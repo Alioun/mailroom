@@ -326,14 +326,31 @@ async fn synthetic_account_flow_uses_fake_credentials_and_preserves_http_authori
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
     }
     async fn terminal(app: &axum::Router, token: &str) -> serde_json::Value {
-        for _ in 0..100 {
-            let result = status(app, token).await;
-            if result["job"]["progress"]["state"] != "running" {
-                return result;
+        let started = std::time::Instant::now();
+        let mut saved = None;
+        let mut folders = None;
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let result = status(app, token).await;
+                let progress = &result["job"]["progress"];
+                match progress["state"].as_str() {
+                    Some("complete" | "cancelled" | "failed") => return result,
+                    Some("running") => {
+                        saved = progress["saved"].as_u64();
+                        folders = progress["folders"].as_u64();
+                    }
+                    _ => panic!("Synthetic account has a missing or invalid progress state"),
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        panic!("Synthetic account did not finish");
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "Synthetic account did not finish after {:?}; last running progress: saved={saved:?}, folders={folders:?}",
+                started.elapsed()
+            )
+        })
     }
     for action in [
         "connect",

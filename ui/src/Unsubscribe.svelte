@@ -30,9 +30,24 @@
   let asOf = Math.floor(Date.now() / 1000)
   function invalidate() { plan = null; reviewed = null; confirmed = false; mailConfirmed = false }
   async function act(action: () => Promise<void>) { busy = true; error = ''; try { await action() } catch { error = t.error; invalidate() } finally { busy = false } }
-  async function refresh() { invalidate(); choices = {}; included = {}; asOf = Math.floor(Date.now() / 1000); view = await openSubscriptionReview(asOf); for (const account of view.accounts) for (const row of account.report.rows) { const key = `${row.account}:${row.id}`; included[key] = row.recommended; choices[key] = row.methods.find(m => ['one_click', 'browser_preparation', 'mail_app_preparation'].includes(m)) ?? 'keep' } }
+  async function refresh() { handoff = null; invalidate(); choices = {}; included = {}; asOf = Math.floor(Date.now() / 1000); view = await openSubscriptionReview(asOf); for (const account of view.accounts) for (const row of account.report.rows) { const key = `${row.account}:${row.id}`; included[key] = row.recommended; choices[key] = row.methods.find(m => ['one_click', 'browser_preparation', 'mail_app_preparation'].includes(m)) ?? 'keep' } }
   async function review(input: SubscriptionReviewInput) { invalidate(); plan = await previewSubscriptionReview(input); reviewed = input }
   function input(): SubscriptionReviewInput { return { as_of: asOf, selections: Object.entries(included).filter(([,v]) => v).map(([id]) => ({ account: id.split(':')[0], subscription: id.split(':')[1], method: choices[id] ?? 'keep' })), folders: { personal, business } } }
+  export async function prepareHandoff(accountId: string, senders: string[], reportAsOf: number) {
+    let prepared = false
+    await act(async () => {
+      invalidate(); choices = {}; included = {}; asOf = reportAsOf
+      view = await openSubscriptionReview(asOf)
+      for (const account of view.accounts) for (const row of account.report.rows) {
+        const key = `${row.account}:${row.id}`
+        included[key] = false
+        choices[key] = 'keep'
+      }
+      handoff = { account: accountId, senders }; prepared = true
+    })
+    if (!prepared) throw new Error('Bulk handoff unavailable')
+  }
+  let handoff = $state<{ account: string; senders: string[] } | null>(null)
   onMount(() => { void act(refresh) })
 </script>
 <section class="unsubscribe" aria-label={t.title}>
@@ -45,13 +60,14 @@
       <p>{t.acquired} · {account.report.last_completed_at === null ? t.unknown : new Date(account.report.last_completed_at * 1000).toISOString()} · {t.age} · {account.report.census_age_seconds ?? t.unknown}</p>
       {#each account.report.warnings as warning}<p>{warning}</p>{/each}
     {/each}
-    <p>{t.selected}</p>
+    {#if handoff}<p class="handoff" role="status">{lang === 'en' ? 'Prepared from wind-down. Matching subscriptions are highlighted. Nothing is selected or approved.' : 'Aus dem Stilllegungsbericht vorbereitet. Passende Abonnements sind markiert. Nichts ist ausgewählt oder genehmigt.'}</p>{/if}
+    <p>{handoff ? t.scope : t.selected}</p>
     <label>{t.personal}<input type="text" bind:value={personal} disabled={busy} oninput={invalidate} maxlength="160" /></label>
     <label>{t.business}<input type="text" bind:value={business} disabled={busy} oninput={invalidate} maxlength="160" /></label>
     {#each groups as { sender, rows } (sender)}
       <details class="sender-group" data-sender={sender} open={rows.some(({ row }) => row.recommended)}><summary>{sender} · {rows.length} {t.subscriptions}</summary>
       {#each rows as { row, key } (key)}
-      <article data-subscription={row.id} data-account={row.account}>
+      <article class:handoff-match={handoff?.account === row.account && handoff.senders.includes(row.sender)} data-subscription={row.id} data-account={row.account}>
         <p>{row.sender}</p><p>{row.account} · {row.recipient || t.unknown} · {row.list_id ?? 'From'} · {row.list_evidence} · {row.class} · {row.role}</p>
         <p>{t.count} · {row.count_12_months} · {t.read} · {row.read_share === null ? t.unknown : `${Math.round(row.read_share * 100)}%`} · unread {row.unread_volume}</p>
         <p>{t.newest} · {row.newest_dated_seen_message === null ? t.unknown : new Date(row.newest_dated_seen_message * 1000).toISOString().slice(0, 10)}</p>
@@ -96,6 +112,7 @@
   .unsubscribe { margin-block: 2rem; padding-top: 1rem; border-top: 1px solid #7775; }
   .sender-group { margin-block: .8rem; }
   summary { cursor: pointer; overflow-wrap: anywhere; }
+  .handoff-match { background: #eaf0f3; }
   article { border-bottom: 1px solid #7775; padding-block: .75rem; }
   p { overflow-wrap: anywhere; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }

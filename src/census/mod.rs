@@ -183,6 +183,8 @@ impl FolderCensus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Census {
     #[serde(default)]
+    pub winddown_evidence: crate::winddown::AcquisitionEvidence,
+    #[serde(default)]
     pub folder_roles: BTreeMap<String, BTreeSet<String>>,
     pub account: AccountId,
     pub folders: BTreeMap<String, FolderCensus>,
@@ -205,6 +207,7 @@ pub struct AddressCandidate {
 impl Census {
     pub fn new(account: AccountId) -> Self {
         Self {
+            winddown_evidence: Default::default(),
             account,
             folder_roles: BTreeMap::new(),
             folders: BTreeMap::new(),

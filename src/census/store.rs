@@ -124,6 +124,8 @@ impl CensusKeys {
 #[serde(deny_unknown_fields)]
 pub struct AccountState {
     #[serde(default)]
+    pub winddown: crate::winddown::Aggregate,
+    #[serde(default)]
     pub ledger: crate::ledger::Projection,
     #[serde(default)]
     pub invoices: crate::invoice::Aggregate,
@@ -144,6 +146,7 @@ impl AccountState {
     fn new(census: Census) -> Self {
         Self {
             revision: 0,
+            winddown: Default::default(),
             ledger: Default::default(),
             invoices: Default::default(),
             unsubscribe: Default::default(),
@@ -289,7 +292,7 @@ impl EncryptedStore {
         }
         let snapshot =
             Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
-        self.stage_snapshot(6, &snapshot)
+        self.stage_snapshot(7, &snapshot)
     }
 
     fn stage_snapshot(
@@ -386,7 +389,7 @@ impl EncryptedStore {
             )
             .map_err(|_| CensusError::Storage)?;
         let snapshot = Zeroizing::new(snapshot);
-        if !matches!(version, 1 | 2 | 3 | 4 | 5 | 6) {
+        if !matches!(version, 1 | 2 | 3 | 4 | 5 | 6 | 7) {
             return Err(CensusError::UnsupportedVersion);
         }
         if account != self.keys.account.as_str() {

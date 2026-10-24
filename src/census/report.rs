@@ -149,7 +149,7 @@ pub struct SenderReport {
     pub recipient_addresses: BTreeSet<String>,
     pub subject_keywords: BTreeMap<String, usize>,
     #[serde(skip)]
-    classes: BTreeSet<SenderClass>,
+    pub(crate) classes: BTreeSet<SenderClass>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct FolderReport {
@@ -188,7 +188,7 @@ pub struct Report {
     pub limitations: Vec<ReportLimitation>,
 }
 
-fn header_date(h: &HeaderRecord) -> Option<i64> {
+pub(crate) fn header_date(h: &HeaderRecord) -> Option<i64> {
     DateTime::parse_from_rfc2822(h.date.as_deref()?)
         .ok()
         .filter(|d| (1970..=2100).contains(&d.year()))
@@ -327,43 +327,17 @@ impl Census {
             ]
             .concat(),
         );
-        let mut messages: BTreeMap<String, (MessageRecord, BTreeSet<String>)> = BTreeMap::new();
-        let mut folders = Vec::new();
-        for (name, folder) in &self.folders {
-            folders.push(FolderReport {
+        let messages = self.canonical_messages(gmail);
+        let folders = self
+            .folders
+            .iter()
+            .map(|(name, folder)| FolderReport {
                 folder: name.clone(),
                 state: folder.state,
                 inventory: folder.live_uids.len(),
                 saved: folder.messages.len(),
-            });
-            for message in folder.messages.values() {
-                let key = if gmail {
-                    message
-                        .gmail_message_id
-                        .as_ref()
-                        .map(|id| format!("gmail:{id}"))
-                } else {
-                    None
-                }
-                .unwrap_or_else(|| {
-                    format!(
-                        "{}:{name}:{}:{}",
-                        name.len(),
-                        folder.uidvalidity,
-                        message.uid
-                    )
-                });
-                let entry = messages
-                    .entry(key)
-                    .or_insert_with(|| (message.clone(), BTreeSet::new()));
-                entry.1.insert(name.clone());
-                entry.0.gmail_labels.extend(message.gmail_labels.clone());
-                entry.0.flags.extend(message.flags.clone());
-                if message.headers.direction == Direction::Sent {
-                    entry.0.headers.direction = Direction::Sent;
-                }
-            }
-        }
+            })
+            .collect::<Vec<_>>();
         let wrote: BTreeSet<String> = messages
             .values()
             .filter(|(m, _)| {
@@ -680,5 +654,44 @@ impl Report {
             summary: text,
             receipt,
         })
+    }
+}
+
+impl Census {
+    pub(crate) fn canonical_messages(
+        &self,
+        gmail: bool,
+    ) -> BTreeMap<String, (MessageRecord, BTreeSet<String>)> {
+        let mut messages: BTreeMap<String, (MessageRecord, BTreeSet<String>)> = BTreeMap::new();
+        for (name, folder) in &self.folders {
+            for message in folder.messages.values() {
+                let key = if gmail {
+                    message
+                        .gmail_message_id
+                        .as_ref()
+                        .map(|id| format!("gmail:{id}"))
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}:{name}:{}:{}",
+                        name.len(),
+                        folder.uidvalidity,
+                        message.uid
+                    )
+                });
+                let entry = messages
+                    .entry(key)
+                    .or_insert_with(|| (message.clone(), BTreeSet::new()));
+                entry.1.insert(name.clone());
+                entry.0.gmail_labels.extend(message.gmail_labels.clone());
+                entry.0.flags.extend(message.flags.clone());
+                if message.headers.direction == Direction::Sent {
+                    entry.0.headers.direction = Direction::Sent;
+                }
+            }
+        }
+        messages
     }
 }

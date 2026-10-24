@@ -672,3 +672,25 @@ async fn production_ledger_is_denied_before_account_or_credential_access() {
         assert_eq!(response.headers()["cache-control"], "no-store");
     }
 }
+
+#[tokio::test]
+async fn production_winddown_denies_before_loading_any_account() {
+    for command in [
+        serde_json::json!({"action":"open"}),
+        serde_json::json!({"action":"export_preview","version":"untrusted","disclosure":"local_file"}),
+        serde_json::json!({"action":"confirm","version":"untrusted","change":{"kind":"dismiss","rows":["row"],"dismissed":true},"receipt":"not-authority","confirmed":true}),
+    ] {
+        let body =
+            serde_json::json!({"account":"nonexistent","as_of":1792886400_i64,"command":command})
+                .to_string();
+        let response = request(
+            "/api/accounts/winddown",
+            &body,
+            Some(server::ORIGIN),
+            server::ADDRESS,
+            "application/json",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+}

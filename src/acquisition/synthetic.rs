@@ -124,6 +124,13 @@ pub(crate) fn scan(
         &cancel,
         progress,
     )?;
+    #[cfg(test)]
+    if std::env::var("MAILROOM_WINDDOWN_FIXTURE").ok().as_deref() == Some("1")
+        && std::env::var_os("MAILROOM_DURABLE_BROWSER_FIXTURE").is_some()
+    {
+        crate::winddown::synthetic::install(&mut census, account.provider);
+        store.save(&census)?;
+    }
     Ok(census)
 }
 

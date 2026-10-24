@@ -463,3 +463,44 @@ fn v4_migration_defaults_unsubscribe_and_flag_coverage_without_inventing_authori
     assert_eq!(preserved.unsubscribe.history.len(), 1);
     assert_eq!(preserved.workspace.unwrap().revision, 4);
 }
+
+#[test]
+fn v6_migration_preserves_ledger_and_histories_without_winddown_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = AccountId::new("winddown-migration").unwrap();
+    let store = EncryptedStore::new(
+        dir.path().into(),
+        CensusKeys::derive(&LocalSecret::random(), &account),
+    )
+    .unwrap();
+    store.save(&Census::new(account)).unwrap();
+    let mut old = serde_json::to_value(store.load_state().unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("winddown");
+    old["census"]
+        .as_object_mut()
+        .unwrap()
+        .remove("winddown_evidence");
+    old["ledger"]["source_version"] = "v6-authoritative-projection".into();
+    store
+        .stage_snapshot(6, &serde_json::to_string(&old).unwrap())
+        .unwrap()
+        .persist(store.path())
+        .unwrap();
+    let mut migrated = store.load_state().unwrap();
+    assert!(!migrated.winddown.settings.winding_down);
+    assert!(migrated.winddown.settings.comparisons.is_empty());
+    assert!(migrated.winddown.dismissed.is_empty());
+    assert!(migrated.winddown.history.is_empty());
+    assert_eq!(
+        migrated.ledger.source_version,
+        "v6-authoritative-projection"
+    );
+    assert_eq!(migrated.census.winddown_evidence, Default::default());
+    migrated.winddown.settings.winding_down = true;
+    store.save_state(&mut migrated).unwrap();
+    assert!(store.load_state().unwrap().winddown.settings.winding_down);
+    assert_eq!(
+        store.load_state().unwrap().ledger.source_version,
+        "v6-authoritative-projection"
+    );
+}

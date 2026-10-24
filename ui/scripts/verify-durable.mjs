@@ -18,7 +18,16 @@ try {
   await page.getByText('Account action complete', { exact: true }).waitFor()
   await page.getByRole('button', { name: 'Run or resume account census', exact: true }).click()
   await page.getByText('Account action complete', { exact: true }).waitFor()
+  let releaseWorkspace
+  const pendingWorkspace = new Promise(resolve => { releaseWorkspace = resolve })
+  const requestedWorkspace = page.waitForRequest(request => request.url().endsWith('/api/accounts/workspace/open'))
+  await page.route('**/api/accounts/workspace/open', route => pendingWorkspace.then(() => route.continue()), { times: 1 })
   await page.getByRole('button', { name: 'Open saved census', exact: true }).click()
+  await requestedWorkspace
+  const initialPreset = page.locator('.accounts .rules-proof').getByLabel('Preset YAML', { exact: true })
+  await initialPreset.waitFor({ state: 'attached' })
+  try { assert.equal(await initialPreset.isDisabled(), true) } finally { releaseWorkspace() }
+  await page.locator('.accounts .rules-proof').getByText('Saved workspace loaded.', { exact: true }).waitFor()
   const region = page.locator('.accounts .rules-proof')
   const save = () => region.getByRole('button', { name: 'Save rules and pins encrypted', exact: true })
   const run = () => region.getByRole('button', { name: 'Prove saved census', exact: true })
@@ -37,6 +46,7 @@ try {
   await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()
   await page.locator('.accounts > .census-actions select').selectOption(selectedId)
   await page.getByRole('button', { name: 'Open saved census', exact: true }).click()
+  await page.locator('.accounts .rules-proof').getByText('Saved workspace loaded.', { exact: true }).waitFor()
   await region.getByText('Rule documents', { exact: true }).click()
   assert.equal(await overrides.inputValue(), marked)
   await run().click()

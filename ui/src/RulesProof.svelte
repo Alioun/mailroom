@@ -66,7 +66,7 @@
     } catch { reset(); workspaceMessage = lang === 'en' ? 'Download rejected. Saved state changed or the gate blocks. Reload and review a fresh proof.' : 'Download abgelehnt. Stand geändert oder Prüfung gesperrt. Erneut laden und neu prüfen.' }
     finally { workspaceBusy = false }
   }
-  let frozen = $derived(workspaceBusy || proofState.kind === 'loading')
+  let frozen = $derived(!sample || workspaceBusy || proofState.kind === 'loading' || (account !== null && !workspace))
   async function compare(mode: Sample['baseline']) {
     if (dirty || frozen) return
     baseline = mode; reset()
@@ -103,8 +103,12 @@
   <h2>{t.title}</h2><p>{t.detail}</p><p class="source">{account ? t.local : t.sample}</p>
   {#if account}
     <div class="workspace-controls">
-      <p role="status">{dirty ? (lang === 'en' ? 'Unsaved rules or pins. Save before proof or download.' : 'Ungespeicherte Regeln oder Fixierungen. Vor Prüfung oder Download speichern.') : (lang === 'en' ? `Saved workspace revision ${workspace?.workspace?.revision}. A census refresh may require reloading.` : `Gespeicherte Revision ${workspace?.workspace?.revision}. Nach neuer Erfassung erneut laden.`)}</p>
-      <button onclick={reloadWorkspace} disabled={frozen}>{lang === 'en' ? 'Reload saved rules and pins' : 'Gespeicherte Regeln und Fixierungen laden'}</button>
+      {#if !workspace}
+        <p role="status">{lang === 'en' ? 'Saved workspace not loaded.' : 'Gespeicherter Arbeitsstand nicht geladen.'}</p>
+      {:else}
+        <p role="status">{dirty ? (lang === 'en' ? 'Unsaved rules or pins. Save before proof or download.' : 'Ungespeicherte Regeln oder Fixierungen. Vor Prüfung oder Download speichern.') : (lang === 'en' ? `Saved workspace revision ${workspace.workspace?.revision}. A census refresh may require reloading.` : `Gespeicherte Revision ${workspace.workspace?.revision}. Nach neuer Erfassung erneut laden.`)}</p>
+      {/if}
+      <button onclick={reloadWorkspace} disabled={workspaceBusy || proofState.kind === 'loading'}>{lang === 'en' ? 'Reload saved rules and pins' : 'Gespeicherte Regeln und Fixierungen laden'}</button>
       <button onclick={save} disabled={frozen || !workspace || !dirty}>{lang === 'en' ? 'Save rules and pins encrypted' : 'Regeln und Fixierungen verschlüsselt speichern'}</button>
       <p aria-live="polite">{workspaceMessage}</p>
       {#if workspace?.workspace && workspace.exports[workspace.exports.length - 1]?.usable}

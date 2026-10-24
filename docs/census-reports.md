@@ -20,7 +20,7 @@ Own-address candidates and their evidence remain local. Confirmation records own
 
 The [psl package](https://crates.io/crates/psl/2.1.245) compiles the [Public Suffix List](https://publicsuffix.org/list/) into Rust. The package declares MIT or Apache-2.0 licensing. The upstream list uses MPL-2.0, as stated in its [source header](https://publicsuffix.org/list/public_suffix_list.dat). ICANN and private suffix rules, including wildcard and exception rules, are included. Dependency installation does not perform a runtime list update. Updating the pinned package requires an analysis-version change and renewed verification.
 
-Hostnames pass IDNA conversion to ASCII, lowercase normalization and DNS label validation. IP literals and malformed domains stay unknown. For example, `mail.shop.co.uk` groups as `shop.co.uk`. These are derived report fields. Existing encrypted snapshot schema version 1 is unchanged and its previous optional registrable-domain field remains untouched.
+Hostnames pass IDNA conversion to ASCII, lowercase normalization and DNS label validation. IP literals and malformed domains stay unknown. For example, `mail.shop.co.uk` groups as `shop.co.uk`. These are derived report fields. The prior optional registrable-domain field remains untouched. Account-state schema version 2 preserves the census alongside the durable rule workspace and local export history.
 
 ## Conservative sender classes
 
@@ -48,7 +48,7 @@ Only the selected candidate domain strings may appear in clear text. Addresses, 
 
 `summary/export` requires that same selection, version, receipt and an explicit true confirmation. It reloads and re-derives the data under the account-operation lock. Changed census data, ownership, selection, receipt or version fails with a generic error. The fixed export name carries no account or private metadata. The UI clears its preview and confirmation when the selection or as-of time changes, and requires fresh review after refreshing. Approval is not persisted and must be reviewed again after reload.
 
-This is a local web confirmation and browser download. It does not implement the wider agent workflow, its native action-naming confirmation, agent folders, proof/ruleset exports, proposal review or background access. No report or classification enables live writes.
+This is a local web confirmation and browser download. It does not implement the wider agent workflow, its native action-naming confirmation, agent folders, agent proof exports, proposal review or background access. No report or classification enables live writes.
 
 ## Remaining census work
 

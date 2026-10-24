@@ -94,7 +94,7 @@ impl MailRead for SyntheticMail {
                 _ => ("sender@example.test", ""),
             };
             let date = if *uid == 98 { "invalid date".into() } else { format!("{} Oct 2026 10:00:00 +0000", 1 + uid % 23) };
-            (*uid, format!("From: {sender}\r\nTo: owner@example.test\r\nDelivered-To: alias@example.test\r\nDate: {date}\r\nSubject: Synthetic account header {uid}\r\n{markers}\r\n").into_bytes())
+            (*uid, format!("From: {sender}\r\nTo: owner@example.test\r\nDelivered-To: alias@example.test\r\nDate: {date}\r\nSubject: Synthetic account header {uid}\r\nMessage-ID: <synthetic-account-{uid}@example.test>\r\n{markers}\r\n").into_bytes())
         }).collect())
     }
 }

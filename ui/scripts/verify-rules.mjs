@@ -46,6 +46,8 @@ try {
   await page.waitForFunction(() => [...document.querySelectorAll('button')].some(b => b.textContent === 'Open saved census' && !b.disabled))
   await open.click()
   const accountProof = page.locator('.accounts').getByRole('region', { name: 'Rules and proof', exact: true })
+  await accountProof.getByRole('button', { name: 'Save rules and pins encrypted', exact: true }).click()
+  await accountProof.getByText('Rules and pins saved encrypted.', { exact: true }).waitFor()
   await accountProof.getByRole('button', { name: 'Prove saved census', exact: true }).click()
   await accountProof.getByText('0 messages receive copies. 99 need recipient review.', { exact: true }).waitFor()
   assert.equal(await accountProof.locator('.decision').count(), 99)

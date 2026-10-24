@@ -221,7 +221,10 @@ pub fn synthetic_account_app() -> Router {
 }
 
 fn build_app(synthetic_accounts: bool) -> Router {
-    let state = Arc::new(AppState::new(synthetic_accounts));
+    router(Arc::new(AppState::new(synthetic_accounts)))
+}
+
+fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route(
             "/api/session",
@@ -259,6 +262,19 @@ fn build_app(synthetic_accounts: bool) -> Router {
         .route("/api/accounts/confirm", post(accounts::confirm))
         .route("/api/accounts/report", post(accounts::report))
         .route("/api/accounts/proof", post(accounts::proof))
+        .route(
+            "/api/accounts/workspace/open",
+            post(accounts::workspace_open),
+        )
+        .route(
+            "/api/accounts/workspace/save",
+            post(accounts::workspace_save),
+        )
+        .route("/api/accounts/proof/preview", post(accounts::proof_preview))
+        .route(
+            "/api/accounts/proof/download",
+            post(accounts::proof_download),
+        )
         .route(
             "/api/accounts/summary/review",
             post(accounts::review_summary),

@@ -363,6 +363,10 @@ async fn synthetic_account_flow_uses_fake_credentials_and_preserves_http_authori
         "synthetic-gmail",
         "report",
         "proof",
+        "workspace/open",
+        "workspace/save",
+        "proof/preview",
+        "proof/download",
         "summary/review",
         "summary/export",
     ] {

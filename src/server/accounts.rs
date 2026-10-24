@@ -6,6 +6,7 @@ use crate::{
     },
     census::{AccountId, Census, ScanState},
     policy::{self, Operation},
+    rules::workspace::{self, Workspace, WorkspaceInput},
 };
 use axum::{
     Json,
@@ -578,4 +579,167 @@ pub(super) async fn proof(
         Ok(Err(e)) => failure(e),
         Err(_) => failure(AcquisitionError::Storage),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WorkspaceSaveRequest {
+    account: AccountId,
+    revision: u64,
+    input: WorkspaceInput,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DownloadRequest {
+    account: AccountId,
+    receipt: String,
+    confirmed: bool,
+}
+enum WorkspaceAction {
+    Open,
+    Save {
+        revision: u64,
+        input: WorkspaceInput,
+    },
+    Preview,
+    Download {
+        receipt: String,
+    },
+}
+pub(super) async fn workspace_open(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<AccountRequest>, JsonRejection>,
+) -> Response {
+    let request = match input(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    workspace_action(state, request.account, WorkspaceAction::Open).await
+}
+pub(super) async fn workspace_save(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<WorkspaceSaveRequest>, JsonRejection>,
+) -> Response {
+    let request = match input(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    workspace_action(
+        state,
+        request.account,
+        WorkspaceAction::Save {
+            revision: request.revision,
+            input: request.input,
+        },
+    )
+    .await
+}
+pub(super) async fn proof_preview(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<AccountRequest>, JsonRejection>,
+) -> Response {
+    let request = match input(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    workspace_action(state, request.account, WorkspaceAction::Preview).await
+}
+pub(super) async fn proof_download(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<DownloadRequest>, JsonRejection>,
+) -> Response {
+    let request = match input(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if !request.confirmed {
+        return failure(AcquisitionError::InvalidInput);
+    }
+    workspace_action(
+        state,
+        request.account,
+        WorkspaceAction::Download {
+            receipt: request.receipt,
+        },
+    )
+    .await
+}
+async fn workspace_action(
+    state: Arc<AppState>,
+    id: AccountId,
+    action: WorkspaceAction,
+) -> Response {
+    match tokio::task::spawn_blocking(move || {
+        let _operation = state.accounts.operation.lock().expect("account operation");
+        if state
+            .accounts
+            .job
+            .lock()
+            .expect("account job")
+            .as_ref()
+            .is_some_and(|j| j.progress.state == ScanState::Running)
+        {
+            return Err(AcquisitionError::InvalidInput);
+        }
+        let repo = state.accounts.repository()?;
+        let account = repo.load(&id)?;
+        let store = repo.store(&account)?;
+        let mut saved = store.load_state()?;
+        match action {
+            WorkspaceAction::Open => Ok(json!(workspace::view(&saved, account.provider))),
+            WorkspaceAction::Save { revision, input } => {
+                if revision != saved.revision {
+                    return Err(AcquisitionError::InvalidInput);
+                }
+                workspace::validate(&input, &saved, account.provider)
+                    .map_err(|_| AcquisitionError::InvalidInput)?;
+                let revision = saved.workspace.as_ref().map_or(Ok(1), |w| {
+                    w.revision.checked_add(1).ok_or(AcquisitionError::Storage)
+                })?;
+                saved.workspace = Some(Workspace { revision, input });
+                store.save_state(&mut saved)?;
+                Ok(json!(workspace::view(&saved, account.provider)))
+            }
+            WorkspaceAction::Preview => workspace::preview(&saved, account.provider, store.keys())
+                .map(|v| json!(v))
+                .map_err(|_| AcquisitionError::InvalidInput),
+            WorkspaceAction::Download { receipt } => {
+                let preview =
+                    workspace::confirm_export(&mut saved, account.provider, store.keys(), &receipt)
+                        .map_err(|_| AcquisitionError::InvalidInput)?;
+                store.save_state(&mut saved)?;
+                Ok(json!({
+                    "filename": preview.filename,
+                    "sieve": preview.proof.artifact.executable(),
+                    "identity": preview.proof.artifact.identity(),
+                    "workspace": workspace::view(&saved, account.provider)
+                }))
+            }
+        }
+    })
+    .await
+    {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(e)) => failure(e),
+        Err(_) => failure(AcquisitionError::Storage),
+    }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn durable_browser_server_fixture() {
+    let Some(root) = std::env::var_os("MAILROOM_DURABLE_BROWSER_FIXTURE") else {
+        return;
+    };
+    let mut state = AppState::new(true);
+    state.accounts.source = AccountSource::Synthetic {
+        accounts: Arc::new(acquisition::persistent_test_accounts(std::path::Path::new(
+            &root,
+        ))),
+        _directory: tempfile::tempdir().unwrap(),
+    };
+    let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
+    axum::serve(listener, super::router(Arc::new(state)))
+        .await
+        .unwrap();
 }

@@ -9,6 +9,7 @@ use rand::{RngCore, rngs::OsRng};
 use rusqlite::Connection;
 use sha2::Sha256;
 use std::{
+    cell::Cell,
     fs,
     io::{Read, Write},
     path::PathBuf,
@@ -75,6 +76,16 @@ impl CensusKeys {
         data_encoding::HEXLOWER.encode(&mac.finalize().into_bytes())
     }
 
+    pub(crate) fn binding_for(&self, purpose: &[u8], value: &[u8]) -> String {
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.placeholders.as_ref())
+            .expect("valid HMAC key");
+        mac.update(b"mailroom/purpose-binding/v1\0");
+        mac.update(&(purpose.len() as u64).to_be_bytes());
+        mac.update(purpose);
+        mac.update(value);
+        data_encoding::HEXLOWER.encode(&mac.finalize().into_bytes())
+    }
+
     pub fn placeholder(&self, kind: &str, value: &str) -> String {
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.placeholders.as_ref())
             .expect("valid HMAC key");
@@ -86,9 +97,36 @@ impl CensusKeys {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountState {
+    pub revision: u64,
+    pub census: Census,
+    pub workspace: Option<crate::rules::workspace::Workspace>,
+    pub exports: Vec<crate::rules::workspace::ExportRecord>,
+}
+impl AccountState {
+    fn new(census: Census) -> Self {
+        Self {
+            revision: 0,
+            census,
+            workspace: None,
+            exports: Vec::new(),
+        }
+    }
+}
+
 pub struct EncryptedStore {
     directory: PathBuf,
     keys: CensusKeys,
+    lock: fs::File,
+    loaded: Cell<bool>,
+}
+
+impl Drop for EncryptedStore {
+    fn drop(&mut self) {
+        let _ = self.lock.unlock();
+    }
 }
 
 impl EncryptedStore {
@@ -114,7 +152,28 @@ impl EncryptedStore {
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
                 .map_err(|_| CensusError::Storage)?;
         }
-        Ok(Self { directory, keys })
+        let lock_path = directory.join(format!("{}.lock", keys.account.as_str()));
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        if lock_path
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return Err(CensusError::Storage);
+        }
+        let lock = options.open(lock_path).map_err(|_| CensusError::Storage)?;
+        lock.try_lock().map_err(|_| CensusError::Storage)?;
+        Ok(Self {
+            directory,
+            keys,
+            lock,
+            loaded: Cell::new(false),
+        })
     }
 
     pub fn keys(&self) -> &CensusKeys {
@@ -131,31 +190,77 @@ impl EncryptedStore {
     }
 
     pub fn save(&self, census: &Census) -> Result<(), CensusError> {
-        self.stage(census)?
+        if census.account != self.keys.account {
+            return Err(CensusError::AccountMismatch);
+        }
+        let mut state = if self.path().try_exists().map_err(|_| CensusError::Storage)? {
+            let loaded = self.loaded.get();
+            let state = self.read_state()?;
+            if !loaded {
+                return Err(CensusError::Storage);
+            }
+            state
+        } else {
+            AccountState::new(census.clone())
+        };
+        state.census = census.clone();
+        self.save_state(&mut state)
+    }
+
+    pub fn save_state(&self, state: &mut AccountState) -> Result<(), CensusError> {
+        if state.census.account != self.keys.account {
+            return Err(CensusError::AccountMismatch);
+        }
+        if state.exports.len() > crate::rules::workspace::HISTORY_LIMIT {
+            return Err(CensusError::Storage);
+        }
+        let current = if self.path().try_exists().map_err(|_| CensusError::Storage)? {
+            self.read_state()?.revision
+        } else {
+            0
+        };
+        if state.revision != current {
+            return Err(CensusError::Storage);
+        }
+        let mut next = state.clone();
+        next.revision = current.checked_add(1).ok_or(CensusError::Storage)?;
+        self.stage_state(&next)?
             .persist(self.path())
             .map_err(|_| CensusError::Storage)?;
         fs::File::open(&self.directory)
             .and_then(|f| f.sync_all())
             .map_err(|_| CensusError::Storage)?;
+        *state = next;
+        self.loaded.set(true);
         Ok(())
     }
 
+    #[cfg(test)]
     fn stage(&self, census: &Census) -> Result<tempfile::NamedTempFile, CensusError> {
-        if census.account != self.keys.account {
+        let mut state = self.load_state()?;
+        state.census = census.clone();
+        self.stage_state(&state)
+    }
+
+    fn stage_state(&self, state: &AccountState) -> Result<tempfile::NamedTempFile, CensusError> {
+        if state.census.account != self.keys.account {
             return Err(CensusError::AccountMismatch);
         }
-        // Authenticate any existing snapshot before replacement, including after a failed open.
-        if self.path().try_exists().map_err(|_| CensusError::Storage)? {
-            self.load()?;
-        }
-        let db = memory_database()?;
-        db.execute_batch("CREATE TABLE census (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL, account TEXT NOT NULL, snapshot TEXT NOT NULL)")
-            .map_err(|_| CensusError::Storage)?;
         let snapshot =
-            Zeroizing::new(serde_json::to_string(census).map_err(|_| CensusError::Storage)?);
+            Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
+        self.stage_snapshot(2, &snapshot)
+    }
+
+    fn stage_snapshot(
+        &self,
+        version: u32,
+        snapshot: &str,
+    ) -> Result<tempfile::NamedTempFile, CensusError> {
+        let db = memory_database()?;
+        db.execute_batch("CREATE TABLE census (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL, account TEXT NOT NULL, snapshot TEXT NOT NULL)").map_err(|_| CensusError::Storage)?;
         db.execute(
-            "INSERT INTO census VALUES(1, 1, ?1, ?2)",
-            (self.keys.account.as_str(), snapshot.as_str()),
+            "INSERT INTO census VALUES(1, ?1, ?2, ?3)",
+            (version, self.keys.account.as_str(), snapshot),
         )
         .map_err(|_| CensusError::Storage)?;
         let sqlite = db.serialize("main").map_err(|_| CensusError::Storage)?;
@@ -189,6 +294,16 @@ impl EncryptedStore {
     }
 
     pub fn load(&self) -> Result<Census, CensusError> {
+        Ok(self.load_state()?.census)
+    }
+
+    pub fn load_state(&self) -> Result<AccountState, CensusError> {
+        let state = self.read_state()?;
+        self.loaded.set(true);
+        Ok(state)
+    }
+
+    fn read_state(&self) -> Result<AccountState, CensusError> {
         let path = self.path();
         let metadata = fs::symlink_metadata(&path).map_err(|_| CensusError::Storage)?;
         if !metadata.is_file()
@@ -230,14 +345,21 @@ impl EncryptedStore {
             )
             .map_err(|_| CensusError::Storage)?;
         let snapshot = Zeroizing::new(snapshot);
-        if version != 1 {
+        if !matches!(version, 1 | 2) {
             return Err(CensusError::UnsupportedVersion);
         }
         if account != self.keys.account.as_str() {
             return Err(CensusError::AccountMismatch);
         }
-        let mut census: Census =
-            serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?;
+        let mut state: AccountState = if version == 1 {
+            AccountState::new(serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?)
+        } else {
+            serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?
+        };
+        if state.exports.len() > crate::rules::workspace::HISTORY_LIMIT {
+            return Err(CensusError::Storage);
+        }
+        let census = &mut state.census;
         if census.account != self.keys.account {
             return Err(CensusError::AccountMismatch);
         }
@@ -250,7 +372,7 @@ impl EncryptedStore {
                 folder.state = super::ScanState::Cancelled;
             }
         }
-        Ok(census)
+        Ok(state)
     }
 }
 
@@ -304,3 +426,7 @@ fn memory_database() -> Result<Connection, CensusError> {
     .map_err(|_| CensusError::Storage)?;
     Ok(db)
 }
+
+#[cfg(test)]
+#[path = "store/tests.rs"]
+mod durable_tests;

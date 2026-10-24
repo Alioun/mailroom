@@ -99,10 +99,23 @@ fn encrypted_sqlite_reopens_without_plaintext_or_sidecars_and_uses_fresh_nonces(
     assert_eq!(store.load().unwrap(), census);
     store.save(&census).unwrap();
     assert_ne!(first, fs::read(store.path()).unwrap());
-    let paths: Vec<_> = fs::read_dir(store.path().parent().unwrap())
+    let entries: Vec<_> = fs::read_dir(store.path().parent().unwrap())
         .unwrap()
+        .map(|e| e.unwrap().path())
         .collect();
-    assert_eq!(paths.len(), 1);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "lock"))
+            .count(),
+        1
+    );
+    let lock = entries
+        .iter()
+        .find(|p| p.extension().is_some_and(|e| e == "lock"))
+        .unwrap();
+    assert_eq!(fs::metadata(lock).unwrap().len(), 0);
     let bytes = fs::read(store.path()).unwrap();
     for private in [
         "SQLite format 3",
@@ -146,6 +159,8 @@ fn wrong_keys_tampering_versions_and_account_mixups_cannot_overwrite_data() {
     let census = populated();
     store.save(&census).unwrap();
     let original = fs::read(store.path()).unwrap();
+    let path = store.path();
+    drop(store);
     let wrong = EncryptedStore::new(
         dir.path().to_owned(),
         CensusKeys::derive(&LocalSecret::from_bytes(vec![7; 32]).unwrap(), &account()),
@@ -153,7 +168,14 @@ fn wrong_keys_tampering_versions_and_account_mixups_cannot_overwrite_data() {
     .unwrap();
     assert_eq!(wrong.load(), Err(CensusError::Authentication));
     assert_eq!(wrong.save(&census), Err(CensusError::Authentication));
-    assert_eq!(fs::read(store.path()).unwrap(), original);
+    assert_eq!(fs::read(&path).unwrap(), original);
+    drop(wrong);
+    let store = EncryptedStore::new(
+        dir.path().to_owned(),
+        CensusKeys::derive(&secret(), &account()),
+    )
+    .unwrap();
+    store.load().unwrap();
     let other = AccountId::new("account-b").unwrap();
     let other_store =
         EncryptedStore::new(dir.path().to_owned(), CensusKeys::derive(&secret(), &other)).unwrap();

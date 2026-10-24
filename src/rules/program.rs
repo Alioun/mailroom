@@ -44,18 +44,18 @@ impl EngineContext {
         }
     }
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Omission {
     pub rule: String,
     pub reason: String,
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectiveDefinition {
     Filing { rule: Rule },
     Forward { rule: Forward },
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EffectiveRule {
     pub id: String,
     pub origin: String,
@@ -73,6 +73,8 @@ pub struct CompiledArtifact {
     omissions: Vec<Omission>,
     folders: BTreeSet<String>,
 }
+pub const SEMANTICS: &str = "mailroom-sieve-subset-v2";
+
 impl CompiledArtifact {
     pub fn identity(&self) -> &str {
         &self.identity
@@ -637,7 +639,7 @@ pub fn compile(
         )
     }));
     let binding = serde_json::to_vec(&(
-        "mailroom-sieve-subset-v2",
+        SEMANTICS,
         preset,
         overrides,
         context,
@@ -747,5 +749,40 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+pub(super) mod persisted {
+    use super::*;
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Snapshot {
+        identity: String,
+        context: EngineContext,
+        executable: String,
+        effective: Vec<EffectiveRule>,
+        trace: Vec<String>,
+        omissions: Vec<Omission>,
+        folders: BTreeSet<String>,
+    }
+    pub fn serialize<S: serde::Serializer>(
+        artifact: &CompiledArtifact,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        artifact.serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<CompiledArtifact, D::Error> {
+        let saved = Snapshot::deserialize(deserializer)?;
+        Ok(CompiledArtifact {
+            identity: saved.identity,
+            context: saved.context,
+            executable: saved.executable,
+            effective: saved.effective,
+            trace: saved.trace,
+            omissions: saved.omissions,
+            folders: saved.folders,
+        })
     }
 }

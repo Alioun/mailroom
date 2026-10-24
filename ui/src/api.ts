@@ -133,3 +133,16 @@ export type Pin = z.infer<typeof pin>
 export async function proveAccount(account: string, input: { documents: Documents; as_of: number; pins: Pin[]; baseline: Sample['baseline']; previous: Documents | null }): Promise<Preview> {
   return preview.parse(await accountPost('proof', { account, ...input }))
 }
+
+const workspaceInput = z.object({ documents, pins: z.array(pin), as_of: z.number(), baseline: sample.shape.baseline })
+const exportInfo = z.object({ identity: z.string(), semantics: z.string(), proof_semantics: z.string(), exported_at: z.number(), provenance: z.string(), usable: z.boolean() })
+const workspaceView = z.object({ revision: z.number(), workspace: z.object({ revision: z.number(), input: workspaceInput }).nullable(), exports: z.array(exportInfo), engine: sample.shape.context.shape.engine })
+const proofPreview = z.object({ proof: preview, receipt: z.string().length(64), revision: z.number(), workspace_revision: z.number(), as_of: z.number(), download_available: z.boolean(), previous: exportInfo.nullable(), filename: z.literal('rules.sieve') })
+export type WorkspaceView = z.infer<typeof workspaceView>
+export type ProofPreview = z.infer<typeof proofPreview>
+export async function openWorkspace(account: string): Promise<WorkspaceView> { return workspaceView.parse(await accountPost('workspace/open', { account })) }
+export async function saveWorkspace(account: string, revision: number, input: z.infer<typeof workspaceInput>): Promise<WorkspaceView> { return workspaceView.parse(await accountPost('workspace/save', { account, revision, input })) }
+export async function previewWorkspace(account: string): Promise<ProofPreview> { return proofPreview.parse(await accountPost('proof/preview', { account })) }
+export async function downloadSieve(account: string, receipt: string) {
+  return z.object({ filename: z.literal('rules.sieve'), sieve: z.string(), identity: z.string(), workspace: workspaceView }).parse(await accountPost('proof/download', { account, receipt, confirmed: true }))
+}

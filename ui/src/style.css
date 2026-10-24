@@ -125,3 +125,6 @@ progress { display: block; width: 100%; max-width: 560px; height: 16px; margin-t
 @media (max-width: 680px) { .rule-documents { grid-template-columns: minmax(0, 1fr); } }
 
 .rules-proof li input { display: inline-block; max-width: 100%; font: inherit; padding: 8px; border: 1px solid var(--line); color: var(--ink); background: white; }
+
+.local-download { border-top: 1px solid var(--line); margin-top: 24px; padding-top: 20px; }
+.local-download label { display: block; margin: 12px 0; }

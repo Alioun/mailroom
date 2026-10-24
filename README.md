@@ -1,6 +1,6 @@
 # mailroom
 
-Inspect a synthetic header census and preview deterministic mail rules locally. The Rust core serves a Svelte interface with Ark UI controls. The census supports owner-run read-only mailbox.org and Gmail acquisition, encrypted persistence, cancellation and resume. Independent synthetic modes demonstrate it without a provider or credential store. Local census reports and reviewed summary downloads are available. The complete census and personal workflow remain unfinished. All account writes remain denied.
+Inspect a synthetic header census and preview deterministic mail rules locally. The Rust core serves a Svelte interface with Ark UI controls. The census supports owner-run read-only mailbox.org and Gmail acquisition, encrypted persistence, cancellation and resume. Independent synthetic modes demonstrate it without a provider or credential store. Local census reports, reviewed summary downloads, encrypted rule workspaces and confirmed local Sieve downloads are available. The complete census and personal workflow remain unfinished. All account writes remain denied.
 
 ## Run locally
 
@@ -42,7 +42,7 @@ See [Census implementation and remaining work](docs/census.md) for the data mode
 
 ## Rules and proof
 
-See [Rules and proof](docs/rules-proof.md) for the validated YAML model, emitted-output evaluator, local census interface, cross-check scope and incomplete acceptance criteria. The examples contain only synthetic mail and configuration.
+See [Rules and proof](docs/rules-proof.md) for the validated YAML model, emitted-output evaluator, local census interface, cross-check scope and incomplete acceptance criteria. Saved-account rules and pins load and save explicitly. A fresh proof and local confirmation can prepare an exact Sieve download for mailbox.org, with an encrypted export baseline. Gmail backlog has no Sieve-download action. A local export grants no provider authority. The examples contain only synthetic mail and configuration.
 
 ```sh
 node ui/scripts/verify-rules.mjs

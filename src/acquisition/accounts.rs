@@ -266,7 +266,8 @@ mod tests {
                 &SecretValue::new(b"synthetic-password".to_vec()),
             )
             .unwrap();
-        let mut census = accounts.store(&account).unwrap().load().unwrap();
+        let store = accounts.store(&account).unwrap();
+        let mut census = store.load().unwrap();
         census
             .reconcile_folder("INBOX", 7, [1].into_iter().collect())
             .unwrap();
@@ -276,7 +277,8 @@ mod tests {
             .unwrap()
             .insert(crate::census::demo::fixture(1).unwrap())
             .unwrap();
-        accounts.store(&account).unwrap().save(&census).unwrap();
+        store.save(&census).unwrap();
+        drop(store);
         let metadata = fs::read_to_string(accounts.metadata_path(&account.id)).unwrap();
         assert!(!metadata.contains("synthetic-password"));
         drop(accounts);
@@ -331,7 +333,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod process_tests {
+pub(crate) mod process_tests {
     use super::*;
     struct FileFake(PathBuf);
     impl CredentialBackend for FileFake {
@@ -346,19 +348,22 @@ mod process_tests {
                 .map_err(|_| AcquisitionError::Credentials)
         }
     }
+    pub(crate) fn persistent_accounts(root: &std::path::Path) -> Accounts {
+        Accounts::new(
+            AccountPaths {
+                config: root.join("config"),
+                data: root.join("data"),
+            },
+            Arc::new(FileFake(root.join("fake-credentials"))),
+        )
+    }
     #[test]
     fn synthetic_process_worker() {
         let Some(directory) = std::env::var_os("MAILROOM_SYNTHETIC_PROCESS_DIR") else {
             return;
         };
         let root = PathBuf::from(directory);
-        let accounts = Accounts::new(
-            AccountPaths {
-                config: root.join("config"),
-                data: root.join("data"),
-            },
-            Arc::new(FileFake(root.join("fake-credentials"))),
-        );
+        let accounts = persistent_accounts(&root);
         if !root.join("account-id").exists() {
             let account = accounts
                 .create(
@@ -380,11 +385,46 @@ mod process_tests {
                 .unwrap();
             census.confirm_address("owner@example.test", true).unwrap();
             store.save(&census).unwrap();
+            let mut state = store.load_state().unwrap();
+            let sample: serde_json::Value =
+                serde_json::from_str(include_str!("../../examples/sample.json")).unwrap();
+            state.workspace = Some(crate::rules::workspace::Workspace {
+                revision: 1,
+                input: crate::rules::workspace::WorkspaceInput {
+                    documents: serde_json::from_value(sample["documents"].clone()).unwrap(),
+                    pins: vec![],
+                    as_of: 1792886400,
+                    baseline: crate::rules::proof::Baseline::Current,
+                },
+            });
+            store.save_state(&mut state).unwrap();
+            let proof =
+                crate::rules::workspace::preview(&state, account.provider, store.keys()).unwrap();
+            crate::rules::workspace::confirm_export(
+                &mut state,
+                account.provider,
+                store.keys(),
+                &proof.receipt,
+            )
+            .unwrap();
+            store.save_state(&mut state).unwrap();
             fs::write(root.join("account-id"), account.id.as_str()).unwrap();
         } else {
             let id = AccountId::new(&fs::read_to_string(root.join("account-id")).unwrap()).unwrap();
             let account = accounts.load(&id).unwrap();
-            let census = accounts.store(&account).unwrap().load().unwrap();
+            let store = accounts.store(&account).unwrap();
+            let state = store.load_state().unwrap();
+            assert_eq!(state.workspace.as_ref().unwrap().revision, 1);
+            assert_eq!(state.exports.len(), 1);
+            assert_eq!(
+                state.exports[0].artifact.executable(),
+                crate::rules::workspace::preview(&state, account.provider, store.keys())
+                    .unwrap()
+                    .proof
+                    .artifact
+                    .executable()
+            );
+            let census = state.census;
             assert_eq!(census.folders["INBOX"].messages.len(), 1);
             assert!(
                 census

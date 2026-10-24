@@ -4,6 +4,8 @@ use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub const SEMANTICS: &str = "parsed-emitted-sieve-subset-v2";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Destination {
@@ -18,14 +20,14 @@ impl Destination {
         }
     }
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pin {
     pub account: String,
     pub message_id_hash: String,
     pub expected: Destination,
 }
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Baseline {
     Current,
@@ -483,7 +485,7 @@ pub fn prove(
     };
     Ok(Proof {
         source: "local_census",
-        semantics: "parsed-emitted-sieve-subset-v2",
+        semantics: SEMANTICS,
         artifact,
         counts,
         decisions,

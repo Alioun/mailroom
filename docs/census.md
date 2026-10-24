@@ -16,13 +16,13 @@ Own-address candidates retain their evidence source. To and Cc remain unverified
 
 ## Encrypted SQLite snapshots
 
-`census::EncryptedStore` opens SQLite only in memory. Temporary storage and journaling use memory. Schema version 1 contains one account snapshot in a singleton SQLite row. The current model is loaded as a whole. It is not a relational query or journal implementation.
+`census::EncryptedStore` opens SQLite only in memory. Temporary storage and journaling use memory. Schema version 2 contains the census, optional rule workspace and bounded local export history in a singleton SQLite row. Version 1 snapshots migrate without inventing configuration or approval. The current model is loaded as a whole. It is not a relational query or journal implementation.
 
 Each account uses a distinct `<opaque-account-id>.census.enc` file. A 32-byte random local secret derives distinct encryption and placeholder keys through HKDF-SHA256 with account-scoped salt and separate purpose labels. Secret and derived-key buffers zeroize on drop. The AES implementation enables its key-zeroization feature.
 
 The file contains the versioned `MAILROOM-CENSUS` marker, a fresh random 96-bit nonce and AES-256-GCM ciphertext with its authentication tag. The version marker and expected account identifier are authenticated as additional data. AES-GCM, HKDF and HMAC come from RustCrypto crates pinned by Cargo.lock.
 
-Saving authenticates any existing file before replacement. It serializes the in-memory SQLite database, encrypts it, writes only ciphertext to a private temporary file, synchronizes that file, atomically replaces the account file and synchronizes the directory. Interrupted staging leaves the previous snapshot readable. Orphan staging files are ignored. Wrong keys, account mixups, unknown versions and tampering fail without replacing the existing file. Plaintext SQLite, WAL files, plaintext temporary copies and raw message logs are never written by this implementation.
+An exclusive account file lock protects each store lifetime. Competing processes fail immediately. Revision checks reject stale whole-state writes. Saving authenticates any existing file before replacement and preserves the other account fields. It serializes the in-memory SQLite database, encrypts it, writes only ciphertext to a private temporary file, synchronizes that file, atomically replaces the account file and synchronizes the directory. Interrupted staging leaves the previous snapshot readable. Orphan staging files are ignored. Wrong keys, account mixups, unknown versions and tampering fail without replacing the existing file. Plaintext SQLite, WAL files, plaintext temporary copies and raw message logs are never written by this implementation.
 
 On Unix the store enforces directory mode 0700 and file mode 0600. Windows ACL enforcement is not implemented or verified. Production storage uses `~/Library/Application Support/mailroom/` on macOS, `%LOCALAPPDATA%\mailroom\` on Windows, or `$XDG_DATA_HOME/mailroom/` on Linux with the usual user-data fallback. Account forgetting, key rotation and large-census behavior remain incomplete. The serialized SQLite snapshot is limited to 128 MiB. Saves rewrite the whole snapshot. The caller must serialize writes to an account store. The demo does so through one server mutex.
 
@@ -84,7 +84,7 @@ Starting the binary with `--synthetic-accounts` installs a fake credential backe
 - Add Takeout MBOX import without body or attachment persistence.
 - Persist full Gmail label topology and excluded-folder counts. Current canonical scanned-folder counts do not describe every provider label or Spam folder.
 - Implement trusted authentication provenance and signature correlation. Preserve unknown coverage when evidence is insufficient.
-- Complete the wider agent workflow separately, including native action-naming confirmation, agent enablement, proof/ruleset exports, restricted agent directories and proposal resolution. The report export currently uses explicit local web confirmation and a browser download. It does not enable agent access or live operations.
+- Complete the wider agent workflow separately, including native action-naming confirmation, agent enablement, agent proof exports, restricted agent directories and proposal resolution. The report export currently uses explicit local web confirmation and a browser download. It does not enable agent access or live operations.
 - Add unsubscribe logs and backlog journals with those workflows. They are absent from this schema.
 
 The person-run `scripts/connect-account.sh` walkthrough starts no credentialed step automatically and reads no secret. It guides an existing local launch and private UI entry without requesting provider setting changes. Its shared wizard library retains unused helpers; shellcheck excludes SC2329 for those template functions only.

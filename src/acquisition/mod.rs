@@ -40,3 +40,6 @@ impl std::fmt::Display for AcquisitionError {
     }
 }
 impl std::error::Error for AcquisitionError {}
+
+#[cfg(test)]
+pub(crate) use accounts::process_tests::persistent_accounts as persistent_test_accounts;

@@ -6,7 +6,7 @@ mod store;
 pub use headers::{HEADER_FIELDS, parse_headers};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-pub use store::{CensusKeys, EncryptedStore, LocalSecret};
+pub use store::{AccountState, CensusKeys, EncryptedStore, LocalSecret};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String")]

@@ -1,5 +1,5 @@
 pub mod config;
-mod program;
+pub(crate) mod program;
 pub mod proof;
 mod sieve;
 pub mod workspace;

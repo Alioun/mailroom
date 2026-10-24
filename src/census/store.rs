@@ -86,6 +86,20 @@ impl CensusKeys {
         data_encoding::HEXLOWER.encode(&mac.finalize().into_bytes())
     }
 
+    pub(crate) fn synthetic_mailbox_keys(&self) -> Self {
+        let hkdf = Hkdf::<Sha256>::new(
+            Some(b"mailroom/synthetic-mailbox/v1"),
+            self.encryption.as_ref(),
+        );
+        let mut bytes = Zeroizing::new(vec![0; 32]);
+        hkdf.expand(b"independent-fake-state", &mut bytes)
+            .expect("HKDF length");
+        Self::derive(
+            &LocalSecret::from_bytes(bytes.to_vec()).expect("key length"),
+            &self.account,
+        )
+    }
+
     pub fn placeholder(&self, kind: &str, value: &str) -> String {
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.placeholders.as_ref())
             .expect("valid HMAC key");
@@ -100,6 +114,12 @@ impl CensusKeys {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountState {
+    #[serde(default)]
+    pub synthetic_uid_next: std::collections::BTreeMap<String, u32>,
+    #[serde(default)]
+    pub backlog: Vec<crate::backlog::Run>,
+    #[serde(default)]
+    pub synthetic_effects: std::collections::BTreeMap<String, crate::backlog::Observation>,
     pub revision: u64,
     pub census: Census,
     pub workspace: Option<crate::rules::workspace::Workspace>,
@@ -109,6 +129,9 @@ impl AccountState {
     fn new(census: Census) -> Self {
         Self {
             revision: 0,
+            backlog: Vec::new(),
+            synthetic_effects: Default::default(),
+            synthetic_uid_next: Default::default(),
             census,
             workspace: None,
             exports: Vec::new(),
@@ -248,7 +271,7 @@ impl EncryptedStore {
         }
         let snapshot =
             Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
-        self.stage_snapshot(2, &snapshot)
+        self.stage_snapshot(3, &snapshot)
     }
 
     fn stage_snapshot(
@@ -345,7 +368,7 @@ impl EncryptedStore {
             )
             .map_err(|_| CensusError::Storage)?;
         let snapshot = Zeroizing::new(snapshot);
-        if !matches!(version, 1 | 2) {
+        if !matches!(version, 1 | 2 | 3) {
             return Err(CensusError::UnsupportedVersion);
         }
         if account != self.keys.account.as_str() {
@@ -370,6 +393,19 @@ impl EncryptedStore {
         for folder in census.folders.values_mut() {
             if folder.state == super::ScanState::Running {
                 folder.state = super::ScanState::Cancelled;
+            }
+        }
+        for run in &mut state.backlog {
+            if run.status == crate::backlog::Status::Running {
+                run.status = if run
+                    .outcomes
+                    .iter()
+                    .any(|o| matches!(o, crate::backlog::Outcome::Intent))
+                {
+                    crate::backlog::Status::Uncertain
+                } else {
+                    crate::backlog::Status::Prepared
+                };
             }
         }
         Ok(state)

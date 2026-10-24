@@ -42,7 +42,7 @@ See [Census implementation and remaining work](docs/census.md) for the data mode
 
 ## Rules and proof
 
-See [Rules and proof](docs/rules-proof.md) for the validated YAML model, emitted-output evaluator, local census interface, cross-check scope and incomplete acceptance criteria. Saved-account rules and pins load and save explicitly. A fresh proof and local confirmation can prepare an exact Sieve download for mailbox.org, with an encrypted export baseline. Gmail backlog has no Sieve-download action. A local export grants no provider authority. The examples contain only synthetic mail and configuration.
+See [Rules and proof](docs/rules-proof.md) for the validated YAML model, emitted-output evaluator, local census interface, cross-check scope and incomplete acceptance criteria. Saved-account rules and pins load and save explicitly. A fresh proof and local confirmation can prepare an exact Sieve download for mailbox.org, with an encrypted export baseline. Gmail backlog has no Sieve-download action. A local export grants no provider authority. The examples contain only synthetic mail and configuration. [Synthetic backlog sorting](docs/backlog.md) adds exact previews, encrypted run journals, recovery and conditional undo over an independently persisted fake mailbox. Production execution remains unavailable.
 
 ```sh
 node ui/scripts/verify-rules.mjs

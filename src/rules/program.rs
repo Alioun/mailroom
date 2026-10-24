@@ -752,7 +752,7 @@ mod tests {
     }
 }
 
-pub(super) mod persisted {
+pub(crate) mod persisted {
     use super::*;
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]

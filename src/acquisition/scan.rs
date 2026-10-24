@@ -146,6 +146,11 @@ pub(super) fn run(
     let outcome = (|| {
         cancel.check()?;
         let folders = source.folders()?;
+        for folder in &folders {
+            census
+                .folder_roles
+                .insert(folder.name.clone(), folder.roles.clone());
+        }
         let all = if provider == Provider::Gmail {
             folders
                 .iter()
@@ -312,6 +317,7 @@ mod tests {
     fn source() -> FakeMail {
         FakeMail {
             folders: vec![Folder {
+                roles: BTreeSet::new(),
                 wire: "Inbox".into(),
                 name: "Inbox".into(),
                 all: false,

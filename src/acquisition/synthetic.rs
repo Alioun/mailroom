@@ -43,6 +43,7 @@ struct SyntheticMail;
 impl MailRead for SyntheticMail {
     fn folders(&mut self) -> Result<Vec<Folder>, AcquisitionError> {
         Ok(vec![Folder {
+            roles: BTreeSet::new(),
             wire: "INBOX".into(),
             name: "INBOX".into(),
             sent: false,
@@ -73,7 +74,7 @@ impl MailRead for SyntheticMail {
                         labels: if *uid == 99 {
                             BTreeSet::from(["\\Sent".into()])
                         } else {
-                            BTreeSet::from(["Synthetic label".into()])
+                            BTreeSet::from(["Synthetic label".into(), "\\Inbox".into()])
                         },
                     },
                 )
@@ -94,7 +95,7 @@ impl MailRead for SyntheticMail {
                 _ => ("sender@example.test", ""),
             };
             let date = if *uid == 98 { "invalid date".into() } else { format!("{} Oct 2026 10:00:00 +0000", 1 + uid % 23) };
-            (*uid, format!("From: {sender}\r\nTo: owner@example.test\r\nDelivered-To: alias@example.test\r\nDate: {date}\r\nSubject: Synthetic account header {uid}\r\nMessage-ID: <synthetic-account-{uid}@example.test>\r\n{markers}\r\n").into_bytes())
+            (*uid, format!("From: {sender}\r\nTo: owner@example.test\r\nDelivered-To: team@home.example.test\r\nDate: {date}\r\nSubject: Synthetic account header {uid}\r\nMessage-ID: <synthetic-account-{uid}@example.test>\r\n{markers}\r\n").into_bytes())
         }).collect())
     }
 }

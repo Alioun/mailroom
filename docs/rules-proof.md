@@ -36,7 +36,7 @@ The synthetic library preview can compare current placement or a previous config
 
 ## Durable local workspace and download
 
-The encrypted singleton SQLite row uses account-state version 2. It contains the complete census, an optional workspace, a monotonic account revision and at most eight confirmed export records. The workspace retains raw YAML, its own revision, account-scoped pins, the exact UTC as-of time and baseline mode. Each export retains the exact compiled artifact, source workspace, proof receipt, preparation time and local-download provenance. The private storage decoder restores the immutable artifact without recompiling it. An obsolete semantics version or different engine makes a recorded baseline unavailable.
+The encrypted singleton SQLite row uses account-state version 3. It contains the complete census, an optional workspace, a monotonic account revision and at most eight confirmed export records. The workspace retains raw YAML, its own revision, account-scoped pins, the exact UTC as-of time and baseline mode. Each export retains the exact compiled artifact, source workspace, proof receipt, preparation time and local-download provenance. The private storage decoder restores the immutable artifact without recompiling it. An obsolete semantics version or different engine makes a recorded baseline unavailable.
 
 Version 1 encrypted SQLite snapshots load with their original census and no invented workspace or approvals. The next successful write migrates them atomically. Unknown versions, invalid JSON and authentication failures retain the existing file. All census checkpoints, refreshes and ownership confirmations preserve workspace and export fields.
 
@@ -78,4 +78,4 @@ Primary tool references:
 8. T3 preview opened but both snapshot attempts timed out. The actual built UI was verified through the repository's Playwright fallback. T3 preview verification remains unverified.
 9. Provider folder separators, existing folder inventory, rule coexistence, accounting acceptance and full-scale census behavior remain unknown. Full Gmail topology and earlier census lifecycle limitations remain as documented in the census receipts. No synthetic check settles these facts.
 
-Deployment, Gmail forwarding setup, journaled backlog moves and undo, unsubscribe, complete address lifecycle, wind-down reporting and owner-authorized live validation remain later dependencies. Every live-write denial remains enforced.
+The [synthetic backlog slice](backlog.md) adds journaled local effects and conditional undo. Production backlog moves, deployment, Gmail forwarding setup, unsubscribe, complete address lifecycle, wind-down reporting and owner-authorized live validation remain later dependencies. Every live-write denial remains enforced.

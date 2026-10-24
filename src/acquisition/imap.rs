@@ -20,6 +20,7 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]
 pub(super) struct Folder {
+    pub roles: BTreeSet<String>,
     pub wire: String,
     pub name: String,
     pub sent: bool,
@@ -240,6 +241,19 @@ impl MailRead for ReadOnlyImap {
             }) = response
             {
                 folders.push(Folder {
+                    roles: attrs
+                        .iter()
+                        .filter_map(|a| match a {
+                            NameAttribute::Archive => Some("archive".into()),
+                            NameAttribute::Sent => Some("sent".into()),
+                            NameAttribute::All => Some("all".into()),
+                            NameAttribute::Drafts => Some("drafts".into()),
+                            NameAttribute::Junk => Some("junk".into()),
+                            NameAttribute::Trash => Some("trash".into()),
+                            NameAttribute::NoSelect => Some("noselect".into()),
+                            _ => None,
+                        })
+                        .collect(),
                     wire: name.to_string(),
                     name: decode_name(&name)?,
                     sent: attrs.contains(&NameAttribute::Sent),

@@ -532,3 +532,45 @@ async fn synthetic_account_flow_uses_fake_credentials_and_preserves_http_authori
     assert!(policy::authorize(Operation::Census).allowed);
     assert!(!policy::authorize(Operation::ChangeFlags).allowed);
 }
+
+#[tokio::test]
+async fn backlog_routes_install_no_production_write_authority() {
+    for command in [
+        serde_json::json!({"action":"start", "options":{"scope":"inbox", "protect_flagged":true, "selected":null}, "receipt":"fake", "confirmed":true}),
+        serde_json::json!({"action":"advance", "run":"fake"}),
+        serde_json::json!({"action":"stop", "run":"fake"}),
+        serde_json::json!({"action":"resume", "run":"fake"}),
+        serde_json::json!({"action":"undo_preview", "run":"fake"}),
+        serde_json::json!({"action":"undo", "run":"fake", "receipt":"fake", "confirmed":true}),
+        serde_json::json!({"action":"resume_undo", "run":"fake"}),
+    ] {
+        let response = request(
+            "/api/accounts/backlog",
+            &serde_json::json!({"account":"nonexistent-fake-account", "command":command})
+                .to_string(),
+            None,
+            server::ADDRESS,
+            "application/json",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    for body in [
+        serde_json::json!({"account":"fake", "command":{"action":"open"}, "synthetic":true}),
+        serde_json::json!({"account":"fake", "command":{"action":"open", "synthetic":true}}),
+        serde_json::json!({"account":"fake", "command":{"action":"preview", "options":{"scope":"inbox", "protect_flagged":true, "selected":null}, "context":{"allowed":true}}}),
+    ] {
+        assert_eq!(
+            request(
+                "/api/accounts/backlog",
+                &body.to_string(),
+                None,
+                server::ADDRESS,
+                "application/json"
+            )
+            .await
+            .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+}

@@ -180,6 +180,8 @@ impl FolderCensus {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Census {
+    #[serde(default)]
+    pub folder_roles: BTreeMap<String, BTreeSet<String>>,
     pub account: AccountId,
     pub folders: BTreeMap<String, FolderCensus>,
     pub confirmed_own_addresses: BTreeSet<String>,
@@ -200,6 +202,7 @@ impl Census {
     pub fn new(account: AccountId) -> Self {
         Self {
             account,
+            folder_roles: BTreeMap::new(),
             folders: BTreeMap::new(),
             confirmed_own_addresses: BTreeSet::new(),
             account_login: None,

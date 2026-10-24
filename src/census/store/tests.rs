@@ -294,3 +294,47 @@ fn reopened_store_rejects_old_census_without_a_current_load_even_on_retry() {
     assert!(store.save(&old).is_err());
     assert_eq!(store.load().unwrap(), current);
 }
+
+#[test]
+fn migrates_v2_without_inventing_runs_and_preserves_prior_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = AccountId::new("synthetic-v2-migration").unwrap();
+    let store = EncryptedStore::new(
+        dir.path().into(),
+        CensusKeys::derive(&LocalSecret::random(), &id),
+    )
+    .unwrap();
+    let census = Census::new(id);
+    let mut state = AccountState::new(census);
+    state.revision = 9;
+    state.workspace = Some(Workspace {
+        revision: 3,
+        input: input(),
+    });
+    let mut old = serde_json::to_value(&state).unwrap();
+    old.as_object_mut().unwrap().remove("backlog");
+    old.as_object_mut().unwrap().remove("synthetic_effects");
+    old.as_object_mut().unwrap().remove("synthetic_uid_next");
+    old["census"]
+        .as_object_mut()
+        .unwrap()
+        .remove("folder_roles");
+    store
+        .stage_snapshot(2, &serde_json::to_string(&old).unwrap())
+        .unwrap()
+        .persist(store.path())
+        .unwrap();
+    let mut migrated = store.load_state().unwrap();
+    assert!(migrated.backlog.is_empty());
+    assert!(migrated.synthetic_effects.is_empty());
+    assert_eq!(migrated.revision, 9);
+    assert_eq!(migrated.workspace.as_ref().unwrap().revision, 3);
+    store.save_state(&mut migrated).unwrap();
+    let reopened = store.load_state().unwrap();
+    assert_eq!(reopened.revision, 10);
+    assert!(reopened.backlog.is_empty());
+    assert_eq!(
+        reopened.workspace.unwrap().input.documents,
+        input().documents
+    );
+}

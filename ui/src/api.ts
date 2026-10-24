@@ -146,3 +146,35 @@ export async function previewWorkspace(account: string): Promise<ProofPreview> {
 export async function downloadSieve(account: string, receipt: string) {
   return z.object({ filename: z.literal('rules.sieve'), sieve: z.string(), identity: z.string(), workspace: workspaceView }).parse(await accountPost('proof/download', { account, receipt, confirmed: true }))
 }
+
+const backlogOptions = z.object({ scope: z.enum(['inbox_unfiled', 'inbox', 'every_folder']), protect_flagged: z.boolean(), selected: z.array(z.string()).nullable() })
+const backlogIdentity = z.object({ folder: z.string(), uidvalidity: z.number(), uid: z.number(), message_id_hash: z.string(), gmail_id: z.string().nullable() })
+const backlogOperation = z.discriminatedUnion('kind', [z.object({ kind: z.literal('imap'), method: z.enum(['uid_move', 'copy_uid_expunge']) }), z.object({ kind: z.literal('gmail'), add: z.array(z.string()), remove: z.array(z.string()) })])
+const backlogPlan = z.object({
+  account: z.string(), provider: account.shape.provider, source: z.string(), state_revision: z.number(), mailbox_revision: z.number().nullable(), semantics: z.string(),
+  artifact: preview.shape.artifact, proof_gate: z.string(), options: backlogOptions,
+  changes: z.array(z.object({ source: backlogIdentity, flags: z.array(z.string()), original_labels: z.array(z.string()), destination: z.string(), sender: z.string(), operation: backlogOperation })),
+  excluded: z.record(z.string(), z.number()), unmatched: z.number(), review: z.number(), groups: z.record(z.string(), z.object({ count: z.number(), selected: z.boolean(), top_senders: z.array(z.tuple([z.string(), z.number()])) })), stopped_folders: z.array(z.string()), diagnostics: z.array(z.string()),
+})
+const backlogObservation = z.object({ destination: backlogIdentity, commands: z.array(z.string()) })
+const backlogOutcome = z.discriminatedUnion('state', [z.object({ state: z.literal('pending') }), z.object({ state: z.literal('intent') }), z.object({ state: z.literal('applied'), observation: backlogObservation }), z.object({ state: z.literal('conflict'), reason: z.string() })])
+const backlogUndo = z.discriminatedUnion('state', [z.object({ state: z.literal('not_requested') }), z.object({ state: z.literal('intent') }), z.object({ state: z.literal('restored'), observation: backlogObservation }), z.object({ state: z.literal('conflict'), reason: z.string() })])
+const backlogRun = z.object({ id: z.string(), plan: backlogPlan, status: z.enum(['prepared', 'running', 'stopped', 'completed', 'failed', 'uncertain']), outcomes: z.array(backlogOutcome), undo: z.array(backlogUndo), undo_requested: z.boolean(), batches: z.number(), error: z.string().nullable() })
+const backlogView = z.object({ runs: z.array(backlogRun), synthetic: z.boolean() })
+const backlogPreview = z.object({ plan: backlogPlan, receipt: z.string(), execution_available: z.boolean() })
+const backlogUndoPreview = z.object({ receipt: z.string(), eligible: z.array(z.number()), conflicts: z.record(z.string(), z.string()), warning: z.string() })
+export type BacklogOptions = z.infer<typeof backlogOptions>
+export type BacklogView = z.infer<typeof backlogView>
+export type BacklogPreview = z.infer<typeof backlogPreview>
+export type BacklogUndoPreview = z.infer<typeof backlogUndoPreview>
+type BacklogAction = { action: 'open' } | { action: 'preview'; options: BacklogOptions } | { action: 'start'; options: BacklogOptions; receipt: string; confirmed: boolean } | { action: 'advance' | 'resume' | 'stop' | 'undo_preview' | 'resume_undo'; run: string } | { action: 'undo'; run: string; receipt: string; confirmed: boolean }
+async function backlogPost(account: string, command: BacklogAction): Promise<unknown> { return accountPost('backlog', { account, command }) }
+export async function openBacklog(account: string): Promise<BacklogView> { return backlogView.parse(await backlogPost(account, { action: 'open' })) }
+export async function previewBacklog(account: string, options: BacklogOptions): Promise<BacklogPreview> { return backlogPreview.parse(await backlogPost(account, { action: 'preview', options })) }
+export async function startBacklog(account: string, plan: BacklogPreview): Promise<BacklogView> { return backlogView.parse(await backlogPost(account, { action: 'start', options: plan.plan.options, receipt: plan.receipt, confirmed: true })) }
+export async function advanceBacklog(account: string, run: string): Promise<BacklogView> { return backlogView.parse(await backlogPost(account, { action: 'advance', run })) }
+export async function previewBacklogUndo(account: string, run: string): Promise<BacklogUndoPreview> { return backlogUndoPreview.parse(await backlogPost(account, { action: 'undo_preview', run })) }
+export async function undoBacklog(account: string, run: string, receipt: string): Promise<BacklogView> { return backlogView.parse(await backlogPost(account, { action: 'undo', run, receipt, confirmed: true })) }
+export async function resumeBacklogUndo(account: string, run: string): Promise<BacklogView> { return backlogView.parse(await backlogPost(account, { action: 'resume_undo', run })) }
+
+export async function resumeBacklog(account: string, run: string): Promise<BacklogView> { return backlogView.parse(await backlogPost(account, { action: 'resume', run })) }

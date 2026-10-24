@@ -60,6 +60,6 @@ This is a local web confirmation and browser download. It does not implement the
 - Scale verification and possible persistence changes beyond whole-snapshot rewrites, the 128 MiB snapshot cap and existing acquisition bounds. Report derivation currently holds the snapshot and derived data in memory.
 - Takeout import, further provider and credential adapters, and broader platform work remain separate units.
 - Wider agent integration and its native confirmation boundary. Clear exports currently support organisational domains only. Other values intentionally remain placeholders.
-- Unsubscribe logs and backlog journals belong to their concrete workflows and remain absent. Rules, invoice forwarding, address ledger, unsubscribe execution and full wind-down statuses remain later personal features.
+- Unsubscribe logs remain absent. The [synthetic backlog workflow](backlog.md) now persists its own journal. Rules, invoice forwarding, address ledger, unsubscribe execution and full wind-down statuses remain later personal features.
 
 Provider OX coexistence, exact recipient semantics, forwarding behavior and accounting intake acceptance remain owner-run evidence. Business roles, the signup domain/mechanism, invoice sender approvals and accounting targets remain owner decisions. Own-address confirmation and classifier observations do not settle any of them.

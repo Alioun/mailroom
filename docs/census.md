@@ -16,7 +16,7 @@ Own-address candidates retain their evidence source. To and Cc remain unverified
 
 ## Encrypted SQLite snapshots
 
-`census::EncryptedStore` opens SQLite only in memory. Temporary storage and journaling use memory. Schema version 2 contains the census, optional rule workspace and bounded local export history in a singleton SQLite row. Version 1 snapshots migrate without inventing configuration or approval. The current model is loaded as a whole. It is not a relational query or journal implementation.
+`census::EncryptedStore` opens SQLite only in memory. Temporary storage and journaling use memory. Schema version 3 contains the census, optional rule workspace, bounded local export history and concrete backlog journal in a singleton SQLite row. Versions 1 and 2 migrate without inventing configuration, runs or approval. The current model is loaded as a whole. It is not a relational query engine. See [Synthetic backlog sorting](backlog.md).
 
 Each account uses a distinct `<opaque-account-id>.census.enc` file. A 32-byte random local secret derives distinct encryption and placeholder keys through HKDF-SHA256 with account-scoped salt and separate purpose labels. Secret and derived-key buffers zeroize on drop. The AES implementation enables its key-zeroization feature.
 
@@ -60,7 +60,7 @@ Only the policy module constructs the internal provider-bound `ReadPermit`. Prod
 
 The fixed endpoints are `imap.mailbox.org:993` and `imap.gmail.com:993`. `native-tls` validates certificates and hostnames before authentication. The pinned `imap` 3.0.0-alpha.15 client and `imap-proto` parser handle responses and literals. This version is a prerelease; the adapter is intentionally private and tested against actual emitted commands. The application does not implement its own IMAP response framing. Modified UTF-7 folder and label payloads use a bounded codec with Base64 and UTF-16 validation. Unicode names are retained locally, with no guesses based on translated folder names.
 
-The transport requests `LIST` with `RETURN (SPECIAL-USE)` when advertised. A non-Gmail server without SPECIAL-USE is rejected rather than guessing folder roles. Gmail also requires X-GM-EXT-1. Folders marked NoSelect, Junk, Trash or Drafts are excluded. Gmail uses its All Mail special-use folder once when available; otherwise it scans eligible folders and deduplicates by X-GM-MSGID. Message labels also exclude Spam, Junk, Trash and Drafts. Sent direction comes from the Sent attribute or Gmail's system Sent label.
+The transport requests `LIST` with `RETURN (SPECIAL-USE)` when advertised. A non-Gmail server without SPECIAL-USE is rejected rather than guessing folder roles. Gmail also requires X-GM-EXT-1. Folders marked NoSelect, Junk, Trash or Drafts are excluded. Gmail uses its All Mail special-use folder once when available; otherwise it scans eligible folders and deduplicates by X-GM-MSGID. Message labels also exclude Spam, Junk, Trash and Drafts. Sent direction comes from the Sent attribute or Gmail's system Sent label. Discovered special-use roles, including Archive, persist in the encrypted census. A translated folder name supplies no role evidence.
 
 Each folder opens with `EXAMINE`. The adapter requires the server's read-only response, nonzero UIDVALIDITY and a successful `UID SEARCH ALL` whose size matches the EXAMINE count. Missing responses or changing counts cause a retry. Metadata requests contain only UID, size, internal date, flags and the Gmail message ID, thread ID and labels when applicable. Metadata refresh covers existing UIDs on every scan. New header requests contain explicit `BODY.PEEK[HEADER.FIELDS (...)]<0.65537>`. Headers over 64 KiB fail. No body or attachment section is requested. There is no public raw-session or arbitrary-command method, and no reachable mutation command, SMTP or ManageSieve implementation.
 
@@ -85,6 +85,6 @@ Starting the binary with `--synthetic-accounts` installs a fake credential backe
 - Persist full Gmail label topology and excluded-folder counts. Current canonical scanned-folder counts do not describe every provider label or Spam folder.
 - Implement trusted authentication provenance and signature correlation. Preserve unknown coverage when evidence is insufficient.
 - Complete the wider agent workflow separately, including native action-naming confirmation, agent enablement, agent proof exports, restricted agent directories and proposal resolution. The report export currently uses explicit local web confirmation and a browser download. It does not enable agent access or live operations.
-- Add unsubscribe logs and backlog journals with those workflows. They are absent from this schema.
+- Unsubscribe logs remain absent. Version 3 includes the concrete synthetic backlog journal. Production backlog operations remain unavailable.
 
 The person-run `scripts/connect-account.sh` walkthrough starts no credentialed step automatically and reads no secret. It guides an existing local launch and private UI entry without requesting provider setting changes. Its shared wizard library retains unused helpers; shellcheck excludes SC2329 for those template functions only.

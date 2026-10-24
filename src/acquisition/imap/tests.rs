@@ -78,7 +78,7 @@ impl FakeTls {
                     )
                 } else if command == "LIST \"\" \"*\" RETURN (SPECIAL-USE)" {
                     format!(
-                        "* LIST (\\All) \"/\" \"[Gmail]/Alle Nachrichten\"\r\n* LIST (\\Junk) \"/\" \"Indesirable\"\r\n* LIST (\\Sent) \"/\" \"Gesendet\"\r\n* LIST () \"/\" \"Archiv/Gr&APwA3w-e\"\r\n{tag} OK list\r\n"
+                        "* LIST (\\All) \"/\" \"[Gmail]/Alle Nachrichten\"\r\n* LIST (\\Junk) \"/\" \"Indesirable\"\r\n* LIST (\\Sent) \"/\" \"Gesendet\"\r\n* LIST () \"/\" \"Archiv/Gr&APwA3w-e\"\r\n* LIST (\\Archive) \"/\" \"Opaque mailbox\"\r\n{tag} OK list\r\n"
                     )
                 } else if command.starts_with("EXAMINE ") {
                     format!(
@@ -160,6 +160,8 @@ fn tls_wire_is_read_only_and_parses_fragmented_literals_unicode_and_gmail_metada
     assert!(folders[1].excluded);
     assert!(folders[2].sent);
     assert_eq!(folders[3].name, "Archiv/Grüße");
+    assert!(folders[3].roles.is_empty());
+    assert!(folders[4].roles.contains("archive"));
     let (validity, uids) = source.inventory(&folders[0]).unwrap();
     assert_eq!(validity, 7);
     assert_eq!(uids, BTreeSet::from([1, 2]));
@@ -306,6 +308,7 @@ fn actual_tls_acquisition_checkpoints_the_provider_inventory() {
     fake.worker.join().unwrap();
     let saved = store.load().unwrap();
     assert_eq!(saved.folders.len(), 1);
+    assert!(saved.folder_roles["Opaque mailbox"].contains("archive"));
     assert_eq!(saved.folders["[Gmail]/Alle Nachrichten"].messages.len(), 2);
     assert!(
         saved.folders["[Gmail]/Alle Nachrichten"]

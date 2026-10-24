@@ -1,3 +1,4 @@
+pub(super) mod backlog;
 use super::{AppState, EmptyRequest};
 use crate::{
     acquisition::{
@@ -28,6 +29,7 @@ enum AccountSource {
     Synthetic {
         accounts: Arc<Accounts>,
         _directory: tempfile::TempDir,
+        mailboxes: std::path::PathBuf,
     },
 }
 #[derive(Clone, Serialize)]
@@ -44,6 +46,7 @@ impl AccountController {
             let directory = tempfile::tempdir().expect("synthetic account directory");
             AccountSource::Synthetic {
                 accounts: Arc::new(acquisition::synthetic::accounts(directory.path())),
+                mailboxes: directory.path().join("mailboxes"),
                 _directory: directory,
             }
         } else {
@@ -737,6 +740,7 @@ async fn durable_browser_server_fixture() {
             &root,
         ))),
         _directory: tempfile::tempdir().unwrap(),
+        mailboxes: std::path::Path::new(&root).join("mailboxes"),
     };
     let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
     axum::serve(listener, super::router(Arc::new(state)))

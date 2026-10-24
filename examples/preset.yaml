@@ -1,0 +1,38 @@
+id: standard
+major: 1
+renamed:
+  studio.old: sender.studio
+rules:
+  - id: guard.login
+    category: money
+    stage: guard
+    retain: true
+    when: [{kind: subject_contains, value: 'login code'}]
+  - id: sender.studio
+    category: orders
+    stage: from
+    when: [{kind: from_domain, value: studio.example.com}]
+  - id: topic.money
+    category: money
+    stage: subject
+    when: [{kind: subject_contains, value: invoice}]
+  - id: topic.money.de
+    category: money
+    stage: subject
+    when: [{kind: subject_contains, value: Rechnung}]
+  - id: topic.contracts
+    category: contracts
+    stage: subject
+    when: [{kind: subject_contains, value: contract}]
+  - id: topic.orders
+    category: orders
+    stage: subject
+    when: [{kind: subject_contains, value: order}]
+  - id: topic.travel
+    category: travel
+    stage: subject
+    when: [{kind: subject_contains, value: booking}]
+  - id: topic.social
+    category: social
+    stage: from
+    when: [{kind: from_domain, value: social.example.net}]

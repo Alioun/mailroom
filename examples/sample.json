@@ -1,28 +1,114 @@
 {
-  "preset": {
-    "id": "sample",
-    "major": 1,
-    "rules": [
-      {"id":"spam-guard","stage":"guard","conditions":[{"kind":"spam_flag"}],"destination":{"kind":"inbox"}},
-      {"id":"bulk","stage":"bulk","conditions":[{"kind":"list_id_exists"}],"destination":{"kind":"folder","name":"Reading"}},
-      {"id":"studio","stage":"from","conditions":[{"kind":"from_domain","value":"studio.example.com"}],"destination":{"kind":"folder","name":"Projects"}},
-      {"id":"receipts","stage":"subject","conditions":[{"kind":"subject_contains","value":"invoice"}],"destination":{"kind":"folder","name":"Receipts"}}
-    ],
-    "copies": [
-      {"id":"invoice-copy","conditions":[{"kind":"subject_contains","value":"invoice"}],"recipient":"archive@example.net"}
+  "documents": {
+    "preset_yaml": "id: standard\nmajor: 1\nrenamed:\n  studio.old: sender.studio\nrules:\n  - id: guard.login\n    category: money\n    stage: guard\n    retain: true\n    when: [{kind: subject_contains, value: 'login code'}]\n  - id: sender.studio\n    category: orders\n    stage: from\n    when: [{kind: from_domain, value: studio.example.com}]\n  - id: topic.money\n    category: money\n    stage: subject\n    when: [{kind: subject_contains, value: invoice}]\n  - id: topic.money.de\n    category: money\n    stage: subject\n    when: [{kind: subject_contains, value: Rechnung}]\n  - id: topic.contracts\n    category: contracts\n    stage: subject\n    when: [{kind: subject_contains, value: contract}]\n  - id: topic.orders\n    category: orders\n    stage: subject\n    when: [{kind: subject_contains, value: order}]\n  - id: topic.travel\n    category: travel\n    stage: subject\n    when: [{kind: subject_contains, value: booking}]\n  - id: topic.social\n    category: social\n    stage: from\n    when: [{kind: from_domain, value: social.example.net}]\n",
+    "override_yaml": "preset: standard\nmajor: 1\nroles:\n  domains:\n    work.example.test: business\n    home.example.test: personal\n    signup.example.test: personal\n  addresses:\n    unknown@work.example.test: unknown\n  signup_domains: [signup.example.test]\npatches:\n  - id: studio.old\n    folder: Studio\nadditions:\n  - id: user.release\n    category: orders\n    stage: subject\n    when: [{kind: subject_contains, value: release}]\n    folder: Releases\nledger:\n  - address: invoices@work.example.test\n    status: active\n    category: money\n    invoice: true\n    folder: Invoices\n  - address: retired@signup.example.test\n    status: retired\n    category: orders\n    invoice: false\n    folder: null\ntargets:\n  accounting: {address: archive@example.net}\nforwards:\n  - id: forward.approved\n    target: accounting\n    trigger:\n      kind: approved_senders\n      addresses: [billing@shop.example.org]\n  - id: forward.invoice_address\n    target: accounting\n    trigger: {kind: invoice_address}\n  - id: forward.keywords\n    target: accounting\n    trigger: {kind: keywords, words: [invoice, Rechnung]}\n"
+  },
+  "context": {
+    "account": "synthetic-rules",
+    "engine": "mailbox_sieve",
+    "recipient_evidence": "synthetic_delivered_to",
+    "capabilities": [
+      "fileinto",
+      "copy",
+      "duplicate",
+      "relational",
+      "comparator-i;ascii-numeric",
+      "imap4flags"
     ]
   },
-  "overrides": {
-    "preset":"sample","major":1,
-    "patches":[{"id":"studio","destination":{"kind":"folder","name":"Studio"}}],
-    "additions":[{"id":"release-note","stage":"subject","conditions":[{"kind":"subject_contains","value":"release"}],"destination":{"kind":"folder","name":"Releases"}}]
-  },
   "messages": [
-    {"id":"sample-1","headers":"From: updates@studio.example.com\nTo: reader@example.org\nSubject: Studio invoice 104\nList-Id: <studio.example.com>"},
-    {"id":"sample-2","headers":"From: news@letters.example.net\nSubject: An invoice guide\nList-Id: <letters.example.net>"},
-    {"id":"sample-3","headers":"From: billing@shop.example.org\nSubject: Your invoice 208"},
-    {"id":"sample-4","headers":"From: friend@example.net\nSubject: Lunch on Friday?"},
-    {"id":"sample-5","headers":"From: updates@studio.example.com\nSubject: Release notes\nList-Id: <studio.example.com>"},
-    {"id":"sample-6","headers":"From: sender@example.org\nSubject: Invoice marked as spam\nX-Spam-Flag: YES"}
-  ]
+    {
+      "id": "sample-0",
+      "headers": "From: Example Sender <updates@studio.example.com>\nTo: team@work.example.test\nDelivered-To: team@work.example.test\nSubject: Studio invoice 104\nMessage-ID: <sample-0@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000\nList-Id: <studio.example.com>",
+      "current_folder": "INBOX"
+    },
+    {
+      "id": "sample-1",
+      "headers": "From: Example Sender <news@letters.example.net>\nTo: team@work.example.test\nDelivered-To: team@work.example.test\nSubject: An invoice guide\nMessage-ID: <sample-1@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000\nList-Id: <letters.example.net>",
+      "current_folder": "INBOX"
+    },
+    {
+      "id": "sample-2",
+      "headers": "From: Example Sender <billing@shop.example.org>\nTo: team@work.example.test\nDelivered-To: team@work.example.test\nSubject: Your invoice 208\nMessage-ID: <sample-2@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000",
+      "current_folder": "INBOX"
+    },
+    {
+      "id": "sample-3",
+      "headers": "From: Example Sender <friend@example.net>\nTo: owner@home.example.test\nDelivered-To: owner@home.example.test\nSubject: Lunch on Friday?\nMessage-ID: <sample-3@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000",
+      "current_folder": "INBOX"
+    },
+    {
+      "id": "sample-4",
+      "headers": "From: Example Sender <updates@studio.example.com>\nTo: team@work.example.test\nDelivered-To: team@work.example.test\nSubject: Release notes\nMessage-ID: <sample-4@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000\nList-Id: <studio.example.com>",
+      "current_folder": "INBOX"
+    },
+    {
+      "id": "sample-5",
+      "headers": "From: Example Sender <billing@shop.example.org>\nTo: unknown@work.example.test\nDelivered-To: unknown@work.example.test\nSubject: Invoice unknown role\nMessage-ID: <sample-5@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000",
+      "current_folder": "INBOX"
+    },
+    {
+      "id": "sample-6",
+      "headers": "From: Example Sender <billing@shop.example.org>\nTo: team@work.example.test, owner@home.example.test\nDelivered-To: team@work.example.test, owner@home.example.test\nSubject: Invoice mixed roles\nMessage-ID: <sample-6@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000",
+      "current_folder": "INBOX"
+    },
+    {
+      "id": "sample-7",
+      "headers": "From: Example Sender <friend@example.net>\nTo: new@signup.example.test\nDelivered-To: new@signup.example.test\nSubject: New sign-up\nMessage-ID: <sample-7@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000",
+      "current_folder": "INBOX"
+    },
+    {
+      "id": "sample-8",
+      "headers": "From: Example Sender <sender@example.org>\nTo: owner@home.example.test\nDelivered-To: owner@home.example.test\nSubject: Invoice with incomplete one-click pair\nMessage-ID: <sample-8@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000\nList-Unsubscribe-Post: List-Unsubscribe=One-Click",
+      "current_folder": "INBOX"
+    },
+    {
+      "id": "sample-9",
+      "headers": "From: Example Sender <sender@example.org>\nTo: owner@home.example.test\nDelivered-To: owner@home.example.test\nSubject: =?UTF-8?Q?Gr=C3=BC=C3=9Fe_und_Rechnung?=\nMessage-ID: <sample-9@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000",
+      "current_folder": "INBOX"
+    },
+    {
+      "id": "sample-10",
+      "headers": "From: Example Sender <billing@shop.example.org>\nTo: team@work.example.test\nDelivered-To: team@work.example.test\nSubject: Invoice login code\nMessage-ID: <sample-10@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000",
+      "current_folder": "INBOX"
+    },
+    {
+      "id": "sample-11",
+      "headers": "From: Example Sender <stranger@example.org>\nTo: invoices@work.example.test\nDelivered-To: invoices@work.example.test\nSubject: Invoice address\nMessage-ID: <sample-11@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000\nList-Id: <letters.example.net>",
+      "current_folder": "INBOX"
+    },
+    {
+      "id": "sample-12",
+      "headers": "From: Example Sender <billing@shop.example.org>\nTo: team@work.example.test\nDelivered-To: team@work.example.test\nSubject: Your invoice 208 duplicate\nMessage-ID: <sample-2@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000",
+      "current_folder": "INBOX"
+    },
+    {
+      "id": "sample-13",
+      "headers": "From: Example Sender <news@example.org>\nTo: owner@home.example.test\nDelivered-To: owner@home.example.test\nSubject: Complete pair invoice\nMessage-ID: <sample-13@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000\nList-Unsubscribe: <https://example.org/unsubscribe>\nList-Unsubscribe-Post: List-Unsubscribe=One-Click",
+      "current_folder": "INBOX"
+    }
+  ],
+  "as_of": 1792886400,
+  "pins": [
+    {
+      "account": "synthetic-rules",
+      "message_id_hash": "1d3c97c8f3a853fff825d376bd8b899f4d0a7646ac9aa1e5b4436a18ab50882d",
+      "expected": {
+        "kind": "folder",
+        "name": "Business/Money"
+      }
+    },
+    {
+      "account": "synthetic-rules",
+      "message_id_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expected": {
+        "kind": "inbox"
+      }
+    }
+  ],
+  "baseline": "current",
+  "previous": {
+    "preset_yaml": "id: standard\nmajor: 1\nrenamed:\n  studio.old: sender.studio\nrules:\n  - id: guard.login\n    category: money\n    stage: guard\n    retain: true\n    when: [{kind: subject_contains, value: 'login code'}]\n  - id: sender.studio\n    category: orders\n    stage: from\n    when: [{kind: from_domain, value: studio.example.com}]\n  - id: topic.money\n    category: money\n    stage: subject\n    when: [{kind: subject_contains, value: invoice}]\n  - id: topic.money.de\n    category: money\n    stage: subject\n    when: [{kind: subject_contains, value: Rechnung}]\n  - id: topic.contracts\n    category: contracts\n    stage: subject\n    when: [{kind: subject_contains, value: contract}]\n  - id: topic.orders\n    category: orders\n    stage: subject\n    when: [{kind: subject_contains, value: order}]\n  - id: topic.travel\n    category: travel\n    stage: subject\n    when: [{kind: subject_contains, value: booking}]\n  - id: topic.social\n    category: social\n    stage: from\n    when: [{kind: from_domain, value: social.example.net}]\n",
+    "override_yaml": "preset: standard\nmajor: 1\nroles:\n  domains:\n    work.example.test: business\n    home.example.test: personal\n    signup.example.test: personal\n  addresses:\n    unknown@work.example.test: unknown\n  signup_domains: [signup.example.test]\npatches: []\nadditions:\n  - id: user.release\n    category: orders\n    stage: subject\n    when: [{kind: subject_contains, value: release}]\n    folder: Releases\nledger:\n  - address: invoices@work.example.test\n    status: active\n    category: money\n    invoice: true\n    folder: Invoices\n  - address: retired@signup.example.test\n    status: retired\n    category: orders\n    invoice: false\n    folder: null\ntargets:\n  accounting: {address: archive@example.net}\nforwards:\n  - id: forward.approved\n    target: accounting\n    trigger:\n      kind: approved_senders\n      addresses: [billing@shop.example.org]\n  - id: forward.invoice_address\n    target: accounting\n    trigger: {kind: invoice_address}\n  - id: forward.keywords\n    target: accounting\n    trigger: {kind: keywords, words: [invoice, Rechnung]}\n"
+  }
 }

@@ -1,0 +1,539 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Overrides",
+  "type": "object",
+  "properties": {
+    "additions": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Rule"
+      }
+    },
+    "forwards": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Forward"
+      }
+    },
+    "layout": {
+      "$ref": "#/$defs/Layout",
+      "default": {
+        "business_root": "Business",
+        "language": "en",
+        "new_addresses": "New addresses",
+        "personal_root": "Personal",
+        "retired_addresses": "Retired addresses"
+      }
+    },
+    "ledger": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/LedgerEntry"
+      }
+    },
+    "major": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "patches": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Patch"
+      }
+    },
+    "preset": {
+      "type": "string"
+    },
+    "roles": {
+      "$ref": "#/$defs/Roles",
+      "default": {
+        "addresses": {},
+        "domains": {},
+        "signup_domains": []
+      }
+    },
+    "targets": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Target"
+      },
+      "default": {}
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "preset",
+    "major"
+  ],
+  "$defs": {
+    "Category": {
+      "type": "string",
+      "enum": [
+        "money",
+        "contracts",
+        "orders",
+        "travel",
+        "social",
+        "newsletters"
+      ]
+    },
+    "Condition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "from_address"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "from_domain"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "to_address"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "subject_contains"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "list_id_exists"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "one_click"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "non_bulk"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "attachment"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "Forward": {
+      "type": "object",
+      "properties": {
+        "accounts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "id": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "trigger": {
+          "$ref": "#/$defs/ForwardTrigger"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "target",
+        "trigger"
+      ]
+    },
+    "ForwardTrigger": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "invoice_address"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "addresses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "uniqueItems": true
+            },
+            "kind": {
+              "type": "string",
+              "const": "approved_senders"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "addresses"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "keywords"
+            },
+            "words": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "words"
+          ]
+        }
+      ]
+    },
+    "Language": {
+      "type": "string",
+      "enum": [
+        "en",
+        "de"
+      ]
+    },
+    "Layout": {
+      "type": "object",
+      "properties": {
+        "business_root": {
+          "type": "string"
+        },
+        "language": {
+          "$ref": "#/$defs/Language"
+        },
+        "new_addresses": {
+          "type": "string"
+        },
+        "personal_root": {
+          "type": "string"
+        },
+        "retired_addresses": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "language",
+        "personal_root",
+        "business_root",
+        "new_addresses",
+        "retired_addresses"
+      ]
+    },
+    "LedgerEntry": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "category": {
+          "$ref": "#/$defs/Category"
+        },
+        "folder": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "invoice": {
+          "type": "boolean",
+          "default": false
+        },
+        "status": {
+          "$ref": "#/$defs/LedgerStatus"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "address",
+        "status",
+        "category"
+      ]
+    },
+    "LedgerStatus": {
+      "type": "string",
+      "enum": [
+        "active",
+        "retired"
+      ]
+    },
+    "Patch": {
+      "type": "object",
+      "properties": {
+        "accounts": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "extend": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Condition"
+          }
+        },
+        "folder": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "mark_read": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "when": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/Condition"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ]
+    },
+    "Role": {
+      "type": "string",
+      "enum": [
+        "personal",
+        "business",
+        "unfiltered",
+        "unknown"
+      ]
+    },
+    "Roles": {
+      "type": "object",
+      "properties": {
+        "addresses": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Role"
+          },
+          "default": {}
+        },
+        "domains": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Role"
+          },
+          "default": {}
+        },
+        "signup_domains": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "Rule": {
+      "type": "object",
+      "properties": {
+        "accounts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "category": {
+          "$ref": "#/$defs/Category"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "folder": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "id": {
+          "type": "string"
+        },
+        "mark_read": {
+          "type": "boolean",
+          "default": false
+        },
+        "retain": {
+          "type": "boolean",
+          "default": false
+        },
+        "stage": {
+          "$ref": "#/$defs/Stage"
+        },
+        "when": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "category",
+        "stage",
+        "when"
+      ]
+    },
+    "Stage": {
+      "type": "string",
+      "enum": [
+        "guard",
+        "from",
+        "subject"
+      ]
+    },
+    "Target": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "address"
+      ]
+    }
+  }
+}

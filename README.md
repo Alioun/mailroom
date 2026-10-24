@@ -16,7 +16,7 @@ For an owner-run connection walkthrough, use `./scripts/connect-account.sh`. Con
 
 For fake-only account verification, start the built binary with `./target/debug/mailroom --synthetic-accounts`. This mode uses temporary encrypted files, fake credentials and 100 invented headers. It cannot connect to a provider or the OS backend. The UI labels the mode explicitly.
 
-Click **Run sample preview**. The six bundled messages produce four filings, two Inbox retentions, and four independent copy actions. Turn off **Apply sample overrides** and run again to compare the preset. Switch between English and German at the top. Sample subjects, folders and addresses are invented demonstration data, not recommended personal settings.
+Click **Run sample preview**. Fourteen invented messages produce ten filings, four Inbox retentions and three independent copies. Edit the YAML, compare current folders with the previous sample configuration, switch to Gmail backlog matching or change a census pin's expected folder. A failing pin blocks the proof. Example addresses and folder roots are generic synthetic settings.
 
 Click **Start synthetic census** to parse eight invented headers. Cancel and resume the scan, confirm an own-address candidate, inspect local header details, and open **Summary preview**. **Simulate scan error** stops after two saved headers. The normal action resumes them. Demo snapshots are encrypted in a temporary sandbox with a key held only in memory. They are not a real account census and cannot resume across server restarts.
 
@@ -40,23 +40,20 @@ The HTTP and browser commands require the running server and run sequentially. T
 
 See [Census implementation and remaining work](docs/census.md) for the data model, encrypted file format and incomplete capabilities.
 
-## Supported rule model
+## Rules and proof
 
-[examples/sample.json](examples/sample.json) is the complete example request. `GET /api/session` bootstraps a per-launch token. Subsequent API calls require it in `X-Mailroom-Token`. Send the fixture to `POST /api/preview` with `Content-Type: application/json`. `GET /api/sample` returns the same fixture. `GET /api/availability` returns the central policy. `POST /api/operations` accepts only an `operation` enum and never starts account work. Dedicated account routes implement owner-run reads. Tokens stay in process and browser memory. The launcher and verification scripts never print them.
+See [Rules and proof](docs/rules-proof.md) for the validated YAML model, emitted-output evaluator, local census interface, cross-check scope and incomplete acceptance criteria. The examples contain only synthetic mail and configuration.
 
-The preset has an ID, a nonzero major version, filing rules and copy rules. Overrides pin that ID and major version. They can patch an existing filing rule's destination, conditions or enabled state and add filing rules. Unknown patch IDs, duplicate IDs, empty patches, invalid destinations, unknown JSON fields and unsupported conditions fail the request. Category patches, renamed-ID migration and copy-rule overrides are outside this subset.
+```sh
+node ui/scripts/verify-rules.mjs
+./scripts/verify-sieve.sh
+```
 
-Each filing rule has one destination, either `inbox` or a `folder` name. The compiler orders guards, patched and added user rules, bulk rules, From rules and Subject rules. Input order breaks ties within each stage. A guard requires a spam condition, bulk requires a list marker, From requires a sender test, and Subject requires a subject test. Patched guards keep guard precedence. The first match decides the only filing destination. Unmatched messages stay in Inbox.
+The Sieve check builds an isolated image and runs check-sieve and Pigeonhole against synthetic artifacts. It starts no global service and mounts no credentials or personal directories. Its runtime container has no network access.
 
-Conditions within a rule are ANDed. Supported conditions are `from_address`, `from_domain`, `subject_contains`, `list_id_exists`, `one_click` and `spam_flag`. Sender and subject comparisons use ASCII case folding. Domain tests include subdomains. `spam_flag` tests `X-Spam-Flag: yes`. `one_click` tests whether `List-Unsubscribe-Post` contains `List-Unsubscribe=One-Click`.
+## Account boundary
 
-Every matching copy rule runs before filing, including before guard retention. Counts distinguish copy actions from copied messages and filing destinations. The preview includes stable matched rule IDs and override traces. Generated Sieve uses the same program with `redirect :copy`, one filing action and `stop`, plus final Inbox retention. Folders must already exist. The output never creates folders.
-
-## Limits and account boundary
-
-This is compiled-subset evaluation, not Sieve execution or provider verification. It accepts at most 200 header-only messages and 100 rules per request. Headers must be ASCII, at most 16 KiB per message, with one bare From mailbox. Folded headers are unfolded. Duplicate headers, MIME encoded words, bodies, display names, non-example address domains, envelope tests, regex and arbitrary Sieve are rejected or unsupported. Sender, recipient, condition and copy addresses must use reserved example domains. No message content is stored.
-
-Pinned-message proof, deployment, journaled sorting, undo, unsubscribe, address policy and daily-use readiness are unavailable. Read-only adapters use fixed provider TLS endpoints. There are no write-enable flags or caller-supplied source URLs. The central policy classifies synthetic reads, account reads and account writes. It permits the synthetic preview and synthetic census. It denies rule upload and activation, folder creation, moves, flags, forwarding changes, sends and unsubscribe requests. Dedicated account actions permit connection, folder discovery, header acquisition and local report review. Report export adds no provider operation.
+Read-only adapters use fixed provider TLS endpoints. There are no write-enable flags or caller-supplied source URLs. The central policy denies rule upload and activation, folder creation, moves, flags, forwarding changes, sends and unsubscribe requests. The new proof route reads the saved census under the existing account-operation lock. It assigns no recipient trust or forwarding authority.
 
 The server binds only `127.0.0.1:4173`, validates Host and any Origin header, rejects cross-site fetch metadata, has no CORS allowance, and limits JSON POST bodies to 256 KiB. Every API except the session bootstrap requires the current launch token. Its production CSP permits only same-origin external scripts and styles, without `unsafe-inline` or `unsafe-eval`. Native CLI requests may omit Origin. A local process can bootstrap a session and request owner account reads. It cannot unlock account writes. The token binds browser requests to a server launch. It does not isolate mutually untrusted processes running as the same OS user.
 

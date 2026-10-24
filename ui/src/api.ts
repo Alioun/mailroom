@@ -2,24 +2,27 @@ import { z } from 'zod'
 
 z.config({ jitless: true })
 
-const decision = z.object({
-  id: z.string(), subject: z.string(), from: z.string(),
-  destination: z.discriminatedUnion('kind', [z.object({ kind: z.literal('inbox') }), z.object({ kind: z.literal('folder'), name: z.string() })]),
-  matched_rule: z.string().nullable(), reason: z.string(),
-  copies: z.array(z.object({ rule: z.string(), recipient: z.string() })),
+const destination = z.discriminatedUnion('kind', [z.object({ kind: z.literal('inbox') }), z.object({ kind: z.literal('folder'), name: z.string() })])
+const documents = z.object({ preset_yaml: z.string(), override_yaml: z.string() })
+const pin = z.object({ account: z.string(), message_id_hash: z.string(), expected: destination })
+const sample = z.object({
+  documents,
+  context: z.object({ account: z.string(), engine: z.enum(['mailbox_sieve', 'gmail_backlog']), recipient_evidence: z.enum(['unknown', 'synthetic_delivered_to', 'synthetic_original_to']), capabilities: z.array(z.string()) }),
+  messages: z.array(z.object({ id: z.string(), headers: z.string(), current_folder: z.string() })),
+  as_of: z.number(), pins: z.array(pin), baseline: z.enum(['current', 'previous']), previous: documents.nullable(),
 })
 const preview = z.object({
-  source: z.literal('synthetic'), semantics: z.string(),
-  counts: z.object({ messages: z.number(), filed: z.number(), inbox: z.number(), copies: z.number(), copied_messages: z.number() }),
-  decisions: z.array(decision), trace: z.array(z.string()), sieve: z.string(), omissions: z.array(z.string()),
+  source: z.literal('local_census'), semantics: z.string(),
+  artifact: z.object({ identity: z.string(), context: sample.shape.context, executable: z.string(), trace: z.array(z.string()), omissions: z.array(z.object({ rule: z.string(), reason: z.string() })), folders: z.array(z.string()), effective: z.array(z.object({ id: z.string(), origin: z.string(), enabled: z.boolean(), accounts: z.array(z.string()) })) }),
+  counts: z.object({ messages: z.number(), filed: z.number(), inbox: z.number(), copies: z.number(), copied_messages: z.number(), review: z.number() }),
+  decisions: z.array(z.object({ id: z.string(), message_id_hash: z.string().nullable(), subject: z.string(), from: z.string(), destination, matched_rule: z.string().nullable(), review: z.boolean(), mark_read: z.boolean(), copies: z.array(z.object({ rule: z.string(), recipient: z.string() })), current_folders: z.array(z.string()), copy_eligibility: z.array(z.object({ rule: z.string(), status: z.string(), reason: z.string() })) })),
+  baseline: sample.shape.baseline, diff: z.array(z.object({ id: z.string(), before: z.array(z.string()), after: z.string() })),
+  rules: z.array(z.object({ id: z.string(), matched: z.number(), candidates: z.number(), monthly: z.record(z.string(), z.number()), zero_match: z.boolean(), fully_shadowed: z.boolean() })),
+  months: z.array(z.string()), unmatched_senders: z.record(z.string(), z.number()), pins: z.array(pin.extend({ status: z.enum(['pass', 'fail', 'stale']), actual: z.array(destination) })),
+  gate: z.enum(['blocked', 'warnings']), warnings: z.array(z.string()), runtime_cross_check: z.string(),
 })
 const operation = z.enum(['preview', 'synthetic_census', 'connect', 'census', 'upload_rules', 'activate_rules', 'create_folder', 'move_messages', 'change_flags', 'change_forwarding', 'send_message', 'unsubscribe'])
 const availability = z.array(z.object({ operation, effect: z.enum(['synthetic_read', 'account_read', 'account_write']), allowed: z.boolean(), reason: z.string() }))
-const sample = z.object({
-  preset: z.unknown(),
-  overrides: z.object({ preset: z.string(), major: z.number(), patches: z.array(z.unknown()), additions: z.array(z.unknown()) }),
-  messages: z.array(z.unknown()),
-})
 export type Preview = z.infer<typeof preview>
 export type Availability = z.infer<typeof availability>
 export type Operation = z.infer<typeof operation>
@@ -123,4 +126,10 @@ export async function reviewSummary(account: string, report: CensusReport, appro
 }
 export async function exportSummary(account: string, report: CensusReport, approved: string[], receipt: string) {
   return z.object({ summary: z.string(), filename: z.literal('census-summary.md') }).parse(await accountPost('summary/export', { account, as_of: report.as_of, version: report.version, approved, receipt, confirmed: true }))
+}
+
+export type Documents = z.infer<typeof documents>
+export type Pin = z.infer<typeof pin>
+export async function proveAccount(account: string, input: { documents: Documents; as_of: number; pins: Pin[]; baseline: Sample['baseline']; previous: Documents | null }): Promise<Preview> {
+  return preview.parse(await accountPost('proof', { account, ...input }))
 }

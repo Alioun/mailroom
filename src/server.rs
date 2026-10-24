@@ -258,6 +258,7 @@ fn build_app(synthetic_accounts: bool) -> Router {
         .route("/api/accounts/open", post(accounts::open))
         .route("/api/accounts/confirm", post(accounts::confirm))
         .route("/api/accounts/report", post(accounts::report))
+        .route("/api/accounts/proof", post(accounts::proof))
         .route(
             "/api/accounts/summary/review",
             post(accounts::review_summary),

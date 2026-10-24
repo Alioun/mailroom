@@ -155,9 +155,9 @@ async fn actual_preview_has_counts_csp_and_no_cors() {
     );
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(value["counts"]["filed"], 4);
-    assert_eq!(value["counts"]["inbox"], 2);
-    assert_eq!(value["counts"]["copies"], 4);
+    assert_eq!(value["counts"]["filed"], 10);
+    assert_eq!(value["counts"]["inbox"], 4);
+    assert_eq!(value["counts"]["copies"], 3);
 }
 
 #[tokio::test]
@@ -362,6 +362,7 @@ async fn synthetic_account_flow_uses_fake_credentials_and_preserves_http_authori
         "synthetic",
         "synthetic-gmail",
         "report",
+        "proof",
         "summary/review",
         "summary/export",
     ] {
@@ -421,6 +422,25 @@ async fn synthetic_account_flow_uses_fake_credentials_and_preserves_http_authori
     assert_eq!(report["complete"], true);
     assert_eq!(report["received"]["messages"], 99);
     assert_eq!(report["sent"], 1);
+    let sample: serde_json::Value =
+        serde_json::from_str(include_str!("../examples/sample.json")).unwrap();
+    let proof_request = serde_json::json!({"account":id,"documents":sample["documents"],"as_of":as_of,"pins":[],"baseline":"current","previous":null});
+    let (code, proof) = post(&app, token, "proof", proof_request.clone()).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(proof["counts"]["messages"], 99);
+    assert_eq!(proof["counts"]["review"], 99);
+    assert_eq!(proof["counts"]["copies"], 0);
+    assert_eq!(
+        proof["artifact"]["context"]["recipient_evidence"],
+        "unknown"
+    );
+    let mut injected = proof_request;
+    injected["context"] = sample["context"].clone();
+    assert_eq!(
+        post(&app, token, "proof", injected).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
     let approved = serde_json::json!([]);
     let review = serde_json::json!({"account":id,"as_of":as_of,"version":report["version"],"approved":approved});
     let (code, preview) = post(&app, token, "summary/review", review.clone()).await;

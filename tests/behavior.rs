@@ -1,144 +1,324 @@
-use mailroom::engine::{self, Destination, PreviewInput};
-use serde_json::{Value, json};
-
-fn sample() -> Value {
+use mailroom::{
+    engine::{self, PreviewInput},
+    rules::{
+        Engine, EvidenceSource,
+        config::{self, Condition, Role},
+        proof::{Baseline, Destination, Pin},
+    },
+};
+use serde_json::json;
+fn input() -> PreviewInput {
     serde_json::from_str(include_str!("../examples/sample.json")).unwrap()
 }
-fn run(value: Value) -> Result<engine::Preview, String> {
-    let input: PreviewInput = serde_json::from_value(value).map_err(|e| e.to_string())?;
-    engine::preview(&input)
+fn run(input: &PreviewInput) -> mailroom::rules::proof::Proof {
+    engine::preview(input).unwrap()
+}
+fn edit(
+    input: &mut PreviewInput,
+    change: impl FnOnce(&mut config::Preset, &mut config::Overrides),
+) {
+    let (mut p, mut o) =
+        config::documents(&input.documents.preset_yaml, &input.documents.override_yaml).unwrap();
+    change(&mut p, &mut o);
+    input.documents.preset_yaml = serde_yaml_ng::to_string(&p).unwrap();
+    input.documents.override_yaml = serde_yaml_ng::to_string(&o).unwrap();
 }
 fn folder(name: &str) -> Destination {
     Destination::Folder { name: name.into() }
 }
-
 #[test]
-fn overrides_beat_bulk_bulk_beats_topic_and_guards_beat_overrides() {
-    let result = run(sample()).unwrap();
-    assert_eq!(result.decisions[0].destination, folder("Studio"));
-    assert_eq!(result.decisions[0].matched_rule.as_deref(), Some("studio"));
-    assert!(result.decisions[0].reason.contains("override"));
-    assert_eq!(result.decisions[1].destination, folder("Reading"));
-    assert_eq!(result.decisions[2].destination, folder("Receipts"));
-    assert_eq!(result.decisions[3].destination, Destination::Inbox);
-    assert!(result.decisions[3].matched_rule.is_none());
-    assert_eq!(result.decisions[4].destination, folder("Studio"));
-    let mut value = sample();
-    value["messages"][5]["headers"] =
-        json!("From: updates@studio.example.com\nSubject: Invoice\nX-Spam-Flag: YES");
-    let result = run(value).unwrap();
-    assert_eq!(result.decisions[5].destination, Destination::Inbox);
-    assert_eq!(
-        result.decisions[5].matched_rule.as_deref(),
-        Some("spam-guard")
+fn settled_order_and_one_destination_with_safe_independent_copies() {
+    let p = run(&input());
+    assert_eq!(p.counts.messages, 14);
+    assert_eq!(p.counts.filed, 10);
+    assert_eq!(p.counts.inbox, 4);
+    assert_eq!(p.counts.review, 2);
+    assert_eq!(p.counts.copies, 3);
+    assert_eq!(p.decisions[0].destination, folder("Business/Studio"));
+    assert_eq!(p.decisions[1].destination, folder("Business/Newsletters"));
+    assert_eq!(p.decisions[2].copies.len(), 1);
+    assert_eq!(p.decisions[3].destination, Destination::Inbox);
+    assert!(p.decisions[5].review && p.decisions[5].copies.is_empty());
+    assert!(p.decisions[6].review && p.decisions[6].copies.is_empty());
+    assert_eq!(p.decisions[7].destination, folder("Personal/New addresses"));
+    assert!(!p.decisions[7].review);
+    assert_eq!(p.decisions[10].destination, Destination::Inbox);
+    assert_eq!(p.decisions[10].copies.len(), 1);
+    assert_eq!(p.decisions[11].destination, folder("Business/Invoices"));
+    assert_eq!(p.decisions[11].copies.len(), 1);
+    assert!(p.decisions[12].copies.is_empty());
+    assert!(
+        p.artifact.executable().find("redirect :copy").unwrap()
+            < p.artifact.executable().find("fileinto ").unwrap()
+    );
+    assert!(!p.artifact.executable().contains(":create"));
+}
+#[test]
+fn full_one_click_pair_and_encoded_unicode_subjects() {
+    let p = run(&input());
+    assert_eq!(p.decisions[8].destination, folder("Personal/Money"));
+    assert_eq!(p.decisions[9].subject, "Grüße und Rechnung");
+    assert_eq!(p.decisions[9].destination, folder("Personal/Money"));
+    assert_eq!(p.decisions[13].destination, folder("Personal/Newsletters"));
+}
+#[test]
+fn unicode_paths_and_mute_read_action_are_configurable_only() {
+    let mut i = input();
+    edit(&mut i, |_, o| {
+        o.layout.language = config::Language::De;
+        o.layout.personal_root = "Beispiel".into();
+        o.layout.business_root = "Büro".into();
+        o.patches[0].mark_read = Some(true);
+        o.patches[0].folder = Some("Stille".into());
+    });
+    let p = run(&i);
+    assert_eq!(p.decisions[0].destination, folder("Büro/Stille"));
+    assert!(p.decisions[0].mark_read);
+    assert!(!p.decisions[5].mark_read);
+    assert_eq!(p.decisions[9].destination, folder("Beispiel/Finanzen"));
+}
+#[test]
+fn unknown_trust_never_falls_back_to_visible_recipients() {
+    let mut i = input();
+    i.context.recipient_evidence = EvidenceSource::Unknown;
+    let p = run(&i);
+    assert_eq!(p.counts.filed, 0);
+    assert_eq!(p.counts.copies, 0);
+    assert_eq!(p.counts.review, 14);
+    assert!(
+        p.decisions
+            .iter()
+            .all(|d| !d.mark_read && d.copy_eligibility.iter().all(|e| e.status == "unknown"))
+    );
+    i.context.recipient_evidence = EvidenceSource::SyntheticOriginalTo;
+    assert_eq!(run(&i).counts.review, 14);
+}
+#[test]
+fn approved_domain_is_distinct_from_address_ledger_and_address_override_wins() {
+    let mut i = input();
+    edit(&mut i, |_, o| {
+        o.roles.signup_domains.clear();
+        o.roles
+            .addresses
+            .insert("team@work.example.test".into(), Role::Unknown);
+    });
+    let p = run(&i);
+    assert!(p.decisions[0].review);
+    assert!(!p.decisions[7].review);
+    assert_eq!(p.decisions[7].destination, Destination::Inbox);
+}
+#[test]
+fn gmail_backlog_keeps_filing_and_never_gets_invoice_copies() {
+    let mut i = input();
+    i.context.engine = Engine::GmailBacklog;
+    let p = run(&i);
+    assert_eq!(p.counts.copies, 0);
+    assert_eq!(p.counts.filed, 10);
+    assert!(!p.artifact.executable().contains("redirect"));
+    assert_eq!(p.artifact.omissions().len(), 3);
+}
+#[test]
+fn unsupported_required_predicate_omits_entire_rule() {
+    let mut i = input();
+    edit(&mut i, |_, o| {
+        o.patches[0].extend.push(Condition::Attachment)
+    });
+    let p = run(&i);
+    assert_eq!(p.decisions[0].destination, folder("Business/Newsletters"));
+    assert!(
+        p.artifact
+            .omissions()
+            .iter()
+            .any(|o| o.rule == "sender.studio")
+    );
+    assert!(!p.artifact.executable().contains("#@ sender.studio"));
+    assert!(
+        p.artifact
+            .omissions()
+            .iter()
+            .any(|o| o.rule == "forward.keywords")
     );
 }
-
 #[test]
-fn one_folder_and_copy_counts_are_independent() {
-    let mut value = sample();
-    let mut copy = value["preset"]["copies"][0].clone();
-    copy["id"] = json!("second-copy");
-    copy["recipient"] = json!("second@example.org");
-    value["preset"]["copies"].as_array_mut().unwrap().push(copy);
-    let result = run(value).unwrap();
-    assert_eq!(result.counts.messages, 6);
-    assert_eq!(result.counts.filed, 4);
-    assert_eq!(result.counts.inbox, 2);
-    assert_eq!(result.counts.copies, 8);
-    assert_eq!(result.counts.copied_messages, 4);
-    assert_eq!(result.decisions[5].copies.len(), 2);
-    assert_eq!(
-        result.counts.messages,
-        result.counts.filed + result.counts.inbox
+fn stable_renames_pins_scopes_disables_and_effective_origins() {
+    let mut i = input();
+    let p = run(&i);
+    assert!(
+        p.artifact
+            .trace()
+            .iter()
+            .any(|t| t.contains("Renamed studio.old"))
     );
     assert!(
-        result.sieve.find("redirect :copy").unwrap() < result.sieve.find("fileinto \"").unwrap()
+        p.artifact
+            .effective()
+            .iter()
+            .any(|r| r.id == "sender.studio" && r.origin == "preset patched by override")
     );
-    assert!(!result.sieve.contains(":create"));
-    assert!(result.sieve.contains("stop;"));
+    edit(&mut i, |_, o| {
+        o.patches[0].enabled = Some(false);
+        o.additions[0].accounts.insert("other-account".into());
+    });
+    let p = run(&i);
+    assert_eq!(p.decisions[4].destination, folder("Business/Newsletters"));
 }
-
 #[test]
-fn disabling_and_additions_change_behavior_without_losing_trace() {
-    let mut value = sample();
-    value["overrides"]["patches"][0]["enabled"] = json!(false);
-    let result = run(value).unwrap();
-    assert_eq!(result.decisions[0].destination, folder("Reading"));
-    assert_eq!(result.decisions[4].destination, folder("Releases"));
-    assert_eq!(result.decisions[4].reason, "added by override");
-    assert!(result.trace.iter().any(|s| s.contains("studio: disabled")));
-}
-
-#[test]
-fn from_precedes_subject_and_domain_matches_subdomains_only() {
-    let mut value = sample();
-    value["overrides"]["patches"] = json!([]);
-    value["messages"] = json!([
-        {"id":"a","headers":"From: member@sub.studio.example.com\nSubject: Invoice"},
-        {"id":"b","headers":"From: member@notstudio.example.com\nSubject: Invoice"}
-    ]);
-    let result = run(value).unwrap();
-    assert_eq!(result.decisions[0].destination, folder("Projects"));
-    assert_eq!(result.decisions[1].destination, folder("Receipts"));
-}
-
-#[test]
-fn folded_ascii_and_one_click_match_with_ascii_casemap() {
-    let mut value = sample();
-    value["preset"]["rules"][1]["conditions"] = json!([{"kind":"one_click"}]);
-    value["messages"] = json!([{"id":"folded","headers":"From: A@EXAMPLE.COM\r\nSubject: Monthly\r\n INVOICE\r\nList-Unsubscribe-Post: list-unsubscribe=one-click\r\n"}]);
-    let result = run(value).unwrap();
-    assert_eq!(result.decisions[0].destination, folder("Reading"));
-    assert_eq!(result.counts.copies, 1);
-}
-
-#[test]
-fn invalid_models_fail_instead_of_weakening_rules() {
-    for (path, replacement) in [
-        ("/overrides/major", json!(2)),
-        ("/overrides/patches/0/id", json!("missing")),
-        ("/preset/rules/1/id", json!("studio")),
-        ("/preset/rules/1/conditions", json!([])),
-        ("/preset/rules/1/conditions/0/kind", json!("body_contains")),
-        ("/preset/rules/1/stage", json!("subject")),
-        ("/messages/1/id", json!("sample-1")),
-        ("/preset/copies/0/recipient", json!("person@real-mail.com")),
-        (
-            "/preset/rules/0/destination",
-            json!({"kind":"folder","name":"Inbox"}),
-        ),
-    ] {
-        let mut value = sample();
-        *value.pointer_mut(path).unwrap() = replacement;
-        assert!(run(value).is_err(), "accepted invalid {path}");
+fn invalid_configuration_fails_without_weakening() {
+    for case in 0..9 {
+        let mut i = input();
+        edit(&mut i, |p, o| match case {
+            0 => o.major = 2,
+            1 => o.patches[0].id = "typo.preset".into(),
+            2 => p.rules[1].id = p.rules[0].id.clone(),
+            3 => o.patches[0].when = Some(vec![]),
+            4 => o.patches[0].folder = Some("three/levels/deep".into()),
+            5 => o.additions[0].id = "topic.typo".into(),
+            6 => {
+                p.renamed.insert("loop.a".into(), "loop.b".into());
+                p.renamed.insert("loop.b".into(), "loop.a".into());
+            }
+            7 => {
+                o.roles
+                    .signup_domains
+                    .insert("unapproved.example.test".into());
+            }
+            _ => o.forwards[0].target = "missing".into(),
+        });
+        assert!(engine::preview(&i).is_err(), "case {case}");
     }
-    let mut value = sample();
-    let duplicate = value["overrides"]["patches"][0].clone();
-    value["overrides"]["patches"]
-        .as_array_mut()
+    let mut i = input();
+    i.documents.override_yaml.push_str("unknown_field: true\n");
+    assert!(engine::preview(&i).is_err());
+}
+#[test]
+fn identity_binds_source_scope_capabilities_and_executable() {
+    let a = run(&input()).artifact.identity().to_owned();
+    assert_eq!(a, run(&input()).artifact.identity());
+    let mut i = input();
+    i.context.capabilities.remove("copy");
+    assert_ne!(a, run(&i).artifact.identity());
+    assert_eq!(run(&i).counts.copies, 0);
+    let mut i = input();
+    edit(&mut i, |_, o| {
+        o.patches[0].accounts = Some(["other-account".into()].into());
+    });
+    assert_ne!(a, run(&i).artifact.identity());
+}
+#[test]
+fn proof_counts_pins_stale_and_baseline_come_from_displayed_decisions() {
+    let mut i = input();
+    let p = run(&i);
+    assert_eq!(p.months.len(), 13);
+    assert_eq!(p.pins[0].status, "pass");
+    assert_eq!(p.pins[1].status, "stale");
+    assert_eq!(p.gate, "warnings");
+    assert_eq!(
+        p.counts.copies,
+        p.decisions.iter().map(|d| d.copies.len()).sum::<usize>()
+    );
+    assert!(
+        p.rules
+            .iter()
+            .all(|r| r.matched == r.monthly.values().sum::<usize>())
+    );
+    assert_eq!(p.counts.inbox, p.unmatched_senders.values().sum::<usize>());
+    i.baseline = Baseline::Previous;
+    assert!(run(&i).diff.len() < p.diff.len());
+    i.pins[0].expected = Destination::Inbox;
+    assert_eq!(run(&i).gate, "blocked");
+    i.pins.push(Pin {
+        account: "other-account".into(),
+        message_id_hash: "f".repeat(64),
+        expected: Destination::Inbox,
+    });
+    assert_eq!(run(&i).pins[2].status, "stale");
+}
+#[test]
+fn shadow_and_zero_warnings_do_not_block() {
+    let mut i = input();
+    edit(&mut i, |p, _| {
+        let mut shadow = p.rules[2].clone();
+        shadow.id = "topic.shadow".into();
+        p.rules.push(shadow);
+    });
+    let p = run(&i);
+    assert!(
+        p.rules
+            .iter()
+            .find(|r| r.id == "topic.shadow")
+            .unwrap()
+            .fully_shadowed
+    );
+    assert_eq!(p.gate, "warnings");
+}
+#[test]
+fn normalized_census_input_rejects_bodies_and_uses_existing_parser() {
+    let mut i = input();
+    i.messages[0].headers.push_str("\n\nNot a header");
+    assert!(engine::preview(&i).is_err());
+    let mut value: serde_json::Value =
+        serde_json::from_str(include_str!("../examples/sample.json")).unwrap();
+    value["allowed"] = json!(true);
+    assert!(serde_json::from_value::<PreviewInput>(value).is_err());
+}
+
+#[test]
+fn published_json_schemas_follow_the_validated_yaml_model() {
+    let preset: serde_json::Value =
+        serde_json::from_str(include_str!("../schemas/preset.schema.json")).unwrap();
+    let overrides: serde_json::Value =
+        serde_json::from_str(include_str!("../schemas/overrides.schema.json")).unwrap();
+    assert_eq!(
+        preset,
+        serde_json::to_value(schemars::schema_for!(config::Preset)).unwrap()
+    );
+    assert_eq!(
+        overrides,
+        serde_json::to_value(schemars::schema_for!(config::Overrides)).unwrap()
+    );
+}
+
+#[test]
+fn census_proof_deduplicates_gmail_unions_placement_and_excludes_sent() {
+    use mailroom::census::Direction;
+    let mut i = input();
+    i.context.engine = Engine::GmailBacklog;
+    let artifact = engine::artifact(&i.documents, &i.context).unwrap();
+    let mut census = engine::synthetic_census(&i).unwrap();
+    let mut duplicate = census.folders["INBOX"].clone();
+    duplicate.messages.retain(|uid, _| *uid == 3);
+    duplicate.live_uids = [3].into();
+    duplicate
+        .messages
+        .get_mut(&3)
         .unwrap()
-        .push(duplicate);
-    assert!(run(value).is_err());
-    let mut value = sample();
-    value["preset"]["rules"][0]["unexpected"] = json!(true);
-    assert!(run(value).is_err());
-}
-
-#[test]
-fn unsupported_header_semantics_are_errors() {
-    for headers in [
-        "From: a@example.org\nSubject: =?UTF-8?Q?invoice?=",
-        "From: Alice <a@example.org>",
-        "From: a@example.org\nSubject: Grüße",
-        "From: a@example.org\nFrom: b@example.org",
-        "From: a@example.org\n\nA body",
-        "From: a@example.org\nBroken header",
-        "Subject: no sender",
-        "From: a@example.org\nTo: real@company.com",
-    ] {
-        let mut value = sample();
-        value["messages"][0]["headers"] = json!(headers);
-        assert!(run(value).is_err(), "accepted unsupported headers");
-    }
+        .gmail_labels
+        .extend(["Existing label".into(), "\\Inbox".into()]);
+    census.folders.insert("Archive".into(), duplicate);
+    let all_mail = census.folders.remove("INBOX").unwrap();
+    census.folders.insert("[Gmail]/All Mail".into(), all_mail);
+    let p = mailroom::rules::proof::prove(
+        artifact.clone(),
+        &census,
+        i.as_of,
+        &[],
+        Baseline::Current,
+        None,
+    )
+    .unwrap();
+    assert_eq!(p.counts.messages, 14);
+    assert!(p.decisions[2].current_folders.contains("Existing label"));
+    assert!(p.decisions[2].current_folders.contains("INBOX"));
+    census
+        .folders
+        .get_mut("Archive")
+        .unwrap()
+        .messages
+        .get_mut(&3)
+        .unwrap()
+        .headers
+        .direction = Direction::Sent;
+    let p = mailroom::rules::proof::prove(artifact, &census, i.as_of, &[], Baseline::Current, None)
+        .unwrap();
+    assert_eq!(p.counts.messages, 13);
 }

@@ -51,7 +51,7 @@ try {
   await page.getByRole('button', { name: 'Resume synthetic census', exact: true }).click()
   await page.getByText('Synthetic census complete', { exact: true }).waitFor()
   await page.getByRole('button', { name: 'Run sample preview', exact: true }).click()
-  await page.getByText('4 messages receive copies.', { exact: false }).waitFor()
+  await page.getByText('3 messages receive copies.', { exact: false }).waitFor()
   await page.getByRole('radio', { name: 'Deutsch', exact: true }).click()
   await page.setViewportSize({ width: 390, height: 844 })
   await page.getByRole('heading', { name: 'Kopfzeilen erfassen', exact: true }).waitFor()

@@ -115,3 +115,13 @@ progress { display: block; width: 100%; max-width: 560px; height: 16px; margin-t
 .reports details { margin-block: .75rem; }
 .approved-values label { display: block; margin-block: .5rem; }
 .summary-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 36rem; overflow: auto; padding: 1rem; border: 1px solid var(--border, #ccc); }
+
+.rule-documents { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+.rule-documents textarea { display: block; width: 100%; font: 13px ui-monospace, monospace; padding: 12px; border: 1px solid var(--line); background: #fff; color: var(--ink); }
+.rules-proof { min-width: 0; }
+.rules-proof select, .rules-proof input[type="date"] { display: block; max-width: 100%; min-height: 44px; font: inherit; padding: 6px; background: #fff; color: var(--ink); border: 1px solid var(--line); }
+.rules-proof p, .rules-proof li, .artifact-id { overflow-wrap: anywhere; }
+.rules-proof button { max-width: 100%; }
+@media (max-width: 680px) { .rule-documents { grid-template-columns: minmax(0, 1fr); } }
+
+.rules-proof li input { display: inline-block; max-width: 100%; font: inherit; padding: 8px; border: 1px solid var(--line); color: var(--ink); background: white; }

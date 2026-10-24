@@ -1,0 +1,23 @@
+name: Synthetic proof
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  fake-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cargo fmt --check
+      - run: cargo test --locked
+      - run: npm --prefix ui ci
+      - run: npm --prefix ui run check
+      - run: npm --prefix ui run build
+      - run: ./scripts/verify-sieve.sh

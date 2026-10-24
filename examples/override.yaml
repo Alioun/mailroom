@@ -1,0 +1,44 @@
+preset: standard
+major: 1
+roles:
+  domains:
+    work.example.test: business
+    home.example.test: personal
+    signup.example.test: personal
+  addresses:
+    unknown@work.example.test: unknown
+  signup_domains: [signup.example.test]
+patches:
+  - id: studio.old
+    folder: Studio
+additions:
+  - id: user.release
+    category: orders
+    stage: subject
+    when: [{kind: subject_contains, value: release}]
+    folder: Releases
+ledger:
+  - address: invoices@work.example.test
+    status: active
+    category: money
+    invoice: true
+    folder: Invoices
+  - address: retired@signup.example.test
+    status: retired
+    category: orders
+    invoice: false
+    folder: null
+targets:
+  accounting: {address: archive@example.net}
+forwards:
+  - id: forward.approved
+    target: accounting
+    trigger:
+      kind: approved_senders
+      addresses: [billing@shop.example.org]
+  - id: forward.invoice_address
+    target: accounting
+    trigger: {kind: invoice_address}
+  - id: forward.keywords
+    target: accounting
+    trigger: {kind: keywords, words: [invoice, Rechnung]}

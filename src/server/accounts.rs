@@ -514,3 +514,68 @@ async fn report_action(
         Err(_) => failure(AcquisitionError::Storage),
     }
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ProofRequest {
+    account: AccountId,
+    documents: crate::engine::Documents,
+    as_of: i64,
+    pins: Vec<crate::rules::proof::Pin>,
+    baseline: crate::rules::proof::Baseline,
+    previous: Option<crate::engine::Documents>,
+}
+pub(super) async fn proof(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<ProofRequest>, JsonRejection>,
+) -> Response {
+    let request = match input(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _operation = state.accounts.operation.lock().expect("account operation");
+        if state
+            .accounts
+            .job
+            .lock()
+            .expect("account job")
+            .as_ref()
+            .is_some_and(|j| j.progress.state == ScanState::Running)
+        {
+            return Err(AcquisitionError::InvalidInput);
+        }
+        let repo = state.accounts.repository()?;
+        let account = repo.load(&request.account)?;
+        let census = repo.store(&account)?.load()?;
+        let engine = if account.provider == Provider::Gmail {
+            crate::rules::Engine::GmailBacklog
+        } else {
+            crate::rules::Engine::MailboxSieve
+        };
+        let context = crate::rules::EngineContext::local(request.account.as_str().into(), engine);
+        let artifact = crate::engine::artifact(&request.documents, &context)
+            .map_err(|_| AcquisitionError::InvalidInput)?;
+        let previous = request
+            .previous
+            .as_ref()
+            .map(|d| crate::engine::artifact(d, &context))
+            .transpose()
+            .map_err(|_| AcquisitionError::InvalidInput)?;
+        crate::rules::proof::prove(
+            artifact,
+            &census,
+            request.as_of,
+            &request.pins,
+            request.baseline,
+            previous.as_ref(),
+        )
+        .map_err(|_| AcquisitionError::InvalidInput)
+    })
+    .await
+    {
+        Ok(Ok(proof)) => Json(proof).into_response(),
+        Ok(Err(e)) => failure(e),
+        Err(_) => failure(AcquisitionError::Storage),
+    }
+}

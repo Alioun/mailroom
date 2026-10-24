@@ -64,7 +64,7 @@ try {
   await undoButton.click()
   await region.locator('.run-state').filter({ hasText: '40 restored · 0 conflicts' }).waitFor({ timeout: 60000 })
   await region.screenshot({ path: `${artifacts}/conditional-undo.png` })
-  assert.equal(await region.getByRole('button', { name: /Cancel/ }).count(), 0)
+  await region.getByText('Cancel stops new sorting batches and keeps completed changes. An already-started batch may finish. Undo is a separate confirmed action.', { exact: true }).waitFor()
   await page.getByRole('radio', { name: 'Deutsch', exact: true }).click()
   await page.setViewportSize({ width: 390, height: 844 })
   await region.getByRole('button', { name: 'Genaue Bestandsänderungen anzeigen', exact: true }).click()
@@ -74,5 +74,5 @@ try {
   assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0)
   assert.deepEqual(await page.evaluate(() => window.backlogCspViolations), [])
   assert.deepEqual(errors, [])
-  console.log('PASS built backlog UI exact selection, explicit synthetic confirmation, persisted run reload, conditional undo confirmation/report, pending Cancel, German narrow layout, empty browser storage and CSP')
+  console.log('PASS built backlog UI exact selection, explicit synthetic confirmation, persisted run reload, conditional undo confirmation/report, settled Cancel explanation, German narrow layout, empty browser storage and CSP')
 } finally { await browser.close() }

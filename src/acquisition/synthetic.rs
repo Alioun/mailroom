@@ -52,7 +52,10 @@ impl MailRead for SyntheticMail {
         }])
     }
     fn inventory(&mut self, _: &Folder) -> Result<(u32, BTreeSet<u32>), AcquisitionError> {
-        Ok((7, (1..=100).collect()))
+        let count = 100;
+        #[cfg(test)]
+        let count = if cancel_fixture() { 601 } else { count };
+        Ok((7, (1..=count).collect()))
     }
     fn metadata(&mut self, uids: &[u32]) -> Result<BTreeMap<u32, Metadata>, AcquisitionError> {
         Ok(uids
@@ -83,7 +86,10 @@ impl MailRead for SyntheticMail {
     }
     fn headers(&mut self, uids: &[u32]) -> Result<BTreeMap<u32, Vec<u8>>, AcquisitionError> {
         Ok(uids.iter().map(|uid| {
-            let (sender, markers) = match *uid {
+            let category = *uid;
+            #[cfg(test)]
+            let category = if cancel_fixture() && *uid > 100 { 1 } else { category };
+            let (sender, markers) = match category {
                 1..=40 => ("Synthetic shop <news@shop.example>", "List-Id: <offers.shop.example>\r\nList-Unsubscribe: <https://shop.example/remove?token=synthetic-private-token>, <mailto:leave@shop.example?subject=unsubscribe&body=synthetic-mail-token>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\nDKIM-Signature: v=1; d=shop.example; s=fixture; h=list-unsubscribe:list-unsubscribe-post; b=synthetic-signature\r\nFeedback-ID: fixture:AmazonSES\r\n"),
                 41..=60 => ("=?UTF-8?Q?Alex_M=C3=BCster?= <alex@people.example>", "In-Reply-To: <synthetic@example.test>\r\n"),
                 61..=70 => ("Receipts <receipts@platform.example>", "Auto-Submitted: auto-generated\r\nReturn-Path: <bounce@amazonses.com>\r\n"),
@@ -119,4 +125,10 @@ pub(crate) fn scan(
         progress,
     )?;
     Ok(census)
+}
+
+#[cfg(test)]
+fn cancel_fixture() -> bool {
+    std::env::var("MAILROOM_BACKLOG_CANCEL_FIXTURE").is_ok_and(|v| v == "1")
+        && std::env::var_os("MAILROOM_DURABLE_BROWSER_FIXTURE").is_some()
 }

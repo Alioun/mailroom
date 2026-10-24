@@ -177,6 +177,7 @@ export async function previewBacklogUndo(account: string, run: string): Promise<
 export async function undoBacklog(account: string, run: string, receipt: string): Promise<BacklogView> { return backlogView.parse(await backlogPost(account, { action: 'undo', run, receipt, confirmed: true })) }
 export async function resumeBacklogUndo(account: string, run: string): Promise<BacklogView> { return backlogView.parse(await backlogPost(account, { action: 'resume_undo', run })) }
 
+export async function stopBacklog(account: string, run: string): Promise<BacklogView> { return backlogView.parse(await backlogPost(account, { action: 'stop', run })) }
 export async function resumeBacklog(account: string, run: string): Promise<BacklogView> { return backlogView.parse(await backlogPost(account, { action: 'resume', run })) }
 
 const invoiceAttachment = z.object({ name: z.string(), media_type: z.string(), bytes: z.array(z.number()) })

@@ -278,6 +278,27 @@ fn stop_before_batch_and_batch_limit_recover_without_losing_progress() {
     assert_eq!(state.backlog[0].status, Status::Prepared);
     stop(&mut state, &id).unwrap();
     store.save_state(&mut state).unwrap();
+    state = store.load_state().unwrap();
+    assert_eq!(state.backlog[0].status, Status::Stopped);
+    stop(&mut state, &id).unwrap();
+    store.save_state(&mut state).unwrap();
+    advance(&store, &mut state, &mut mailbox, &id).unwrap();
+    assert_eq!(state.backlog[0].batches, 1);
+    assert!(!state.backlog[0].undo_requested);
+    assert!(
+        state.backlog[0]
+            .undo
+            .iter()
+            .all(|u| matches!(u, Undo::NotRequested))
+    );
+    assert_eq!(
+        state.backlog[0]
+            .outcomes
+            .iter()
+            .filter(|o| matches!(o, Outcome::Applied { .. }))
+            .count(),
+        500
+    );
     resume(&mut state, &id).unwrap();
     advance(&store, &mut state, &mut mailbox, &id).unwrap();
     assert_eq!(state.backlog[0].status, Status::Completed);

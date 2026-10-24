@@ -260,7 +260,15 @@ pub(super) fn boundary(name: &str) {
         if let Some(root) = std::env::var_os("MAILROOM_DURABLE_BROWSER_FIXTURE") {
             let path = std::path::Path::new(&root).join(format!("reached-{name}"));
             std::fs::write(path, b"synthetic crash boundary reached").expect("fixture marker");
-            std::thread::sleep(std::time::Duration::from_secs(30));
+            for _ in 0..1500 {
+                if std::path::Path::new(&root)
+                    .join(format!("continue-{name}"))
+                    .exists()
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
         }
     }
     let _ = name;

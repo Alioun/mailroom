@@ -3,6 +3,7 @@
   import Reports from './Reports.svelte'
   import Backlog from './Backlog.svelte'
   import Invoices from './Invoices.svelte'
+  import Unsubscribe from './Unsubscribe.svelte'
   import RulesProof from './RulesProof.svelte'
   import { readAccountStatus, listAccounts, connectAccount, syntheticAccount, scanAccount, cancelAccount, openAccount, confirmAccount, type Account, type AccountStatus, type AccountView } from './api'
   let { lang }: { lang: 'en' | 'de' } = $props()
@@ -114,5 +115,6 @@
     {#key view}<Reports account={selected} {lang} /><RulesProof account={selected} {lang} /><Backlog account={selected} {lang} /><Invoices account={selected} {lang} />{/key}
     <details><summary>{t.details}</summary>{#each Object.entries(view.census.folders) as [name, folder] (name)}<h3>{name}</h3><p>{Object.keys(folder.messages).length} {t.saved} · UIDVALIDITY {folder.uidvalidity}</p>{#each Object.values(folder.messages) as message (message.uid)}<p>{message.headers.subject} · {message.headers.direction} · UID {message.uid}</p>{/each}{/each}</details>
   {/if}
+  <Unsubscribe {lang} />
   <p class="help">{t.limits}</p>
 </section>

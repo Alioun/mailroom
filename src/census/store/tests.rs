@@ -400,3 +400,66 @@ fn obsolete_copy_semantics_do_not_become_a_usable_export_baseline() {
     state.workspace.as_mut().unwrap().input.baseline = crate::rules::proof::Baseline::Current;
     assert!(workspace::preview(&state, Provider::MailboxOrg, store.keys()).is_ok());
 }
+
+#[test]
+fn v4_migration_defaults_unsubscribe_and_flag_coverage_without_inventing_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = AccountId::new("unsubscribe-migration").unwrap();
+    let store = EncryptedStore::new(
+        dir.path().into(),
+        CensusKeys::derive(&LocalSecret::random(), &id),
+    )
+    .unwrap();
+    let mut census = Census::new(id);
+    census
+        .reconcile_folder("INBOX", 7, [1].into_iter().collect())
+        .unwrap();
+    census
+        .folders
+        .get_mut("INBOX")
+        .unwrap()
+        .insert(crate::census::demo::fixture(1).unwrap())
+        .unwrap();
+    let mut state = AccountState::new(census);
+    state.workspace = Some(Workspace {
+        revision: 4,
+        input: input(),
+    });
+    let mut old = serde_json::to_value(&state).unwrap();
+    old.as_object_mut().unwrap().remove("unsubscribe");
+    old["census"]["folders"]["INBOX"]["messages"]["1"]
+        .as_object_mut()
+        .unwrap()
+        .remove("flags_observed");
+    store
+        .stage_snapshot(4, &serde_json::to_string(&old).unwrap())
+        .unwrap()
+        .persist(store.path())
+        .unwrap();
+    let mut migrated = store.load_state().unwrap();
+    assert!(migrated.unsubscribe.history.is_empty());
+    assert!(migrated.unsubscribe.mutes.is_empty());
+    assert!(!migrated.census.folders["INBOX"].messages[&1].flags_observed);
+    migrated
+        .unsubscribe
+        .history
+        .push(crate::unsubscribe::Entry {
+            id: "opaque-fixture".into(),
+            subscription: "exact-fixture".into(),
+            sender_key: "news@example.test".into(),
+            method: crate::unsubscribe::Method::Keep,
+            time: 1792886400,
+            status: crate::unsubscribe::Status::Kept,
+            host: None,
+            payload_digest: "opaque-digest".into(),
+            source_ids: vec!["opaque-source".into()],
+            http_status: None,
+            success: "unknown".into(),
+        });
+    store.save_state(&mut migrated).unwrap();
+    let census = store.load().unwrap();
+    store.save(&census).unwrap();
+    let preserved = store.load_state().unwrap();
+    assert_eq!(preserved.unsubscribe.history.len(), 1);
+    assert_eq!(preserved.workspace.unwrap().revision, 4);
+}

@@ -234,6 +234,12 @@ pub(super) fn run(
         // A failed folder scan must not turn a partial LIST into deletion of other saved folders.
         census.folders.retain(|name, _| names.contains(name));
         census.acquisition_state = ScanState::Complete;
+        census.last_completed_at = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| AcquisitionError::Storage)?
+                .as_secs() as i64,
+        );
         store.save(census)?;
         progress(ScanProgress::current(census, ScanState::Complete));
         Ok(())

@@ -600,3 +600,55 @@ async fn production_invoice_commands_fail_before_account_or_credential_access() 
     let response = request("/api/accounts/invoices", r#"{"account":"nonexistent", "command":{"action":"send", "selection":"x", "target":"x", "receipt":"x", "confirmation_action":"x", "synthetic":true}}"#, None, server::ADDRESS, "application/json").await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+#[tokio::test]
+async fn production_unsubscribe_denies_before_account_and_credential_access() {
+    let input = serde_json::json!({"as_of":1792886400_i64,"selections":[{"subscription":"fixture","method":"one_click"}],"folders":{"personal":"Muted","business":"Quiet"}});
+    for command in [
+        serde_json::json!({"action":"preview","input":input}),
+        serde_json::json!({"action":"confirm","input":input,"receipt":"0".repeat(64),"confirmation_action":"fake","mail_confirmation_action":null}),
+        serde_json::json!({"action":"recover","entry":"fake","as_of":1792886400_i64}),
+    ] {
+        let response = request(
+            "/api/accounts/unsubscribe",
+            &serde_json::json!({"account":"nonexistent-no-credentials","command":command})
+                .to_string(),
+            None,
+            server::ADDRESS,
+            "application/json",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    let response = request("/api/accounts/unsubscribe", &serde_json::json!({"account":"nonexistent-no-credentials","command":{"action":"preview","input":input,"provider_trust":true}}).to_string(), None, server::ADDRESS,"application/json").await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn production_subscription_list_denies_before_account_or_credentials() {
+    let input = serde_json::json!({"as_of":1792886400_i64,"selections":[{"account":"nonexistent-no-credentials","subscription":"fixture","method":"one_click"}],"folders":{"personal":"Muted","business":"Quiet"}});
+    for command in [
+        serde_json::json!({"action":"preview","input":input}),
+        serde_json::json!({"action":"confirm","input":input,"receipt":"0".repeat(64),"confirmation_action":"fake","mail_confirmation_action":null}),
+    ] {
+        let response = request(
+            "/api/accounts/subscription-review",
+            &serde_json::json!({"command":command}).to_string(),
+            None,
+            server::ADDRESS,
+            "application/json",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    let response = request(
+        "/api/accounts/subscription-review",
+        &serde_json::json!({"command":{"action":"preview","input":input,"provider_trust":true}})
+            .to_string(),
+        None,
+        server::ADDRESS,
+        "application/json",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}

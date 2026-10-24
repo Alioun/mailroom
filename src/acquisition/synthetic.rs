@@ -84,7 +84,7 @@ impl MailRead for SyntheticMail {
     fn headers(&mut self, uids: &[u32]) -> Result<BTreeMap<u32, Vec<u8>>, AcquisitionError> {
         Ok(uids.iter().map(|uid| {
             let (sender, markers) = match *uid {
-                1..=40 => ("Synthetic shop <news@shop.example>", "List-Id: <offers.shop.example>\r\nList-Unsubscribe: <https://shop.example/remove?token=synthetic-private-token>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\nFeedback-ID: fixture:AmazonSES\r\n"),
+                1..=40 => ("Synthetic shop <news@shop.example>", "List-Id: <offers.shop.example>\r\nList-Unsubscribe: <https://shop.example/remove?token=synthetic-private-token>, <mailto:leave@shop.example?subject=unsubscribe&body=synthetic-mail-token>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\nDKIM-Signature: v=1; d=shop.example; s=fixture; h=list-unsubscribe:list-unsubscribe-post; b=synthetic-signature\r\nFeedback-ID: fixture:AmazonSES\r\n"),
                 41..=60 => ("=?UTF-8?Q?Alex_M=C3=BCster?= <alex@people.example>", "In-Reply-To: <synthetic@example.test>\r\n"),
                 61..=70 => ("Receipts <receipts@platform.example>", "Auto-Submitted: auto-generated\r\nReturn-Path: <bounce@amazonses.com>\r\n"),
                 71..=80 => ("Discussion <team@community.example>", "List-Id: <team.community.example>\r\nList-Post: <mailto:team@community.example>\r\n"),
@@ -95,7 +95,9 @@ impl MailRead for SyntheticMail {
                 _ => ("sender@example.test", ""),
             };
             let date = if *uid == 98 { "invalid date".into() } else { format!("{} Oct 2026 10:00:00 +0000", 1 + uid % 23) };
-            (*uid, format!("From: {sender}\r\nTo: owner@example.test\r\nDelivered-To: team@home.example.test\r\nDate: {date}\r\nSubject: Synthetic account header {uid}\r\nMessage-ID: <synthetic-account-{uid}@example.test>\r\n{markers}\r\n").into_bytes())
+            let recipient = if (21..=30).contains(uid) { "alias@home.example.test" } else { "team@home.example.test" };
+            let markers = if (31..=40).contains(uid) { markers.replace("<offers.shop.example>", "<updates.shop.example>") } else { markers.into() };
+            (*uid, format!("From: {sender}\r\nTo: owner@example.test\r\nDelivered-To: {recipient}\r\nDate: {date}\r\nSubject: Synthetic account header {uid}\r\nMessage-ID: <synthetic-account-{uid}@example.test>\r\n{markers}\r\n").into_bytes())
         }).collect())
     }
 }

@@ -71,6 +71,7 @@ pub fn synthetic_census(input: &PreviewInput) -> Result<Census, String> {
                 uid,
                 size: m.headers.len() as u64,
                 internal_date: "24-Oct-2026 00:00:00 +0000".into(),
+                flags_observed: true,
                 flags: BTreeSet::new(),
                 gmail_message_id: Some(m.id.clone()),
                 gmail_thread_id: None,

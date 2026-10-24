@@ -173,6 +173,7 @@ pub fn fixture(uid: u32) -> Result<MessageRecord, CensusError> {
         uid,
         size: 1024,
         internal_date: "2026-10-21T10:00:00Z".to_owned(),
+        flags_observed: true,
         flags: if uid % 2 == 0 {
             BTreeSet::from(["\\Seen".to_owned()])
         } else {

@@ -30,6 +30,10 @@ fn main() {
         "overlap",
         "aliases",
         "distinct",
+        "mute-exact",
+        "mute-no-flags",
+        "mute-unknown",
+        "mute-from",
     ] {
         let case_dir = directory.join(variant);
         fs::create_dir_all(&case_dir).unwrap();
@@ -44,6 +48,28 @@ fn main() {
                     let yaml = source["documents"]["override_yaml"].as_str().unwrap().replace("  accounting: {address: archive@example.net}", "  accounting: {address: archive@example.net}\n  alias: {address: ARCHIVE@example.net}").replace("id: forward.invoice_address\n    target: accounting", "id: forward.invoice_address\n    target: alias");
                     source["documents"]["override_yaml"] = if variant == "distinct" { yaml.replace("ARCHIVE@example.net", "distinct@example.test") } else { yaml }.into();
                 }
+            },
+            "mute-exact" | "mute-no-flags" | "mute-unknown" | "mute-from" => {
+                let mut overrides: serde_json::Value = serde_yaml_ng::from_str(source["documents"]["override_yaml"].as_str().unwrap()).unwrap();
+                let condition = if variant == "mute-from" { json!({"kind":"from_address", "value":"billing@shop.example.org"}) } else { json!({"kind":"list_id_exact", "value":"<letters.example.net>"}) };
+                let conditions = if variant == "mute-from" { vec![condition, json!({"kind":"list_id_absent"})] } else { vec![condition] };
+                overrides["additions"].as_array_mut().unwrap().insert(0, json!({"id":"user.mute.fixture", "category":"newsletters", "stage":"from", "folder":"Muted", "mark_read":true, "when":conditions}));
+                source["documents"]["override_yaml"] = serde_yaml_ng::to_string(&overrides).unwrap().into();
+                let additions = [
+                    ("exact-list", "billing@shop.example.org", "team@work.example.test", "<letters.example.net>", "Invoice with list"),
+                    ("other-list", "billing@shop.example.org", "team@work.example.test", "<other.example.net>", "Invoice other list"),
+                    ("substring-list", "billing@shop.example.org", "team@work.example.test", "prefix<letters.example.net>suffix", "Invoice substring"),
+                    ("unknown-role-list", "billing@shop.example.org", "unknown@work.example.test", "<letters.example.net>", "Invoice unknown"),
+                    ("mixed-list", "billing@shop.example.org", "team@work.example.test, owner@home.example.test", "<letters.example.net>", "Invoice mixed"),
+                    ("personal-list", "news@letters.example.net", "owner@home.example.test", "<letters.example.net>", "Personal mail"),
+                    ("case-list", "news@letters.example.net", "owner@home.example.test", "<LETTERS.EXAMPLE.NET>", "ASCII casemap exact semantics"),
+                    ("guard-list", "billing@shop.example.org", "team@work.example.test", "<letters.example.net>", "Invoice login code"),
+                ];
+                for (id, sender, recipient, list, subject) in additions {
+                    source["messages"].as_array_mut().unwrap().push(json!({"id":id, "headers":format!("From: {sender}\nDelivered-To: {recipient}\nTo: {recipient}\nSubject: {subject}\nList-Id: {list}\nMessage-ID: <{id}@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000"), "current_folder":"INBOX"}));
+                }
+                if variant == "mute-no-flags" { source["context"]["capabilities"].as_array_mut().unwrap().retain(|v| v != "imap4flags"); }
+                if variant == "mute-unknown" { source["context"]["recipient_evidence"] = "unknown".into(); }
             },
             "limited" => source["context"]["capabilities"] = json!([]), _ => (),
         }
@@ -75,7 +101,7 @@ fn main() {
         .unwrap();
     }
     println!(
-        "Synthetic artifacts generated. Eight variants, 112 independent messages. Artifact {}.",
+        "Synthetic artifacts generated. Twelve variants, 200 independent messages. Artifact {}.",
         proof.artifact.identity()
     );
 }

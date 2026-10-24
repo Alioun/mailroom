@@ -48,6 +48,7 @@ impl Metadata {
     pub fn apply(&self, record: &mut MessageRecord, folder: &Folder) {
         record.size = self.size;
         record.internal_date = self.date.clone();
+        record.flags_observed = true;
         record.flags = self.flags.clone();
         record.gmail_message_id = self.gmail_id.clone();
         record.gmail_thread_id = self.thread_id.clone();
@@ -460,6 +461,7 @@ pub(super) fn record(
         uid: metadata.uid,
         size: 0,
         internal_date: String::new(),
+        flags_observed: true,
         flags: BTreeSet::new(),
         gmail_message_id: None,
         gmail_thread_id: None,

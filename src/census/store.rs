@@ -94,6 +94,10 @@ impl CensusKeys {
         self.synthetic_keys(b"mailroom/synthetic-invoice-transport/v1")
     }
 
+    pub(crate) fn synthetic_unsubscribe_keys(&self) -> Self {
+        self.synthetic_keys(b"mailroom/synthetic-unsubscribe/v1")
+    }
+
     fn synthetic_keys(&self, purpose: &[u8]) -> Self {
         let hkdf = Hkdf::<Sha256>::new(Some(purpose), self.encryption.as_ref());
         let mut bytes = Zeroizing::new(vec![0; 32]);
@@ -122,6 +126,8 @@ pub struct AccountState {
     #[serde(default)]
     pub invoices: crate::invoice::Aggregate,
     #[serde(default)]
+    pub unsubscribe: crate::unsubscribe::Aggregate,
+    #[serde(default)]
     pub synthetic_uid_next: std::collections::BTreeMap<String, u32>,
     #[serde(default)]
     pub backlog: Vec<crate::backlog::Run>,
@@ -137,6 +143,7 @@ impl AccountState {
         Self {
             revision: 0,
             invoices: Default::default(),
+            unsubscribe: Default::default(),
             backlog: Vec::new(),
             synthetic_effects: Default::default(),
             synthetic_uid_next: Default::default(),
@@ -279,7 +286,7 @@ impl EncryptedStore {
         }
         let snapshot =
             Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
-        self.stage_snapshot(4, &snapshot)
+        self.stage_snapshot(5, &snapshot)
     }
 
     fn stage_snapshot(
@@ -376,7 +383,7 @@ impl EncryptedStore {
             )
             .map_err(|_| CensusError::Storage)?;
         let snapshot = Zeroizing::new(snapshot);
-        if !matches!(version, 1 | 2 | 3 | 4) {
+        if !matches!(version, 1 | 2 | 3 | 4 | 5) {
             return Err(CensusError::UnsupportedVersion);
         }
         if account != self.keys.account.as_str() {
@@ -419,6 +426,11 @@ impl EncryptedStore {
         for send in &mut state.invoices.sends {
             if send.status == crate::invoice::Status::Intent {
                 send.status = crate::invoice::Status::Uncertain;
+            }
+        }
+        for entry in &mut state.unsubscribe.history {
+            if entry.status == crate::unsubscribe::Status::Intent {
+                entry.status = crate::unsubscribe::Status::Uncertain;
             }
         }
         Ok(state)

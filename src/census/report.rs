@@ -75,7 +75,7 @@ pub struct Counts {
     pub last_13_months: usize,
 }
 impl Counts {
-    fn add(&mut self, message: &MessageRecord, as_of: i64) {
+    pub(crate) fn add(&mut self, message: &MessageRecord, as_of: i64) {
         self.messages += 1;
         let seen = message
             .flags

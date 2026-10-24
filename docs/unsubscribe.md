@@ -1,0 +1,41 @@
+# Exact subscription unsubscribe and mute tests
+
+The local interface provides synthetic test controls for exact account, receiving-address and List-Id subscriptions. One review groups subscriptions visually by sender across census accounts. Expandable sender groups show the number of separate subscriptions, with no sender-wide approval checkbox. Each account, receiving address and mailing list has its own checkbox and method. Eligible subscriptions are initially checked, and a single exact list confirmation binds every selected identity. Q20 settles product scope only; all real operations remain denied.
+
+## Candidate facts
+
+The report reuses census classification and the pinned PSL. It keeps distinct receiving addresses and List-Ids separate, ranks by unread 12-month volume, and uses a stable subscription identifier to break ties. People lists, platform senders, unknown flags, partial census, unresolved recipients and missing relay originals prevent recommendations. The five-message and six-calendar-month boundaries are inclusive. A Seen message's Date is a message date, not an observed read time.
+
+Account-state version 5 adds encrypted unsubscribe history and owned mute overrides. Versions 1 through 4 migrate without invented approvals or flag coverage. Each message now records whether its flags were observed. A metadata refresh supplies that evidence. The report displays the last complete census time and its age when available, without inventing a freshness threshold. Existing census, workspace, export, backlog and invoice writers preserve the aggregate.
+
+## Method authority and effects
+
+Ordinary parsed Authentication-Results and DKIM headers remain unknown. Only the installed synthetic provider fixture can correlate a passing signature with both exact unsubscribe headers. Caller JSON cannot install provider trust or transport adapters.
+
+The automatic method parses HTTPS conservatively, rejects credentials and ambiguous authorities, checks every synthetic DNS answer for nonpublic IPv4/IPv6 destinations, binds the checked peer addresses, and refuses redirects. The installed fake fixture resolves only its designated host to a canned public address. No DNS resolver, socket, TLS or HTTP client sends an unsubscribe request. Those production integrations remain unimplemented.
+
+A fake POST uses exactly `List-Unsubscribe=One-Click` with form content type, without cookies, referrer or unrelated headers. A mailto copy card contains the exact recipient, receiving identity, subject and body. Its synthetic local send needs an additional action-naming confirmation. The checkbox is a simulation, not an OS dialog or passkey prompt. Browser, mail-app and address-retirement actions are preparation only. They launch nothing.
+
+A dedicated full HMAC binds state, census, workspace revision, exact subscriptions, source/header digests, methods, hosts, roles, destinations, displayed effects and compiled proof. The server recomputes the preview before accepting confirmation. Invoice and proof-download receipts cannot authorize unsubscribe.
+
+Intent precedes an independently encrypted fake effect. Observation follows it. Recovery reconciles matching acknowledgments; an absent acknowledgment stays uncertain and blocks a new action without retry. HTTP status, mail handoff and actual unsubscribe success remain separate. Success stays unknown. External unsubscribe has no Undo.
+
+History and independent acknowledgment records contain hosts and opaque digests, never token-bearing URIs or mail bodies. Transient exact copy cards stay in protected responses and component memory. Browser storage is unused. The encrypted original census retains original headers.
+
+## Mutes
+
+A mute creates an owned `user.mute.*` override. It matches the full List-Id header with Sieve `header :is` and ASCII casemap semantics, or exact From with a List-Id-absent guard when List-Id is absent. It also restricts the receiving address and account. It never substitutes a domain match. Duplicate List-Id evidence remains a distinct ambiguous subscription and prevents mute availability. Gmail observations combine Seen flags. Pin conflicts block confirmation.
+
+The folder segment is configurable for each role and sits beneath the configured role root. Mutes mark future messages read. Recipient safety and guards retain precedence; invoice copies remain independent before filing. Missing flag capability omits the entire read-marking rule. Production deployment and retroactive movement/read marking remain unavailable.
+
+Mute writes preserve unrelated configuration semantics but serialize the override document canonically. YAML comments and original formatting are not preserved. Removal previews the compiled rules without the unchanged owned override. A changed rule or patch causes rejection so user edits survive. Removing the rule changes future routing only. A later census proposes mute only after 14 days, an observed request or mail handoff, and a new source with an arrival after the request. Refreshing old mail does not qualify. Missing observation or arrival evidence stays unknown.
+
+## Verification entry points
+
+- `cargo test --locked` covers candidate boundaries, authentication correlation, URL/DNS/peer refusal, confirmation, encrypted migration, token-safe plaintext journals, durable fake acknowledgments, exact mute proof and later-arrival evidence.
+- `./scripts/verify-sieve.sh` compares emitted Sieve with independent check-sieve and Pigeonhole executions. It includes exact, other, substring and case-varied lists; recipient safety; guards; read capability; From fallback; and copy preservation. Fresh-cache cases do not establish persistent provider cache behavior.
+- `scripts/verify-unsubscribe-restart.mjs` kills and replaces the fake fixture before and after effects. It requires the verified fake listener to be stopped first and retains its final fake-only process.
+- `scripts/verify-unsubscribe.mjs` exercises protected HTTP for synthetic IMAP and Gmail.
+- `ui/scripts/verify-unsubscribe.mjs` drives the built English/German interface and records local synthetic screenshots.
+
+The cross-account confirmation validates the whole list before persisting intents and persists all intents before synthetic effects. This is not a distributed atomic transaction: partial intent persistence after a crash can remain uncertain without an effect. Q19 Cancel belongs to a separate backlog unit. Real provider provenance, native confirmation, SMTP, network integration, alias retirement, deployed-rule evidence, retroactive mute effects and uncertainty repair remain incomplete. This slice does not establish full personal readiness.

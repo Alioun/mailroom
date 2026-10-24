@@ -110,6 +110,8 @@ pub struct MessageRecord {
     pub uid: u32,
     pub size: u64,
     pub internal_date: String,
+    #[serde(default)]
+    pub flags_observed: bool,
     pub flags: BTreeSet<String>,
     pub gmail_message_id: Option<String>,
     pub gmail_thread_id: Option<String>,
@@ -189,6 +191,8 @@ pub struct Census {
     pub account_login: Option<String>,
     #[serde(default)]
     pub acquisition_state: ScanState,
+    #[serde(default)]
+    pub last_completed_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -207,6 +211,7 @@ impl Census {
             confirmed_own_addresses: BTreeSet::new(),
             account_login: None,
             acquisition_state: ScanState::Idle,
+            last_completed_at: None,
         }
     }
 

@@ -143,6 +143,8 @@ pub enum Condition {
     ToAddress { value: String },
     SubjectContains { value: String },
     ListIdExists,
+    ListIdAbsent,
+    ListIdExact { value: String },
     OneClick,
     NonBulk,
     Attachment,
@@ -290,6 +292,14 @@ pub fn validate_rule(rule: &Rule) -> Result<(), String> {
             }
             Condition::FromDomain { value } if !domain(value) => {
                 return Err("Invalid rule domain; use lowercase ASCII IDNA".into());
+            }
+            Condition::ListIdExact { value }
+                if value.is_empty()
+                    || value.len() > 512
+                    || value.trim() != value
+                    || value.chars().any(char::is_control) =>
+            {
+                return Err("Invalid exact List-Id header value".into());
             }
             Condition::SubjectContains { value }
                 if value.is_empty() || value.len() > 200 || value.chars().any(char::is_control) =>

@@ -174,6 +174,8 @@ fn condition(c: &Condition, recipient: &str) -> Test {
         ]),
         Condition::ToAddress { value } => address(recipient, "all", "is", value),
         Condition::SubjectContains { value } => header("subject", "contains", value),
+        Condition::ListIdExact { value } => header("list-id", "is", value),
+        Condition::ListIdAbsent => not(Test::Exists("list-id".into())),
         Condition::ListIdExists => Test::Exists("list-id".into()),
         Condition::OneClick => one_click(),
         Condition::NonBulk => not(bulk()),

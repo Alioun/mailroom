@@ -8,15 +8,18 @@ edition = "2024"
 aes = { version = "0.8", features = ["zeroize"] }
 aes-gcm = { version = "0.10", features = ["zeroize"] }
 axum = "0.8"
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 data-encoding = "2"
 directories = "6"
 hkdf = "0.12"
 hmac = "0.12"
+idna = "1.1.0"
 imap = "3.0.0-alpha.15"
 imap-proto = "0.16"
 keyring = "4.2"
 mailparse = "0.16"
 native-tls = "0.2"
+psl = "=2.1.245"
 rand = "0.8"
 rusqlite = { version = "0.37", features = ["bundled", "serialize"] }
 serde = { version = "1", features = ["derive"] }

@@ -78,6 +78,7 @@ impl DemoCensus {
         }
         self.census
             .reconcile_folder("INBOX", 7, (1..=TOTAL).collect())?;
+        self.census.acquisition_state = ScanState::Running;
         self.store.save(&self.census)?;
         self.state = ScanState::Running;
         self.mode = mode;
@@ -97,12 +98,14 @@ impl DemoCensus {
             folder.insert(fixture(*uid)?)?;
             self.state = folder.state;
         }
+        self.census.acquisition_state = self.state;
         self.store.save(&self.census)?;
         Ok(self.state == ScanState::Running)
     }
 
     pub fn fail(&mut self) {
         self.state = ScanState::Failed;
+        self.census.acquisition_state = ScanState::Failed;
     }
 
     pub fn cancel(&mut self) -> Result<(), CensusError> {
@@ -112,6 +115,7 @@ impl DemoCensus {
                 .get_mut("INBOX")
                 .expect("demo folder")
                 .state = ScanState::Cancelled;
+            self.census.acquisition_state = ScanState::Cancelled;
             self.store.save(&self.census)?;
             self.state = ScanState::Cancelled;
         }
@@ -143,7 +147,7 @@ impl DemoCensus {
             .collect();
         DemoStatus { source: "synthetic", state: self.state, completed: messages.len(), total: TOTAL,
             error: (self.state == ScanState::Failed).then_some("Synthetic scan stopped. Saved records remain available. Resume with the normal demo."),
-            addresses: self.census.own_address_candidates(), messages, summary: self.census.summary(&self.keys).expect("demo account keys"),
+            addresses: self.census.own_address_candidates(), messages, summary: self.census.summary(&self.keys, 1792886400, false).expect("demo account keys"),
             storage: "Encrypted SQLite in a temporary synthetic sandbox. Ephemeral key in memory. No real account or credential store.",
         }
     }

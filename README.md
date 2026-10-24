@@ -1,6 +1,6 @@
 # mailroom
 
-Inspect a synthetic header census and preview deterministic mail rules locally. The Rust core serves a Svelte interface with Ark UI controls. The census supports owner-run read-only mailbox.org and Gmail acquisition, encrypted persistence, cancellation and resume. Independent synthetic modes demonstrate it without a provider or credential store. Full reports and the complete personal workflow remain unfinished. All account writes remain denied.
+Inspect a synthetic header census and preview deterministic mail rules locally. The Rust core serves a Svelte interface with Ark UI controls. The census supports owner-run read-only mailbox.org and Gmail acquisition, encrypted persistence, cancellation and resume. Independent synthetic modes demonstrate it without a provider or credential store. Local census reports and reviewed summary downloads are available. The complete census and personal workflow remain unfinished. All account writes remain denied.
 
 ## Run locally
 
@@ -31,11 +31,12 @@ npm --prefix ui run build
 node scripts/verify-http.mjs
 node ui/scripts/verify-census.mjs
 node ui/scripts/verify-acquisition.mjs
+node ui/scripts/verify-reports.mjs
 bash -n scripts/connect-account.sh
 shellcheck -e SC2329 scripts/connect-account.sh
 ```
 
-The HTTP and browser commands require the running server and run sequentially. The acquisition browser flow requires `--synthetic-accounts`. The HTTP script checks the foundation preview, denied account operations, launch tokens, cancellation, encrypted resume, failure recovery and summary privacy. The browser scripts exercise the built interface and save screenshots under `.audit/census-browser/` and `.audit/acquisition-browser/`. It requires Playwright Chromium, installed with `npm --prefix ui exec playwright install chromium`.
+The HTTP and browser commands require the running server and run sequentially. The acquisition and report browser flows require `--synthetic-accounts`. The HTTP script checks the foundation preview, denied account operations, launch tokens, cancellation, encrypted resume, failure recovery and summary privacy. The browser scripts exercise the built interface and save screenshots under `.audit/census-browser/`, `.audit/acquisition-browser/` and `.audit/reports-browser/`. It requires Playwright Chromium, installed with `npm --prefix ui exec playwright install chromium`.
 
 See [Census implementation and remaining work](docs/census.md) for the data model, encrypted file format and incomplete capabilities.
 
@@ -55,7 +56,7 @@ Every matching copy rule runs before filing, including before guard retention. C
 
 This is compiled-subset evaluation, not Sieve execution or provider verification. It accepts at most 200 header-only messages and 100 rules per request. Headers must be ASCII, at most 16 KiB per message, with one bare From mailbox. Folded headers are unfolded. Duplicate headers, MIME encoded words, bodies, display names, non-example address domains, envelope tests, regex and arbitrary Sieve are rejected or unsupported. Sender, recipient, condition and copy addresses must use reserved example domains. No message content is stored.
 
-Pinned-message proof, deployment, journaled sorting, undo, unsubscribe, address policy and daily-use readiness are unavailable. Read-only adapters use fixed provider TLS endpoints. There are no write-enable flags or caller-supplied source URLs. The central policy classifies synthetic reads, account reads and account writes. It permits the synthetic preview and synthetic census. It denies rule upload and activation, folder creation, moves, flags, forwarding changes, sends and unsubscribe requests. Dedicated account actions permit connection, folder discovery and header acquisition only.
+Pinned-message proof, deployment, journaled sorting, undo, unsubscribe, address policy and daily-use readiness are unavailable. Read-only adapters use fixed provider TLS endpoints. There are no write-enable flags or caller-supplied source URLs. The central policy classifies synthetic reads, account reads and account writes. It permits the synthetic preview and synthetic census. It denies rule upload and activation, folder creation, moves, flags, forwarding changes, sends and unsubscribe requests. Dedicated account actions permit connection, folder discovery, header acquisition and local report review. Report export adds no provider operation.
 
 The server binds only `127.0.0.1:4173`, validates Host and any Origin header, rejects cross-site fetch metadata, has no CORS allowance, and limits JSON POST bodies to 256 KiB. Every API except the session bootstrap requires the current launch token. Its production CSP permits only same-origin external scripts and styles, without `unsafe-inline` or `unsafe-eval`. Native CLI requests may omit Origin. A local process can bootstrap a session and request owner account reads. It cannot unlock account writes. The token binds browser requests to a server launch. It does not isolate mutually untrusted processes running as the same OS user.
 

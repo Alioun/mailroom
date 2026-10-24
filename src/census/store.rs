@@ -67,6 +67,14 @@ impl CensusKeys {
         }
     }
 
+    pub(crate) fn binding(&self, value: &[u8]) -> String {
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.placeholders.as_ref())
+            .expect("valid HMAC key");
+        mac.update(b"mailroom/report-binding/v1\0");
+        mac.update(value);
+        data_encoding::HEXLOWER.encode(&mac.finalize().into_bytes())
+    }
+
     pub fn placeholder(&self, kind: &str, value: &str) -> String {
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.placeholders.as_ref())
             .expect("valid HMAC key");
@@ -107,6 +115,10 @@ impl EncryptedStore {
                 .map_err(|_| CensusError::Storage)?;
         }
         Ok(Self { directory, keys })
+    }
+
+    pub fn keys(&self) -> &CensusKeys {
+        &self.keys
     }
 
     pub fn path(&self) -> PathBuf {

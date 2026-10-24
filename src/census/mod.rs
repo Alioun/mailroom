@@ -1,5 +1,6 @@
 pub mod demo;
 mod headers;
+pub mod report;
 mod store;
 
 pub use headers::{HEADER_FIELDS, parse_headers};
@@ -291,52 +292,15 @@ impl Census {
         Ok(())
     }
 
-    pub fn summary(&self, keys: &CensusKeys) -> Result<String, CensusError> {
-        if !keys.belongs_to(&self.account) {
-            return Err(CensusError::AccountMismatch);
-        }
-        let mut text = String::from(
-            "# Census summary\n\nAll values are placeholders. No clear values approved. Subjects and unsubscribe targets are omitted.\n\n",
-        );
-        for (folder, census) in &self.folders {
-            text.push_str(&format!(
-                "- {}: {} messages\n",
-                keys.placeholder("folder", folder),
-                census.messages.len()
-            ));
-        }
-        text.push_str("\nConfirmed own addresses\n\n");
-        for address in &self.confirmed_own_addresses {
-            if let Some((local, domain)) = address.rsplit_once('@') {
-                text.push_str(&format!(
-                    "- {}@{}\n",
-                    keys.placeholder("alias", local),
-                    keys.placeholder("own-domain", domain)
-                ));
-            }
-        }
-        text.push_str("\nSenders with at least 3 messages\n\n");
-        let mut senders: BTreeMap<String, usize> = BTreeMap::new();
-        for message in self.folders.values().flat_map(|f| f.messages.values()) {
-            if message.headers.direction == Direction::Received {
-                if let Some(sender) = &message.headers.effective_sender {
-                    *senders.entry(sender.address.clone()).or_default() += 1;
-                }
-            }
-        }
-        let mut tail = 0;
-        for (sender, count) in senders {
-            if count < 3 {
-                tail += count;
-            } else {
-                text.push_str(&format!(
-                    "- {}: {} messages\n",
-                    keys.placeholder("person", &sender),
-                    count
-                ));
-            }
-        }
-        text.push_str(&format!("\nLong tail: {tail} messages\n\nLimitations: no pinned PSL, sender classification, monthly statistics or approved clear values yet. DKIM coverage is unknown.\n"));
-        Ok(text)
+    pub fn summary(
+        &self,
+        keys: &CensusKeys,
+        as_of: i64,
+        gmail: bool,
+    ) -> Result<String, CensusError> {
+        Ok(self
+            .report(keys, as_of, gmail)?
+            .summary_preview(keys, &BTreeSet::new())?
+            .summary)
     }
 }

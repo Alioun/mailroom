@@ -343,6 +343,10 @@ async fn synthetic_account_flow_uses_fake_credentials_and_preserves_http_authori
         "cancel",
         "list",
         "synthetic",
+        "synthetic-gmail",
+        "report",
+        "summary/review",
+        "summary/export",
     ] {
         let (code, value) = post(&app, token, action, serde_json::json!({"host":"fake.invalid", "password": {"synthetic-sensitive-value": true}, "allowed":true})).await;
         assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
@@ -389,6 +393,101 @@ async fn synthetic_account_flow_uses_fake_credentials_and_preserves_http_authori
             .iter()
             .any(|a| a["address"] == "owner@example.test" && a["confirmed"] == true)
     );
+    let as_of = 1792886400_i64;
+    let (_, report) = post(
+        &app,
+        token,
+        "report",
+        serde_json::json!({"account":id,"as_of":as_of}),
+    )
+    .await;
+    assert_eq!(report["complete"], true);
+    assert_eq!(report["received"]["messages"], 99);
+    assert_eq!(report["sent"], 1);
+    let approved = serde_json::json!([]);
+    let review = serde_json::json!({"account":id,"as_of":as_of,"version":report["version"],"approved":approved});
+    let (code, preview) = post(&app, token, "summary/review", review.clone()).await;
+    assert_eq!(code, StatusCode::OK);
+    let summary = preview["summary"].as_str().unwrap();
+    for private in [
+        "shop.example",
+        "owner@example.test",
+        "Synthetic label",
+        "synthetic-private-token",
+        "Synthetic account header",
+    ] {
+        assert!(!summary.contains(private), "{private}");
+    }
+    let mut export = review.clone();
+    export["receipt"] = preview["receipt"].clone();
+    export["confirmed"] = true.into();
+    let (code, shared) = post(&app, token, "summary/export", export.clone()).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(shared["summary"], preview["summary"]);
+    assert_eq!(shared["filename"], "census-summary.md");
+    let mut invalid = export.clone();
+    invalid["confirmed"] = false.into();
+    assert_eq!(
+        post(&app, token, "summary/export", invalid).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let candidate = report["clear_candidates"][0]["id"].as_str().unwrap();
+    let mut altered = export.clone();
+    altered["approved"] = serde_json::json!([candidate]);
+    assert_eq!(
+        post(&app, token, "summary/export", altered).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let mut invalid = review.clone();
+    invalid["approved"] = serde_json::json!(["caller-injected-private-token"]);
+    let (code, failure) = post(&app, token, "summary/review", invalid).await;
+    assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        !failure
+            .to_string()
+            .contains("caller-injected-private-token")
+    );
+    post(
+        &app,
+        token,
+        "confirm",
+        serde_json::json!({"account":id,"address":"owner@example.test","confirmed":false}),
+    )
+    .await;
+    assert_eq!(
+        post(&app, token, "summary/review", review).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        post(&app, token, "summary/export", export.clone()).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    post(&app, token, "synthetic-gmail", serde_json::json!({})).await;
+    let other = terminal(&app, token).await;
+    let other_id = other["job"]["account"]["id"].as_str().unwrap();
+    let (_, partial) = post(
+        &app,
+        token,
+        "report",
+        serde_json::json!({"account":other_id,"as_of":as_of}),
+    )
+    .await;
+    assert_eq!(partial["complete"], false);
+    export["account"] = other_id.into();
+    assert_eq!(
+        post(&app, token, "summary/export", export).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    post(&app, token, "scan", serde_json::json!({"account":other_id})).await;
+    terminal(&app, token).await;
+    let (_, gmail) = post(
+        &app,
+        token,
+        "report",
+        serde_json::json!({"account":other_id,"as_of":as_of}),
+    )
+    .await;
+    assert_eq!(gmail["gmail_arrivals"]["2026-10"], 99);
     assert!(policy::authorize(Operation::Census).allowed);
     assert!(!policy::authorize(Operation::ChangeFlags).allowed);
 }

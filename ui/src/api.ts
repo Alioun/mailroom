@@ -89,8 +89,38 @@ async function accountPost(action: string, input: unknown): Promise<unknown> {
 export async function readAccountStatus(): Promise<AccountStatus> { return accountStatus.parse(await responseJson(await localFetch('/api/accounts/status'))) }
 export async function listAccounts(): Promise<Account[]> { return z.array(account).parse(await accountPost('list', {})) }
 export async function connectAccount(input: { provider: Account['provider']; login: string; password: string }): Promise<AccountStatus> { return accountStatus.parse(await accountPost('connect', input)) }
-export async function syntheticAccount(): Promise<AccountStatus> { return accountStatus.parse(await accountPost('synthetic', {})) }
+export async function syntheticAccount(gmail = false): Promise<AccountStatus> { return accountStatus.parse(await accountPost(gmail ? 'synthetic-gmail' : 'synthetic', {})) }
 export async function scanAccount(account: string): Promise<AccountStatus> { return accountStatus.parse(await accountPost('scan', { account })) }
 export async function cancelAccount(): Promise<AccountStatus> { return accountStatus.parse(await accountPost('cancel', {})) }
 export async function openAccount(account: string): Promise<AccountView> { return accountView.parse(await accountPost('open', { account })) }
 export async function confirmAccount(account: string, address: string, confirmed: boolean): Promise<AccountView> { return accountView.parse(await accountPost('confirm', { account, address, confirmed })) }
+
+const reportCounts = z.object({
+  messages: z.number(), seen: z.number(), flagged: z.number(), answered: z.number(),
+  monthly: z.record(z.string(), z.number()), invalid_dates: z.number(), future_dates: z.number(),
+  latest_read_message_date: z.number().nullable(), first_date: z.number().nullable(), last_date: z.number().nullable(),
+  last_12_months: z.number(), last_13_months: z.number(), read_last_6_months: z.number(),
+})
+const report = z.object({
+  version: z.string(), analysis_version: z.string(), as_of: z.number(), state: censusStatus.shape.state, complete: z.boolean(),
+  folders: z.array(z.object({ folder: z.string(), state: censusStatus.shape.state, inventory: z.number(), saved: z.number() })),
+  saved_records: z.number(), canonical_messages: z.number(), received: reportCounts, sent: z.number(),
+  own_addresses: censusStatus.shape.addresses, own_domains: z.array(z.string()),
+  senders: z.array(z.object({
+    sender: z.string().nullable(), domain: z.string().nullable(), class: z.enum(['bulk', 'platform', 'list_with_people', 'person', 'unknown']), wrote_to_sender: z.boolean(), counts: reportCounts,
+    raw_from: z.array(z.string()), relay_claims: z.array(z.string()), one_click_pair: z.number(), list_unsubscribe: z.number(), list_id_messages: z.number(), list_ids: z.array(z.string()),
+    esp_observations: z.array(z.string()), folders: z.array(z.string()), gmail_labels: z.array(z.string()), recipient_addresses: z.array(z.string()), subject_keywords: z.record(z.string(), z.number()),
+  })),
+  domains: z.record(z.string(), reportCounts), gmail_arrivals: z.record(z.string(), z.number()), invalid_arrival_dates: z.number(), future_arrival_dates: z.number(),
+  clear_candidates: z.array(z.object({ id: z.string(), domain: z.string() })), limitations: z.array(z.enum(['unknown_authentication', 'current_flags_and_dates', 'gmail_topology', 'subject_tokens', 'classification'])),
+})
+const summaryPreview = z.object({ summary: z.string(), receipt: z.string() })
+export type CensusReport = z.infer<typeof report>
+export type SummaryPreview = z.infer<typeof summaryPreview>
+export async function readReport(account: string, as_of: number): Promise<CensusReport> { return report.parse(await accountPost('report', { account, as_of })) }
+export async function reviewSummary(account: string, report: CensusReport, approved: string[]): Promise<SummaryPreview> {
+  return summaryPreview.parse(await accountPost('summary/review', { account, as_of: report.as_of, version: report.version, approved }))
+}
+export async function exportSummary(account: string, report: CensusReport, approved: string[], receipt: string) {
+  return z.object({ summary: z.string(), filename: z.literal('census-summary.md') }).parse(await accountPost('summary/export', { account, as_of: report.as_of, version: report.version, approved, receipt, confirmed: true }))
+}

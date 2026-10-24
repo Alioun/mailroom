@@ -215,12 +215,13 @@ fn incremental_refresh_deletes_vanished_uids_resets_validity_and_resumes_holes()
 fn summary_is_keyed_private_and_does_not_confirm_recipient_roles() {
     let census = populated();
     let keys = CensusKeys::derive(&secret(), &account());
-    let summary = census.summary(&keys).unwrap();
+    let summary = census.summary(&keys, 1792886400, false).unwrap();
     assert_eq!(
-        census.summary(&CensusKeys::derive(
-            &secret(),
-            &AccountId::new("account-b").unwrap()
-        )),
+        census.summary(
+            &CensusKeys::derive(&secret(), &AccountId::new("account-b").unwrap()),
+            1792886400,
+            false
+        ),
         Err(CensusError::AccountMismatch)
     );
     for private in [

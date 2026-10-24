@@ -1,28 +1,29 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import Reports from './Reports.svelte'
   import { readAccountStatus, listAccounts, connectAccount, syntheticAccount, scanAccount, cancelAccount, openAccount, confirmAccount, type Account, type AccountStatus, type AccountView } from './api'
   let { lang }: { lang: 'en' | 'de' } = $props()
   const strings = {
     en: {
       title: 'Connect an account', detail: 'Owner-run, read-only access to mailbox.org or Gmail. Use an existing password or app password. Connection checks TLS, login and folder discovery. No account settings change.',
       provider: 'Provider', login: 'Login address', password: 'Existing password or app password', connect: 'Connect account privately', secret: 'The password goes to the OS credential store. It is never saved in configuration or browser storage.',
-      synthetic: 'Synthetic account verification. Temporary files and fake credentials only. No provider or OS credential store is contacted.', add: 'Add synthetic account',
+      synthetic: 'Synthetic account verification. Temporary files and fake credentials only. No provider or OS credential store is contacted.', add: 'Add synthetic account', addGmail: 'Add synthetic Gmail account',
       load: 'Load saved accounts', choose: 'Choose an account', scan: 'Run or resume account census', cancel: 'Cancel account census', open: 'Open saved census',
       idle: 'Ready', running: 'Account action running', cancelled: 'Account census cancelled', complete: 'Account action complete', failed: 'Account action failed', saved: 'headers saved', folders: 'folders',
       error: 'The account action failed. Check the existing credential privately, or restore the original census key. Saved files were retained. Retry later for provider or network failures.',
       addresses: 'Confirm own addresses', ownership: 'To and Cc are unverified evidence. Confirmation assigns ownership only. It does not assign a business role or forwarding permission.', confirm: 'Confirm own address', details: 'Saved local headers',
-      limits: 'This is acquisition only. Reports, classification, Takeout and trusted DKIM correlation remain incomplete. No result proves rule coexistence, delivery-recipient behavior or accounting acceptance. All account writes stay locked.',
+      limits: 'Takeout and trusted DKIM correlation remain incomplete. The full personal workflow is not ready for daily use. No result proves rule coexistence, delivery-recipient behavior or accounting acceptance. All account writes stay locked.',
       loadError: 'Could not read the local response. Reload or retry the action.',
     },
     de: {
       title: 'Konto verbinden', detail: 'Nur vom Kontoinhaber ausgeführter Lesezugriff auf mailbox.org oder Gmail. Nutze ein vorhandenes Passwort oder App-Passwort. Die Verbindung prüft TLS, Anmeldung und Ordner. Kontoeinstellungen bleiben unverändert.',
       provider: 'Anbieter', login: 'Anmeldeadresse', password: 'Vorhandenes Passwort oder App-Passwort', connect: 'Konto vertraulich verbinden', secret: 'Das Passwort geht in den Zugangsdaten-Speicher des Betriebssystems. Es wird weder in der Konfiguration noch im Browserspeicher abgelegt.',
-      synthetic: 'Synthetische Kontoprüfung. Nur temporäre Dateien und erfundene Zugangsdaten. Kein Anbieter oder Zugangsdaten-Speicher des Betriebssystems wird kontaktiert.', add: 'Synthetisches Konto hinzufügen',
+      synthetic: 'Synthetische Kontoprüfung. Nur temporäre Dateien und erfundene Zugangsdaten. Kein Anbieter oder Zugangsdaten-Speicher des Betriebssystems wird kontaktiert.', add: 'Synthetisches Konto hinzufügen', addGmail: 'Synthetisches Gmail-Konto hinzufügen',
       load: 'Gespeicherte Konten laden', choose: 'Konto wählen', scan: 'Kontoerfassung starten oder fortsetzen', cancel: 'Kontoerfassung abbrechen', open: 'Gespeicherte Erfassung öffnen',
       idle: 'Bereit', running: 'Kontoaktion läuft', cancelled: 'Kontoerfassung abgebrochen', complete: 'Kontoaktion abgeschlossen', failed: 'Kontoaktion fehlgeschlagen', saved: 'Kopfzeilen gespeichert', folders: 'Ordner',
       error: 'Die Kontoaktion ist fehlgeschlagen. Prüfe die vorhandenen Zugangsdaten vertraulich oder stelle den ursprünglichen Erfassungsschlüssel wieder her. Gespeicherte Dateien bleiben erhalten. Bei Anbieter- oder Netzwerkfehlern später erneut versuchen.',
       addresses: 'Eigene Adressen bestätigen', ownership: 'An und Cc sind unbestätigte Belege. Die Bestätigung weist nur die Zugehörigkeit zu. Sie weist keine geschäftliche Rolle oder Weiterleitungsberechtigung zu.', confirm: 'Eigene Adresse bestätigen', details: 'Lokal gespeicherte Kopfzeilen',
-      limits: 'Dies ist nur die Erfassung. Berichte, Klassifizierung, Takeout und vertrauenswürdige DKIM-Zuordnung fehlen noch. Kein Ergebnis belegt Regel-Koexistenz, Zustellempfänger oder Buchhaltungsannahme. Alle Kontoänderungen bleiben gesperrt.',
+      limits: 'Takeout und vertrauenswürdige DKIM-Zuordnung fehlen noch. Der gesamte persönliche Ablauf ist noch nicht für den Alltag bereit. Kein Ergebnis belegt Regel-Koexistenz, Zustellempfänger oder Buchhaltungsannahme. Alle Kontoänderungen bleiben gesperrt.',
       loadError: 'Die lokale Antwort konnte nicht gelesen werden. Lade neu oder wiederhole die Aktion.',
     },
   }
@@ -79,6 +80,7 @@
   {#if status?.synthetic}
     <p class="source">{t.synthetic}</p>
     <button disabled={busy || running} onclick={() => act(async () => { selected = ''; view = null; accept(await syntheticAccount()) })}>{t.add}</button>
+    <button disabled={busy || running} onclick={() => act(async () => { selected = ''; view = null; accept(await syntheticAccount(true)) })}>{t.addGmail}</button>
   {:else if status}
     <form class="account-form" onsubmit={(event) => { event.preventDefault(); void connect() }}>
       <label>{t.provider}<select bind:value={provider} disabled={busy || running}><option value="mailbox_org">mailbox.org</option><option value="gmail">Gmail</option></select></label>
@@ -106,6 +108,7 @@
     <p class="scan-state">{t[view.census.acquisition_state]}</p>
     <h3>{t.addresses}</h3><p class="help">{t.ownership}</p>
     <ul class="account-addresses">{#each view.addresses as address (address.address)}<li><label><input type="checkbox" checked={address.confirmed} disabled={busy || running} onchange={(event) => { const checked = event.currentTarget.checked; void act(async () => { view = await confirmAccount(selected, address.address, checked) }) }} />{t.confirm} {address.address}</label><p class="help">{address.evidence.join(', ')}</p></li>{/each}</ul>
+    {#key view}<Reports account={selected} {lang} />{/key}
     <details><summary>{t.details}</summary>{#each Object.entries(view.census.folders) as [name, folder] (name)}<h3>{name}</h3><p>{Object.keys(folder.messages).length} {t.saved} · UIDVALIDITY {folder.uidvalidity}</p>{#each Object.values(folder.messages) as message (message.uid)}<p>{message.headers.subject} · {message.headers.direction} · UID {message.uid}</p>{/each}{/each}</details>
   {/if}
   <p class="help">{t.limits}</p>

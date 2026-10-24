@@ -249,10 +249,23 @@ fn build_app(synthetic_accounts: bool) -> Router {
         .route("/api/accounts/list", post(accounts::list))
         .route("/api/accounts/connect", post(accounts::connect))
         .route("/api/accounts/synthetic", post(accounts::synthetic))
+        .route(
+            "/api/accounts/synthetic-gmail",
+            post(accounts::synthetic_gmail),
+        )
         .route("/api/accounts/scan", post(accounts::scan))
         .route("/api/accounts/cancel", post(accounts::cancel))
         .route("/api/accounts/open", post(accounts::open))
         .route("/api/accounts/confirm", post(accounts::confirm))
+        .route("/api/accounts/report", post(accounts::report))
+        .route(
+            "/api/accounts/summary/review",
+            post(accounts::review_summary),
+        )
+        .route(
+            "/api/accounts/summary/export",
+            post(accounts::export_summary),
+        )
         .route("/api/preview", post(preview))
         .route("/api/operations", post(operation))
         .route("/api/census/demo", get(demo_status))

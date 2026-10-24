@@ -10,8 +10,8 @@
       progress: 'Scan progress', messages: 'headers saved', idle: 'Ready for synthetic data', running: 'Scanning synthetic headers', cancelled: 'Cancelled. Saved headers retained.', complete: 'Synthetic census complete', failed: 'Synthetic scan stopped',
       addresses: 'Review discovered addresses', addressDetail: 'Evidence suggests these may be own addresses. To and Cc are unverified candidates. Confirmation does not assign a personal or business role.',
       confirm: 'Confirm own address', local: 'Local header details', localDetail: 'Full Subjects and sender addresses stay in this local view. The report below omits them.',
-      received: 'Received', sent: 'Sent', unknown: 'DKIM coverage unknown', summary: 'Summary preview', summaryDetail: 'All values are keyed placeholders. No clear values are approved. Review a report before sharing it. Full monthly and sender statistics are pending.',
-      limitations: 'No Takeout import, pinned PSL, trusted DKIM correlation, sender classification or complete summary yet. The temporary demo key disappears when the server stops.',
+      received: 'Received', sent: 'Sent', unknown: 'DKIM coverage unknown', summary: 'Summary preview', summaryDetail: 'All values are keyed placeholders. No clear values are approved. Review a report before sharing it. The account controls above provide report review and export. This demo fixes its as-of time to 25 October 2026 UTC.',
+      limitations: 'Takeout import and trusted DKIM correlation remain unavailable. The temporary demo key disappears when the server stops.',
       retry: 'Reload census status', loadError: 'Could not load the local census.',
     },
     de: {
@@ -20,8 +20,8 @@
       progress: 'Fortschritt', messages: 'Kopfzeilen gespeichert', idle: 'Bereit für synthetische Daten', running: 'Synthetische Kopfzeilen werden erfasst', cancelled: 'Abgebrochen. Gespeicherte Kopfzeilen bleiben erhalten.', complete: 'Synthetische Erfassung abgeschlossen', failed: 'Synthetische Erfassung gestoppt',
       addresses: 'Entdeckte Adressen prüfen', addressDetail: 'Die Belege deuten auf eigene Adressen hin. An und Cc sind unbestätigte Kandidaten. Eine Bestätigung weist keine private oder geschäftliche Rolle zu.',
       confirm: 'Eigene Adresse bestätigen', local: 'Lokale Kopfzeilendetails', localDetail: 'Vollständige Betreffzeilen und Absenderadressen bleiben in dieser lokalen Ansicht. Der Bericht darunter lässt sie aus.',
-      received: 'Empfangen', sent: 'Gesendet', unknown: 'DKIM-Abdeckung unbekannt', summary: 'Berichtsvorschau', summaryDetail: 'Alle Werte sind schlüsselgebundene Platzhalter. Keine Klartextwerte sind freigegeben. Prüfe den Bericht vor dem Teilen. Vollständige Monats- und Absenderstatistiken fehlen noch.',
-      limitations: 'Noch kein Takeout-Import, fixierte PSL, vertrauenswürdige DKIM-Zuordnung, Absenderklassifizierung oder vollständiger Bericht. Der temporäre Beispielschlüssel verschwindet beim Serverstopp.',
+      received: 'Empfangen', sent: 'Gesendet', unknown: 'DKIM-Abdeckung unbekannt', summary: 'Berichtsvorschau', summaryDetail: 'Alle Werte sind schlüsselgebundene Platzhalter. Keine Klartextwerte sind freigegeben. Prüfe den Bericht vor dem Teilen. Die Kontosteuerung oben bietet Berichtsprüfung und Export. Dieses Beispiel nutzt den festen Stand 25. Oktober 2026 UTC.',
+      limitations: 'Takeout-Import und vertrauenswürdige DKIM-Zuordnung fehlen noch. Der temporäre Beispielschlüssel verschwindet beim Serverstopp.',
       retry: 'Erfassungsstatus neu laden', loadError: 'Die lokale Erfassung konnte nicht geladen werden.',
     },
   }

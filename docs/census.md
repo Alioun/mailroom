@@ -1,6 +1,6 @@
 # Census implementation and remaining work
 
-The executable supports an owner-run read-only account path and two independent synthetic paths. The owner can connect mailbox.org or Gmail, run or resume header acquisition, cancel it and inspect encrypted saved data. The complete census and personal workflow remain incomplete. Verification uses fake credentials and local synthetic TLS servers. No real account or OS credential backend has been exercised by an agent.
+The executable supports an owner-run read-only account path and two independent synthetic paths. The owner can connect mailbox.org or Gmail, run or resume header acquisition, cancel it, inspect encrypted saved data, derive local reports and review a private summary export. The complete census and personal workflow remain incomplete. Verification uses fake credentials and local synthetic TLS servers. No real account or OS credential backend has been exercised by an agent.
 
 ## Ownership and data flow
 
@@ -32,7 +32,9 @@ The demo processes eight bundled synthetic headers in bounded steps. Each comple
 
 The local interface supports English and German. The eight-header demo shows progress, decoded Subjects, sender details and own-address confirmation. Owner account controls are separate from this demo.
 
-The summary is deliberately conservative. Its approval list is empty, so it emits no clear sender, address, domain, folder, Subject or unsubscribe target. Placeholder values use a kind label and six lowercase base32 characters from account-scoped HMAC-SHA256. Normalization trims whitespace and lowercases the value. Confirmed addresses use separate alias and own-domain placeholders. Senders with fewer than three messages are pooled. This is a preview, not the complete required summary.
+The eight-header demo uses the same report analysis and a fixed as-of time of 25 October 2026 UTC. Its approval list stays empty. The account interface supports a separate report review and export, described in [Census report semantics](census-reports.md). Both paths omit full Subjects and unsubscribe targets from summaries.
+
+Placeholders use a kind label and six lowercase base32 characters from account-scoped HMAC-SHA256. Normalization trims whitespace and lowercases the value. Confirmed addresses use separate alias and own-domain placeholders. Sender identities keep the same person placeholder even when classification changes. Senders with fewer than three messages pool into a long tail. Clear organisational domains require an explicit reviewed selection. Folders, labels, List-Ids and keywords always remain placeholders in exported summaries.
 
 ## HTTP boundary
 
@@ -70,9 +72,9 @@ Confirmed own addresses survive UID resets and vanished evidence and remain visi
 
 ## Synthetic account verification
 
-Starting the binary with `--synthetic-accounts` installs a fake credential backend and a bundled 100-header source in a temporary directory. The UI clearly identifies this mode and offers an Add synthetic account button instead of a password form. HTTP cannot switch modes or provide fake endpoints. The normal eight-header demo remains separate, with independent ephemeral keys. Both synthetic account credentials and files disappear with the process.
+Starting the binary with `--synthetic-accounts` installs a fake credential backend and a bundled 100-header source in a temporary directory. The UI clearly identifies this mode and offers synthetic mailbox.org and Gmail account buttons instead of a password form. HTTP cannot switch modes or provide fake endpoints. The normal eight-header demo remains separate, with independent ephemeral keys. Both synthetic account credentials and files disappear with the process.
 
-`cargo test --locked` covers the fake backend, actual subprocess restart, key loss, account isolation, exact read-only TLS commands, fragmented header literals, Unicode folders and labels, certificate and hostname rejection, redacted authentication failure, response-size enforcement, cancellation, reconciliation, metadata refresh, Gmail exclusions and deduplication. HTTP tests exercise the fake account lifecycle. `ui/scripts/verify-acquisition.mjs` drives the built synthetic account UI. `ui/scripts/verify-census.mjs` retains the original demo checks. Neither browser flow touches a provider or the OS backend.
+`cargo test --locked` covers the fake backend, actual subprocess restart, key loss, account isolation, exact read-only TLS commands, fragmented header literals, Unicode folders and labels, certificate and hostname rejection, redacted authentication failure, response-size enforcement, cancellation, reconciliation, metadata refresh, Gmail exclusions and deduplication. HTTP tests exercise the fake account lifecycle. `ui/scripts/verify-acquisition.mjs` drives the built synthetic account UI. `ui/scripts/verify-census.mjs` retains the original demo checks. `ui/scripts/verify-reports.mjs` drives partial and complete report states, Sent correspondence, Gmail arrivals, domain selection, exact Markdown download, German narrow layout, CSP and empty browser storage. None of these flows touches a provider or the OS backend.
 
 ## Required follow-up units
 
@@ -80,9 +82,9 @@ Starting the binary with `--synthetic-accounts` installs a fake credential backe
 - Add credential update, account forgetting, key rotation, interrupted-creation cleanup and a recovery interface. The current UI retries scans with existing stored credentials; it does not replace them.
 - Verify large-census performance and replace whole-snapshot rewrites if needed. The existing 128 MiB limit still applies.
 - Add Takeout MBOX import without body or attachment persistence.
-- Pin a PSL snapshot before deriving registrable domains. The model stores no registrable domain.
+- Persist full Gmail label topology and excluded-folder counts. Current canonical scanned-folder counts do not describe every provider label or Spam folder.
 - Implement trusted authentication provenance and signature correlation. Preserve unknown coverage when evidence is insufficient.
-- Add sender classification, ESP attribution, Sent-derived correspondence, full monthly/read/flag/list statistics, approved clear-value handling and repeated-keyword summary rules. Add report approval and export. The synthetic summary continues to omit all clear values and Subjects. Production controls currently expose local details only.
+- Complete the wider agent workflow separately, including native action-naming confirmation, agent enablement, proof/ruleset exports, restricted agent directories and proposal resolution. The report export currently uses explicit local web confirmation and a browser download. It does not enable agent access or live operations.
 - Add unsubscribe logs and backlog journals with those workflows. They are absent from this schema.
 
 The person-run `scripts/connect-account.sh` walkthrough starts no credentialed step automatically and reads no secret. It guides an existing local launch and private UI entry without requesting provider setting changes. Its shared wizard library retains unused helpers; shellcheck excludes SC2329 for those template functions only.

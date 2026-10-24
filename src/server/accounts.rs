@@ -159,10 +159,25 @@ pub(super) async fn synthetic(
     if !state.accounts.synthetic() {
         return failure(AcquisitionError::InvalidInput);
     }
+    synthetic_connection(state, Provider::MailboxOrg).await
+}
+pub(super) async fn synthetic_gmail(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<EmptyRequest>, JsonRejection>,
+) -> Response {
+    if let Err(error) = input(body) {
+        return error;
+    }
+    if !state.accounts.synthetic() {
+        return failure(AcquisitionError::InvalidInput);
+    }
+    synthetic_connection(state, Provider::Gmail).await
+}
+async fn synthetic_connection(state: Arc<AppState>, provider: Provider) -> Response {
     launch_connection(
         state,
         ConnectRequest {
-            provider: Provider::MailboxOrg,
+            provider,
             login: "owner@example.test".into(),
             password: SecretValue::new(b"synthetic-account-password".to_vec()),
         },
@@ -364,6 +379,137 @@ async fn census_action(
     .await
     {
         Ok(Ok(view)) => Json(view).into_response(),
+        Ok(Err(e)) => failure(e),
+        Err(_) => failure(AcquisitionError::Storage),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReportRequest {
+    account: AccountId,
+    as_of: i64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReviewRequest {
+    account: AccountId,
+    as_of: i64,
+    version: String,
+    approved: std::collections::BTreeSet<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ExportRequest {
+    account: AccountId,
+    as_of: i64,
+    version: String,
+    approved: std::collections::BTreeSet<String>,
+    receipt: String,
+    confirmed: bool,
+}
+pub(super) async fn report(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<ReportRequest>, JsonRejection>,
+) -> Response {
+    let request = match input(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    report_action(state, request, None, None).await
+}
+pub(super) async fn review_summary(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<ReviewRequest>, JsonRejection>,
+) -> Response {
+    let request = match input(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    report_action(
+        state,
+        ReportRequest {
+            account: request.account.clone(),
+            as_of: request.as_of,
+        },
+        Some(request),
+        None,
+    )
+    .await
+}
+pub(super) async fn export_summary(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<ExportRequest>, JsonRejection>,
+) -> Response {
+    let request = match input(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if !request.confirmed {
+        return failure(AcquisitionError::InvalidInput);
+    }
+    report_action(
+        state,
+        ReportRequest {
+            account: request.account.clone(),
+            as_of: request.as_of,
+        },
+        Some(ReviewRequest {
+            account: request.account,
+            as_of: request.as_of,
+            version: request.version,
+            approved: request.approved,
+        }),
+        Some(request.receipt),
+    )
+    .await
+}
+async fn report_action(
+    state: Arc<AppState>,
+    request: ReportRequest,
+    review: Option<ReviewRequest>,
+    receipt: Option<String>,
+) -> Response {
+    match tokio::task::spawn_blocking(move || {
+        let _operation = state.accounts.operation.lock().expect("account operation");
+        if state
+            .accounts
+            .job
+            .lock()
+            .expect("account job")
+            .as_ref()
+            .is_some_and(|j| j.progress.state == ScanState::Running)
+        {
+            return Err(AcquisitionError::InvalidInput);
+        }
+        let repo = state.accounts.repository()?;
+        let account = repo.load(&request.account)?;
+        let store = repo.store(&account)?;
+        let census = store.load()?;
+        let report = census.report(
+            store.keys(),
+            request.as_of,
+            account.provider == Provider::Gmail,
+        )?;
+        if let Some(review) = review {
+            if report.version != review.version {
+                return Err(AcquisitionError::InvalidInput);
+            }
+            let preview = report.summary_preview(store.keys(), &review.approved)?;
+            if let Some(receipt) = receipt {
+                use subtle::ConstantTimeEq;
+                if !bool::from(preview.receipt.as_bytes().ct_eq(receipt.as_bytes())) {
+                    return Err(AcquisitionError::InvalidInput);
+                }
+                return Ok(json!({"summary": preview.summary, "filename": "census-summary.md"}));
+            }
+            return Ok(json!(preview));
+        }
+        Ok::<_, AcquisitionError>(json!(report))
+    })
+    .await
+    {
+        Ok(Ok(value)) => Json(value).into_response(),
         Ok(Err(e)) => failure(e),
         Err(_) => failure(AcquisitionError::Storage),
     }

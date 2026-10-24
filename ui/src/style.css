@@ -109,3 +109,9 @@ progress { display: block; width: 100%; max-width: 560px; height: 16px; margin-t
 .accounts .census-actions label { min-width: 0; max-width: 100%; }
 .accounts p, .account-addresses label { overflow-wrap: anywhere; }
 .account-addresses { padding-left: 20px; }
+
+.reports { margin-block: 1.5rem; border-block: 1px solid var(--border, #ccc); padding-block: 1rem; }
+.reports p, .reports summary { overflow-wrap: anywhere; }
+.reports details { margin-block: .75rem; }
+.approved-values label { display: block; margin-block: .5rem; }
+.summary-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 36rem; overflow: auto; padding: 1rem; border: 1px solid var(--border, #ccc); }

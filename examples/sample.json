@@ -1,0 +1,28 @@
+{
+  "preset": {
+    "id": "sample",
+    "major": 1,
+    "rules": [
+      {"id":"spam-guard","stage":"guard","conditions":[{"kind":"spam_flag"}],"destination":{"kind":"inbox"}},
+      {"id":"bulk","stage":"bulk","conditions":[{"kind":"list_id_exists"}],"destination":{"kind":"folder","name":"Reading"}},
+      {"id":"studio","stage":"from","conditions":[{"kind":"from_domain","value":"studio.example.com"}],"destination":{"kind":"folder","name":"Projects"}},
+      {"id":"receipts","stage":"subject","conditions":[{"kind":"subject_contains","value":"invoice"}],"destination":{"kind":"folder","name":"Receipts"}}
+    ],
+    "copies": [
+      {"id":"invoice-copy","conditions":[{"kind":"subject_contains","value":"invoice"}],"recipient":"archive@example.net"}
+    ]
+  },
+  "overrides": {
+    "preset":"sample","major":1,
+    "patches":[{"id":"studio","destination":{"kind":"folder","name":"Studio"}}],
+    "additions":[{"id":"release-note","stage":"subject","conditions":[{"kind":"subject_contains","value":"release"}],"destination":{"kind":"folder","name":"Releases"}}]
+  },
+  "messages": [
+    {"id":"sample-1","headers":"From: updates@studio.example.com\nTo: reader@example.org\nSubject: Studio invoice 104\nList-Id: <studio.example.com>"},
+    {"id":"sample-2","headers":"From: news@letters.example.net\nSubject: An invoice guide\nList-Id: <letters.example.net>"},
+    {"id":"sample-3","headers":"From: billing@shop.example.org\nSubject: Your invoice 208"},
+    {"id":"sample-4","headers":"From: friend@example.net\nSubject: Lunch on Friday?"},
+    {"id":"sample-5","headers":"From: updates@studio.example.com\nSubject: Release notes\nList-Id: <studio.example.com>"},
+    {"id":"sample-6","headers":"From: sender@example.org\nSubject: Invoice marked as spam\nX-Spam-Flag: YES"}
+  ]
+}

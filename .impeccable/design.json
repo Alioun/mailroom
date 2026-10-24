@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-24T10:42:07.162358+00:00",
+  "title": "Design System: mailroom",
+  "extensions": {
+    "shadows": [],
+    "motion": [],
+    "breakpoints": [
+      {
+        "name": "compact",
+        "value": "680px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Preview button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Runs the synthetic preview.",
+      "html": "<button class=\"ds-preview\">Run sample preview</button>",
+      "css": ".ds-preview{background:var(--accent,#15596a);color:#fff;border:1px solid #15596a;border-radius:5px;padding:9px 16px;min-height:44px;font:600 16px sans-serif}.ds-preview:hover{background:#104655}.ds-preview:focus-visible{outline:3px solid #1c7086;outline-offset:4px}.ds-preview:disabled{background:#e2e8eb;color:#65767d;border-color:#d3dde1}"
+    },
+    {
+      "name": "Selected language",
+      "kind": "button",
+      "description": "Shows the current language.",
+      "html": "<button class=\"ds-selected\" aria-pressed=\"true\">English</button>",
+      "css": ".ds-selected{background:#dfeaf0;color:#123f50;border:1px solid #91acb8;border-radius:5px;padding:9px 12px;min-height:44px;font:16px sans-serif}.ds-selected:hover{background:#e5edf0}.ds-selected:focus-visible{outline:3px solid #1c7086;outline-offset:4px}"
+    },
+    {
+      "name": "Sample override input",
+      "kind": "input",
+      "description": "Applies the bundled sample overrides.",
+      "html": "<label class=\"ds-override\"><input type=\"checkbox\" checked> Apply sample overrides</label>",
+      "css": ".ds-override{display:flex;align-items:center;gap:10px;font:600 15px sans-serif;color:#203239}.ds-override input{width:18px;height:18px;accent-color:#15596a}.ds-override input:focus-visible{outline:3px solid #1c7086;outline-offset:4px}"
+    }
+  ]
+}

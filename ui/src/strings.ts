@@ -1,0 +1,31 @@
+import type { Operation } from './api'
+export const strings = {
+  en: {
+    title: 'Preview the filing decisions', intro: 'Run a synthetic mailbox through compiled rules. See where each message would go before any account is connected.',
+    synthetic: 'Synthetic data only', locked: 'Live writes locked', sample: 'Sample mailbox', sampleDetail: 'Six invented messages. Reserved example domains. Nothing is read from an account.',
+    overrides: 'Apply sample overrides', overrideDetail: 'Move Studio mail ahead of bulk filing and add a release-note rule. These are demonstration choices.',
+    run: 'Run sample preview', running: 'Evaluating…', initial: 'Your preview will appear here.', initialDetail: 'Run the sample to see filing destinations, independent copies and the rule behind each decision.',
+    results: 'Preview results', messages: 'Messages', filed: 'Filed', inbox: 'Retained in Inbox', copies: 'Copy actions', copiedMessages: 'messages receive copies',
+    all: 'All messages', retained: 'Inbox only', withCopies: 'With copies', empty: 'No messages match this view.', message: 'Message', destination: 'Filing destination', reason: 'Matched rule', copy: 'Copy', noCopy: 'No copies', unmatched: 'Unmatched; retain in Inbox',
+    preset: 'Preset', patched: 'Preset patched by override', added: 'Added by override', subjectMissing: 'No subject', program: 'Compiled program', sieve: 'Generated Sieve', trace: 'Override and rule trace', fixtures: 'Synthetic input',
+    boundary: 'Account operations', boundaryDetail: 'Availability comes from the Rust authorization policy. Direct HTTP requests pass through the same policy.', denied: 'Denied', unavailable: 'Unavailable', unavailableDetail: 'Account connection and census are not implemented. Every account write is denied. No providers or credentials are installed.',
+    limits: 'What this preview proves', limitsDetail: 'It evaluates the supported compiled rules, not a Sieve server. It is not the complete proof engine or a daily-use application.', subset: 'ASCII headers; AND conditions; case-insensitive sender and subject tests; list and spam markers. Order: guards, overrides, bulk, From, Subject. Input order breaks ties.', omissions: 'No MIME decoding, bodies, display names, envelope tests, regex, arbitrary Sieve, pinned-message proof, journal or undo. Existing folders only. Copies happen before all filing, including Inbox guards.',
+    error: 'The preview could not run.', retry: 'Reload sample', footer: 'Local preview · No account connected', language: 'Language',
+  },
+  de: {
+    title: 'Ablageentscheidungen prüfen', intro: 'Wende kompilierte Regeln auf ein synthetisches Postfach an. Prüfe das Ziel jeder Nachricht, bevor ein Konto verbunden wird.',
+    synthetic: 'Nur synthetische Daten', locked: 'Kontoänderungen gesperrt', sample: 'Beispielpostfach', sampleDetail: 'Sechs erfundene Nachrichten. Reservierte Beispieldomains. Kein Zugriff auf ein Konto.',
+    overrides: 'Beispielanpassungen anwenden', overrideDetail: 'Studio-Nachrichten vor Rundmails ablegen und eine Regel für Versionshinweise ergänzen. Dies sind reine Beispiele.',
+    run: 'Beispielvorschau starten', running: 'Wird ausgewertet…', initial: 'Hier erscheint deine Vorschau.', initialDetail: 'Starte das Beispiel, um Ablageziele, separate Kopien und die jeweilige Regel zu sehen.',
+    results: 'Vorschauergebnis', messages: 'Nachrichten', filed: 'Abgelegt', inbox: 'Im Posteingang behalten', copies: 'Kopieraktionen', copiedMessages: 'Nachrichten erhalten Kopien',
+    all: 'Alle Nachrichten', retained: 'Nur Posteingang', withCopies: 'Mit Kopien', empty: 'Keine Nachrichten in dieser Ansicht.', message: 'Nachricht', destination: 'Ablageziel', reason: 'Passende Regel', copy: 'Kopie', noCopy: 'Keine Kopien', unmatched: 'Keine passende Regel; im Posteingang behalten',
+    preset: 'Voreinstellung', patched: 'Voreinstellung durch Anpassung geändert', added: 'Durch Anpassung ergänzt', subjectMissing: 'Kein Betreff', program: 'Kompiliertes Programm', sieve: 'Erzeugtes Sieve', trace: 'Anpassungen und Regelreihenfolge', fixtures: 'Synthetische Eingabe',
+    boundary: 'Kontoaktionen', boundaryDetail: 'Die Verfügbarkeit kommt aus der Rust-Autorisierung. Direkte HTTP-Anfragen durchlaufen dieselbe Prüfung.', denied: 'Gesperrt', unavailable: 'Nicht verfügbar', unavailableDetail: 'Kontoverbindung und Bestandsaufnahme sind nicht implementiert. Alle Kontoänderungen sind gesperrt. Keine Anbieter oder Zugangsdaten eingerichtet.',
+    limits: 'Was diese Vorschau belegt', limitsDetail: 'Sie wertet unterstützte kompilierte Regeln ohne Sieve-Server aus. Sie ist weder die vollständige Regelprüfung noch für den täglichen Einsatz bereit.', subset: 'ASCII-Kopfzeilen; UND-Bedingungen; Absender- und Betreffprüfung ohne Beachtung der Großschreibung; Listen- und Spamkennzeichen. Reihenfolge: Schutzregeln, Anpassungen, Rundmails, Absender, Betreff. Bei Gleichstand zählt die Eingabereihenfolge.', omissions: 'Keine MIME-Dekodierung, Nachrichtentexte, Anzeigenamen, Envelope-Prüfung, regulären Ausdrücke, beliebigen Sieve-Regeln, fixierten Prüfnachrichten, Protokollierung oder Rückgängig-Funktion. Nur bestehende Ordner. Kopien erfolgen vor jeder Ablage, auch vor Schutzregeln für den Posteingang.',
+    error: 'Die Vorschau konnte nicht starten.', retry: 'Beispiel neu laden', footer: 'Lokale Vorschau · Kein Konto verbunden', language: 'Sprache',
+  },
+}
+export const operationLabels: Record<'en' | 'de', Record<Operation, string>> = {
+  en: { preview: 'Synthetic preview', connect: 'Connect account', census: 'Header census', upload_rules: 'Upload rules', activate_rules: 'Activate rules', create_folder: 'Create folders', move_messages: 'Move messages', change_flags: 'Change flags', change_forwarding: 'Change forwarding', send_message: 'Send messages', unsubscribe: 'Unsubscribe' },
+  de: { preview: 'Synthetische Vorschau', connect: 'Konto verbinden', census: 'Kopfzeilen erfassen', upload_rules: 'Regeln hochladen', activate_rules: 'Regeln aktivieren', create_folder: 'Ordner erstellen', move_messages: 'Nachrichten verschieben', change_flags: 'Markierungen ändern', change_forwarding: 'Weiterleitung ändern', send_message: 'Nachrichten senden', unsubscribe: 'Abmelden' },
+}

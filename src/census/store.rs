@@ -87,10 +87,15 @@ impl CensusKeys {
     }
 
     pub(crate) fn synthetic_mailbox_keys(&self) -> Self {
-        let hkdf = Hkdf::<Sha256>::new(
-            Some(b"mailroom/synthetic-mailbox/v1"),
-            self.encryption.as_ref(),
-        );
+        self.synthetic_keys(b"mailroom/synthetic-mailbox/v1")
+    }
+
+    pub(crate) fn synthetic_invoice_keys(&self) -> Self {
+        self.synthetic_keys(b"mailroom/synthetic-invoice-transport/v1")
+    }
+
+    fn synthetic_keys(&self, purpose: &[u8]) -> Self {
+        let hkdf = Hkdf::<Sha256>::new(Some(purpose), self.encryption.as_ref());
         let mut bytes = Zeroizing::new(vec![0; 32]);
         hkdf.expand(b"independent-fake-state", &mut bytes)
             .expect("HKDF length");
@@ -115,6 +120,8 @@ impl CensusKeys {
 #[serde(deny_unknown_fields)]
 pub struct AccountState {
     #[serde(default)]
+    pub invoices: crate::invoice::Aggregate,
+    #[serde(default)]
     pub synthetic_uid_next: std::collections::BTreeMap<String, u32>,
     #[serde(default)]
     pub backlog: Vec<crate::backlog::Run>,
@@ -129,6 +136,7 @@ impl AccountState {
     fn new(census: Census) -> Self {
         Self {
             revision: 0,
+            invoices: Default::default(),
             backlog: Vec::new(),
             synthetic_effects: Default::default(),
             synthetic_uid_next: Default::default(),
@@ -271,7 +279,7 @@ impl EncryptedStore {
         }
         let snapshot =
             Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
-        self.stage_snapshot(3, &snapshot)
+        self.stage_snapshot(4, &snapshot)
     }
 
     fn stage_snapshot(
@@ -368,7 +376,7 @@ impl EncryptedStore {
             )
             .map_err(|_| CensusError::Storage)?;
         let snapshot = Zeroizing::new(snapshot);
-        if !matches!(version, 1 | 2 | 3) {
+        if !matches!(version, 1 | 2 | 3 | 4) {
             return Err(CensusError::UnsupportedVersion);
         }
         if account != self.keys.account.as_str() {
@@ -406,6 +414,11 @@ impl EncryptedStore {
                 } else {
                     crate::backlog::Status::Prepared
                 };
+            }
+        }
+        for send in &mut state.invoices.sends {
+            if send.status == crate::invoice::Status::Intent {
+                send.status = crate::invoice::Status::Uncertain;
             }
         }
         Ok(state)

@@ -322,3 +322,76 @@ fn census_proof_deduplicates_gmail_unions_placement_and_excludes_sent() {
         .unwrap();
     assert_eq!(p.counts.messages, 13);
 }
+
+#[test]
+fn destination_intents_copy_once_across_overlapping_triggers_and_aliases() {
+    let mut i = input();
+    i.messages[2].headers = i.messages[2].headers.replace(
+        "Delivered-To: team@work.example.test",
+        "Delivered-To: invoices@work.example.test",
+    );
+    edit(&mut i, |_, o| {
+        o.targets.insert(
+            "alias".into(),
+            config::Target {
+                address: "ARCHIVE@example.net".into(),
+            },
+        );
+        o.forwards
+            .iter_mut()
+            .find(|f| f.id == "forward.invoice_address")
+            .unwrap()
+            .target = "alias".into();
+    });
+    let p = run(&i);
+    assert_eq!(p.decisions[2].copies.len(), 1);
+    assert_eq!(p.decisions[2].copies[0].rule, "forward.approved");
+    assert_eq!(p.decisions[2].destination, folder("Business/Invoices"));
+    edit(&mut i, |_, o| {
+        o.targets.insert(
+            "distinct".into(),
+            config::Target {
+                address: "distinct@example.test".into(),
+            },
+        );
+        let mut f = o.forwards[0].clone();
+        f.id = "forward.distinct".into();
+        f.target = "distinct".into();
+        o.forwards.push(f);
+    });
+    assert_eq!(run(&i).decisions[2].copies.len(), 2);
+}
+
+#[test]
+fn repeated_original_and_forwarded_message_ids_share_the_destination_guard() {
+    let mut i = input();
+    let original = i.messages[11].headers.clone();
+    i.messages[2].headers = original
+        .replace(
+            "From: Example Sender <stranger@example.org>",
+            "From: Example Sender <billing@shop.example.org>",
+        )
+        .replace(
+            "Delivered-To: invoices@work.example.test",
+            "Delivered-To: team@work.example.test",
+        );
+    i.messages[2].headers = i.messages[2].headers.replace(
+        "Date: Sat, 24 Oct 2026 00:00:00 +0000",
+        "Date: Fri, 23 Oct 2026 00:00:00 +0000",
+    );
+    let p = run(&i);
+    let hash = p
+        .decisions
+        .iter()
+        .find(|d| d.id.ends_with("/3"))
+        .unwrap()
+        .message_id_hash
+        .clone();
+    let repeated: Vec<_> = p
+        .decisions
+        .iter()
+        .filter(|d| d.message_id_hash == hash)
+        .collect();
+    assert_eq!(repeated.len(), 2);
+    assert_eq!(repeated.iter().map(|d| d.copies.len()).sum::<usize>(), 1);
+}

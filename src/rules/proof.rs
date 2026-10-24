@@ -4,7 +4,7 @@ use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const SEMANTICS: &str = "parsed-emitted-sieve-subset-v2";
+pub const SEMANTICS: &str = "parsed-emitted-sieve-subset-v3";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -272,7 +272,7 @@ fn execute(
                             recipient: target.clone(),
                         });
                         if let Some(hash) = &h.message_id_hash {
-                            pending.push(format!("mailroom.{}/{hash}", s.id));
+                            pending.push(format!("{}/{hash}", super::program::copy_handle(target)));
                         }
                     }
                     Action::File(name) => {

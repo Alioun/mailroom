@@ -72,6 +72,7 @@ pub(in crate::server) async fn handle(
             Action::Open => {},
             Action::Preview { options } => return backlog::preview(&saved, account.provider, store.keys(), options, mailbox.as_ref()).map(|p| json!(p)),
             Action::Start { options, receipt, confirmed } => {
+                if saved.invoices.sends.iter().any(|s| s.status != crate::invoice::Status::Completed) { return Err("Recover the pending invoice submission first".into()); }
                 if !confirmed { return Err("Explicit synthetic confirmation required".into()); }
                 let preview = backlog::preview(&saved, account.provider, store.keys(), options, mailbox.as_ref())?;
                 backlog::start(&mut saved, preview, &receipt)?;

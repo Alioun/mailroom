@@ -338,3 +338,65 @@ fn migrates_v2_without_inventing_runs_and_preserves_prior_fields() {
         input().documents
     );
 }
+
+#[test]
+fn older_account_states_preserve_fields_without_inventing_invoice_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = AccountId::new("invoice-migration").unwrap();
+    let secret = LocalSecret::random();
+    let store = EncryptedStore::new(dir.path().into(), CensusKeys::derive(&secret, &id)).unwrap();
+    store.save(&Census::new(id)).unwrap();
+    let mut state = store.load_state().unwrap();
+    state.workspace = Some(Workspace {
+        revision: 4,
+        input: input(),
+    });
+    state.synthetic_uid_next.insert("fixture".into(), 73);
+    for version in [2, 3] {
+        let mut encoded = serde_json::to_value(&state).unwrap();
+        encoded.as_object_mut().unwrap().remove("invoices");
+        store
+            .stage_snapshot(version, &serde_json::to_string(&encoded).unwrap())
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        let migrated = store.load_state().unwrap();
+        assert!(migrated.invoices.sources.is_empty());
+        assert!(migrated.invoices.sends.is_empty());
+        assert!(migrated.invoices.synthetic_received.is_empty());
+        assert_eq!(migrated.workspace.unwrap().revision, 4);
+        assert_eq!(migrated.synthetic_uid_next["fixture"], 73);
+    }
+}
+
+#[test]
+fn obsolete_copy_semantics_do_not_become_a_usable_export_baseline() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = AccountId::new("invoice-old-baseline").unwrap();
+    let store = EncryptedStore::new(
+        dir.path().into(),
+        CensusKeys::derive(&LocalSecret::random(), &id),
+    )
+    .unwrap();
+    store.save(&Census::new(id)).unwrap();
+    let mut state = store.load_state().unwrap();
+    state.workspace = Some(Workspace {
+        revision: 1,
+        input: input(),
+    });
+    let preview = workspace::preview(&state, Provider::MailboxOrg, store.keys()).unwrap();
+    workspace::confirm_export(
+        &mut state,
+        Provider::MailboxOrg,
+        store.keys(),
+        &preview.receipt,
+    )
+    .unwrap();
+    state.exports[0].semantics = "mailroom-sieve-subset-v2".into();
+    state.exports[0].proof_semantics = "parsed-emitted-sieve-subset-v2".into();
+    assert!(!workspace::view(&state, Provider::MailboxOrg).exports[0].usable);
+    state.workspace.as_mut().unwrap().input.baseline = crate::rules::proof::Baseline::Previous;
+    assert!(workspace::preview(&state, Provider::MailboxOrg, store.keys()).is_err());
+    state.workspace.as_mut().unwrap().input.baseline = crate::rules::proof::Baseline::Current;
+    assert!(workspace::preview(&state, Provider::MailboxOrg, store.keys()).is_ok());
+}

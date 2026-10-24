@@ -574,3 +574,29 @@ async fn backlog_routes_install_no_production_write_authority() {
         );
     }
 }
+
+#[tokio::test]
+async fn production_invoice_commands_fail_before_account_or_credential_access() {
+    for command in [
+        serde_json::json!({"action":"preview", "selection":"INBOX/1/1", "target":"accounting"}),
+        serde_json::json!({"action":"prepare_mail_app", "selection":"INBOX/1/1", "target":"accounting"}),
+        serde_json::json!({"action":"send", "selection":"INBOX/1/1", "target":"accounting", "receipt":"0".repeat(64), "confirmation_action":"Send exactly this invoice"}),
+        serde_json::json!({"action":"recover", "send":"0".repeat(64)}),
+    ] {
+        let body = serde_json::json!({"account":"nonexistent-no-credentials", "command":command})
+            .to_string();
+        let response = request(
+            "/api/accounts/invoices",
+            &body,
+            None,
+            server::ADDRESS,
+            "application/json",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("No production invoice"));
+    }
+    let response = request("/api/accounts/invoices", r#"{"account":"nonexistent", "command":{"action":"send", "selection":"x", "target":"x", "receipt":"x", "confirmation_action":"x", "synthetic":true}}"#, None, server::ADDRESS, "application/json").await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}

@@ -27,6 +27,9 @@ fn main() {
         "unknown-trust",
         "gmail-backlog",
         "limited",
+        "overlap",
+        "aliases",
+        "distinct",
     ] {
         let case_dir = directory.join(variant);
         fs::create_dir_all(&case_dir).unwrap();
@@ -35,6 +38,13 @@ fn main() {
             "german-read" => source["documents"]["override_yaml"] = format!("{}\nlayout:\n  language: de\n  personal_root: Beispiel\n  business_root: Büro\n  new_addresses: Neue Adressen\n  retired_addresses: Alte Adressen\n", source["documents"]["override_yaml"].as_str().unwrap().replace("    folder: Studio", "    folder: Stille\n    mark_read: true")).into(),
             "unknown-trust" => source["context"]["recipient_evidence"] = "unknown".into(),
             "gmail-backlog" => source["context"]["engine"] = "gmail_backlog".into(),
+            "overlap" | "aliases" | "distinct" => {
+                source["messages"][2]["headers"] = source["messages"][2]["headers"].as_str().unwrap().replace("Delivered-To: team@work.example.test", "Delivered-To: invoices@work.example.test").into();
+                if variant == "aliases" || variant == "distinct" {
+                    let yaml = source["documents"]["override_yaml"].as_str().unwrap().replace("  accounting: {address: archive@example.net}", "  accounting: {address: archive@example.net}\n  alias: {address: ARCHIVE@example.net}").replace("id: forward.invoice_address\n    target: accounting", "id: forward.invoice_address\n    target: alias");
+                    source["documents"]["override_yaml"] = if variant == "distinct" { yaml.replace("ARCHIVE@example.net", "distinct@example.test") } else { yaml }.into();
+                }
+            },
             "limited" => source["context"]["capabilities"] = json!([]), _ => (),
         }
         let input: PreviewInput = serde_json::from_value(source.clone()).unwrap();
@@ -65,7 +75,7 @@ fn main() {
         .unwrap();
     }
     println!(
-        "Synthetic artifacts generated. Five variants, 70 independent messages. Artifact {}.",
+        "Synthetic artifacts generated. Eight variants, 112 independent messages. Artifact {}.",
         proof.artifact.identity()
     );
 }

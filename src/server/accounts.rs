@@ -1,4 +1,5 @@
 pub(super) mod backlog;
+pub(super) mod invoices;
 use super::{AppState, EmptyRequest};
 use crate::{
     acquisition::{
@@ -370,6 +371,12 @@ async fn census_action(
         let repo = state.accounts.repository()?;
         let account = repo.load(&id)?;
         let store = repo.store(&account)?;
+        if state.accounts.synthetic() {
+            let mut saved = store.load_state()?;
+            if crate::invoice::initialize_synthetic(&mut saved) {
+                store.save_state(&mut saved)?;
+            }
+        }
         let mut census = store.load()?;
         if let Some((address, confirmed)) = confirm {
             census.confirm_address(&address, confirmed)?;

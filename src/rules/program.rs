@@ -4,7 +4,7 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,7 +73,7 @@ pub struct CompiledArtifact {
     omissions: Vec<Omission>,
     folders: BTreeSet<String>,
 }
-pub const SEMANTICS: &str = "mailroom-sieve-subset-v2";
+pub const SEMANTICS: &str = "mailroom-sieve-subset-v3";
 
 impl CompiledArtifact {
     pub fn identity(&self) -> &str {
@@ -423,6 +423,7 @@ pub fn compile(
             return Err("Invalid private forwarding target".into());
         }
     }
+    let mut target_intents: BTreeMap<String, Vec<Test>> = BTreeMap::new();
     for f in &overrides.forwards {
         identifier(&f.id)?;
         identifier(&f.target)?;
@@ -491,12 +492,16 @@ pub fn compile(
             });
             continue;
         }
-        let handle = format!("mailroom.{}", f.id);
+        let destination = target.address.to_ascii_lowercase();
+        let preceding = target_intents.entry(destination.clone()).or_default();
+        let exclusive_trigger = all(vec![trigger.clone(), not(any(preceding.clone()))]);
+        preceding.push(trigger);
+        let handle = copy_handle(&destination);
         statements.push(Statement {
             id: f.id.clone(),
             test: all(vec![
                 business.clone(),
-                trigger,
+                exclusive_trigger,
                 Test::Exists("message-id".into()),
                 not(Test::Duplicate(handle)),
             ]),
@@ -785,4 +790,12 @@ pub(crate) mod persisted {
             folders: saved.folders,
         })
     }
+}
+
+pub(super) fn copy_handle(destination: &str) -> String {
+    format!(
+        "mailroom.target.{}",
+        data_encoding::HEXLOWER
+            .encode(&Sha256::digest(destination.to_ascii_lowercase().as_bytes()))
+    )
 }

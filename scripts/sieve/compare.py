@@ -37,5 +37,5 @@ for directory in sorted(Path('/fixtures').iterdir()):
         seen = '\\seen' in output.lower() or '\\seen' in trace_text.lower()
         assert seen == decision['mark_read'], (directory.name, i, 'Seen action disagreement')
         count += 1
-print(f'PASS: check-sieve lint and Pigeonhole fresh-cache filing/copy/Seen semantics for {count} synthetic executions across five variants.')
+print(f'PASS: check-sieve lint and Pigeonhole fresh-cache filing/copy/Seen semantics for {count} synthetic executions across eight variants.')
 print('UNVERIFIED: persistent duplicate-cache true/expiry behavior, real provider recipient provenance, separator, capabilities and accounting acceptance.')

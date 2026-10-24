@@ -47,6 +47,8 @@ pub(in crate::server) async fn handle(
         let account = repo.load(&request.account).map_err(|e| e.to_string())?;
         let store = repo.store(&account).map_err(|e| e.to_string())?;
         let mut saved = store.load_state().map_err(|e| e.to_string())?;
+        let ledger_guard = state.accounts.ledger.as_ref().map(|l| l.lock()).transpose()?;
+        sync_ledger(&mut saved, &store, account.provider, ledger_guard.as_ref())?;
         let synthetic = state.accounts.synthetic();
         if synthetic && invoice::initialize_synthetic(&mut saved) { store.save_state(&mut saved).map_err(|e| e.to_string())?; }
         let mut transport = match &state.accounts.source {

@@ -48,7 +48,11 @@ struct AccountReview {
     installed: InstalledSynthetic,
     preview: Preview,
 }
-fn prepare(state: &AppState, input: &Input) -> Result<(Vec<AccountReview>, String), String> {
+fn prepare(
+    state: &AppState,
+    input: &Input,
+    guard: Option<&crate::ledger::file::LockedLedger<'_>>,
+) -> Result<(Vec<AccountReview>, String), String> {
     if input.selections.is_empty() || input.selections.len() > 64 {
         return Err("Choose 1..64 separate subscriptions".into());
     }
@@ -81,7 +85,8 @@ fn prepare(state: &AppState, input: &Input) -> Result<(Vec<AccountReview>, Strin
         let store = repo
             .store(&account)
             .map_err(|_| "Account storage unavailable")?;
-        let saved = store.load_state().map_err(|_| "Census unavailable")?;
+        let mut saved = store.load_state().map_err(|_| "Census unavailable")?;
+        sync_ledger(&mut saved, &store, account.provider, guard)?;
         let installed = InstalledSynthetic::open(mailboxes, &store, &saved)?;
         let single = ReviewInput {
             as_of: input.as_of,
@@ -133,7 +138,15 @@ fn view(state: &AppState, as_of: i64) -> Result<serde_json::Value, String> {
         if !store.path().exists() {
             continue;
         }
-        let saved = store.load_state().map_err(|_| "Census unavailable")?;
+        let mut saved = store.load_state().map_err(|_| "Census unavailable")?;
+        let snapshot = state
+            .accounts
+            .ledger
+            .as_ref()
+            .map(|l| l.lock())
+            .transpose()?;
+        sync_ledger(&mut saved, &store, account.provider, snapshot.as_ref())?;
+        drop(snapshot);
         if saved.census.folders.is_empty() {
             continue;
         }
@@ -170,15 +183,16 @@ pub(in crate::server) async fn handle(
     match tokio::task::spawn_blocking(move || {
         let _operation=state.accounts.operation.lock().expect("account operation");
         if state.accounts.job.lock().expect("account job").as_ref().is_some_and(|j|j.progress.state==ScanState::Running) {return Err("Wait for census completion".to_owned());}
+        let ledger_guard = state.accounts.ledger.as_ref().map(|l| l.lock()).transpose()?;
         let as_of=match request.command {
             Action::Open {as_of}=>as_of,
             Action::Preview {input}=>{
-                let (reviews,receipt)=prepare(&state,&input)?;
+                let (reviews,receipt)=prepare(&state,&input,ledger_guard.as_ref())?;
                 let mail=reviews.iter().find_map(|r|r.preview.local_mail_confirmation);
                 return Ok(json!({"previews":reviews.iter().map(|r|&r.preview).collect::<Vec<_>>(),"receipt":receipt,"confirmation_action":CONFIRM,"local_mail_confirmation":mail}));
             },
             Action::Confirm {input,receipt,confirmation_action,mail_confirmation_action}=>{
-                let (mut reviews,current)=prepare(&state,&input)?;
+                let (mut reviews,current)=prepare(&state,&input,ledger_guard.as_ref())?;
                 if receipt.len()!=64 || current.as_bytes().ct_eq(receipt.as_bytes()).unwrap_u8()!=1 || confirmation_action!=CONFIRM {return Err("Exact multi-account subscription list changed".into());}
                 let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| "Invalid clock")?.as_secs() as i64;
                 let mut intents=Vec::new();
@@ -204,6 +218,7 @@ pub(in crate::server) async fn handle(
                 input.as_of
             },
         };
+        drop(ledger_guard);
         view(&state,as_of)
     }).await {
         Ok(Ok(value))=>Json(value).into_response(),

@@ -652,3 +652,23 @@ async fn production_subscription_list_denies_before_account_or_credentials() {
     .await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+#[tokio::test]
+async fn production_ledger_is_denied_before_account_or_credential_access() {
+    for command in [
+        serde_json::json!({"action":"open"}),
+        serde_json::json!({"action":"preview","batch":{"content_version":"synthetic","revision":0,"enabled":true,"entries":[]}}),
+        serde_json::json!({"action":"confirm","batch":{"content_version":"synthetic","revision":0,"enabled":true,"entries":[]},"receipt":"not-an-approval","confirmed":true}),
+    ] {
+        let response = request(
+            "/api/accounts/ledger",
+            &serde_json::json!({"account":"does-not-exist","command":command}).to_string(),
+            Some(server::ORIGIN),
+            server::ADDRESS,
+            "application/json",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+    }
+}

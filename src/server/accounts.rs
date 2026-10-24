@@ -1,5 +1,6 @@
 pub(super) mod backlog;
 pub(super) mod invoices;
+pub(super) mod ledger;
 pub(super) mod subscription_review;
 pub(super) mod unsubscribe;
 use super::{AppState, EmptyRequest};
@@ -26,6 +27,7 @@ pub(super) struct AccountController {
     source: AccountSource,
     job: Mutex<Option<Job>>,
     operation: Mutex<()>,
+    ledger: Option<crate::ledger::InstalledLedger>,
 }
 enum AccountSource {
     Os,
@@ -55,7 +57,18 @@ impl AccountController {
         } else {
             AccountSource::Os
         };
+        let ledger = match &source {
+            AccountSource::Synthetic { mailboxes, .. } => {
+                std::fs::create_dir_all(mailboxes).expect("synthetic mailbox directory");
+                Some(
+                    crate::ledger::InstalledLedger::install(mailboxes.join("ledger"))
+                        .expect("synthetic private ledger"),
+                )
+            }
+            _ => None,
+        };
         Self {
+            ledger,
             source,
             job: Mutex::new(None),
             operation: Mutex::new(()),
@@ -697,28 +710,50 @@ async fn workspace_action(
         let account = repo.load(&id)?;
         let store = repo.store(&account)?;
         let mut saved = store.load_state()?;
+        let ledger_guard = state
+            .accounts
+            .ledger
+            .as_ref()
+            .map(|l| l.lock())
+            .transpose()
+            .map_err(|_| AcquisitionError::Storage)?;
+        sync_ledger(&mut saved, &store, account.provider, ledger_guard.as_ref())
+            .map_err(|_| AcquisitionError::InvalidInput)?;
         match action {
             WorkspaceAction::Open => Ok(json!(workspace::view(&saved, account.provider))),
             WorkspaceAction::Save { revision, input } => {
                 if revision != saved.revision {
                     return Err(AcquisitionError::InvalidInput);
                 }
+                crate::ledger::validate_workspace_edit(&saved, &input)
+                    .map_err(|_| AcquisitionError::InvalidInput)?;
                 workspace::validate(&input, &saved, account.provider)
                     .map_err(|_| AcquisitionError::InvalidInput)?;
                 let revision = saved.workspace.as_ref().map_or(Ok(1), |w| {
                     w.revision.checked_add(1).ok_or(AcquisitionError::Storage)
                 })?;
                 saved.workspace = Some(Workspace { revision, input });
+                if let Some(guard) = &ledger_guard {
+                    let snapshot = guard.read().map_err(|_| AcquisitionError::Storage)?;
+                    crate::ledger::reconcile(&mut saved, &snapshot, account.provider)
+                        .map_err(|_| AcquisitionError::InvalidInput)?;
+                }
                 store.save_state(&mut saved)?;
                 Ok(json!(workspace::view(&saved, account.provider)))
             }
-            WorkspaceAction::Preview => workspace::preview(&saved, account.provider, store.keys())
-                .map(|v| json!(v))
-                .map_err(|_| AcquisitionError::InvalidInput),
+            WorkspaceAction::Preview => {
+                let proof = workspace::preview(&saved, account.provider, store.keys())
+                    .map_err(|_| AcquisitionError::InvalidInput)?;
+                ledger_fresh(&saved, ledger_guard.as_ref())
+                    .map_err(|_| AcquisitionError::InvalidInput)?;
+                Ok(json!(proof))
+            }
             WorkspaceAction::Download { receipt } => {
                 let preview =
                     workspace::confirm_export(&mut saved, account.provider, store.keys(), &receipt)
                         .map_err(|_| AcquisitionError::InvalidInput)?;
+                ledger_fresh(&saved, ledger_guard.as_ref())
+                    .map_err(|_| AcquisitionError::InvalidInput)?;
                 store.save_state(&mut saved)?;
                 Ok(json!({
                     "filename": preview.filename,
@@ -737,6 +772,33 @@ async fn workspace_action(
     }
 }
 
+fn ledger_fresh(
+    saved: &crate::census::AccountState,
+    guard: Option<&crate::ledger::file::LockedLedger<'_>>,
+) -> Result<(), String> {
+    if let Some(guard) = guard {
+        if guard.read()?.content_version != saved.ledger.source_version {
+            return Err("Ledger changed while proving. Review fresh proof".into());
+        }
+    }
+    Ok(())
+}
+
+fn sync_ledger(
+    saved: &mut crate::census::AccountState,
+    store: &crate::census::EncryptedStore,
+    provider: Provider,
+    guard: Option<&crate::ledger::file::LockedLedger<'_>>,
+) -> Result<(), String> {
+    if let Some(guard) = guard {
+        let snapshot = guard.read()?;
+        if saved.workspace.is_some() && crate::ledger::reconcile(saved, &snapshot, provider)? {
+            store.save_state(saved).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[tokio::test]
 async fn durable_browser_server_fixture() {
@@ -751,6 +813,10 @@ async fn durable_browser_server_fixture() {
         _directory: tempfile::tempdir().unwrap(),
         mailboxes: std::path::Path::new(&root).join("mailboxes"),
     };
+    state.accounts.ledger = Some(
+        crate::ledger::InstalledLedger::install(std::path::Path::new(&root).join("ledger"))
+            .unwrap(),
+    );
     let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
     axum::serve(listener, super::router(Arc::new(state)))
         .await

@@ -250,6 +250,7 @@ fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/accounts/backlog", post(accounts::backlog::handle))
         .route("/api/accounts/invoices", post(accounts::invoices::handle))
+        .route("/api/accounts/ledger", post(accounts::ledger::handle))
         .route(
             "/api/accounts/unsubscribe",
             post(accounts::unsubscribe::handle),

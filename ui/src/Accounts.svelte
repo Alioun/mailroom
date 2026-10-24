@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import Reports from './Reports.svelte'
+  import Ledger from './Ledger.svelte'
   import Backlog from './Backlog.svelte'
   import Invoices from './Invoices.svelte'
   import Unsubscribe from './Unsubscribe.svelte'
@@ -112,7 +113,7 @@
     <p class="scan-state">{t[view.census.acquisition_state]}</p>
     <h3>{t.addresses}</h3><p class="help">{t.ownership}</p>
     <ul class="account-addresses">{#each view.addresses as address (address.address)}<li><label><input type="checkbox" checked={address.confirmed} disabled={busy || running} onchange={(event) => { const checked = event.currentTarget.checked; void act(async () => { view = await confirmAccount(selected, address.address, checked) }) }} />{t.confirm} {address.address}</label><p class="help">{address.evidence.join(', ')}</p></li>{/each}</ul>
-    {#key view}<Reports account={selected} {lang} /><RulesProof account={selected} {lang} /><Backlog account={selected} {lang} /><Invoices account={selected} {lang} />{/key}
+    {#key view}<Reports account={selected} {lang} /><Ledger account={selected} {lang} /><RulesProof account={selected} {lang} /><Backlog account={selected} {lang} /><Invoices account={selected} {lang} />{/key}
     <details><summary>{t.details}</summary>{#each Object.entries(view.census.folders) as [name, folder] (name)}<h3>{name}</h3><p>{Object.keys(folder.messages).length} {t.saved} · UIDVALIDITY {folder.uidvalidity}</p>{#each Object.values(folder.messages) as message (message.uid)}<p>{message.headers.subject} · {message.headers.direction} · UID {message.uid}</p>{/each}{/each}</details>
   {/if}
   <Unsubscribe {lang} />

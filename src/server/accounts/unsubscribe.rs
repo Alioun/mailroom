@@ -44,6 +44,8 @@ pub(in crate::server) async fn handle(
         let account = repo.load(&request.account).map_err(|_| "Account unavailable")?;
         let store = repo.store(&account).map_err(|_| "Account storage unavailable")?;
         let mut saved = store.load_state().map_err(|_| "Account state unavailable")?;
+        let ledger_guard = state.accounts.ledger.as_ref().map(|l| l.lock()).transpose()?;
+        sync_ledger(&mut saved, &store, account.provider, ledger_guard.as_ref())?;
         let mut installed = match &state.accounts.source { AccountSource::Synthetic { mailboxes, .. } => Some(InstalledSynthetic::open(mailboxes, &store, &saved)?), _ => None };
         let as_of = match request.command {
             Action::Open { as_of } => as_of,

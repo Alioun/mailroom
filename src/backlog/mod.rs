@@ -91,6 +91,8 @@ pub struct Plan {
     pub provider: Provider,
     pub source: String,
     pub state_revision: u64,
+    #[serde(default)]
+    pub ledger_version: String,
     pub mailbox_revision: Option<u64>,
     pub semantics: String,
     #[serde(with = "crate::rules::program::persisted")]
@@ -176,6 +178,7 @@ pub(crate) fn preview(
         }
         .into(),
         state_revision: state.revision,
+        ledger_version: state.ledger.source_version.clone(),
         mailbox_revision: mailbox.map(|m| m.revision),
         semantics: SEMANTICS.into(),
         artifact,
@@ -501,6 +504,9 @@ pub(crate) fn stop(state: &mut AccountState, id: &str) -> Result<(), String> {
 }
 pub(crate) fn resume(state: &mut AccountState, id: &str) -> Result<(), String> {
     let ri = run_index(state, id)?;
+    if state.backlog[ri].plan.ledger_version != state.ledger.source_version {
+        return Err("Ledger changed. Review fresh proof before further sorting".into());
+    }
     let r = &mut state.backlog[ri];
     if r.undo_requested
         || r.outcomes
@@ -535,6 +541,9 @@ pub(crate) fn advance(
         Status::Completed | Status::Stopped
     ) {
         return Ok(());
+    }
+    if state.backlog[ri].plan.ledger_version != state.ledger.source_version {
+        return Err("Ledger changed. Review fresh proof before further sorting".into());
     }
     if state.backlog[ri]
         .outcomes

@@ -22,6 +22,7 @@ fn main() {
     )
     .unwrap();
     for variant in [
+        "ledger-projection",
         "standard",
         "german-read",
         "unknown-trust",
@@ -39,6 +40,44 @@ fn main() {
         fs::create_dir_all(&case_dir).unwrap();
         let mut source = source.clone();
         match variant {
+            "ledger-projection" => {
+                let input: PreviewInput = serde_json::from_value(source.clone()).unwrap();
+                let root = tempfile::tempdir().unwrap();
+                let adapter = mailroom::ledger::InstalledLedger::install(root.path().join("private")).unwrap();
+                let guard = adapter.lock().unwrap();
+                let initial = guard.read().unwrap();
+                let mut document = initial.document;
+                document.enabled = true;
+                for (address, status, invoice) in [("active@home.example.test", "active", false), ("retired@home.example.test", "retired", false), ("retired-invoice@work.example.test", "retired", true)] {
+                    document.entries.push(serde_json::from_value(json!({"address":address,"service":"Synthetic service", "folder":"Ledger filing","first_seen":"synthetic historical value","note":"synthetic only","status":status,"category":"orders","invoice":invoice})).unwrap());
+                }
+                let snapshot = guard.replace(&initial.content_version, &document).unwrap();
+                let account = mailroom::census::AccountId::new(&input.context.account).unwrap();
+                let store = mailroom::census::EncryptedStore::new(root.path().join("account"), mailroom::census::CensusKeys::derive(&mailroom::census::LocalSecret::random(), &account)).unwrap();
+                store.save(&mailroom::engine::synthetic_census(&input).unwrap()).unwrap();
+                let mut state = store.load_state().unwrap();
+                state.workspace = Some(mailroom::rules::workspace::Workspace {revision:1,input:mailroom::rules::workspace::WorkspaceInput{documents:input.documents,pins:vec![],as_of:input.as_of,baseline:mailroom::rules::proof::Baseline::Current}});
+                let w = &mut state.workspace.as_mut().unwrap().input.documents;
+                let (_, mut overrides) = config::documents(&w.preset_yaml, &w.override_yaml).unwrap();
+                overrides.additions.insert(0, serde_json::from_value(json!({"id":"user.mute.ledger","category":"newsletters","stage":"from","folder":"Quiet","mark_read":true,"when":[{"kind":"list_id_exact","value":"<ledger-muted.example.test>"}]})).unwrap());
+                w.override_yaml = serde_yaml_ng::to_string(&overrides).unwrap();
+                mailroom::ledger::reconcile(&mut state,&snapshot,mailroom::acquisition::Provider::MailboxOrg).unwrap();
+                source["documents"]["override_yaml"] = state.workspace.unwrap().input.documents.override_yaml.into();
+                for (id, recipient, subject, list) in [
+                    ("ledger-active","active@home.example.test","Order",""),
+                    ("ledger-retired","retired@home.example.test","Order",""),
+                    ("ledger-invoice","retired-invoice@work.example.test","Invoice",""),
+                    ("ledger-guard","active@home.example.test","Your login code",""),
+                    ("ledger-override","active@home.example.test","Release","List-Id: <studio.example.net>\n"),
+                    ("ledger-mute","active@home.example.test","Order","List-Id: <ledger-muted.example.test>\n"),
+                    ("ledger-mixed","active@home.example.test, team@work.example.test","Order",""),
+                    ("ledger-unknown","active@unknown.example.test","Order",""),
+                    ("ordinary-classified","other@work.example.test","Invoice",""),
+                ] {
+                    let sender = if id == "ledger-invoice" { "invoicing@separate.example.net" } else { "billing@shop.example.org" };
+                    source["messages"].as_array_mut().unwrap().push(json!({"id":id,"headers":format!("From: {sender}\nDelivered-To: {recipient}\nTo: {recipient}\nSubject: {subject}\n{list}Message-ID: <{id}@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000"),"current_folder":"INBOX"}));
+                }
+            },
             "german-read" => source["documents"]["override_yaml"] = format!("{}\nlayout:\n  language: de\n  personal_root: Beispiel\n  business_root: Büro\n  new_addresses: Neue Adressen\n  retired_addresses: Alte Adressen\n", source["documents"]["override_yaml"].as_str().unwrap().replace("    folder: Studio", "    folder: Stille\n    mark_read: true")).into(),
             "unknown-trust" => source["context"]["recipient_evidence"] = "unknown".into(),
             "gmail-backlog" => source["context"]["engine"] = "gmail_backlog".into(),
@@ -84,6 +123,40 @@ fn main() {
             source["baseline"] = "current".into();
             let input: PreviewInput = serde_json::from_value(source.clone()).unwrap();
             let proof = engine::preview(&input).unwrap();
+            if variant == "ledger-projection" {
+                let decision = &proof.decisions[0];
+                let expected_folder = match fixture["id"].as_str().unwrap() {
+                    "ledger-active" => Some("Personal/Ledger filing"),
+                    "ledger-retired" => Some("Personal/Retired addresses"),
+                    "ledger-invoice" => Some("Business/Retired addresses"),
+                    "ledger-guard" | "ledger-mixed" | "ledger-unknown" => Some("INBOX"),
+                    "ledger-override" => Some("Personal/Releases"),
+                    "ledger-mute" => Some("Personal/Quiet"),
+                    "ordinary-classified" => Some("Business/Money"),
+                    _ => None,
+                };
+                if let Some(folder) = expected_folder {
+                    let actual = serde_json::to_value(&decision.destination).unwrap();
+                    assert_eq!(
+                        actual
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("INBOX"),
+                        folder,
+                        "explicit ledger behavior"
+                    );
+                }
+                if fixture["id"] == "ledger-mute" {
+                    assert!(decision.mark_read);
+                }
+                if fixture["id"] == "ledger-invoice" {
+                    assert_eq!(decision.copies.len(), 1);
+                }
+                if fixture["id"] == "ledger-mixed" || fixture["id"] == "ledger-unknown" {
+                    assert!(decision.copies.is_empty());
+                    assert!(decision.review);
+                }
+            }
             expected.push(serde_json::to_value(&proof.decisions[0]).unwrap());
             fs::write(
                 case_dir.join(format!("{i}.eml")),
@@ -101,7 +174,7 @@ fn main() {
         .unwrap();
     }
     println!(
-        "Synthetic artifacts generated. Twelve variants, 200 independent messages. Artifact {}.",
+        "Synthetic artifacts generated, including private-file ledger projection. Artifact {}.",
         proof.artifact.identity()
     );
 }

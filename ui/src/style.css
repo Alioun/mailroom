@@ -102,3 +102,10 @@ progress { display: block; width: 100%; max-width: 560px; height: 16px; margin-t
   .operations ul { grid-template-columns: 1fr; }
   .filing { max-width: 125px; overflow-wrap: anywhere; text-align: right; }
 }
+
+.account-form { display: grid; gap: 14px; max-width: 560px; margin-block: 24px; }
+.account-form label, .accounts select { display: block; }
+.account-form input, .accounts select { width: 100%; max-width: 560px; font: inherit; padding: 10px; border: 1px solid var(--line); border-radius: 5px; background: white; color: var(--ink); }
+.accounts .census-actions label { min-width: 0; max-width: 100%; }
+.accounts p, .account-addresses label { overflow-wrap: anywhere; }
+.account-addresses { padding-left: 20px; }

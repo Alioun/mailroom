@@ -116,9 +116,10 @@ pub struct MessageRecord {
     pub headers: HeaderRecord,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanState {
+    #[default]
     Idle,
     Running,
     Cancelled,
@@ -181,6 +182,10 @@ pub struct Census {
     pub account: AccountId,
     pub folders: BTreeMap<String, FolderCensus>,
     pub confirmed_own_addresses: BTreeSet<String>,
+    #[serde(default)]
+    pub account_login: Option<String>,
+    #[serde(default)]
+    pub acquisition_state: ScanState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -196,6 +201,8 @@ impl Census {
             account,
             folders: BTreeMap::new(),
             confirmed_own_addresses: BTreeSet::new(),
+            account_login: None,
+            acquisition_state: ScanState::Idle,
         }
     }
 
@@ -221,7 +228,22 @@ impl Census {
     }
 
     pub fn own_address_candidates(&self) -> Vec<AddressCandidate> {
-        let mut candidates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut candidates: BTreeMap<String, BTreeSet<String>> = self
+            .confirmed_own_addresses
+            .iter()
+            .map(|address| {
+                (
+                    address.clone(),
+                    BTreeSet::from(["previously_confirmed".to_owned()]),
+                )
+            })
+            .collect();
+        if let Some(login) = &self.account_login {
+            candidates
+                .entry(login.clone())
+                .or_default()
+                .insert("account_login_unverified".to_owned());
+        }
         for message in self.folders.values().flat_map(|f| f.messages.values()) {
             let h = &message.headers;
             let sources = if h.direction == Direction::Sent {

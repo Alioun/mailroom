@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { ToggleGroup } from '@ark-ui/svelte/toggle-group'
   import Census from './Census.svelte'
+  import Accounts from './Accounts.svelte'
   import { load, evaluate, type Availability, type Sample, type Preview } from './api'
   import { strings, operationLabels } from './strings'
   let languages = $state(['en'])
@@ -49,7 +50,8 @@
     </ToggleGroup.Root>
   </header>
   <main>
-    <div class="intro"><h1>{t.title}</h1><p>{t.intro}</p><div class="status-line"><span class="source">{t.synthetic}</span><span>{t.locked}</span></div></div>
+    <div class="intro"><h1>{t.title}</h1><p>{t.intro}</p><div class="status-line"><span class="source">{lang === 'en' ? 'Local interface' : 'Lokale Oberfläche'}</span><span>{t.locked}</span></div></div>
+    <Accounts {lang} />
     <Census {lang} />
     <section class="sample" aria-labelledby="sample-heading">
       <div><h2 id="sample-heading">{t.sample}</h2><p>{t.sampleDetail}</p></div>

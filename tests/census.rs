@@ -282,3 +282,36 @@ fn synthetic_scan_cancels_resumes_from_encrypted_snapshot_and_reports_failure() 
     while demo.advance(resumed).unwrap() {}
     assert_eq!(demo.status().completed, 8);
 }
+
+#[test]
+fn confirmed_ownership_remains_visible_after_all_evidence_messages_vanish() {
+    let mut census = populated();
+    census
+        .reconcile_folder("INBOX", 77, BTreeSet::new())
+        .unwrap();
+    let candidate = census
+        .own_address_candidates()
+        .into_iter()
+        .find(|a| a.address == "owner@example.test")
+        .unwrap();
+    assert!(candidate.confirmed);
+    assert!(candidate.evidence.contains("previously_confirmed"));
+    census.confirm_address("owner@example.test", false).unwrap();
+    assert!(census.confirmed_own_addresses.is_empty());
+}
+
+#[test]
+fn reopening_an_interrupted_account_acquisition_cannot_report_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = EncryptedStore::new(
+        dir.path().to_owned(),
+        CensusKeys::derive(&secret(), &account()),
+    )
+    .unwrap();
+    let mut census = populated();
+    census.acquisition_state = ScanState::Running;
+    store.save(&census).unwrap();
+    let restored = store.load().unwrap();
+    assert_eq!(restored.acquisition_state, ScanState::Cancelled);
+    assert_eq!(restored.folders, census.folders);
+}

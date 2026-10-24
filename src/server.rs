@@ -1,3 +1,4 @@
+mod accounts;
 use crate::{
     census::{
         CensusError,
@@ -29,13 +30,15 @@ pub const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; 
 struct AppState {
     token: Zeroizing<String>,
     demo: Mutex<DemoCensus>,
+    accounts: accounts::AccountController,
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(synthetic_accounts: bool) -> Self {
         let mut random = Zeroizing::new([0; 32]);
         OsRng.fill_bytes(random.as_mut());
         Self {
+            accounts: accounts::AccountController::new(synthetic_accounts),
             token: Zeroizing::new(data_encoding::HEXLOWER.encode(random.as_ref())),
             demo: Mutex::new(DemoCensus::new().expect("synthetic sandbox must be writable")),
         }
@@ -121,7 +124,7 @@ struct OperationRequest {
 
 async fn operation(Json(input): Json<OperationRequest>) -> Response {
     let availability = policy::authorize(input.operation);
-    if !availability.allowed {
+    if !availability.allowed || matches!(availability.effect, policy::Effect::AccountRead) {
         return (StatusCode::FORBIDDEN, Json(availability)).into_response();
     }
     (
@@ -210,7 +213,15 @@ async fn demo_confirm(
 }
 
 pub fn app() -> Router {
-    let state = Arc::new(AppState::new());
+    build_app(false)
+}
+
+pub fn synthetic_account_app() -> Router {
+    build_app(true)
+}
+
+fn build_app(synthetic_accounts: bool) -> Router {
+    let state = Arc::new(AppState::new(synthetic_accounts));
     Router::new()
         .route(
             "/api/session",
@@ -234,6 +245,14 @@ pub fn app() -> Router {
             "/api/availability",
             get(|| async { Json(policy::OPERATIONS.map(policy::authorize)) }),
         )
+        .route("/api/accounts/status", get(accounts::status))
+        .route("/api/accounts/list", post(accounts::list))
+        .route("/api/accounts/connect", post(accounts::connect))
+        .route("/api/accounts/synthetic", post(accounts::synthetic))
+        .route("/api/accounts/scan", post(accounts::scan))
+        .route("/api/accounts/cancel", post(accounts::cancel))
+        .route("/api/accounts/open", post(accounts::open))
+        .route("/api/accounts/confirm", post(accounts::confirm))
         .route("/api/preview", post(preview))
         .route("/api/operations", post(operation))
         .route("/api/census/demo", get(demo_status))
@@ -251,6 +270,9 @@ pub fn app() -> Router {
 
 pub async fn run() -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(ADDRESS).await?;
-    println!("mailroom synthetic preview: {ORIGIN}");
-    axum::serve(listener, app()).await
+    let synthetic = std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--synthetic-accounts");
+    println!("mailroom local interface: {ORIGIN}");
+    axum::serve(listener, build_app(synthetic)).await
 }

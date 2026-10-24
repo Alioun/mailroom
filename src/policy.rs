@@ -63,10 +63,7 @@ pub fn authorize(operation: Operation) -> Availability {
     };
     let (allowed, reason) = match effect {
         Effect::SyntheticRead => (true, "Bundled synthetic data only"),
-        Effect::AccountRead => (
-            false,
-            "Unavailable: no account adapters or credentials in this unit",
-        ),
+        Effect::AccountRead => (true, "Owner-run TLS IMAP discovery and header reads only"),
         Effect::AccountWrite => (
             false,
             "Denied: all real-account mutations are locked in this unit",
@@ -78,4 +75,20 @@ pub fn authorize(operation: Operation) -> Availability {
         allowed,
         reason,
     }
+}
+
+// Only this module issues the provider-bound read capability. HTTP bodies cannot deserialize it.
+pub(crate) struct ReadPermit(crate::acquisition::Provider);
+impl ReadPermit {
+    pub(crate) fn provider(&self) -> crate::acquisition::Provider {
+        self.0
+    }
+}
+pub(crate) fn read_permit(
+    provider: crate::acquisition::Provider,
+) -> Result<ReadPermit, crate::acquisition::AcquisitionError> {
+    if !authorize(Operation::Census).allowed {
+        return Err(crate::acquisition::AcquisitionError::InvalidInput);
+    }
+    Ok(ReadPermit(provider))
 }

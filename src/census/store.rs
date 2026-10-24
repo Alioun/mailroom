@@ -85,6 +85,16 @@ pub struct EncryptedStore {
 
 impl EncryptedStore {
     pub fn new(directory: PathBuf, keys: CensusKeys) -> Result<Self, CensusError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&directory)
+                .map_err(|_| CensusError::Storage)?;
+        }
+        #[cfg(not(unix))]
         fs::create_dir_all(&directory).map_err(|_| CensusError::Storage)?;
         let metadata = fs::symlink_metadata(&directory).map_err(|_| CensusError::Storage)?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -220,6 +230,9 @@ impl EncryptedStore {
             return Err(CensusError::AccountMismatch);
         }
         // An interrupted scan can resume, but reopening cannot imply a running worker.
+        if census.acquisition_state == super::ScanState::Running {
+            census.acquisition_state = super::ScanState::Cancelled;
+        }
         for folder in census.folders.values_mut() {
             if folder.state == super::ScanState::Running {
                 folder.state = super::ScanState::Cancelled;

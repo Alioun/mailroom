@@ -1,6 +1,6 @@
 # Census implementation and remaining work
 
-The current executable exposes a synthetic census only. It does not access an account, credential backend, personal configuration or mail dataset. The account actions remain unavailable in the interface and denied by the Rust policy.
+The executable supports an owner-run read-only account path and two independent synthetic paths. The owner can connect mailbox.org or Gmail, run or resume header acquisition, cancel it and inspect encrypted saved data. The complete census and personal workflow remain incomplete. Verification uses fake credentials and local synthetic TLS servers. No real account or OS credential backend has been exercised by an agent.
 
 ## Ownership and data flow
 
@@ -24,13 +24,13 @@ The file contains the versioned `MAILROOM-CENSUS` marker, a fresh random 96-bit 
 
 Saving authenticates any existing file before replacement. It serializes the in-memory SQLite database, encrypts it, writes only ciphertext to a private temporary file, synchronizes that file, atomically replaces the account file and synchronizes the directory. Interrupted staging leaves the previous snapshot readable. Orphan staging files are ignored. Wrong keys, account mixups, unknown versions and tampering fail without replacing the existing file. Plaintext SQLite, WAL files, plaintext temporary copies and raw message logs are never written by this implementation.
 
-On Unix the store enforces directory mode 0700 and file mode 0600. Windows ACL enforcement is not implemented or verified. The library currently accepts an application-supplied directory. Production per-user data-directory selection, an OS-backed master secret, account forgetting, key rotation and large-census behavior remain incomplete. The serialized SQLite snapshot is limited to 128 MiB. Saves rewrite the whole snapshot. The caller must serialize writes to an account store. The demo does so through one server mutex.
+On Unix the store enforces directory mode 0700 and file mode 0600. Windows ACL enforcement is not implemented or verified. Production storage uses `~/Library/Application Support/mailroom/` on macOS, `%LOCALAPPDATA%\mailroom\` on Windows, or `$XDG_DATA_HOME/mailroom/` on Linux with the usual user-data fallback. Account forgetting, key rotation and large-census behavior remain incomplete. The serialized SQLite snapshot is limited to 128 MiB. Saves rewrite the whole snapshot. The caller must serialize writes to an account store. The demo does so through one server mutex.
 
 ## Synthetic interface and report
 
 The demo processes eight bundled synthetic headers in bounded steps. Each completed step saves the actual encrypted snapshot. Resume reopens that file. Cancellation preserves records. A generation identifier prevents an old worker from advancing a restarted scan. Simulated failure stops after two saved headers. The demo's master secret stays in memory and disappears at server exit. No real credential backend is invoked.
 
-The local interface shows progress, decoded Subjects, sender details and own-address confirmation. It supports English and German. Connection to real accounts is visibly unavailable.
+The local interface supports English and German. The eight-header demo shows progress, decoded Subjects, sender details and own-address confirmation. Owner account controls are separate from this demo.
 
 The summary is deliberately conservative. Its approval list is empty, so it emits no clear sender, address, domain, folder, Subject or unsubscribe target. Placeholder values use a kind label and six lowercase base32 characters from account-scoped HMAC-SHA256. Normalization trims whitespace and lowercases the value. Confirmed addresses use separate alias and own-domain placeholders. Senders with fewer than three messages are pooled. This is a preview, not the complete required summary.
 
@@ -38,16 +38,51 @@ The summary is deliberately conservative. Its approval list is empty, so it emit
 
 The server generates a random token per launch and keeps it out of stdout, URLs, arguments and persistent browser storage. A same-origin session bootstrap supplies it to the interface. All subsequent API requests require `X-Mailroom-Token`. Host, Origin and fetch-site checks apply to bootstrap and API requests. There is no wildcard CORS.
 
-Synthetic census requests accept only a demo mode, cancellation or confirmation of a discovered synthetic address. They reject account identifiers, credential fields, source URLs and authorization fields. No request can enable an account adapter or override the policy. All account operations remain denied.
+Synthetic census requests accept only a demo mode, cancellation or confirmation of a discovered synthetic address. They reject account identifiers, credential fields, source URLs and authorization fields. No synthetic request can enable an account adapter or override the policy. All eight categories of account mutation remain denied. Dedicated owner account routes permit read-only work; the generic operations route never starts account work.
+
+## Owner account persistence and credentials
+
+`acquisition::Accounts` stores one private metadata file per random opaque account ID. Metadata contains the selected provider, login and two credential references. It contains no password or census key. On macOS metadata uses `~/.config/mailroom/`. Linux uses the per-user config directory and Windows uses the roaming application-data directory. Census ciphertext stays in the separate data directory described above.
+
+The default backend uses `keyring` 4.2's binary secret API for macOS Keychain, Windows Credential Manager and Linux Secret Service. It initializes only when an owner account action needs credentials. Server construction, session bootstrap, status and both synthetic paths never initialize it. Loading the saved-account list reads metadata only and requires an explicit UI action. Connecting saves the supplied existing password directly to the backend, generates a random 32-byte local secret in the same backend, creates the encrypted census, and then attempts TLS authentication and folder discovery. A failed connection can therefore leave a saved account ready for a later scan retry. Reconnecting creates a separate account ID; it does not replace an existing account's credential or key.
+
+Every later census open or scan requires the existing local secret and an existing readable snapshot. A missing credential, missing snapshot, bad key or unreadable snapshot stops the action. Nothing silently generates a replacement key. Fake-backend tests verify isolation and reconstruction, including two actual subprocesses reopening one synthetic account.
+
+Application secret values redact Debug and zeroize their byte buffers on drop. Derived keys retain the existing zeroization. Native IMAP, TLS, HTTP and browser implementations can create transient copies that these wrappers cannot promise to zeroize. Passwords never enter application logs, returned errors, argv, URLs, config or persistent browser storage. The hidden UI input clears on submission. OS prompts and an unlocked credential store are owner prerequisites. No agent runs those steps. Additional password-manager adapters are deferred. This does not isolate mutually untrusted processes running as the same OS user.
+
+Account operations serialize through one server-side operation lock. One job may run at a time. The fixed listening port prevents two normal server instances from running simultaneously. Direct library callers must serialize access themselves. Account creation is not transactional across the OS backend and filesystem; interruption can leave orphan references or a ciphertext file. Recovery and cleanup of those orphans are not implemented. Existing readable accounts are not overwritten.
+
+## Read-only IMAP acquisition
+
+Only the policy module constructs the internal provider-bound `ReadPermit`. Production transport construction requires that type. The transport and its IMAP session are private. Its only operations expose folder discovery, complete UID inventory, metadata and explicit header fields. HTTP accepts typed account IDs and provider choices. It accepts no host, port, TLS override, raw command, authority or source URL.
+
+The fixed endpoints are `imap.mailbox.org:993` and `imap.gmail.com:993`. `native-tls` validates certificates and hostnames before authentication. The pinned `imap` 3.0.0-alpha.15 client and `imap-proto` parser handle responses and literals. This version is a prerelease; the adapter is intentionally private and tested against actual emitted commands. The application does not implement its own IMAP response framing. Modified UTF-7 folder and label payloads use a bounded codec with Base64 and UTF-16 validation. Unicode names are retained locally, with no guesses based on translated folder names.
+
+The transport requests `LIST` with `RETURN (SPECIAL-USE)` when advertised. A non-Gmail server without SPECIAL-USE is rejected rather than guessing folder roles. Gmail also requires X-GM-EXT-1. Folders marked NoSelect, Junk, Trash or Drafts are excluded. Gmail uses its All Mail special-use folder once when available; otherwise it scans eligible folders and deduplicates by X-GM-MSGID. Message labels also exclude Spam, Junk, Trash and Drafts. Sent direction comes from the Sent attribute or Gmail's system Sent label.
+
+Each folder opens with `EXAMINE`. The adapter requires the server's read-only response, nonzero UIDVALIDITY and a successful `UID SEARCH ALL` whose size matches the EXAMINE count. Missing responses or changing counts cause a retry. Metadata requests contain only UID, size, internal date, flags and the Gmail message ID, thread ID and labels when applicable. Metadata refresh covers existing UIDs on every scan. New header requests contain explicit `BODY.PEEK[HEADER.FIELDS (...)]<0.65537>`. Headers over 64 KiB fail. No body or attachment section is requested. There is no public raw-session or arbitrary-command method, and no reachable mutation command, SMTP or ManageSieve implementation.
+
+The adapter uses one TLS connection at a time, batches of at most 25 UIDs, a 4 MiB response budget per command, a 15-second socket timeout and a command deadline checked between reads. Inventories are limited to 250,000 UIDs per folder and LIST to 10,000 folders. Acquisition pauses at least 100 ms between batches. TLS, protocol and incomplete-inventory failures retry at most twice after 1 and 2 seconds. Authentication, credential and storage failures do not retry. Cancellation is checked between reads, batches and backoff intervals. An in-flight OS DNS lookup or socket operation can delay cancellation; DNS uses the system resolver and is not independently timed out.
+
+Reconciliation begins only after a complete folder UID and metadata inventory. It resumes missing UID holes, removes vanished records, clears records on UIDVALIDITY change, and refreshes flags, labels and direction. Removed folders disappear only after all selected folders finish. Each header batch checkpoints the encrypted snapshot. A persisted account acquisition state becomes complete only after the entire selected inventory finishes. Reopening an interrupted running state marks it cancelled. A failure retains completed valid checkpoints, reports failure and leaves unvisited saved folders intact. A resumed scan re-inventories the provider rather than trusting a previous last UID. Gmail label topology and skipped-folder counts are not separately persisted; reports currently see canonical scanned folders and per-message labels.
+
+Confirmed own addresses survive UID resets and vanished evidence and remain visible for later revocation. The encrypted account login is an unverified candidate. To/Cc, login and relay claims assign no personal or business role, forwarding permission or accounting behavior. DKIM unsubscribe coverage remains unknown. No transport result proves OX coexistence, delivery-recipient behavior or accounting acceptance.
+
+## Synthetic account verification
+
+Starting the binary with `--synthetic-accounts` installs a fake credential backend and a bundled 100-header source in a temporary directory. The UI clearly identifies this mode and offers an Add synthetic account button instead of a password form. HTTP cannot switch modes or provide fake endpoints. The normal eight-header demo remains separate, with independent ephemeral keys. Both synthetic account credentials and files disappear with the process.
+
+`cargo test --locked` covers the fake backend, actual subprocess restart, key loss, account isolation, exact read-only TLS commands, fragmented header literals, Unicode folders and labels, certificate and hostname rejection, redacted authentication failure, response-size enforcement, cancellation, reconciliation, metadata refresh, Gmail exclusions and deduplication. HTTP tests exercise the fake account lifecycle. `ui/scripts/verify-acquisition.mjs` drives the built synthetic account UI. `ui/scripts/verify-census.mjs` retains the original demo checks. Neither browser flow touches a provider or the OS backend.
 
 ## Required follow-up units
 
-- Implement the OS credential backend and person-run connection interface with hidden input or stored references. Wire production census keys to that backend and select the per-user data directory. No real account path exists yet.
-- Add an internal read capability and a structurally read-only IMAP adapter. Require validated TLS, EXAMINE, explicit BODY.PEEK header fields, bounded reads, cancellation and sanitized failures. Test actual commands against fake endpoints before enabling owner-run acquisition.
-- Connect UID reconciliation to complete server inventories, including metadata refresh, removed folders, vanished messages and UIDVALIDITY resets. Implement Gmail All Mail selection, deduplication, labels and Junk/Trash exclusion. The current code provides only local checkpoint reconciliation.
+- Validate the OS adapters and real provider behavior through an owner-run process. Current evidence establishes synthetic behavior only. Windows ACL enforcement and cross-platform runtime behavior remain unverified.
+- Add credential update, account forgetting, key rotation, interrupted-creation cleanup and a recovery interface. The current UI retries scans with existing stored credentials; it does not replace them.
+- Verify large-census performance and replace whole-snapshot rewrites if needed. The existing 128 MiB limit still applies.
 - Add Takeout MBOX import without body or attachment persistence.
-- Pin a PSL snapshot before deriving registrable domains. The current model explicitly stores no registrable domain.
+- Pin a PSL snapshot before deriving registrable domains. The model stores no registrable domain.
 - Implement trusted authentication provenance and signature correlation. Preserve unknown coverage when evidence is insufficient.
-- Add sender classification, ESP attribution, Sent-derived correspondence, full monthly/read/flag/list statistics, approved clear-value handling and the repeated-keyword summary rules. Add report approval and export. Until then the summary omits all clear values and Subjects.
-- Add unsubscribe logs and backlog journals with those concrete workflows. They are absent from this schema.
-- Verify production persistence, credentials, account connection and acquisition through synthetic credential backends and fake TLS endpoints. Current verification covers only the local slice.
+- Add sender classification, ESP attribution, Sent-derived correspondence, full monthly/read/flag/list statistics, approved clear-value handling and repeated-keyword summary rules. Add report approval and export. The synthetic summary continues to omit all clear values and Subjects. Production controls currently expose local details only.
+- Add unsubscribe logs and backlog journals with those workflows. They are absent from this schema.
+
+The person-run `scripts/connect-account.sh` walkthrough starts no credentialed step automatically and reads no secret. It guides an existing local launch and private UI entry without requesting provider setting changes. Its shared wizard library retains unused helpers; shellcheck excludes SC2329 for those template functions only.

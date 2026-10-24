@@ -6,24 +6,22 @@
   const strings = {
     en: {
       title: 'Header census', detail: 'Explore eight invented headers. This demo parses mail, checkpoints an encrypted SQLite snapshot, and resumes after cancellation or a simulated failure. It never connects to an account.',
-      unavailable: 'Connect a real account', unavailableDetail: 'Unavailable until the OS credential adapter and read-only IMAP acquisition are implemented.',
       start: 'Start synthetic census', resume: 'Resume synthetic census', cancel: 'Cancel census', failure: 'Simulate scan error',
       progress: 'Scan progress', messages: 'headers saved', idle: 'Ready for synthetic data', running: 'Scanning synthetic headers', cancelled: 'Cancelled. Saved headers retained.', complete: 'Synthetic census complete', failed: 'Synthetic scan stopped',
       addresses: 'Review discovered addresses', addressDetail: 'Evidence suggests these may be own addresses. To and Cc are unverified candidates. Confirmation does not assign a personal or business role.',
       confirm: 'Confirm own address', local: 'Local header details', localDetail: 'Full Subjects and sender addresses stay in this local view. The report below omits them.',
       received: 'Received', sent: 'Sent', unknown: 'DKIM coverage unknown', summary: 'Summary preview', summaryDetail: 'All values are keyed placeholders. No clear values are approved. Review a report before sharing it. Full monthly and sender statistics are pending.',
-      limitations: 'No live acquisition, Takeout import, pinned PSL, trusted DKIM correlation, sender classification or complete summary yet. The temporary demo key disappears when the server stops.',
+      limitations: 'No Takeout import, pinned PSL, trusted DKIM correlation, sender classification or complete summary yet. The temporary demo key disappears when the server stops.',
       retry: 'Reload census status', loadError: 'Could not load the local census.',
     },
     de: {
       title: 'Kopfzeilen erfassen', detail: 'Acht erfundene Kopfzeilen erkunden. Das Beispiel verarbeitet Nachrichten, speichert verschlüsselte SQLite-Prüfpunkte und setzt nach Abbruch oder simuliertem Fehler fort. Es verbindet kein Konto.',
-      unavailable: 'Echtes Konto verbinden', unavailableDetail: 'Nicht verfügbar, bis Betriebssystem-Zugangsdaten und schreibgeschützte IMAP-Erfassung implementiert sind.',
       start: 'Synthetische Erfassung starten', resume: 'Synthetische Erfassung fortsetzen', cancel: 'Erfassung abbrechen', failure: 'Erfassungsfehler simulieren',
       progress: 'Fortschritt', messages: 'Kopfzeilen gespeichert', idle: 'Bereit für synthetische Daten', running: 'Synthetische Kopfzeilen werden erfasst', cancelled: 'Abgebrochen. Gespeicherte Kopfzeilen bleiben erhalten.', complete: 'Synthetische Erfassung abgeschlossen', failed: 'Synthetische Erfassung gestoppt',
       addresses: 'Entdeckte Adressen prüfen', addressDetail: 'Die Belege deuten auf eigene Adressen hin. An und Cc sind unbestätigte Kandidaten. Eine Bestätigung weist keine private oder geschäftliche Rolle zu.',
       confirm: 'Eigene Adresse bestätigen', local: 'Lokale Kopfzeilendetails', localDetail: 'Vollständige Betreffzeilen und Absenderadressen bleiben in dieser lokalen Ansicht. Der Bericht darunter lässt sie aus.',
       received: 'Empfangen', sent: 'Gesendet', unknown: 'DKIM-Abdeckung unbekannt', summary: 'Berichtsvorschau', summaryDetail: 'Alle Werte sind schlüsselgebundene Platzhalter. Keine Klartextwerte sind freigegeben. Prüfe den Bericht vor dem Teilen. Vollständige Monats- und Absenderstatistiken fehlen noch.',
-      limitations: 'Noch keine echte Erfassung, Takeout-Import, fixierte PSL, vertrauenswürdige DKIM-Zuordnung, Absenderklassifizierung oder vollständiger Bericht. Der temporäre Beispielschlüssel verschwindet beim Serverstopp.',
+      limitations: 'Noch kein Takeout-Import, fixierte PSL, vertrauenswürdige DKIM-Zuordnung, Absenderklassifizierung oder vollständiger Bericht. Der temporäre Beispielschlüssel verschwindet beim Serverstopp.',
       retry: 'Erfassungsstatus neu laden', loadError: 'Die lokale Erfassung konnte nicht geladen werden.',
     },
   }
@@ -62,10 +60,6 @@
   <h2 id="census-heading">{t.title}</h2>
   <p>{t.detail}</p>
   <p class="source">{lang === 'en' ? 'Synthetic data only' : 'Nur synthetische Daten'}</p>
-  <div class="census-actions">
-    <button disabled>{t.unavailable}</button>
-    <p class="help">{t.unavailableDetail}</p>
-  </div>
   {#if error}<div class="error" role="alert"><p>{error}</p><button onclick={reload}>{t.retry}</button></div>{/if}
   {#if census}
     <div class="census-actions">

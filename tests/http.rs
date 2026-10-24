@@ -51,7 +51,9 @@ async fn all_account_mutations_are_denied_through_http() {
         if matches!(authorization.effect, Effect::SyntheticRead) {
             continue;
         }
-        assert!(!authorization.allowed);
+        if matches!(authorization.effect, Effect::AccountWrite) {
+            assert!(!authorization.allowed);
+        }
         let body = serde_json::json!({"operation":operation}).to_string();
         let response = request(
             "/api/operations",
@@ -263,4 +265,130 @@ async fn census_http_cannot_accept_account_source_or_authority_injection() {
             StatusCode::UNPROCESSABLE_ENTITY
         );
     }
+}
+
+#[tokio::test]
+async fn synthetic_account_flow_uses_fake_credentials_and_preserves_http_authority_boundaries() {
+    let app = server::synthetic_account_app();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/session")
+                .header("host", server::ADDRESS)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let session: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let token = session["token"].as_str().unwrap();
+    async fn post(
+        app: &axum::Router,
+        token: &str,
+        action: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/accounts/{action}"))
+                    .header("host", server::ADDRESS)
+                    .header("x-mailroom-token", token)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        (status, value)
+    }
+    async fn status(app: &axum::Router, token: &str) -> serde_json::Value {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/accounts/status")
+                    .header("host", server::ADDRESS)
+                    .header("x-mailroom-token", token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+    }
+    async fn terminal(app: &axum::Router, token: &str) -> serde_json::Value {
+        for _ in 0..100 {
+            let result = status(app, token).await;
+            if result["job"]["progress"]["state"] != "running" {
+                return result;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("Synthetic account did not finish");
+    }
+    for action in [
+        "connect",
+        "scan",
+        "open",
+        "confirm",
+        "cancel",
+        "list",
+        "synthetic",
+    ] {
+        let (code, value) = post(&app, token, action, serde_json::json!({"host":"fake.invalid", "password": {"synthetic-sensitive-value": true}, "allowed":true})).await;
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!value.to_string().contains("synthetic-sensitive-value"));
+    }
+    assert_eq!(
+        post(&app, token, "synthetic", serde_json::json!({}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let connected = terminal(&app, token).await;
+    assert_eq!(connected["job"]["progress"]["state"], "complete");
+    let id = connected["job"]["account"]["id"].as_str().unwrap();
+    let account = serde_json::json!({"account":id});
+    post(&app, token, "scan", account.clone()).await;
+    assert_eq!(
+        post(&app, token, "scan", account.clone()).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    post(&app, token, "cancel", serde_json::json!({})).await;
+    assert_eq!(
+        terminal(&app, token).await["job"]["progress"]["state"],
+        "cancelled"
+    );
+    post(&app, token, "scan", account.clone()).await;
+    let scanned = terminal(&app, token).await;
+    assert_eq!(scanned["job"]["progress"]["state"], "complete");
+    assert_eq!(scanned["job"]["progress"]["saved"], 100);
+    let (code, view) = post(&app, token, "open", account.clone()).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(view["addresses"][0]["confirmed"], false);
+    let (_, confirmed) = post(
+        &app,
+        token,
+        "confirm",
+        serde_json::json!({"account":id,"address":"owner@example.test","confirmed":true}),
+    )
+    .await;
+    assert!(
+        confirmed["addresses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["address"] == "owner@example.test" && a["confirmed"] == true)
+    );
+    assert!(policy::authorize(Operation::Census).allowed);
+    assert!(!policy::authorize(Operation::ChangeFlags).allowed);
 }

@@ -17,7 +17,7 @@ try {
   await page.goto('http://127.0.0.1:4173')
   const start = page.getByRole('button', { name: 'Start synthetic census', exact: true })
   await start.waitFor()
-  assert.equal(await page.getByRole('button', { name: 'Connect a real account', exact: true }).isDisabled(), true)
+  await page.getByRole('heading', { name: 'Connect an account', exact: true }).waitFor()
   await start.click()
   await page.waitForFunction(() => Number(document.querySelector('progress')?.value) >= 1)
   assert.ok(Number(await page.getByRole('progressbar').getAttribute('value')) < 8)

@@ -18,18 +18,22 @@ assert.equal(result.decisions[1].destination.name, 'Reading')
 assert.equal(result.decisions[3].destination.kind, 'inbox')
 const availability = await (await local('/api/availability')).json()
 let denied = 0
-for (const action of availability.filter(a => a.effect !== 'synthetic_read')) {
+for (const action of availability.filter(a => a.effect === 'account_write')) {
   assert.equal(action.allowed, false)
   assert.equal((await post('/api/operations', { operation: action.operation })).status, 403)
   denied++
 }
-assert.equal(denied, 10)
+assert.equal(denied, 8)
+for (const action of ['connect', 'census']) {
+  assert.equal(availability.find(a => a.operation === action).allowed, true)
+  assert.equal((await post('/api/operations', { operation: action })).status, 403)
+}
 assert.equal((await post('/api/operations', { operation: 'send_message', synthetic: true, allowed: true })).status, 422)
 assert.equal((await post('/api/preview', sample, { Origin: 'https://foreign.example' })).status, 403)
 assert.equal((await post('/api/preview', sample, { 'Sec-Fetch-Site': 'cross-site' })).status, 403)
 assert.equal((await post('/api/preview', sample, { 'Content-Type': 'text/plain' })).status, 415)
 assert.equal((await post('/api/preview', 'x'.repeat(262145))).status, 413)
-console.log('PASS: real HTTP preview, exact counts, 10 denied account operations, authorization injection, Origin, fetch-site, content type, body limit and CSP')
+console.log('PASS: real HTTP preview, exact counts, 8 denied account mutations, authorization injection, Origin, fetch-site, content type, body limit and CSP')
 
 assert.equal((await fetch(base + '/api/census/demo')).status, 403)
 assert.equal((await fetch(base + '/api/census/demo', { headers: { 'X-Mailroom-Token': 'invalid' } })).status, 403)

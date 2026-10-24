@@ -67,3 +67,30 @@ export async function censusAction(action: 'start' | 'cancel' | 'confirm', input
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
   })))
 }
+
+const account = z.object({ id: z.string(), provider: z.enum(['mailbox_org', 'gmail']), login: z.string() })
+const accountStatus = z.object({
+  synthetic: z.boolean(),
+  job: z.object({ account: account.nullable(), progress: z.object({ state: z.enum(['idle', 'running', 'cancelled', 'complete', 'failed']), saved: z.number(), folders: z.number() }), error: z.string().nullable() }).nullable(),
+})
+const accountView = z.object({
+  addresses: censusStatus.shape.addresses,
+  census: z.object({ account: z.string(), acquisition_state: censusStatus.shape.state, folders: z.record(z.string(), z.object({
+    uidvalidity: z.number(), state: censusStatus.shape.state,
+    messages: z.record(z.string(), z.object({ uid: z.number(), headers: z.object({ subject: z.string(), direction: z.enum(['received', 'sent']) }) })),
+  })) }),
+})
+export type Account = z.infer<typeof account>
+export type AccountStatus = z.infer<typeof accountStatus>
+export type AccountView = z.infer<typeof accountView>
+async function accountPost(action: string, input: unknown): Promise<unknown> {
+  return responseJson(await localFetch(`/api/accounts/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) }))
+}
+export async function readAccountStatus(): Promise<AccountStatus> { return accountStatus.parse(await responseJson(await localFetch('/api/accounts/status'))) }
+export async function listAccounts(): Promise<Account[]> { return z.array(account).parse(await accountPost('list', {})) }
+export async function connectAccount(input: { provider: Account['provider']; login: string; password: string }): Promise<AccountStatus> { return accountStatus.parse(await accountPost('connect', input)) }
+export async function syntheticAccount(): Promise<AccountStatus> { return accountStatus.parse(await accountPost('synthetic', {})) }
+export async function scanAccount(account: string): Promise<AccountStatus> { return accountStatus.parse(await accountPost('scan', { account })) }
+export async function cancelAccount(): Promise<AccountStatus> { return accountStatus.parse(await accountPost('cancel', {})) }
+export async function openAccount(account: string): Promise<AccountView> { return accountView.parse(await accountPost('open', { account })) }
+export async function confirmAccount(account: string, address: string, confirmed: boolean): Promise<AccountView> { return accountView.parse(await accountPost('confirm', { account, address, confirmed })) }

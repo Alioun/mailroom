@@ -1,6 +1,6 @@
 # mailroom
 
-Preview deterministic mail rules locally with synthetic header fixtures. This first unit has a Rust compiler and HTTP server, a Svelte interface, and Ark UI controls. It does not connect to accounts or authorize real writes.
+Inspect a synthetic header census and preview deterministic mail rules locally. The Rust core serves a Svelte interface with Ark UI controls. The census demonstrates Unicode parsing, encrypted SQLite snapshots, cancellation, resume and a conservative summary. Real account connection and acquisition remain unavailable. All account writes remain denied.
 
 ## Run locally
 
@@ -14,6 +14,8 @@ Open <http://127.0.0.1:4173>. The launcher installs locked UI dependencies, buil
 
 Click **Run sample preview**. The six bundled messages produce four filings, two Inbox retentions, and four independent copy actions. Turn off **Apply sample overrides** and run again to compare the preset. Switch between English and German at the top. Sample subjects, folders and addresses are invented demonstration data, not recommended personal settings.
 
+Click **Start synthetic census** to parse eight invented headers. Cancel and resume the scan, confirm an own-address candidate, inspect local header details, and open **Summary preview**. **Simulate scan error** stops after two saved headers. The normal action resumes them. Demo snapshots are encrypted in a temporary sandbox with a key held only in memory. They are not a real account census and cannot resume across server restarts.
+
 ## Verify the unit
 
 ```sh
@@ -23,13 +25,16 @@ cargo test --locked
 npm --prefix ui run check
 npm --prefix ui run build
 node scripts/verify-http.mjs
+node ui/scripts/verify-census.mjs
 ```
 
-The last command requires the running server. It verifies a real preview and direct denial of every account operation, foreign origins, invalid content types, excessive bodies and caller-supplied authorization fields.
+The last two commands require the running server and must run sequentially because they operate the same synthetic census. The HTTP script checks the foundation preview, denied account operations, launch tokens, cancellation, encrypted resume, failure recovery and summary privacy. The browser script exercises the built interface and saves screenshots under `.audit/census-browser/`. It requires Playwright Chromium, installed with `npm --prefix ui exec playwright install chromium`.
+
+See [Census implementation and remaining work](docs/census.md) for the data model, encrypted file format and incomplete capabilities.
 
 ## Supported rule model
 
-[examples/sample.json](examples/sample.json) is the complete example request. Send it to `POST /api/preview` with `Content-Type: application/json`. `GET /api/sample` returns the same fixture. `GET /api/availability` returns the central policy. `POST /api/operations` accepts only an `operation` enum and denies all account operations.
+[examples/sample.json](examples/sample.json) is the complete example request. `GET /api/session` bootstraps a per-launch token. Subsequent API calls require it in `X-Mailroom-Token`. Send the fixture to `POST /api/preview` with `Content-Type: application/json`. `GET /api/sample` returns the same fixture. `GET /api/availability` returns the central policy. `POST /api/operations` accepts only an `operation` enum and denies all account operations. Tokens stay in process and browser memory. The launcher and verification scripts never print them.
 
 The preset has an ID, a nonzero major version, filing rules and copy rules. Overrides pin that ID and major version. They can patch an existing filing rule's destination, conditions or enabled state and add filing rules. Unknown patch IDs, duplicate IDs, empty patches, invalid destinations, unknown JSON fields and unsupported conditions fail the request. Category patches, renamed-ID migration and copy-rule overrides are outside this subset.
 
@@ -43,8 +48,8 @@ Every matching copy rule runs before filing, including before guard retention. C
 
 This is compiled-subset evaluation, not Sieve execution or provider verification. It accepts at most 200 header-only messages and 100 rules per request. Headers must be ASCII, at most 16 KiB per message, with one bare From mailbox. Folded headers are unfolded. Duplicate headers, MIME encoded words, bodies, display names, non-example address domains, envelope tests, regex and arbitrary Sieve are rejected or unsupported. Sender, recipient, condition and copy addresses must use reserved example domains. No message content is stored.
 
-Connection, header census, pinned-message proof, deployment, journaled sorting, undo, unsubscribe, address policy and daily-use readiness are unavailable. There are no provider adapters, credentials, write-enable flags or caller-supplied source URLs. The central policy classifies synthetic reads, account reads and account writes. It denies rule upload and activation, folder creation, moves, flags, forwarding changes, sends and unsubscribe requests. Account reads are also unavailable in this unit.
+Real connection and header acquisition, pinned-message proof, deployment, journaled sorting, undo, unsubscribe, address policy and daily-use readiness are unavailable. There are no provider adapters, credential-store calls, write-enable flags or caller-supplied source URLs. The central policy classifies synthetic reads, account reads and account writes. It permits the synthetic preview and synthetic census. It denies rule upload and activation, folder creation, moves, flags, forwarding changes, sends and unsubscribe requests. Account reads remain unavailable.
 
-The server binds only `127.0.0.1:4173`, validates Host and any Origin header, rejects cross-site fetch metadata, has no CORS allowance, and limits JSON POST bodies to 256 KiB. Its production CSP permits only same-origin external scripts and styles, without `unsafe-inline` or `unsafe-eval`. Native CLI requests may omit Origin. A local process can run previews but cannot unlock account writes.
+The server binds only `127.0.0.1:4173`, validates Host and any Origin header, rejects cross-site fetch metadata, has no CORS allowance, and limits JSON POST bodies to 256 KiB. Every API except the session bootstrap requires the current launch token. Its production CSP permits only same-origin external scripts and styles, without `unsafe-inline` or `unsafe-eval`. Native CLI requests may omit Origin. A local process can bootstrap a session and operate synthetic data, but cannot unlock account reads or writes. The token binds browser requests to a server launch. It does not isolate mutually untrusted processes running as the same OS user.
 
 The Ark UI compatibility spike exercised the production-built language toggle under this CSP. Its state changed to German without a recorded CSP violation. Future floating or portaled components need their own compatibility check before adoption.

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
     Preview,
+    SyntheticCensus,
     Connect,
     Census,
     UploadRules,
@@ -32,8 +33,9 @@ pub struct Availability {
     pub reason: &'static str,
 }
 
-pub const OPERATIONS: [Operation; 11] = [
+pub const OPERATIONS: [Operation; 12] = [
     Operation::Preview,
+    Operation::SyntheticCensus,
     Operation::Connect,
     Operation::Census,
     Operation::UploadRules,
@@ -48,7 +50,7 @@ pub const OPERATIONS: [Operation; 11] = [
 
 pub fn authorize(operation: Operation) -> Availability {
     let effect = match operation {
-        Operation::Preview => Effect::SyntheticRead,
+        Operation::Preview | Operation::SyntheticCensus => Effect::SyntheticRead,
         Operation::Connect | Operation::Census => Effect::AccountRead,
         Operation::UploadRules
         | Operation::ActivateRules
@@ -60,7 +62,7 @@ pub fn authorize(operation: Operation) -> Availability {
         | Operation::Unsubscribe => Effect::AccountWrite,
     };
     let (allowed, reason) = match effect {
-        Effect::SyntheticRead => (true, "Synthetic preview only"),
+        Effect::SyntheticRead => (true, "Bundled synthetic data only"),
         Effect::AccountRead => (
             false,
             "Unavailable: no account adapters or credentials in this unit",

@@ -9,7 +9,7 @@ body { margin: 0; }
 ::selection { background: #c3e2eb; color: #102f3a; }
 button, input { font: inherit; }
 button { border: 1px solid #a4b6bf; background: transparent; color: var(--ink); padding: 9px 16px; border-radius: 5px; cursor: pointer; min-height: 44px; }
-button:hover { background: #e5edf0; }
+button:hover:not(:disabled) { background: #e5edf0; }
 button:disabled { color: #65767d; background: #e2e8eb; border-color: #d3dde1; cursor: default; }
 button:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visible, [role="radiogroup"]:focus-visible { outline: 3px solid #1c7086 !important; outline-offset: 4px; }
 a { color: inherit; text-underline-offset: 4px; }
@@ -37,7 +37,7 @@ section { padding: 30px 0; border-top: 1px solid var(--line); }
 input[type="checkbox"] { width: 18px; height: 18px; flex: 0 0 auto; }
 .help { font-size: 13px; }
 .primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; margin-top: 18px; }
-.primary:hover { background: #104655; color: #fff; }
+.primary:hover:not(:disabled) { background: #104655; color: #fff; }
 .primary span { padding-left: 12px; }
 .results { margin-top: 34px; }
 .empty { padding: 40px 0; }
@@ -71,6 +71,21 @@ details ul { font-size: 14px; }
 .error { margin: 24px 0; padding: 20px; color: #7b312a; background: #f7e9e7; }
 .error p { color: inherit; margin-bottom: 14px; }
 footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; border-top: 1px solid var(--line); padding: 24px 0 36px; font-size: 12px; color: var(--muted); }
+.census { margin-bottom: 24px; }
+.census-actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 20px; }
+.census-actions .primary { margin-top: 0; }
+.census-actions p { margin: 0; flex-basis: 100%; }
+.census-progress { margin: 24px 0; }
+.scan-state { font-weight: 600; color: var(--ink); }
+progress { display: block; width: 100%; max-width: 560px; height: 16px; margin-top: 12px; accent-color: var(--accent); }
+.address-candidates { list-style: none; padding: 0; }
+.address-candidates li { margin: 14px 0; }
+.address-candidates label { display: flex; gap: 12px; align-items: start; min-height: 44px; }
+.address-candidates span { overflow-wrap: anywhere; }
+.address-candidates strong, .address-candidates small { display: block; }
+.address-candidates small { color: var(--muted); font-size: 12px; }
+.census-message { padding: 18px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.census-summary { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 680px) {
   .app-shell { padding: 0 20px; }
   header { min-height: 82px; }

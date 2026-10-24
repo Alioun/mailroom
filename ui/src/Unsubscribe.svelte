@@ -21,7 +21,11 @@
   const groups = $derived.by(() => {
     const senders = new Map<string, Array<{ row: NonNullable<SubscriptionReviewView>['accounts'][number]['report']['rows'][number]; key: string }>>()
     for (const account of view?.accounts ?? []) for (const row of account.report.rows) { const rows = senders.get(row.sender) ?? []; rows.push({ row, key: `${row.account}:${row.id}` }); senders.set(row.sender, rows) }
-    return [...senders].sort(([a], [b]) => a.localeCompare(b))
+    return [...senders].map(([sender, rows]) => ({
+      sender,
+      rows: rows.sort((a, b) => b.row.unread_volume - a.row.unread_volume || a.key.localeCompare(b.key)),
+      unreadVolume: rows.reduce((total, { row }) => total + row.unread_volume, 0),
+    })).sort((a, b) => b.unreadVolume - a.unreadVolume || a.sender.localeCompare(b.sender))
   })
   let asOf = Math.floor(Date.now() / 1000)
   function invalidate() { plan = null; reviewed = null; confirmed = false; mailConfirmed = false }
@@ -44,11 +48,11 @@
     <p>{t.selected}</p>
     <label>{t.personal}<input type="text" bind:value={personal} disabled={busy} oninput={invalidate} maxlength="160" /></label>
     <label>{t.business}<input type="text" bind:value={business} disabled={busy} oninput={invalidate} maxlength="160" /></label>
-    {#each groups as [sender, rows] (sender)}
+    {#each groups as { sender, rows } (sender)}
       <details class="sender-group" data-sender={sender} open={rows.some(({ row }) => row.recommended)}><summary>{sender} · {rows.length} {t.subscriptions}</summary>
       {#each rows as { row, key } (key)}
       <article data-subscription={row.id} data-account={row.account}>
-        <p>Rank {row.rank} · {row.sender}</p><p>{row.account} · {row.recipient || t.unknown} · {row.list_id ?? 'From'} · {row.list_evidence} · {row.class} · {row.role}</p>
+        <p>{row.sender}</p><p>{row.account} · {row.recipient || t.unknown} · {row.list_id ?? 'From'} · {row.list_evidence} · {row.class} · {row.role}</p>
         <p>{t.count} · {row.count_12_months} · {t.read} · {row.read_share === null ? t.unknown : `${Math.round(row.read_share * 100)}%`} · unread {row.unread_volume}</p>
         <p>{t.newest} · {row.newest_dated_seen_message === null ? t.unknown : new Date(row.newest_dated_seen_message * 1000).toISOString().slice(0, 10)}</p>
         <p>{t.flags} · {row.flags_known ? t.yes : t.unknown} · {t.recommended} · {row.recommended ? t.yes : t.no}</p>

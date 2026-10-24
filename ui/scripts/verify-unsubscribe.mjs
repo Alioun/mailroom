@@ -43,6 +43,11 @@ try {
   assert.equal(recovered.history.find(e => e.id === retained.entry).status, 'mail_handoff')
   await region.locator('[data-unsubscribe-status]').filter({ hasText: 'mail_handoff' }).first().waitFor()
   await region.locator("[data-unsubscribe-status]").filter({ hasText: "mail_handoff" }).first().screenshot({ path: `${artifacts}/restart-reconciled.png` })
+  const unreadTotals = await region.locator('.sender-group').evaluateAll(groups => groups.map(group =>
+    Array.from(group.querySelectorAll('article')).reduce((total, row) => total + Number(row.textContent.match(/unread (\d+)/)[1]), 0)))
+  console.log('Observed live sender unread totals', JSON.stringify(unreadTotals))
+  assert.ok(unreadTotals.length > 1)
+  assert.ok(unreadTotals.every((total, i) => i === 0 || unreadTotals[i - 1] >= total), 'Live sender groups descend by total unread volume')
   const sender = region.locator('[data-sender="news@shop.example"]')
   assert.equal(await sender.count(), 1, 'One visual sender group across all census accounts')
   await sender.locator('summary').click()

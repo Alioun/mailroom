@@ -1,6 +1,6 @@
 # Exact subscription unsubscribe and mute tests
 
-The local interface provides synthetic test controls for exact account, receiving-address and List-Id subscriptions. One review groups subscriptions visually by sender across census accounts. Expandable sender groups show the number of separate subscriptions, with no sender-wide approval checkbox. Each account, receiving address and mailing list has its own checkbox and method. Eligible subscriptions are initially checked, and a single exact list confirmation binds every selected identity. Q20 settles product scope only; all real operations remain denied.
+The local interface provides synthetic test controls for exact account, receiving-address and List-Id subscriptions. One review groups subscriptions visually by sender across census accounts. Sender groups rank by their separate subscriptions' combined 12-month unread volume, descending, with sender names breaking ties. Child subscriptions rank by unread volume, then exact account/subscription key. Expandable sender groups show the number of separate subscriptions, with no sender-wide approval checkbox. Each account, receiving address and mailing list has its own checkbox and method. Eligible subscriptions are initially checked, and a single exact list confirmation binds every selected identity. Q20 settles product scope only; all real operations remain denied.
 
 ## Candidate facts
 
@@ -36,6 +36,7 @@ Mute writes preserve unrelated configuration semantics but serialize the overrid
 - `./scripts/verify-sieve.sh` compares emitted Sieve with independent check-sieve and Pigeonhole executions. It includes exact, other, substring and case-varied lists; recipient safety; guards; read capability; From fallback; and copy preservation. Fresh-cache cases do not establish persistent provider cache behavior.
 - `scripts/verify-unsubscribe-restart.mjs` kills and replaces the fake fixture before and after effects. It requires the verified fake listener to be stopped first and retains its final fake-only process.
 - `scripts/verify-unsubscribe.mjs` exercises protected HTTP for synthetic IMAP and Gmail.
+- `ui/scripts/verify-unsubscribe-ranking.mjs` checks built sender and child ordering with alphabetical input, cross-account totals, ties and unchanged selection eligibility. It requires two existing synthetic census accounts and makes no effects.
 - `ui/scripts/verify-unsubscribe.mjs` drives the built English/German interface and records local synthetic screenshots.
 
 The cross-account confirmation validates the whole list before persisting intents and persists all intents before synthetic effects. This is not a distributed atomic transaction: partial intent persistence after a crash can remain uncertain without an effect. Q19 Cancel belongs to a separate backlog unit. Real provider provenance, native confirmation, SMTP, network integration, alias retirement, deployed-rule evidence, retroactive mute effects and uncertainty repair remain incomplete. This slice does not establish full personal readiness.

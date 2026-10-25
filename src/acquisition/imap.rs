@@ -548,6 +548,7 @@ pub(super) fn record(
     raw: &[u8],
 ) -> Result<MessageRecord, AcquisitionError> {
     let mut record = MessageRecord {
+        delivery: Default::default(),
         uid: metadata.uid,
         size: 0,
         internal_date: String::new(),

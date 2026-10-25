@@ -122,7 +122,7 @@ try {
   await command('confirm', { receipt: `${p.receipt.slice(0, -1)}${p.receipt.endsWith('0') ? '1' : '0'}`, confirmed: true }); await terminal('failed')
   await confirm(p)
   const deployed = await observe()
-  assert.equal(deployed.schema, 13); assert.equal(deployed.provider_target, p.transaction.after.bodies.find(b => b.name === p.transaction.target).sha256)
+  assert.equal(deployed.schema, 14); assert.equal(deployed.provider_target, p.transaction.after.bodies.find(b => b.name === p.transaction.target).sha256)
   assert.equal(deployed.active, 'Open-Xchange'); assert.equal(deployed.unrelated, initial.unrelated)
   assert.deepEqual(deployed.external_unrelated, initial.external_unrelated)
   assert.ok((await command('status')).journal.history[0].steps.every(s => s.acknowledgment && s.outcome === 'observed'))

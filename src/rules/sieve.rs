@@ -1,3 +1,4 @@
+use super::config::Keyword;
 use crate::census::HeaderRecord;
 use std::collections::BTreeSet;
 
@@ -22,6 +23,11 @@ pub enum Test {
         value: String,
     },
     Duplicate(String),
+    Envelope {
+        part: String,
+        mode: String,
+        value: String,
+    },
 }
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -29,6 +35,7 @@ pub enum Action {
     File(String),
     Copy(String),
     Seen,
+    AddKeyword(Keyword),
     Stop,
 }
 #[derive(Clone, Debug)]
@@ -36,6 +43,33 @@ pub struct Statement {
     pub id: String,
     pub test: Test,
     pub actions: Vec<Action>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Truth {
+    Match,
+    NoMatch,
+    Unknown,
+}
+impl Truth {
+    pub fn matched(self) -> bool {
+        self == Self::Match
+    }
+    fn from_bool(value: bool) -> Self {
+        if value { Self::Match } else { Self::NoMatch }
+    }
+    fn not(self) -> Self {
+        match self {
+            Self::Match => Self::NoMatch,
+            Self::NoMatch => Self::Match,
+            Self::Unknown => Self::Unknown,
+        }
+    }
+}
+pub struct MessageView<'a> {
+    pub headers: &'a HeaderRecord,
+    pub envelope: Option<&'a str>,
 }
 
 pub fn quote(value: &str) -> String {
@@ -76,12 +110,17 @@ impl Test {
                 quote(field),
                 quote(value)
             ),
+            Self::Envelope { part, mode, value } => format!(
+                "envelope :{part} :{mode} :comparator \"i;ascii-casemap\" \"to\" {}",
+                quote(value)
+            ),
             Self::Duplicate(handle) => {
                 format!("duplicate :header \"message-id\" :handle {}", quote(handle))
             }
         }
     }
-    pub fn evaluate(&self, h: &HeaderRecord, duplicates: &BTreeSet<String>) -> bool {
+    pub fn evaluate(&self, message: &MessageView<'_>, duplicates: &BTreeSet<String>) -> Truth {
+        let h = message.headers;
         let addresses = |field: &str| match field {
             "from" => &h.from,
             "to" => &h.to,
@@ -90,12 +129,37 @@ impl Test {
             "x-original-to" => &h.original_to,
             _ => unreachable!("validated Sieve header"),
         };
-        match self {
+        Truth::from_bool(match self {
             Self::True => true,
             Self::False => false,
-            Self::All(t) => t.iter().all(|t| t.evaluate(h, duplicates)),
-            Self::Any(t) => t.iter().any(|t| t.evaluate(h, duplicates)),
-            Self::Not(t) => !t.evaluate(h, duplicates),
+            Self::All(t) | Self::Any(t) => {
+                let all = matches!(self, Self::All(_));
+                let values: Vec<_> = t.iter().map(|t| t.evaluate(message, duplicates)).collect();
+                return if all && values.contains(&Truth::NoMatch) {
+                    Truth::NoMatch
+                } else if !all && values.contains(&Truth::Match) {
+                    Truth::Match
+                } else if values.contains(&Truth::Unknown) {
+                    Truth::Unknown
+                } else {
+                    Truth::from_bool(all)
+                };
+            }
+            Self::Not(t) => return t.evaluate(message, duplicates).not(),
+            Self::Envelope { part, mode, value } => {
+                return match message.envelope {
+                    Some(recipient) => Truth::from_bool(compare(
+                        if part == "domain" {
+                            recipient.rsplit_once('@').map(|(_, d)| d).unwrap_or("")
+                        } else {
+                            recipient
+                        },
+                        value,
+                        mode,
+                    )),
+                    None => Truth::Unknown,
+                };
+            }
             Self::Exists(f) if f == "message-id" => h.message_id_hash.is_some(),
             Self::Exists(f) => h.evidence.contains_key(f),
             Self::Count(f) => addresses(f).len() == 1,
@@ -128,9 +192,10 @@ impl Test {
                 .message_id_hash
                 .as_ref()
                 .is_some_and(|hash| duplicates.contains(&format!("{handle}/{hash}"))),
-        }
+        })
     }
 }
+
 fn compare(value: &str, pattern: &str, mode: &str) -> bool {
     let value = value.to_ascii_lowercase();
     let pattern = pattern.to_ascii_lowercase();
@@ -181,6 +246,7 @@ pub fn render(statements: &[Statement], extensions: &BTreeSet<String>) -> String
                 Action::File(f) => format!("fileinto {}", quote(f)),
                 Action::Copy(t) => format!("redirect :copy {}", quote(t)),
                 Action::Seen => "addflag \"\\\\Seen\"".into(),
+                Action::AddKeyword(k) => format!("addflag {}", quote(k.as_str())),
                 Action::Stop => "stop".into(),
             };
             text.push_str(&format!("  {command};\n"));
@@ -270,10 +336,12 @@ pub fn parse(text: &str) -> Result<Vec<Statement>, String> {
                     Action::Copy(p.string()?)
                 }
                 "addflag" => {
-                    if p.string()? != "\\Seen" {
-                        return Err("Unsupported Sieve flag".into());
+                    let value = p.string()?;
+                    if value == "\\Seen" {
+                        Action::Seen
+                    } else {
+                        Action::AddKeyword(Keyword::try_from(value)?)
                     }
-                    Action::Seen
                 }
                 _ => return Err("Unsupported Sieve action".into()),
             };
@@ -376,6 +444,22 @@ impl Parser {
                     value: self.string()?,
                 }
             }
+            "envelope" => {
+                let part = self.next()?;
+                if part != ":all" && part != ":domain" {
+                    return Err("Unsupported envelope address part".into());
+                }
+                let mode = self.mode()?;
+                self.comparator("i;ascii-casemap")?;
+                if self.string()? != "to" {
+                    return Err("Only current delivery envelope-to is supported".into());
+                }
+                Test::Envelope {
+                    part: part[1..].into(),
+                    mode,
+                    value: self.string()?,
+                }
+            }
             "address" => {
                 let part = self.next()?;
                 if part == ":count" {
@@ -404,5 +488,39 @@ impl Parser {
             }
             _ => return Err("Unsupported Sieve test".into()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parsed_compound_envelope_unknown_never_becomes_positive_negation() {
+        let headers = crate::census::parse_headers(b"From: invented@example.test\r\nTo: route@business.test\r\nDelivered-To: route@business.test\r\n\r\n",crate::census::Direction::Received).unwrap();
+        let view = MessageView {
+            headers: &headers,
+            envelope: None,
+        };
+        let e = "envelope :all :is :comparator \"i;ascii-casemap\" \"to\" \"route@business.test\"";
+        for (test, expected) in [
+            (e.to_owned(), Truth::Unknown),
+            (format!("not {e}"), Truth::Unknown),
+            (format!("allof (true, not {e})"), Truth::Unknown),
+            (format!("anyof (false, not {e})"), Truth::Unknown),
+            (format!("allof (false, {e})"), Truth::NoMatch),
+            (format!("anyof (true, {e})"), Truth::Match),
+        ] {
+            let text = format!("#@ user.test\nif {test} {{ addflag \"$route\"; }}");
+            let parsed = parse(&text).unwrap();
+            assert_eq!(parsed[0].test.evaluate(&view, &BTreeSet::new()), expected);
+        }
+        for command in [
+            "setflag \"$route\"",
+            "removeflag \"$route\"",
+            "addflag \"\\\\Recent\"",
+            "fileinto :flags \"$route\" \"Orders\"",
+        ] {
+            assert!(parse(&format!("#@ user.test\nif true {{ {command}; }}")).is_err());
+        }
     }
 }

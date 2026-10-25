@@ -10,6 +10,7 @@ fn keys(account: &AccountId) -> CensusKeys {
 }
 fn message(uid: u32, sender: &str, extra: &str) -> MessageRecord {
     MessageRecord {
+        delivery: Default::default(),
         uid, size: 100, internal_date: "24-Oct-2026 10:00:00 +0000".into(), flags_observed: true, flags: BTreeSet::new(), gmail_message_id: Some(uid.to_string()), gmail_thread_id: None, gmail_labels: BTreeSet::from(["Private label token".into()]),
         headers: parse_headers(format!("From: {sender}\r\nTo: owner@private.example\r\nSubject: =?UTF-8?Q?Private_Secret_Order_123_123_123?=\r\nDate: 24 Oct 2026 10:00:00 +0000\r\n{extra}\r\n").as_bytes(), Direction::Received).unwrap(),
     }

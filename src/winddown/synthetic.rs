@@ -107,6 +107,7 @@ pub(crate) fn install(census: &mut Census, provider: Provider) {
     for (uid, sender, date, fields, delivery) in specs {
         let headers = parse_headers(format!("From: {sender}\r\nDate: {date}\r\nMessage-ID: <winddown-{}-{uid}@example.test>\r\n{fields}\r\n", if comparison { "comparison" } else { "source" }).as_bytes(), Direction::Received).unwrap();
         let message = MessageRecord {
+            delivery: Default::default(),
             uid,
             size: 100,
             internal_date: "24-Oct-2026 10:00:00 +0000".into(),
@@ -126,6 +127,7 @@ pub(crate) fn install(census: &mut Census, provider: Provider) {
         records.push(message);
         let sent_uid = uid + 1000;
         records.push(MessageRecord {
+            delivery: Default::default(),
             uid: sent_uid,
             size: 100,
             internal_date: "24-Oct-2026 10:00:00 +0000".into(),

@@ -31,6 +31,22 @@ pub struct Fixture {
     pub id: String,
     pub headers: String,
     pub current_folder: String,
+    #[serde(default)]
+    pub delivery: FixtureDelivery,
+    #[serde(default)]
+    pub observed_flags: Option<BTreeSet<String>>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FixtureDelivery {
+    #[default]
+    Unavailable,
+    Unsupported,
+    Ambiguous,
+    Known {
+        recipient: crate::census::delivery::Recipient,
+    },
 }
 
 pub fn artifact(
@@ -68,11 +84,20 @@ pub fn synthetic_census(input: &PreviewInput) -> Result<Census, String> {
         folder.messages.insert(
             uid,
             MessageRecord {
+                delivery: match &m.delivery {
+                    FixtureDelivery::Unavailable => crate::census::delivery::DeliveryEvidence::Unavailable,
+                    FixtureDelivery::Unsupported => crate::census::delivery::DeliveryEvidence::Unsupported,
+                    FixtureDelivery::Ambiguous => crate::census::delivery::DeliveryEvidence::Ambiguous,
+                    FixtureDelivery::Known { recipient } => match &input.context.recipient_evidence {
+                        rules::EvidenceSource::SyntheticEnvelope { source } => crate::census::delivery::DeliveryEvidence::Known { recipient: recipient.clone(), source: source.clone(), message: crate::census::delivery::DeliveryEvidence::message_binding(&format!("{}/1/{uid}", m.current_folder), headers.message_id_hash.as_deref()) },
+                        _ => return Err("Known fixture envelope requires a separately explicit synthetic envelope context".into()),
+                    }
+                },
                 uid,
                 size: m.headers.len() as u64,
                 internal_date: "24-Oct-2026 00:00:00 +0000".into(),
-                flags_observed: true,
-                flags: BTreeSet::new(),
+                flags_observed: m.observed_flags.is_some(),
+                flags: m.observed_flags.clone().unwrap_or_default(),
                 gmail_message_id: Some(m.id.clone()),
                 gmail_thread_id: None,
                 gmail_labels: BTreeSet::new(),

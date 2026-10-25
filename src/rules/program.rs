@@ -18,6 +18,9 @@ pub enum EvidenceSource {
     Unknown,
     SyntheticDeliveredTo,
     SyntheticOriginalTo,
+    SyntheticEnvelope {
+        source: crate::census::delivery::Source,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,8 +40,9 @@ impl EngineContext {
         }
     }
     fn recipient_field(&self) -> Option<&'static str> {
-        match self.recipient_evidence {
+        match &self.recipient_evidence {
             EvidenceSource::Unknown => None,
+            EvidenceSource::SyntheticEnvelope { .. } => Some("$envelope"),
             EvidenceSource::SyntheticDeliveredTo => Some("delivered-to"),
             EvidenceSource::SyntheticOriginalTo => Some("x-original-to"),
         }
@@ -54,6 +58,7 @@ pub struct Omission {
 pub enum EffectiveDefinition {
     Filing { rule: Rule },
     Forward { rule: Forward },
+    DeliveryTag { rule: DeliveryTag },
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EffectiveRule {
@@ -73,7 +78,7 @@ pub struct CompiledArtifact {
     omissions: Vec<Omission>,
     folders: BTreeSet<String>,
 }
-pub const SEMANTICS: &str = "mailroom-sieve-subset-v3";
+pub const SEMANTICS: &str = "mailroom-sieve-subset-v4";
 
 impl CompiledArtifact {
     pub fn identity(&self) -> &str {
@@ -119,6 +124,13 @@ fn not(t: Test) -> Test {
     Test::Not(Box::new(t))
 }
 fn address(field: &str, part: &str, mode: &str, value: &str) -> Test {
+    if field == "$envelope" {
+        return Test::Envelope {
+            part: part.into(),
+            mode: mode.into(),
+            value: value.into(),
+        };
+    }
     Test::Address {
         field: field.into(),
         part: part.into(),
@@ -223,6 +235,18 @@ pub fn compile(
 ) -> Result<CompiledArtifact, String> {
     identifier(&preset.id)?;
     identifier(&context.account)?;
+    if let EvidenceSource::SyntheticEnvelope { source } = &context.recipient_evidence {
+        if !source.validate()
+            || source.account != context.account
+            || source.provider
+                != match context.engine {
+                    Engine::MailboxSieve => "mailbox_org",
+                    Engine::GmailBacklog => "gmail",
+                }
+        {
+            return Err("Synthetic envelope source is incompatible with account or engine".into());
+        }
+    }
     if preset.major == 0 || overrides.preset != preset.id || overrides.major != preset.major {
         return Err("Override must pin the supplied preset and nonzero major version".into());
     }
@@ -230,6 +254,7 @@ pub fn compile(
         + overrides.additions.len()
         + overrides.forwards.len()
         + overrides.ledger.len()
+        + overrides.delivery_tags.len()
         > 200
     {
         return Err("At most 200 authored rules and ledger entries".into());
@@ -390,13 +415,22 @@ pub fn compile(
     let mut omissions = Vec::new();
     let mut statements = Vec::new();
     let needed = ["fileinto", "relational", "comparator-i;ascii-numeric"];
-    let safety_capable = needed.iter().all(|c| context.capabilities.contains(*c));
+    let envelope_mode = matches!(
+        context.recipient_evidence,
+        EvidenceSource::SyntheticEnvelope { .. }
+    );
+    let safety_capable = needed.iter().all(|c| context.capabilities.contains(*c))
+        && (!envelope_mode || context.capabilities.contains("envelope"));
     let recipient = context.recipient_field().unwrap_or("delivered-to");
     let personal = role_test(&overrides.roles, Role::Personal, recipient);
     let business = role_test(&overrides.roles, Role::Business, recipient);
     let safe = if context.recipient_field().is_some() && safety_capable {
         all(vec![
-            Test::Count(recipient.into()),
+            if envelope_mode {
+                address(recipient, "all", "matches", "*")
+            } else {
+                Test::Count(recipient.into())
+            },
             any(vec![personal.clone(), business.clone()]),
         ])
     } else {
@@ -410,6 +444,57 @@ pub fn compile(
         None,
         false,
     );
+    if overrides.delivery_tags.len() > 32 {
+        return Err("At most 32 delivery tags".into());
+    }
+    for tag in &overrides.delivery_tags {
+        identifier(&tag.id)?;
+        if tag.id.starts_with("system.")
+            || !ids.insert(tag.id.clone())
+            || tag.accounts.is_empty()
+            || tag.accounts.len() > 32
+            || !mailbox(&tag.envelope_to)
+        {
+            return Err("Delivery tags require unique nonreserved IDs, explicit account scope and an exact supported mailbox".into());
+        }
+        for account in &tag.accounts {
+            identifier(account)?;
+        }
+        effective.push(EffectiveRule {
+            id: tag.id.clone(),
+            origin: "override delivery tag".into(),
+            enabled: tag.enabled,
+            accounts: tag.accounts.clone(),
+            definition: EffectiveDefinition::DeliveryTag { rule: tag.clone() },
+        });
+        let reason = if !tag.enabled {
+            Some("Delivery tag is disabled")
+        } else if !scoped(&tag.accounts, context) {
+            Some("Delivery tag is outside this account scope")
+        } else if context.engine != Engine::MailboxSieve {
+            Some("Delivery tags are unavailable in Gmail backlog")
+        } else if !envelope_mode {
+            Some("Separate installed current-delivery envelope evidence is unavailable")
+        } else if !safety_capable || !context.capabilities.contains("imap4flags") {
+            Some(
+                "Required envelope/imap4flags or role-safety support is unavailable; entire tag omitted",
+            )
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            omissions.push(Omission {
+                rule: tag.id.clone(),
+                reason: reason.into(),
+            });
+        } else {
+            statements.push(Statement {
+                id: tag.id.clone(),
+                test: address("$envelope", "all", "is", &tag.envelope_to),
+                actions: vec![Action::AddKeyword(tag.add_keyword.clone())],
+            });
+        }
+    }
     let mut ledger_addresses = BTreeSet::new();
     for entry in &overrides.ledger {
         if !mailbox(&entry.address) || !ledger_addresses.insert(entry.address.clone()) {
@@ -600,10 +685,11 @@ pub fn compile(
     {
         extensions.extend(["copy".into(), "duplicate".into()]);
     }
-    if statements
-        .iter()
-        .any(|s| s.actions.iter().any(|a| matches!(a, Action::Seen)))
-    {
+    if statements.iter().any(|s| {
+        s.actions
+            .iter()
+            .any(|a| matches!(a, Action::Seen | Action::AddKeyword(_)))
+    }) {
         extensions.insert("imap4flags".into());
     }
     if !safety_capable || context.recipient_field().is_none() {
@@ -623,6 +709,9 @@ pub fn compile(
                 "Recipient provenance or role-safety capability is unavailable; bulk filing omitted"
                     .into(),
         });
+    }
+    if envelope_mode && safety_capable {
+        extensions.insert("envelope".into());
     }
     let executable = sieve::render(&statements, &extensions);
     sieve::parse(&executable)?;

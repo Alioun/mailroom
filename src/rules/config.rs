@@ -31,6 +31,8 @@ pub struct Overrides {
     pub targets: BTreeMap<String, Target>,
     #[serde(default)]
     pub forwards: Vec<Forward>,
+    #[serde(default)]
+    pub delivery_tags: Vec<DeliveryTag>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -199,6 +201,48 @@ pub enum ForwardTrigger {
     InvoiceAddress,
     ApprovedSenders { addresses: BTreeSet<String> },
     Keywords { words: Vec<String> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct Keyword(String);
+impl TryFrom<String> for Keyword {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        if value.is_empty()
+            || value.len() > 128
+            || !value
+                .bytes()
+                .all(|b| (33..=126).contains(&b) && !b"(){\\\"%*]".contains(&b))
+            || ["seen", "answered", "flagged", "deleted", "draft", "recent"]
+                .iter()
+                .any(|v| value.eq_ignore_ascii_case(v))
+        {
+            return Err("Expected one ASCII IMAP keyword atom, excluding system flags".into());
+        }
+        Ok(Self(value))
+    }
+}
+impl From<Keyword> for String {
+    fn from(value: Keyword) -> Self {
+        value.0
+    }
+}
+impl Keyword {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryTag {
+    pub id: String,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    pub accounts: BTreeSet<String>,
+    pub envelope_to: String,
+    pub add_keyword: Keyword,
 }
 
 pub fn documents(preset: &str, overrides: &str) -> Result<(Preset, Overrides), String> {

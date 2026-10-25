@@ -16,9 +16,9 @@ fn fixture() -> (tempfile::TempDir, EncryptedStore, AccountState) {
         serde_json::from_str(include_str!("../../../examples/sample.json")).unwrap();
     input.context.account = account.as_str().into();
     input.messages = vec![
-        engine::Fixture { id: "order-one".into(), current_folder: "INBOX".into(), headers: "From: robot@shop.example\r\nTo: owner@example.test\r\nSubject: order confirmation\r\nAuto-Submitted: auto-generated\r\nMessage-ID: <one@example.test>\r\n\r\n".into() },
-        engine::Fixture { id: "order-two".into(), current_folder: "INBOX".into(), headers: "From: robot@shop.example\r\nTo: owner@example.test\r\nSubject: order receipt\r\nAuto-Submitted: auto-generated\r\nMessage-ID: <two@example.test>\r\n\r\n".into() },
-        engine::Fixture { id: "travel".into(), current_folder: "INBOX".into(), headers: "From: robot@travel.example\r\nSubject: booking confirmed\r\nAuto-Submitted: auto-generated\r\nMessage-ID: <three@example.test>\r\n\r\n".into() },
+        engine::Fixture { delivery: Default::default(), observed_flags: Some(Default::default()), id: "order-one".into(), current_folder: "INBOX".into(), headers: "From: robot@shop.example\r\nTo: owner@example.test\r\nSubject: order confirmation\r\nAuto-Submitted: auto-generated\r\nMessage-ID: <one@example.test>\r\n\r\n".into() },
+        engine::Fixture { delivery: Default::default(), observed_flags: Some(Default::default()), id: "order-two".into(), current_folder: "INBOX".into(), headers: "From: robot@shop.example\r\nTo: owner@example.test\r\nSubject: order receipt\r\nAuto-Submitted: auto-generated\r\nMessage-ID: <two@example.test>\r\n\r\n".into() },
+        engine::Fixture { delivery: Default::default(), observed_flags: Some(Default::default()), id: "travel".into(), current_folder: "INBOX".into(), headers: "From: robot@travel.example\r\nSubject: booking confirmed\r\nAuto-Submitted: auto-generated\r\nMessage-ID: <three@example.test>\r\n\r\n".into() },
     ];
     let census = engine::synthetic_census(&input).unwrap();
     store.save(&census).unwrap();
@@ -472,8 +472,8 @@ fn synthetic_engine_demonstrates_filing_and_bulk_priority_separately_from_held_p
         .insert("owner@example.test".into(), config::Role::Personal);
     input.documents.override_yaml = serde_yaml_ng::to_string(&overrides).unwrap();
     input.messages = vec![
-        engine::Fixture { id: "ordinary".into(), current_folder: "INBOX".into(), headers: "From: robot@shop.example\r\nDelivered-To: owner@example.test\r\nSubject: a generic message\r\n\r\n".into() },
-        engine::Fixture { id: "bulk".into(), current_folder: "INBOX".into(), headers: "From: robot@shop.example\r\nDelivered-To: owner@example.test\r\nList-Id: shop.example\r\nSubject: a generic message\r\n\r\n".into() },
+        engine::Fixture { delivery: Default::default(), observed_flags: Some(Default::default()), id: "ordinary".into(), current_folder: "INBOX".into(), headers: "From: robot@shop.example\r\nDelivered-To: owner@example.test\r\nSubject: a generic message\r\n\r\n".into() },
+        engine::Fixture { delivery: Default::default(), observed_flags: Some(Default::default()), id: "bulk".into(), current_folder: "INBOX".into(), headers: "From: robot@shop.example\r\nDelivered-To: owner@example.test\r\nList-Id: shop.example\r\nSubject: a generic message\r\n\r\n".into() },
     ];
     input.pins.clear();
     let proof = engine::preview(&input).unwrap();

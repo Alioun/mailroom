@@ -18,7 +18,7 @@ fn fixture(
     let mut input: PreviewInput =
         serde_json::from_str(include_str!("../../examples/sample.json")).unwrap();
     input.context.account = "synthetic-backlog-tests".into();
-    input.messages = (0..n.min(200)).map(|i| Fixture { id: format!("fixture-{i}"), current_folder: "INBOX".into(), headers: format!("From: billing@shop.example.org\r\nTo: owner@home.example.test\r\nDelivered-To: owner@home.example.test\r\nSubject: invoice\r\nMessage-ID: <fixture-{i}@example.test>\r\nDate: Sat, 24 Oct 2026 00:00:00 +0000\r\n\r\n") }).collect();
+    input.messages = (0..n.min(200)).map(|i| Fixture { delivery: Default::default(), observed_flags: Some(Default::default()), id: format!("fixture-{i}"), current_folder: "INBOX".into(), headers: format!("From: billing@shop.example.org\r\nTo: owner@home.example.test\r\nDelivered-To: owner@home.example.test\r\nSubject: invoice\r\nMessage-ID: <fixture-{i}@example.test>\r\nDate: Sat, 24 Oct 2026 00:00:00 +0000\r\n\r\n") }).collect();
     let mut census = crate::engine::synthetic_census(&input).unwrap();
     let base = census.folders["INBOX"].messages[&1].clone();
     for i in 201..=n {

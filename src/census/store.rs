@@ -433,10 +433,19 @@ impl EncryptedStore {
         }) {
             return Err(CensusError::Storage);
         }
+        if state
+            .census
+            .folders
+            .values()
+            .flat_map(|f| f.messages.values())
+            .any(|m| !m.delivery.validate())
+        {
+            return Err(CensusError::Storage);
+        }
         state.census.acquisition.validate(&state.census.account)?;
         let snapshot =
             Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
-        self.stage_snapshot(13, &snapshot)
+        self.stage_snapshot(14, &snapshot)
     }
 
     fn stage_snapshot(
@@ -554,12 +563,19 @@ impl EncryptedStore {
         let snapshot = Zeroizing::new(snapshot);
         if !matches!(
             version,
-            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13
+            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14
         ) {
             return Err(CensusError::UnsupportedVersion);
         }
         if account != self.keys.account.as_str() {
             return Err(CensusError::AccountMismatch);
+        }
+        if version < 14 {
+            let raw: serde_json::Value =
+                serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?;
+            if has_delivery_semantics(&raw) {
+                return Err(CensusError::UnsupportedVersion);
+            }
         }
         let mut state: AccountState = if version == 1 {
             let legacy: serde_json::Value =
@@ -632,6 +648,15 @@ impl EncryptedStore {
         }) {
             return Err(CensusError::Storage);
         }
+        if state
+            .census
+            .folders
+            .values()
+            .flat_map(|f| f.messages.values())
+            .any(|m| !m.delivery.validate())
+        {
+            return Err(CensusError::Storage);
+        }
         state.census.acquisition.validate(&state.census.account)?;
         state.sieve.interrupted();
         state.sieve_transactions.interrupted();
@@ -681,6 +706,123 @@ impl EncryptedStore {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn delivery_schema_fourteen_preserves_legacy_absence_and_rejects_nested_smuggling() {
+        for version in 1..=13 {
+            let root = tempfile::tempdir().unwrap();
+            let input: crate::engine::PreviewInput =
+                serde_json::from_str(include_str!("../../examples/sample.json")).unwrap();
+            let census = crate::engine::synthetic_census(&input).unwrap();
+            let store = EncryptedStore::new(
+                root.path().into(),
+                CensusKeys::derive(&LocalSecret::random(), &census.account),
+            )
+            .unwrap();
+            let value = if version == 1 {
+                serde_json::to_value(&census).unwrap()
+            } else {
+                serde_json::to_value(AccountState::new(census)).unwrap()
+            };
+            store
+                .stage_snapshot(version, &serde_json::to_string(&value).unwrap())
+                .unwrap()
+                .persist(store.path())
+                .unwrap();
+            let loaded = store.load_state().unwrap();
+            assert!(
+                loaded
+                    .census
+                    .folders
+                    .values()
+                    .flat_map(|f| f.messages.values())
+                    .all(|m| m.delivery == Default::default())
+            );
+            for injected in ["message", "context", "tag", "yaml", "backlog"] {
+                let mut changed = value.clone();
+                if version == 1 {
+                    changed["folders"]["INBOX"]["messages"]["1"]["delivery"] =
+                        serde_json::json!({"status":"ambiguous"});
+                } else {
+                    match injected {
+                        "message" => {
+                            changed["census"]["folders"]["INBOX"]["messages"]["1"]["delivery"] =
+                                serde_json::json!({"status":"unsupported"})
+                        }
+                        "context" => {
+                            changed["exports"] = serde_json::json!([{"artifact":{"context":{"recipient_evidence":{"synthetic_envelope":{"source":{}}}}}}])
+                        }
+                        "tag" => {
+                            changed["exports"] = serde_json::json!([{"artifact":{"effective":[{"definition":{"kind":"delivery_tag"}}]}}])
+                        }
+                        "backlog" => {
+                            changed["backlog"] = serde_json::json!([{"plan":{"artifact":{"context":{"recipient_evidence":{"synthetic_envelope":{"source":{}}}}}}}])
+                        }
+                        _ => {
+                            changed["workspace"] = serde_json::json!({"input":{"documents":{"override_yaml":"delivery_tags: [{id: user.injected}]"}}})
+                        }
+                    }
+                }
+                store
+                    .stage_snapshot(version, &serde_json::to_string(&changed).unwrap())
+                    .unwrap()
+                    .persist(store.path())
+                    .unwrap();
+                assert!(
+                    matches!(store.load_state(), Err(CensusError::UnsupportedVersion)),
+                    "schema {version} {injected}"
+                );
+            }
+            store
+                .stage_state(&loaded)
+                .unwrap()
+                .persist(store.path())
+                .unwrap();
+            assert_eq!(store.schema_version().unwrap(), 14);
+            assert_eq!(
+                serde_json::to_value(store.load_state().unwrap()).unwrap(),
+                serde_json::to_value(loaded).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn obsolete_export_bytes_and_versions_survive_schema_fourteen_without_recompilation() {
+        let root = tempfile::tempdir().unwrap();
+        let (repo, account, _fake) =
+            crate::acquisition::folder_provisioning::tests::install(root.path());
+        let store = repo.store(&account).unwrap();
+        let mut historical = serde_json::to_value(store.load_state().unwrap()).unwrap();
+        for export in historical["exports"].as_array_mut().unwrap() {
+            export["semantics"] = serde_json::json!("mailroom-sieve-subset-v3");
+            export["proof_semantics"] = serde_json::json!("parsed-emitted-sieve-subset-v3");
+            export["artifact"]["executable"] = serde_json::json!(
+                "# Historical export retains its original line endings.\r\nkeep;\r\n"
+            );
+        }
+        let expected = historical["exports"].clone();
+        store
+            .stage_snapshot(13, &serde_json::to_string(&historical).unwrap())
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        let mut loaded = store.load_state().unwrap();
+        let context = repo.workspace_context(&account, &store).unwrap();
+        assert!(
+            crate::rules::workspace::view(&loaded, &context)
+                .exports
+                .iter()
+                .all(|e| !e.usable)
+        );
+        loaded.workspace.as_mut().unwrap().input.baseline = crate::rules::proof::Baseline::Previous;
+        assert!(crate::rules::workspace::preview(&loaded, &context, store.keys()).is_err());
+        store.save_state(&mut loaded).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 14);
+        assert_eq!(
+            serde_json::to_value(store.load_state().unwrap().exports).unwrap(),
+            expected
+        );
+    }
 
     #[test]
     fn pre_thirteen_exports_default_to_unusable_and_reject_authority_smuggling() {
@@ -736,7 +878,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 13);
+        assert_eq!(store.schema_version().unwrap(), 14);
         assert_eq!(
             serde_json::to_value(store.load_state().unwrap().exports).unwrap(),
             serde_json::to_value(&saved.exports).unwrap()
@@ -786,7 +928,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 13);
+        assert_eq!(store.schema_version().unwrap(), 14);
         assert!(store.load_state().unwrap().folder_provisioning == saved.folder_provisioning);
         let mut bad = saved.clone();
         bad.folder_provisioning.history[0].plan.entries[0]
@@ -835,7 +977,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 13);
+        assert_eq!(store.schema_version().unwrap(), 14);
         assert!(store.load_state().unwrap().sieve_transactions == state.sieve_transactions);
         let mut malformed = state.clone();
         malformed.sieve_transactions.history[0].after.bodies[1]
@@ -883,7 +1025,7 @@ mod tests {
             assert!(state.exports.is_empty());
             assert!(state.proposals.history.is_empty());
             store.save_state(&mut state).unwrap();
-            assert_eq!(store.schema_version().unwrap(), 13);
+            assert_eq!(store.schema_version().unwrap(), 14);
             assert_eq!(store.load().unwrap().acquisition, Default::default());
         }
     }
@@ -951,6 +1093,63 @@ mod tests {
             vec![1]
         );
     }
+}
+
+fn has_delivery_semantics(value: &serde_json::Value) -> bool {
+    fn workspace_has_tags(value: &serde_json::Value) -> bool {
+        value
+            .pointer("/input/documents/override_yaml")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|text| serde_yaml_ng::from_str::<serde_json::Value>(text).ok())
+            .and_then(|doc| doc.get("delivery_tags").cloned())
+            .is_some_and(|tags| tags.as_array().is_none_or(|tags| !tags.is_empty()))
+    }
+    fn artifact_has_delivery(value: &serde_json::Value) -> bool {
+        value
+            .pointer("/context/recipient_evidence/synthetic_envelope")
+            .is_some()
+            || value
+                .get("effective")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|rule| {
+                    rule.pointer("/definition/kind")
+                        .is_some_and(|kind| kind == "delivery_tag")
+                })
+    }
+    let census = value.get("census").unwrap_or(value);
+    let messages = census
+        .get("folders")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|f| f.values())
+        .filter_map(|f| f.get("messages").and_then(serde_json::Value::as_object))
+        .flat_map(|m| m.values());
+    if messages.into_iter().any(|m| m.get("delivery").is_some()) {
+        return true;
+    }
+    if value.get("workspace").is_some_and(workspace_has_tags) {
+        return true;
+    }
+    value
+        .get("exports")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|export| {
+            export.get("artifact").is_some_and(artifact_has_delivery)
+                || export.get("workspace").is_some_and(workspace_has_tags)
+        })
+        || value
+            .get("backlog")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|run| {
+                run.pointer("/plan/artifact")
+                    .is_some_and(artifact_has_delivery)
+            })
 }
 
 fn memory_database() -> Result<Connection, CensusError> {

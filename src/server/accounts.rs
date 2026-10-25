@@ -995,3 +995,26 @@ async fn folder_provisioning_server_fixture() {
         .await
         .unwrap();
 }
+
+#[cfg(test)]
+#[tokio::test]
+async fn envelope_keyword_server_fixture() {
+    let Some(root) = std::env::var_os("MAILROOM_ENVELOPE_FIXTURE") else {
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let (repo, _account, _folder, _sieve) =
+        acquisition::workspace_authority::envelope_tests::install(root);
+    let mut state = AppState::new(true);
+    state.accounts.source = AccountSource::Synthetic {
+        accounts: Arc::new(repo),
+        _directory: tempfile::tempdir().unwrap(),
+        mailboxes: root.join("mailboxes"),
+    };
+    state.accounts.ledger =
+        Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
+    let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
+    axum::serve(listener, super::router(Arc::new(state)))
+        .await
+        .unwrap();
+}

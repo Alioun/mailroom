@@ -1,4 +1,5 @@
 pub mod acquisition;
+pub mod delivery;
 pub mod demo;
 pub mod folder_provisioning;
 mod headers;
@@ -111,6 +112,8 @@ pub struct HeaderRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageRecord {
+    #[serde(default, skip_serializing_if = "delivery_unavailable")]
+    pub delivery: delivery::DeliveryEvidence,
     pub uid: u32,
     pub size: u64,
     pub internal_date: String,
@@ -121,6 +124,10 @@ pub struct MessageRecord {
     pub gmail_thread_id: Option<String>,
     pub gmail_labels: BTreeSet<String>,
     pub headers: HeaderRecord,
+}
+
+fn delivery_unavailable(value: &delivery::DeliveryEvidence) -> bool {
+    matches!(value, delivery::DeliveryEvidence::Unavailable)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

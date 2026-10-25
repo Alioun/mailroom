@@ -1,3 +1,4 @@
+import { recipientEvidence } from './api'
 import { z } from 'zod'
 import { localFetch } from './api'
 const name = z.object({ decoded: z.string().max(1024), wire: z.string().max(2048) })
@@ -8,7 +9,7 @@ const outcome = z.enum(['intent', 'acknowledged', 'observed', 'refused', 'uncert
 const operation = z.object({ id: z.string(), artifact: z.string(), proof_binding: z.string(), receipt: z.string(), before: inventory, plan: z.object({ logical_leaves: z.array(z.string()).max(64), entries: z.array(z.object({ name, role: z.enum(['ancestor', 'leaf']), existing: mailbox.nullable() })).max(64) }), status: z.enum(['running', 'complete', 'refused', 'uncertain', 'stopped', 'conflict', 'fresh_review']), steps: z.array(z.object({ name, outcome, acknowledgment: z.boolean(), failure: z.string().nullable(), before: inventory, observed: inventory.nullable() })).max(64) })
 const journal = z.object({ history: z.array(operation).max(8) })
 const view = z.object({ installed: z.literal(true), recovery_hold: z.boolean(), journal, limitations: z.string() })
-const preview = z.object({ operation, receipt: z.string(), proof: z.object({ gate: z.string(), semantics: z.string(), pins: z.array(z.object({ message_id_hash: z.string(), status: z.string() })), warnings: z.array(z.string()), runtime_cross_check: z.string(), recipient_evidence: z.enum(['unknown', 'synthetic_delivered_to', 'synthetic_original_to']), capabilities: z.array(z.string()), context_binding: z.string().length(64) }), limitations: z.string() })
+const preview = z.object({ operation, receipt: z.string(), proof: z.object({ gate: z.string(), semantics: z.string(), pins: z.array(z.object({ message_id_hash: z.string(), status: z.string() })), warnings: z.array(z.string()), runtime_cross_check: z.string(), recipient_evidence: recipientEvidence, capabilities: z.array(z.string()), context_binding: z.string().length(64) }), limitations: z.string() })
 export type FolderView = z.infer<typeof view>
 export type FolderPreview = z.infer<typeof preview>
 type Command = { action: 'preview' | 'status' | 'cancel' } | { action: 'confirm'; receipt: string; confirmed: boolean } | { action: 'reconcile'; operation: string }

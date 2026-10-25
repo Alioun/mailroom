@@ -22,10 +22,12 @@ for directory in sorted(Path('/fixtures').iterdir()):
     shutil.copyfile(directory / 'rules.sieve', script)
     run(['check-sieve', str(script)])
     expected = json.loads((directory / 'expected.json').read_text())
+    envelopes = json.loads((directory / 'envelope.json').read_text()) if (directory / 'envelope.json').exists() else None
     for i, decision in enumerate(expected):
         trace = Path('/tmp/trace')
         trace.unlink(missing_ok=True)
-        output, errors = run(['sieve-test', '-C', '-c', '/harness/dovecot.conf', '-t', str(trace), str(script), str(directory / f'{i}.eml')])
+        envelope_args = ['-r', envelopes[i]] if envelopes else []
+        output, errors = run(['sieve-test', *envelope_args, '-C', '-c', '/harness/dovecot.conf', '-t', str(trace), str(script), str(directory / f'{i}.eml')])
         if 'error:' in errors.lower() or 'error:' in output.lower():
             raise RuntimeError(f"Pigeonhole reported an error in {directory.name}/{i}")
         folders = re.findall(r'store message in folder: (.+)', output)
@@ -38,6 +40,11 @@ for directory in sorted(Path('/fixtures').iterdir()):
         trace_text = trace.read_text()
         seen = '\\seen' in output.lower() or '\\seen' in trace_text.lower()
         assert seen == decision['mark_read'], (directory.name, i, 'Seen action disagreement')
+        if envelopes:
+            flag_lines = re.findall(r'with flags: (.+)', output, re.IGNORECASE)
+            keywords = {token.strip('[]\"').lower() for line in flag_lines for token in line.split() if not token.startswith('\\')}
+            assert keywords == {k.lower() for k in decision['keyword_additions']}, (directory.name, i, 'Additive keyword disagreement', keywords)
         count += 1
-print(f'PASS: check-sieve lint and Pigeonhole fresh-cache filing/copy/Seen semantics for {count} synthetic executions across {variants} variants.')
+print(f'PASS: check-sieve lint and Pigeonhole fresh-cache filing/copy/Seen and explicit-envelope keyword semantics for {count} synthetic executions across {variants} variants.')
 print('UNVERIFIED: persistent duplicate-cache true/expiry behavior, real provider recipient provenance, separator, capabilities and accounting acceptance.')
+print('UNVERIFIED: permanent keyword storage and Gmail-origin authentication. Envelope recipients are explicit synthetic arguments, separate from message headers.')

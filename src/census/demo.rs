@@ -170,6 +170,7 @@ pub fn fixture(uid: u32) -> Result<MessageRecord, CensusError> {
         "From: {from}\r\nTo: owner@example.test\r\nDelivered-To: alias@example.test\r\nSubject: =?UTF-8?Q?Gr=C3=BC=C3=9Fe_und_Rechnung?= {uid}\r\nDate: Wed, 21 Oct 2026 10:00:00 +0000\r\nMessage-ID: <demo-{uid}@example.test>\r\nList-Unsubscribe: <https://studio.example/remove?token=synthetic-private-target>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\nAuthentication-Results: forged.example; dkim=pass header.d=studio.example\r\nDKIM-Signature: v=1; d=studio.example; s=demo; h=from:list-unsubscribe:list-unsubscribe-post; b=synthetic\r\n\r\n"
     );
     Ok(MessageRecord {
+        delivery: Default::default(),
         uid,
         size: 1024,
         internal_date: "2026-10-21T10:00:00Z".to_owned(),

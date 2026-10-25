@@ -103,7 +103,7 @@ fn schema_ten_protocol_and_proposal_sieve_facts_round_trip_with_selected_recover
             .unwrap();
     }
     let (manifest, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
-    assert!(manifest.accounts.iter().all(|m| m.state_schema == 13));
+    assert!(manifest.accounts.iter().all(|m| m.state_schema == 14));
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();
@@ -582,5 +582,56 @@ fn selected_folder_journal_restores_held_and_retains_later_independent_effects()
     assert_eq!(
         crate::acquisition::sieve_transaction::tests::independent_effects(root.path(), &store),
         effects
+    );
+}
+
+#[test]
+fn selected_schema_fourteen_keeps_complete_delivery_state_and_restored_holds() {
+    let root = tempfile::tempdir().unwrap();
+    let (repo, account, _folder, _sieve) =
+        crate::acquisition::workspace_authority::envelope_tests::install(root.path());
+    let ledger = InstalledLedger::install(root.path().join("ledger")).unwrap();
+    let before = repo.store(&account).unwrap().load_state().unwrap();
+    let (manifest, bundle) = capture(
+        &repo,
+        std::slice::from_ref(&account.id),
+        &ledger,
+        root.path(),
+    );
+    assert_eq!(manifest.accounts[0].state_schema, 14);
+    let fresh_root = tempfile::tempdir().unwrap();
+    let mut fresh = persistent_accounts(fresh_root.path());
+    let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();
+    fs::remove_file(fresh_root.path().join("ledger/addresses.yaml")).unwrap();
+    let preview = fresh
+        .selected_restore_preview(&bundle, &secret(), true, Some(&target))
+        .unwrap();
+    fresh
+        .selected_restore(&bundle, &secret(), &preview, Some(&target), |_| Ok(()))
+        .unwrap();
+    let restored = fresh.load(&account.id).unwrap();
+    fresh.install_synthetic_envelope(&restored, "delivery-fixture-v1");
+    let store = fresh.store(&restored).unwrap();
+    let after = store.load_state().unwrap();
+    assert_eq!(
+        encoded(&before).unwrap().as_slice(),
+        encoded(&after).unwrap().as_slice()
+    );
+    assert!(store.recovery_pending());
+    let p = crate::rules::workspace::preview(
+        &after,
+        &fresh.workspace_context(&restored, &store).unwrap(),
+        store.keys(),
+    )
+    .unwrap();
+    assert_eq!(
+        p.proof.artifact.context().recipient_evidence,
+        crate::rules::EvidenceSource::Unknown
+    );
+    assert!(
+        p.proof
+            .decisions
+            .iter()
+            .all(|d| d.review && d.keyword_additions.is_empty())
     );
 }

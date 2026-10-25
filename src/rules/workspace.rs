@@ -110,7 +110,10 @@ impl WorkspaceContext {
     pub(crate) fn binding(&self) -> &str {
         &self.binding
     }
-    fn engine(&self, account: &crate::census::AccountId) -> Result<EngineContext, String> {
+    pub(crate) fn engine(
+        &self,
+        account: &crate::census::AccountId,
+    ) -> Result<EngineContext, String> {
         if self.account.as_ref().is_some_and(|id| id != account) {
             return Err("Workspace context belongs to another account".into());
         }

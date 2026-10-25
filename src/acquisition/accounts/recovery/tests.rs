@@ -76,7 +76,7 @@ fn schema_ten_protocol_and_proposal_sieve_facts_round_trip_with_single_account_r
     let before = state(&repo, &account);
     assert!(before.census.acquisition.is_protocol());
     let (manifest, bundle) = capture(&repo, &account, root.path());
-    assert_eq!(manifest.state_schema, 13);
+    assert_eq!(manifest.state_schema, 14);
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let preview = fresh.restore_preview(&bundle, &secret()).unwrap();
@@ -527,7 +527,7 @@ fn folder_journal_restores_held_without_reverting_later_independent_topology() {
     );
     let before = state(&repo, &account);
     let (manifest, bundle) = capture(&repo, &account, root.path());
-    assert_eq!(manifest.state_schema, 13);
+    assert_eq!(manifest.state_schema, 14);
     let effects = crate::acquisition::sieve_transaction::tests::independent_effects(
         root.path(),
         &repo.store(&account).unwrap(),
@@ -578,5 +578,46 @@ fn folder_journal_restores_held_without_reverting_later_independent_topology() {
     assert_eq!(
         crate::acquisition::sieve_transaction::tests::independent_effects(root.path(), &store),
         effects
+    );
+}
+
+#[test]
+fn schema_fourteen_delivery_round_trips_complete_state_without_recovering_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let (repo, account, _folder, _sieve) =
+        crate::acquisition::workspace_authority::envelope_tests::install(root.path());
+    let before = state(&repo, &account);
+    let (manifest, bundle) = capture(&repo, &account, root.path());
+    assert_eq!(manifest.state_schema, 14);
+    let fresh_root = tempfile::tempdir().unwrap();
+    let mut fresh = persistent_accounts(fresh_root.path());
+    let preview = fresh.restore_preview(&bundle, &secret()).unwrap();
+    fresh
+        .restore(&bundle, &secret(), &preview, |_| Ok(()))
+        .unwrap();
+    let restored = fresh.load(&account.id).unwrap();
+    fresh.install_synthetic_envelope(&restored, "delivery-fixture-v1");
+    let store = fresh.store(&restored).unwrap();
+    let after = store.load_state().unwrap();
+    assert_eq!(
+        encoded(&before).unwrap().as_slice(),
+        encoded(&after).unwrap().as_slice()
+    );
+    assert!(store.recovery_pending());
+    let p = crate::rules::workspace::preview(
+        &after,
+        &fresh.workspace_context(&restored, &store).unwrap(),
+        store.keys(),
+    )
+    .unwrap();
+    assert_eq!(
+        p.proof.artifact.context().recipient_evidence,
+        crate::rules::EvidenceSource::Unknown
+    );
+    assert!(
+        p.proof
+            .decisions
+            .iter()
+            .all(|d| d.review && d.keyword_additions.is_empty() && d.copies.is_empty())
     );
 }

@@ -10,6 +10,13 @@
         "$ref": "#/$defs/Rule"
       }
     },
+    "delivery_tags": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DeliveryTag"
+      }
+    },
     "forwards": {
       "type": "array",
       "default": [],
@@ -236,6 +243,38 @@
         }
       ]
     },
+    "DeliveryTag": {
+      "type": "object",
+      "properties": {
+        "accounts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "add_keyword": {
+          "$ref": "#/$defs/Keyword"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "envelope_to": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "accounts",
+        "envelope_to",
+        "add_keyword"
+      ]
+    },
     "Forward": {
       "type": "object",
       "properties": {
@@ -325,6 +364,9 @@
           ]
         }
       ]
+    },
+    "Keyword": {
+      "type": "string"
     },
     "Language": {
       "type": "string",

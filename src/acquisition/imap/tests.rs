@@ -558,7 +558,7 @@ fn optional_tls_counts_distinguish_zero_absent_denied_malformed_and_ambiguous() 
             CensusKeys::derive(&secret, &account),
         )
         .unwrap();
-        assert_eq!(reopened.schema_version().unwrap(), 13);
+        assert_eq!(reopened.schema_version().unwrap(), 14);
         let census = reopened.load().unwrap();
         let observation = census.acquisition.view(i64::MAX).spam;
         match reason {

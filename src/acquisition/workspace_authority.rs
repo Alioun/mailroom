@@ -33,7 +33,37 @@ impl Accounts {
             a.account == account.id && a.provider == account.provider && !store.recovery_pending()
         });
         if let Some(a) = authority {
-            engine.recipient_evidence = a.recipient_evidence.clone();
+            engine.recipient_evidence = match &a.recipient_evidence {
+                EvidenceSource::SyntheticEnvelope { source }
+                    if a.profile == "synthetic-envelope/v1"
+                        && source.validate()
+                        && source.account == account.id.as_str()
+                        && source.provider
+                            == match account.provider {
+                                Provider::MailboxOrg => "mailbox_org",
+                                Provider::Gmail => "gmail",
+                            }
+                        && source.identity == a.identity
+                        && source.profile == a.profile
+                        && source.epoch == a.epoch =>
+                {
+                    let mut source = source.clone();
+                    source.authority = store.keys().binding_for(
+                        b"mailroom/delivery-authority/v1",
+                        &serde_json::to_vec(&(
+                            self.sieve_authority(account, store)?,
+                            &account.login,
+                            a,
+                            self.folder_source.as_ref().map(|s| s.identity()),
+                            self.sieve_source.as_ref().map(|s| s.identity()),
+                        ))
+                        .map_err(|_| AcquisitionError::Storage)?,
+                    );
+                    EvidenceSource::SyntheticEnvelope { source }
+                }
+                EvidenceSource::SyntheticEnvelope { .. } => EvidenceSource::Unknown,
+                old => old.clone(),
+            };
             engine.capabilities = a.capabilities.clone();
         }
         let bytes = serde_json::to_vec(&(
@@ -56,6 +86,29 @@ impl Accounts {
             binding,
         ))
     }
+    #[cfg(test)]
+    pub(crate) fn install_synthetic_envelope(&mut self, account: &Account, epoch: &str) {
+        self.install_synthetic_workspace(account, epoch);
+        let authority = self.workspace_authority.as_mut().unwrap();
+        authority.identity = "explicit-synthetic-smtp-delivery".into();
+        authority.profile = "synthetic-envelope/v1";
+        authority.capabilities.insert("envelope".into());
+        authority.recipient_evidence = EvidenceSource::SyntheticEnvelope {
+            source: crate::census::delivery::Source {
+                account: account.id.as_str().into(),
+                provider: match account.provider {
+                    Provider::MailboxOrg => "mailbox_org",
+                    Provider::Gmail => "gmail",
+                }
+                .into(),
+                identity: authority.identity.clone(),
+                profile: authority.profile.into(),
+                epoch: epoch.into(),
+                authority: "installed-only".into(),
+            },
+        };
+    }
+
     #[cfg(test)]
     pub(crate) fn install_synthetic_workspace(&mut self, account: &Account, epoch: &str) {
         assert!(!epoch.is_empty());
@@ -298,3 +351,7 @@ mod tests {
         assert_eq!(local.proof.counts.filed, 0);
     }
 }
+
+#[cfg(test)]
+#[path = "workspace_authority/envelope_tests.rs"]
+pub(crate) mod envelope_tests;

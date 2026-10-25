@@ -22,6 +22,7 @@ fn main() {
     )
     .unwrap();
     for variant in [
+        "envelope-keyword",
         "ledger-projection",
         "standard",
         "german-read",
@@ -40,6 +41,17 @@ fn main() {
         fs::create_dir_all(&case_dir).unwrap();
         let mut source = source.clone();
         match variant {
+            "envelope-keyword" => {
+                source["context"]["recipient_evidence"] = json!({"synthetic_envelope":{"source":{"account":source["context"]["account"],"provider":"mailbox_org","identity":"independent-envelope-fixture","profile":"synthetic-envelope/v1","epoch":"one","authority":"explicit-preview-only"}}});
+                source["context"]["capabilities"].as_array_mut().unwrap().push(json!("envelope"));
+                let account=source["context"]["account"].as_str().unwrap();
+                source["documents"]["override_yaml"]=format!("{}\ndelivery_tags:\n  - id: user.route\n    accounts: [{account}]\n    envelope_to: invoices@work.example.test\n    add_keyword: $route\n",source["documents"]["override_yaml"].as_str().unwrap()).into();
+                source["messages"]=json!([
+                    {"id":"envelope-match","headers":"From: shop@example.test\nDelivered-To: forged@unknown.example.test\nSubject: Invoice\nMessage-ID: <independent-match@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000", "current_folder":"INBOX", "delivery":{"status":"known","recipient":"invoices@work.example.test"}},
+                    {"id":"envelope-no-match","headers":"From: shop@example.test\nDelivered-To: invoices@work.example.test\nSubject: Invoice\nMessage-ID: <independent-other@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000", "current_folder":"INBOX", "delivery":{"status":"known","recipient":"team@work.example.test"}}
+                ]);
+            }
+
             "ledger-projection" => {
                 let input: PreviewInput = serde_json::from_value(source.clone()).unwrap();
                 let root = tempfile::tempdir().unwrap();
@@ -115,6 +127,21 @@ fn main() {
         let input: PreviewInput = serde_json::from_value(source.clone()).unwrap();
         let artifact = engine::artifact(&input.documents, &input.context).unwrap();
         fs::write(case_dir.join("rules.sieve"), artifact.executable()).unwrap();
+        if variant == "envelope-keyword" {
+            fs::write(
+                case_dir.join("envelope.json"),
+                serde_json::to_vec_pretty(
+                    &source["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|m| m["delivery"]["recipient"].clone())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
         let fixtures = source["messages"].as_array().unwrap().clone();
         let mut expected = Vec::new();
         for (i, fixture) in fixtures.iter().enumerate() {

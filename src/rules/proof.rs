@@ -1,10 +1,13 @@
-use super::{CompiledArtifact, Engine, sieve::Action};
+use super::{
+    CompiledArtifact, Engine,
+    sieve::{Action, MessageView, Truth},
+};
 use crate::census::{Census, Direction, MessageRecord, ScanState};
 use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const SEMANTICS: &str = "parsed-emitted-sieve-subset-v3";
+pub const SEMANTICS: &str = "parsed-emitted-sieve-subset-v4";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -72,6 +75,16 @@ pub struct Decision {
     pub copies: Vec<CopyDecision>,
     pub copy_eligibility: Vec<CopyEligibility>,
     pub current_folders: BTreeSet<String>,
+    pub delivery_status: &'static str,
+    pub keyword_additions: Vec<String>,
+    pub observed_flags: Option<BTreeSet<String>>,
+    pub delivery_tags: Vec<TagDecision>,
+}
+#[derive(Serialize)]
+pub struct TagDecision {
+    pub rule: String,
+    pub status: &'static str,
+    pub reason: &'static str,
 }
 #[derive(Serialize)]
 pub struct CopyDecision {
@@ -189,11 +202,26 @@ fn execute(
     let mut candidates: BTreeMap<String, (usize, BTreeMap<String, usize>)> = BTreeMap::new();
     for m in input {
         let h = &m.record.headers;
+        let installed = match &artifact.context().recipient_evidence {
+            super::EvidenceSource::SyntheticEnvelope { source } => Some(source),
+            _ => None,
+        };
+        let binding = crate::census::delivery::DeliveryEvidence::message_binding(
+            &m.id,
+            h.message_id_hash.as_deref(),
+        );
+        let (envelope, delivery_status) = m.record.delivery.resolve(installed, &binding);
+        let view = MessageView {
+            headers: h,
+            envelope,
+        };
         let review = statements
-            .first()
+            .iter()
+            .find(|s| s.id == "system.role_safety")
             .ok_or("Missing role safety gate")?
             .test
-            .evaluate(h, &duplicates);
+            .evaluate(&view, &duplicates)
+            != Truth::NoMatch;
         let mut d = Decision {
             id: m.id.clone(),
             message_id_hash: h.message_id_hash.clone(),
@@ -211,12 +239,16 @@ fn execute(
             copies: Vec::new(),
             copy_eligibility: Vec::new(),
             current_folders: m.folders.clone(),
+            delivery_status,
+            keyword_additions: Vec::new(),
+            observed_flags: m.record.flags_observed.then(|| m.record.flags.clone()),
+            delivery_tags: Vec::new(),
         };
         if !review {
             let mut matched_ids = BTreeSet::new();
             for s in &statements {
                 if s.id.starts_with("system.")
-                    || !s.test.evaluate(h, &duplicates)
+                    || !s.test.evaluate(&view, &duplicates).matched()
                     || !matched_ids.insert(&s.id)
                 {
                     continue;
@@ -245,7 +277,7 @@ fn execute(
                 )
             } else if h.message_id_hash.is_none() {
                 ("unknown", "Message-ID evidence is missing; no copy")
-            } else if statement.is_some_and(|s| s.test.evaluate(h, &duplicates)) {
+            } else if statement.is_some_and(|s| s.test.evaluate(&view, &duplicates).matched()) {
                 ("eligible", "Compiled forward matches with duplicate guard")
             } else {
                 (
@@ -259,9 +291,65 @@ fn execute(
                 reason,
             });
         }
+        for tag in artifact
+            .effective()
+            .iter()
+            .filter(|r| r.origin == "override delivery tag")
+        {
+            let omitted = artifact.omissions().iter().find(|o| o.rule == tag.id);
+            let result = statements
+                .iter()
+                .find(|s| s.id == tag.id)
+                .map(|s| s.test.evaluate(&view, &duplicates));
+            let (status, reason) = if omitted.is_some() {
+                (
+                    "omitted",
+                    "Complete tag omitted by engine, scope, evidence or capabilities",
+                )
+            } else if result == Some(Truth::Unknown) {
+                (
+                    "unknown",
+                    "Current delivery evidence is unavailable or incompatible",
+                )
+            } else if review && result == Some(Truth::Match) {
+                (
+                    "held_unresolved",
+                    "Held-message tagging awaits an explicit owner decision; existing no-flag hold preserved",
+                )
+            } else if result == Some(Truth::Match) {
+                (
+                    "match",
+                    "Parsed envelope predicate matches; additive keyword planned",
+                )
+            } else {
+                (
+                    "no_match",
+                    "Parsed current delivery recipient does not match",
+                )
+            };
+            d.delivery_tags.push(TagDecision {
+                rule: tag.id.clone(),
+                status,
+                reason,
+            });
+        }
         let mut pending = Vec::new();
         'script: for s in &statements {
-            if !s.test.evaluate(h, &duplicates) {
+            if review {
+                d.matched_rule = Some("system.role_safety".into());
+                break;
+            }
+            let truth = s.test.evaluate(&view, &duplicates);
+            if truth == Truth::Unknown {
+                d.review = true;
+                d.destination = Destination::Inbox;
+                d.copies.clear();
+                d.keyword_additions.clear();
+                d.mark_read = false;
+                pending.clear();
+                break;
+            }
+            if !truth.matched() {
                 continue;
             }
             for action in &s.actions {
@@ -284,6 +372,15 @@ fn execute(
                         d.matched_rule = Some(s.id.clone());
                     }
                     Action::Seen => d.mark_read = true,
+                    Action::AddKeyword(k) => {
+                        if !d
+                            .keyword_additions
+                            .iter()
+                            .any(|v| v.eq_ignore_ascii_case(k.as_str()))
+                        {
+                            d.keyword_additions.push(k.as_str().into());
+                        }
+                    }
                     Action::Stop => break 'script,
                 }
             }
@@ -354,7 +451,10 @@ pub fn prove(
                 .filter(|d| {
                     window_ids.contains(&d.id)
                         && (d.matched_rule.as_ref() == Some(&r.id)
-                            || d.copies.iter().any(|c| c.rule == r.id))
+                            || d.copies.iter().any(|c| c.rule == r.id)
+                            || d.delivery_tags
+                                .iter()
+                                .any(|t| t.rule == r.id && t.status == "match"))
                 })
                 .collect();
             let mut monthly: BTreeMap<_, _> = months.iter().map(|m| (m.clone(), 0)).collect();
@@ -379,7 +479,7 @@ pub fn prove(
             }
         })
         .collect::<Vec<_>>();
-    let mut warnings = vec!["Recipient safety accepts exactly one verified synthetic delivery recipient. Multiple recipients retain Inbox for review, including same-role recipients. Real provider provenance remains unknown.".into(), "Header census proves no attachment presence or accounting acceptance. Duplicate state starts empty for each proof and has no historical provider cache.".into(), "Folder paths use a logical slash separator. Actual provider separator, existing folders and rule coexistence remain unverified.".into()];
+    let mut warnings = vec!["Delivery tags label a matched ingress address, not authenticated Gmail origin. Sieve starts with empty accumulated flags. Observed IMAP flags are separate; permanent keyword storage is unverified. Held-message tagging remains unresolved pending the owner decision.".into(),"Recipient safety accepts exactly one verified synthetic delivery recipient. Multiple recipients retain Inbox for review, including same-role recipients. Real provider provenance remains unknown.".into(), "Header census proves no attachment presence or accounting acceptance. Duplicate state starts empty for each proof and has no historical provider cache.".into(), "Folder paths use a logical slash separator. Actual provider separator, existing folders and rule coexistence remain unverified.".into()];
     if census.acquisition_state != ScanState::Complete
         || census
             .folders
@@ -423,6 +523,16 @@ pub fn prove(
             };
             let status = if actual.is_empty() {
                 "stale"
+            } else if decisions.iter().any(|d| {
+                d.message_id_hash.as_ref() == Some(&p.message_id_hash)
+                    && d.review
+                    && matches!(
+                        artifact.context().recipient_evidence,
+                        super::EvidenceSource::SyntheticEnvelope { .. }
+                    )
+                    && d.delivery_status != "known"
+            }) {
+                "unknown"
             } else if actual.iter().all(|d| d == &p.expected) {
                 "pass"
             } else {
@@ -478,7 +588,7 @@ pub fn prove(
         copied_messages: decisions.iter().filter(|d| !d.copies.is_empty()).count(),
         review: decisions.iter().filter(|d| d.review).count(),
     };
-    let gate = if pins.iter().any(|p| p.status == "fail") {
+    let gate = if pins.iter().any(|p| matches!(p.status, "fail" | "unknown")) {
         "blocked"
     } else {
         "warnings"

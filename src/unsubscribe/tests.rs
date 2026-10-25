@@ -17,7 +17,7 @@ fn fixture() -> (
     input.context.account = "unsubscribe-fixture".into();
     input.messages.clear();
     for i in 1..=6 {
-        input.messages.push(engine::Fixture { id: format!("message-{i}"), headers: format!("From: News <news@shop.example>\nDelivered-To: team@home.example.test\nTo: team@home.example.test\nDate: 20 Oct 2026 10:00:00 +0000\nMessage-ID: <unsubscribe-{i}@example.test>\nList-Id: <offers.shop.example>\nList-Unsubscribe: <https://shop.example/remove?token=synthetic-private-token>, <mailto:leave@shop.example?subject=unsubscribe&body=synthetic-mail-token>\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\nDKIM-Signature: v=1; d=shop.example; s=fixture; h=list-unsubscribe:list-unsubscribe-post; b=synthetic-signature\n"), current_folder: "INBOX".into() });
+        input.messages.push(engine::Fixture { delivery: Default::default(), observed_flags: Some(Default::default()), id: format!("message-{i}"), headers: format!("From: News <news@shop.example>\nDelivered-To: team@home.example.test\nTo: team@home.example.test\nDate: 20 Oct 2026 10:00:00 +0000\nMessage-ID: <unsubscribe-{i}@example.test>\nList-Id: <offers.shop.example>\nList-Unsubscribe: <https://shop.example/remove?token=synthetic-private-token>, <mailto:leave@shop.example?subject=unsubscribe&body=synthetic-mail-token>\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\nDKIM-Signature: v=1; d=shop.example; s=fixture; h=list-unsubscribe:list-unsubscribe-post; b=synthetic-signature\n"), current_folder: "INBOX".into() });
     }
     let census = engine::synthetic_census(&input).unwrap();
     let store = EncryptedStore::new(

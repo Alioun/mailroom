@@ -2,6 +2,7 @@ pub(super) mod backlog;
 pub(super) mod invoices;
 pub(super) mod ledger;
 pub(super) mod lifecycle;
+pub(super) mod recovery;
 pub(super) mod subscription_review;
 pub(super) mod unsubscribe;
 pub(super) mod winddown;
@@ -825,6 +826,9 @@ fn sync_ledger(
     provider: Provider,
     guard: Option<&crate::ledger::file::LockedLedger<'_>>,
 ) -> Result<(), String> {
+    if store.recovery_pending() {
+        return Ok(());
+    }
     if let Some(guard) = guard {
         let snapshot = guard.read()?;
         if saved.workspace.is_some() && crate::ledger::reconcile(saved, &snapshot, provider)? {
@@ -840,10 +844,12 @@ async fn durable_browser_server_fixture() {
     let Some(root) = std::env::var_os("MAILROOM_DURABLE_BROWSER_FIXTURE") else {
         return;
     };
+    let installation =
+        std::env::var_os("MAILROOM_RECOVERY_INSTALLATION").unwrap_or_else(|| root.clone());
     let mut state = AppState::new(true);
     state.accounts.source = AccountSource::Synthetic {
         accounts: Arc::new(acquisition::persistent_test_accounts(std::path::Path::new(
-            &root,
+            &installation,
         ))),
         _directory: tempfile::tempdir().unwrap(),
         mailboxes: std::path::Path::new(&root).join("mailboxes"),

@@ -263,6 +263,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/accounts/status", get(accounts::status))
         .route("/api/accounts/list", post(accounts::list))
         .route("/api/accounts/lifecycle", post(accounts::lifecycle::handle))
+        .route("/api/accounts/recovery", post(accounts::recovery::handle))
         .route("/api/accounts/connect", post(accounts::connect))
         .route("/api/accounts/synthetic", post(accounts::synthetic))
         .route(

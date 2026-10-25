@@ -49,6 +49,7 @@ pub struct CensusKeys {
     placeholders: Zeroizing<[u8; 32]>,
     identity: Option<Zeroizing<Vec<u8>>>,
     generation: u64,
+    recovery_authority: Option<String>,
 }
 
 impl CensusKeys {
@@ -70,6 +71,7 @@ impl CensusKeys {
             placeholders,
             identity: None,
             generation: 0,
+            recovery_authority: None,
         }
     }
 
@@ -99,6 +101,10 @@ impl CensusKeys {
         keys.generation = generation;
         Ok(keys)
     }
+    pub(crate) fn recovery_authority(&mut self, authority: &str) {
+        self.recovery_authority = Some(authority.to_owned());
+    }
+
     pub(crate) fn binding(&self, value: &[u8]) -> String {
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.placeholders.as_ref())
             .expect("valid HMAC key");
@@ -106,11 +112,18 @@ impl CensusKeys {
         if self.generation > 0 {
             mac.update(&self.generation.to_be_bytes());
         }
+        if let Some(authority) = &self.recovery_authority {
+            mac.update(authority.as_bytes());
+        }
         mac.update(value);
         data_encoding::HEXLOWER.encode(&mac.finalize().into_bytes())
     }
 
     pub(crate) fn binding_for(&self, purpose: &[u8], value: &[u8]) -> String {
+        if let Some(authority) = &self.recovery_authority {
+            let payload = [authority.as_bytes(), &self.generation.to_be_bytes(), value].concat();
+            return self.identity_binding_for(purpose, &payload);
+        }
         if self.generation == 0 {
             return self.identity_binding_for(purpose, value);
         }
@@ -322,7 +335,14 @@ impl EncryptedStore {
         self.save_state(&mut state)
     }
 
+    pub(crate) fn recovery_pending(&self) -> bool {
+        self.keys.recovery_authority.is_some()
+    }
+
     pub fn save_state(&self, state: &mut AccountState) -> Result<(), CensusError> {
+        if self.keys.recovery_authority.is_some() {
+            return Err(CensusError::Storage);
+        }
         if state.census.account != self.keys.account {
             return Err(CensusError::AccountMismatch);
         }
@@ -432,7 +452,15 @@ impl EncryptedStore {
         Ok(state)
     }
 
+    pub(crate) fn schema_version(&self) -> Result<u32, CensusError> {
+        self.read_state_versioned().map(|(version, _)| version)
+    }
+
     fn read_state(&self) -> Result<AccountState, CensusError> {
+        self.read_state_versioned().map(|(_, state)| state)
+    }
+
+    fn read_state_versioned(&self) -> Result<(u32, AccountState), CensusError> {
         let path = self.path();
         let metadata = fs::symlink_metadata(&path).map_err(|_| CensusError::Storage)?;
         if !metadata.is_file()
@@ -524,7 +552,7 @@ impl EncryptedStore {
                 entry.status = crate::unsubscribe::Status::Uncertain;
             }
         }
-        Ok(state)
+        Ok((version, state))
     }
 }
 

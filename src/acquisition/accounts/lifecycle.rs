@@ -113,6 +113,15 @@ impl Accounts {
     }
     pub(super) fn require_ready(&self, id: &AccountId) -> Result<(), AcquisitionError> {
         if self
+            .paths
+            .config
+            .join("lifecycle")
+            .join(format!("{}.restore", id.as_str()))
+            .exists()
+        {
+            return Err(AcquisitionError::LifecyclePending);
+        }
+        if self
             .intent_path(id)
             .try_exists()
             .map_err(|_| AcquisitionError::Storage)?
@@ -208,7 +217,7 @@ impl Accounts {
     fn store_keys(&self, a: &Account, kind: usize) -> Result<CensusKeys, AcquisitionError> {
         let value = self.backend.get(&a.local_secret_ref)?;
         let secret = LocalSecret::from_bytes(value.bytes().to_vec())?;
-        let keys = match &a.identity_ref {
+        let mut keys = match &a.identity_ref {
             Some(reference) => CensusKeys::rotated(
                 &secret,
                 &a.id,
@@ -217,6 +226,11 @@ impl Accounts {
             )?,
             None => CensusKeys::derive(&secret, &a.id),
         };
+        if kind == 0 {
+            if let Some(restored) = &a.restored {
+                keys.recovery_authority(&restored.authority);
+            }
+        }
         Ok(match kind {
             0 => keys,
             1 => keys.synthetic_mailbox_keys(),
@@ -267,6 +281,7 @@ impl Accounts {
             generation: 0,
             identity_ref: None,
             connection: ConnectionState::Unverified,
+            restored: None,
             id,
             provider,
             login,
@@ -706,7 +721,7 @@ fn valid_nonce(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
-fn nonce() -> String {
+pub(super) fn nonce() -> String {
     let mut random = [0; 16];
     OsRng.fill_bytes(&mut random);
     data_encoding::HEXLOWER.encode(&random)
@@ -721,7 +736,7 @@ fn validate_password(password: &SecretValue) -> Result<(), AcquisitionError> {
         Ok(())
     }
 }
-fn cipher_path(dir: &Path, id: &AccountId, generation: u64) -> PathBuf {
+pub(super) fn cipher_path(dir: &Path, id: &AccountId, generation: u64) -> PathBuf {
     dir.join(if generation == 0 {
         format!("{}.census.enc", id.as_str())
     } else {
@@ -745,7 +760,7 @@ fn attributable_staging(dir: &Path, id: &AccountId) -> Result<Vec<PathBuf>, Acqu
     }
     Ok(paths)
 }
-fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, AcquisitionError> {
+pub(super) fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, AcquisitionError> {
     let m = fs::symlink_metadata(path).map_err(|_| AcquisitionError::Storage)?;
     if !m.is_file() || m.file_type().is_symlink() || m.len() > limit {
         return Err(AcquisitionError::Storage);
@@ -759,7 +774,7 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, AcquisitionError> {
     }
     Ok(bytes)
 }
-fn write_json(path: &Path, value: &impl Serialize) -> Result<(), AcquisitionError> {
+pub(super) fn write_json(path: &Path, value: &impl Serialize) -> Result<(), AcquisitionError> {
     let parent = path.parent().ok_or(AcquisitionError::Storage)?;
     private_directory(parent)?;
     let prefix = format!(
@@ -805,7 +820,7 @@ pub(crate) fn remove_file(path: &Path) -> Result<(), AcquisitionError> {
         Err(_) => Err(AcquisitionError::Storage),
     }
 }
-fn sync_dir(path: &Path) -> Result<(), AcquisitionError> {
+pub(super) fn sync_dir(path: &Path) -> Result<(), AcquisitionError> {
     fs::File::open(path)
         .and_then(|f| f.sync_all())
         .map_err(|_| AcquisitionError::Storage)
@@ -847,6 +862,6 @@ pub(crate) fn boundary(name: &str) -> Result<(), AcquisitionError> {
     Ok(())
 }
 #[cfg(test)]
-thread_local! { static FAIL: std::cell::RefCell<(Option<String>, usize)> = const { std::cell::RefCell::new((None,0)) }; }
+thread_local! { pub(super) static FAIL: std::cell::RefCell<(Option<String>, usize)> = const { std::cell::RefCell::new((None,0)) }; }
 #[cfg(test)]
 mod tests;

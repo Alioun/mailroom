@@ -145,6 +145,11 @@ fn prepare(
         let store = repo
             .store(&account)
             .map_err(|_| "Account storage unavailable")?;
+        if store.recovery_pending() {
+            return Err(
+                "Fresh provider evidence and reconciliation required after recovery".into(),
+            );
+        }
         let mut saved = store.load_state().map_err(|_| "Census unavailable")?;
         sync_ledger(&mut saved, &store, account.provider, guard)?;
         let installed = InstalledSynthetic::open(mailboxes, &store, &saved)?;
@@ -197,6 +202,11 @@ fn view(state: &AppState, as_of: i64) -> Result<serde_json::Value, String> {
             .map_err(|_| "Account storage unavailable")?;
         if !store.path().exists() {
             continue;
+        }
+        if store.recovery_pending() {
+            return Err(
+                "Fresh provider evidence and reconciliation required after recovery".into(),
+            );
         }
         let mut saved = store.load_state().map_err(|_| "Census unavailable")?;
         let snapshot = state

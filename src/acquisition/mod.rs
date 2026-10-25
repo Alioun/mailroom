@@ -4,6 +4,7 @@ mod scan;
 pub(crate) mod synthetic;
 use crate::census::CensusError;
 pub use accounts::lifecycle;
+pub(crate) use accounts::recovery;
 pub use accounts::{
     Account, AccountPaths, Accounts, CredentialBackend, OsCredentials, Provider, SecretValue,
 };

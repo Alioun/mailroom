@@ -1,4 +1,5 @@
 pub mod lifecycle;
+pub(crate) mod recovery;
 use super::AcquisitionError;
 use crate::census::{AccountId, Census, CensusKeys, EncryptedStore, LocalSecret};
 use rand::{RngCore, rngs::OsRng};
@@ -106,6 +107,8 @@ pub struct Account {
     identity_ref: Option<String>,
     #[serde(default)]
     connection: ConnectionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restored: Option<recovery::Restored>,
 }
 
 #[derive(Clone, Copy, Default, Serialize, Deserialize)]

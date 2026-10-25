@@ -53,6 +53,12 @@ The Sieve check builds an isolated image and runs check-sieve and Pigeonhole aga
 
 See [Exact-action confirmation](docs/macos-confirmation.md) for the synthetic single-use boundary, compile-only Swift helper and denied native prerequisites. Inspect the deferred owner setup with `bash scripts/setup-macos-protection.sh --plan`.
 
+## Encrypted recovery development
+
+[Encrypted recovery](docs/recovery-format.md) captures one synthetic account with a separately held recovery key. It authenticates an absent-account restore and preserves later independent mailbox and transport effects. Restored accounts remain read-only pending fresh provider evidence and reconciliation. Production creation and restoration are denied while native launch and protected Keychain implementation are missing.
+
+Inspect the [owner-run recovery wizard](scripts/recovery-wizard.sh) with `bash scripts/recovery-wizard.sh --plan`. Planning requests no secret and creates no backup. With port 4173 free, run `CARGO_PROFILE_TEST_OPT_LEVEL=1 node scripts/verify-recovery.mjs`, then `node ui/scripts/verify-recovery.mjs` against its paired synthetic fixture.
+
 ## Account boundary
 
 [Local account lifecycle](docs/account-lifecycle.md) adds synthetic-only password replacement, interrupted-creation cleanup, exact local forgetting and safe key generations. New production connections and lifecycle changes remain unavailable until protected credential installation is implemented. The existing connection wizard cannot complete a new production connection during this gate.

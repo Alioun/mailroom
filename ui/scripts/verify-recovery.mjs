@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { readFile, writeFile, mkdir, stat } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, stat, rename } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
@@ -30,7 +30,7 @@ async function start(boundary = '') {
   for (let i = 0; i < 300; i++) {
     assert.equal(child.exitCode, null)
     const response = await fetch(`${retained.base}/api/session`).catch(() => null)
-    if (response?.ok) { token = (await response.json()).token; return }
+    if (response?.ok) { token = (await response.json()).token; await writeFile(retainedPath, JSON.stringify(retained, null, 2) + '\n'); await writeFile(join(root, '.audit/recovery-browser-runtime.json'), JSON.stringify(retained, null, 2) + '\n'); return }
     await new Promise(r => setTimeout(r, 40))
   }
   throw Error('Replacement synthetic startup timeout')
@@ -65,6 +65,8 @@ try {
   await region.getByRole('status').waitFor()
   await verifiedStop()
   retained.installation = join(retained.directory, 'browser-fresh-installation'); await mkdir(retained.installation)
+  retained.account = account; retained.bundle = captured.bundle
+  await rename(join(retained.directory, 'reached-restore_metadata'), join(retained.directory, 'reached-restore_metadata-before-browser-preserved')).catch(error => { if (error.code !== 'ENOENT') throw error })
   await start('restore_metadata')
   await page.reload()
   await page.getByRole('radio', { name: 'Deutsch', exact: true }).click()

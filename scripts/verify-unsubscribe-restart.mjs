@@ -50,9 +50,14 @@ try {
     const row = view.report.rows.find(r => r.methods.includes(method))
     assert.ok(row)
     const input = { as_of: sample.as_of, selections: [{ subscription: row.id, method }], folders: { personal: 'Muted', business: 'Quiet' } }
-    const preview = await command(account, { action: 'preview', input })
+    let preview = await command(account, { action: 'preview', input })
     await stop(); await start(boundary)
-    assert.deepEqual(await command(account, { action: 'preview', input }), preview, 'Full exact preview and HMAC reproduce after process replacement')
+    const reproduced = await command(account, { action: 'preview', input })
+    assert.deepEqual(reproduced.actions, preview.actions, 'Exact actions reproduce after process replacement')
+    assert.equal(reproduced.confirmation.plan_digest, preview.confirmation.plan_digest, 'Original generation-bound receipt remains bound')
+    assert.notEqual(reproduced.receipt, preview.receipt, 'Confirmation requests do not survive replacement')
+    await command(account, { action: 'confirm', input, receipt: preview.receipt, confirmation_action: preview.confirmation_action, mail_confirmation_action: preview.local_mail_confirmation }, 422)
+    preview = reproduced
     const send = { action: 'confirm', input, receipt: preview.receipt, confirmation_action: preview.confirmation_action, mail_confirmation_action: preview.local_mail_confirmation }
     await unlink(join(directory, `unsubscribe-reached-${boundary}`)).catch(() => {})
     const pending = command(account, send).catch(() => null)
@@ -103,7 +108,7 @@ try {
         for (const marker of ['synthetic-private-token', 'synthetic-mail-token', preview.receipt, 'preset_yaml']) assert.equal(bytes.includes(Buffer.from(marker)), false, 'Encrypted persistence')
       }
     }
-    console.log(`PASS actual SIGKILL/replacement ${boundary} ${method}, exact full HMAC reproduction, independent durable effects, token-safe plaintext history/acks, no retry, old session denied, repeated recovery`)
+    console.log(`PASS actual SIGKILL/replacement ${boundary} ${method}, exact plan reproduction and old confirmation rejection, independent durable effects, token-safe plaintext history/acks, no retry, old session denied, repeated recovery`)
     retained = { pid: server.pid, binary, directory, account, entry, base }
     if (method !== 'local_mail') await stop()
   }

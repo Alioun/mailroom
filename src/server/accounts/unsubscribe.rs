@@ -49,12 +49,25 @@ pub(in crate::server) async fn handle(
         let mut installed = match &state.accounts.source { AccountSource::Synthetic { mailboxes, .. } => Some(InstalledSynthetic::open(mailboxes, &store, &saved)?), _ => None };
         let as_of = match request.command {
             Action::Open { as_of } => as_of,
-            Action::Preview { input } => return unsubscribe::preview(&saved, account.provider, store.keys(), &input, installed.as_ref()).map(|p| json!(p)),
+            Action::Preview { input } => {
+                let mut preview = unsubscribe::preview(&saved, account.provider, store.keys(), &input, installed.as_ref())?;
+                let (handle, request) = state.accounts.confirmations.lock().expect("confirmations").offer(unsubscribe::confirmation_plan(&preview))?;
+                preview.receipt = handle;
+                preview.confirmation = Some(request);
+                return Ok(json!(preview));
+            },
             Action::Confirm { input, receipt, confirmation_action, mail_confirmation_action } => {
                 if saved.invoices.sends.iter().any(|s| s.status != crate::invoice::Status::Completed) || saved.backlog.iter().any(|r| !matches!(r.status, crate::backlog::Status::Completed | crate::backlog::Status::Failed)) { return Err("Reconcile pending invoice/backlog work first".into()); }
                 let preview = unsubscribe::preview(&saved, account.provider, store.keys(), &input, installed.as_ref())?;
+                if confirmation_action != preview.confirmation_action || preview.local_mail_confirmation.is_some_and(|a| mail_confirmation_action.as_deref() != Some(a)) { return Err("Action changed".into()); }
+                let current = unsubscribe::confirmation_plan(&preview);
+                let consent = state.accounts.confirmations.lock().expect("confirmations").confirm(&receipt, &current, &mut crate::confirmation::SyntheticBackend, || {
+                    let latest = store.load_state().map_err(|_| "Revalidate unsubscribe state")?;
+                    ledger_fresh(&latest, ledger_guard.as_ref())?;
+                    unsubscribe::preview(&latest, account.provider, store.keys(), &input, installed.as_ref()).map(|p| unsubscribe::confirmation_plan(&p))
+                })?;
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| "Invalid clock")?.as_secs() as i64;
-                let ids = unsubscribe::confirm(&mut saved, &preview, &receipt, &confirmation_action, mail_confirmation_action.as_deref(), now)?;
+                let ids = unsubscribe::confirm(&mut saved, &preview, consent.receipt(), &confirmation_action, mail_confirmation_action.as_deref(), now)?;
                 store.save_state(&mut saved).map_err(|_| "Persist unsubscribe intent")?;
                 unsubscribe::boundary("before");
                 for (id, action) in ids.iter().zip(preview.actions.iter()) {

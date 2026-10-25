@@ -1,6 +1,7 @@
 pub mod acquisition;
 pub mod backlog;
 pub mod census;
+pub(crate) mod confirmation;
 pub mod engine;
 pub mod invoice;
 pub mod ledger;

@@ -140,6 +140,46 @@ pub struct Preview {
     pub local_mail_confirmation: Option<&'static str>,
     pub proof: Option<crate::rules::proof::Proof>,
     pub scope: &'static str,
+    pub(crate) confirmation: Option<crate::confirmation::Request>,
+}
+pub(crate) fn confirmation_plan(preview: &Preview) -> crate::confirmation::Plan {
+    crate::confirmation::Plan {
+        exact_receipt: preview.receipt.clone(),
+        actions: preview
+            .actions
+            .iter()
+            .map(|a| {
+                if a.method != Method::LocalMail {
+                    return crate::confirmation::ExactAction::SubscriptionAction {
+                        account: a.account.clone(),
+                        revision: preview.state_revision,
+                        workspace_revision: preview.workspace_revision,
+                        subscription: a.subscription.clone(),
+                        method: a.method.clone(),
+                        receiving_identity: a.recipient.clone(),
+                        host: a.host.clone(),
+                        content_digest: a.payload_digest.clone(),
+                        source_digest: a.header_digest.clone(),
+                        effect: a.effect.clone(),
+                        destination: a.destination.clone(),
+                    };
+                }
+                let card = a.copy_card.as_ref().expect("Local mail copy card");
+                crate::confirmation::ExactAction::UnsubscribeLocalMail {
+                    account: a.account.clone(),
+                    revision: preview.state_revision,
+                    workspace_revision: preview.workspace_revision,
+                    subscription: a.subscription.clone(),
+                    target: card.to.clone().expect("Local mail target"),
+                    sending_identity: card.from.clone().expect("Local mail sender"),
+                    receiving_identity: a.recipient.clone(),
+                    subject: card.subject.clone().expect("Local mail subject"),
+                    content_digest: a.payload_digest.clone(),
+                    source_digest: a.header_digest.clone(),
+                }
+            })
+            .collect(),
+    }
 }
 const CONFIRM: &str = "Confirm exactly these subscription actions (synthetic only)";
 const MAIL_CONFIRM: &str = "Send exactly these unsubscribe messages from the displayed receiving addresses (synthetic adapter, no OS dialog)";
@@ -295,6 +335,7 @@ pub(crate) fn preview(
         local_mail_confirmation,
         proof,
         scope: "Subscriptions are approved separately for each account, receiving address and mailing list. Sender grouping grants no authority.",
+        confirmation: None,
     })
 }
 

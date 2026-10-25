@@ -87,6 +87,7 @@
     {#if plan}
       <div class="confirmation" data-unsubscribe-preview>
         <p>{plan.confirmation_action}</p>
+        <pre data-exact-confirmation>{plan.confirmation.display}</pre>
         {#each plan.previews as accountPlan (accountPlan.account)}
         <p>{accountPlan.scope}</p>
         {#each accountPlan.actions as action}

@@ -102,6 +102,7 @@ for (const sibling of targets.slice(1)) {
 }
 await list({ action: 'preview', input: { ...input, selections: [first, first] } }, 422)
 for (const field of ['provider_trust', 'transport', 'synthetic']) await list({ action: 'preview', input, [field]: true }, 422)
+plan = await list({ action: 'preview', input })
 all = await list(confirmList(input, plan))
 for (const account of accounts) {
   const saved = all.accounts.find(a => a.account === account)

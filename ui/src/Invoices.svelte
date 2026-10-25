@@ -43,8 +43,9 @@
     {#if preview}
       <div class="confirmation" data-invoice-preview>
         <p>{preview.plan.target_name} · {preview.plan.target}</p><p>{preview.plan.sending_address}</p><p>{preview.plan.source.folder} / {preview.plan.source.uidvalidity} / {preview.plan.source.uid}</p>
-        <p>{preview.plan.confirmation_action}</p><p class="help">{preview.plan.content_digest}</p>
-        <h4>{t.source}</h4><pre>{preview.plan.source.original}</pre>
+        <p>{preview.plan.confirmation_action}</p>
+        {#if preview.confirmation}<pre data-exact-confirmation>{preview.confirmation.display}</pre>{/if}<p class="help">{preview.plan.content_digest}</p>
+        <h4>{t.source}</h4><pre data-invoice-source>{preview.plan.source.original}</pre>
         {#if fallback}<p>{t.preparation} {fallback}</p>{:else}<label><input type="checkbox" bind:checked={confirmation} disabled={busy} />{t.confirm}</label><button disabled={busy || !confirmation} onclick={() => act(async () => { if (!preview) return; view = await sendInvoice(account, preview); invalidate() })}>{t.send}</button>{/if}
       </div>
     {/if}

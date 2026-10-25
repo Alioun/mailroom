@@ -130,6 +130,23 @@ pub struct Preview {
     pub plan: Plan,
     pub receipt: String,
     pub native_available: bool,
+    pub(crate) confirmation: Option<crate::confirmation::Request>,
+}
+pub(crate) fn confirmation_plan(preview: &Preview) -> crate::confirmation::Plan {
+    let p = &preview.plan;
+    crate::confirmation::Plan {
+        exact_receipt: preview.receipt.clone(),
+        actions: vec![crate::confirmation::ExactAction::InvoiceSend {
+            account: p.account.clone(),
+            revision: p.state_revision,
+            report_version: p.report_version.clone(),
+            target_name: p.target_name.clone(),
+            target: p.target.clone(),
+            sending_identity: p.sending_address.clone(),
+            source: p.selection.clone(),
+            content_digest: p.content_digest.clone(),
+        }],
+    }
 }
 fn digest(value: &[u8]) -> String {
     data_encoding::HEXLOWER.encode(&Sha256::digest(value))
@@ -229,6 +246,7 @@ pub(crate) fn preview(
         plan,
         receipt,
         native_available: false,
+        confirmation: None,
     })
 }
 

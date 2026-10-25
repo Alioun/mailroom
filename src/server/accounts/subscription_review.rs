@@ -48,6 +48,66 @@ struct AccountReview {
     installed: InstalledSynthetic,
     preview: Preview,
 }
+fn confirmation_plan(reviews: &[AccountReview], receipt: &str) -> crate::confirmation::Plan {
+    crate::confirmation::Plan {
+        exact_receipt: receipt.into(),
+        actions: reviews
+            .iter()
+            .flat_map(|r| unsubscribe::confirmation_plan(&r.preview).actions)
+            .collect(),
+    }
+}
+fn revalidate(
+    reviews: &[AccountReview],
+    input: &Input,
+    guard: Option<&crate::ledger::file::LockedLedger<'_>>,
+) -> Result<crate::confirmation::Plan, String> {
+    let mut previews = Vec::new();
+    for r in reviews {
+        let saved = r
+            .store
+            .load_state()
+            .map_err(|_| "Revalidate subscription state")?;
+        ledger_fresh(&saved, guard)?;
+        let single = ReviewInput {
+            as_of: input.as_of,
+            selections: input
+                .selections
+                .iter()
+                .filter(|t| t.account == r.account.id)
+                .map(|t| Selection {
+                    subscription: t.subscription.clone(),
+                    method: t.method.clone(),
+                })
+                .collect(),
+            folders: input.folders.clone(),
+        };
+        previews.push((
+            &r.account.id,
+            unsubscribe::preview(
+                &saved,
+                r.account.provider,
+                r.store.keys(),
+                &single,
+                Some(&r.installed),
+            )?,
+        ));
+    }
+    let payload = zeroize::Zeroizing::new(
+        serde_json::to_vec(&("separate-subscriptions-v1", input, &previews))
+            .map_err(|_| "Review encoding")?,
+    );
+    Ok(crate::confirmation::Plan {
+        exact_receipt: reviews[0]
+            .store
+            .keys()
+            .binding_for(b"mailroom/unsubscribe-list-confirm/v1", &payload),
+        actions: previews
+            .iter()
+            .flat_map(|(_, p)| unsubscribe::confirmation_plan(p).actions)
+            .collect(),
+    })
+}
 fn prepare(
     state: &AppState,
     input: &Input,
@@ -189,11 +249,17 @@ pub(in crate::server) async fn handle(
             Action::Preview {input}=>{
                 let (reviews,receipt)=prepare(&state,&input,ledger_guard.as_ref())?;
                 let mail=reviews.iter().find_map(|r|r.preview.local_mail_confirmation);
-                return Ok(json!({"previews":reviews.iter().map(|r|&r.preview).collect::<Vec<_>>(),"receipt":receipt,"confirmation_action":CONFIRM,"local_mail_confirmation":mail}));
+                let (handle,request)=state.accounts.confirmations.lock().expect("confirmations").offer(confirmation_plan(&reviews,&receipt))?;
+                return Ok(json!({"previews":reviews.iter().map(|r|&r.preview).collect::<Vec<_>>(),"receipt":handle,"confirmation_action":CONFIRM,"local_mail_confirmation":mail,"confirmation":request}));
             },
             Action::Confirm {input,receipt,confirmation_action,mail_confirmation_action}=>{
                 let (mut reviews,current)=prepare(&state,&input,ledger_guard.as_ref())?;
-                if receipt.len()!=64 || current.as_bytes().ct_eq(receipt.as_bytes()).unwrap_u8()!=1 || confirmation_action!=CONFIRM {return Err("Exact multi-account subscription list changed".into());}
+                if confirmation_action!=CONFIRM || reviews.iter().any(|r|r.preview.local_mail_confirmation.is_some_and(|a|mail_confirmation_action.as_deref()!=Some(a))) {return Err("Exact multi-account subscription list changed".into());}
+                let current_plan=confirmation_plan(&reviews,&current);
+                let consent=state.accounts.confirmations.lock().expect("confirmations").confirm(&receipt,&current_plan,&mut crate::confirmation::SyntheticBackend,|| {
+                    revalidate(&reviews,&input,ledger_guard.as_ref())
+                })?;
+                if consent.receipt().as_bytes().ct_eq(current.as_bytes()).unwrap_u8()!=1 {return Err("Exact subscription receipt changed".into());}
                 let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| "Invalid clock")?.as_secs() as i64;
                 let mut intents=Vec::new();
                 for r in &mut reviews {

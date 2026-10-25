@@ -50,10 +50,14 @@ try {
     await post('workspace/save', { account, revision: workspace.revision, input: { documents, pins: [], as_of: sample.as_of, baseline: 'current' } })
     const opened = await command(account, 'open')
     const selection = opened.report.rows[0].id, target = 'accounting'
-    const preview = await command(account, 'preview', { selection, target })
+    let preview = await command(account, 'preview', { selection, target })
     await stop(); await start(boundary)
     const reproduced = await command(account, 'preview', { selection, target })
-    assert.deepEqual(reproduced, preview, 'Exact source and full HMAC reproduce after process replacement')
+    assert.deepEqual(reproduced.plan, preview.plan, 'Exact source and plan reproduce after process replacement')
+    assert.equal(reproduced.confirmation.plan_digest, preview.confirmation.plan_digest, 'Original generation-bound exact receipt remains bound')
+    assert.notEqual(reproduced.receipt, preview.receipt, 'Confirmation requests do not survive replacement')
+    await command(account, 'send', { selection, target, receipt: preview.receipt, confirmation_action: preview.plan.confirmation_action }, 422)
+    preview = reproduced
     const interrupted = command(account, 'send', { selection, target, receipt: preview.receipt, confirmation_action: preview.plan.confirmation_action }).catch(() => null)
     let reached = false
     for (let i = 0; i < 1000; i++) {

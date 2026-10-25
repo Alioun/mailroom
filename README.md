@@ -12,7 +12,7 @@ Install Rust with Cargo and Node.js 22.12 or newer with npm. From this checkout,
 
 Open <http://127.0.0.1:4173>. The launcher installs locked UI dependencies, builds the UI and Rust binary, and starts the server. Stop it with Ctrl+C. Use this exact URL because the server rejects other Host headers.
 
-New production connections are locked until protected credential installation is implemented. The owner-run `./scripts/connect-account.sh` walkthrough cannot complete a new connection during this gate. For an existing saved account, choose it, run or resume its census, and open the local result. No account settings change. No agent runs credentialed steps. The OS adapters and actual provider behavior have not been validated with real accounts.
+New production connections are locked until protected credential installation is implemented. The owner-run `./scripts/connect-account.sh` walkthrough cannot complete a new connection during this gate. Existing saved-account reads on macOS also require the protected credential adapter, which remains unavailable. No account settings change. No agent runs credentialed steps. The macOS credential adapter is denied until application-specific trust and per-access approval are implemented and verified. The OS adapters and actual provider behavior have not been validated with real accounts.
 
 For fake-only account verification, start the built binary with `./target/debug/mailroom --synthetic-accounts`. This mode uses temporary encrypted files, fake credentials and 100 invented headers. It cannot connect to a provider or the OS backend. The UI labels the mode explicitly.
 
@@ -50,6 +50,8 @@ node ui/scripts/verify-rules.mjs
 ```
 
 The Sieve check builds an isolated image and runs check-sieve and Pigeonhole against synthetic artifacts. It starts no global service and mounts no credentials or personal directories. Its runtime container has no network access.
+
+See [Exact-action confirmation](docs/macos-confirmation.md) for the synthetic single-use boundary, compile-only Swift helper and denied native prerequisites. Inspect the deferred owner setup with `bash scripts/setup-macos-protection.sh --plan`.
 
 ## Account boundary
 

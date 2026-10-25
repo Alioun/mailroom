@@ -32,6 +32,9 @@ pub(super) struct AccountController {
     admission: Mutex<()>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     ledger: Option<crate::ledger::InstalledLedger>,
+    confirmations: Mutex<crate::confirmation::Boundary>,
+    #[cfg(test)]
+    repository_accesses: std::sync::atomic::AtomicUsize,
 }
 enum AccountSource {
     Os,
@@ -72,6 +75,13 @@ impl AccountController {
             _ => None,
         };
         Self {
+            confirmations: Mutex::new(if synthetic {
+                crate::confirmation::Boundary::synthetic()
+            } else {
+                crate::confirmation::Boundary::default()
+            }),
+            #[cfg(test)]
+            repository_accesses: std::sync::atomic::AtomicUsize::new(0),
             ledger,
             source,
             job: Mutex::new(None),
@@ -81,6 +91,9 @@ impl AccountController {
         }
     }
     fn repository(&self) -> Result<Arc<Accounts>, AcquisitionError> {
+        #[cfg(test)]
+        self.repository_accesses
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match &self.source {
             AccountSource::Os => Ok(Arc::new(Accounts::new(
                 AccountPaths::per_user()?,
@@ -843,4 +856,81 @@ async fn durable_browser_server_fixture() {
     axum::serve(listener, super::router(Arc::new(state)))
         .await
         .unwrap();
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn production_consequential_routes_deny_before_repository_or_confirmation_access() {
+    use tower::ServiceExt;
+    let state = Arc::new(AppState::new(false));
+    let router = super::router(state.clone());
+    let input = json!({"as_of":1792886400_i64,"selections":[{"subscription":"synthetic-subscription","method":"local_mail"}],"folders":{"personal":"Muted","business":"Quiet"}});
+    let list_input = json!({"as_of":1792886400_i64,"selections":[{"account":"synthetic-account","subscription":"synthetic-subscription","method":"local_mail"}],"folders":{"personal":"Muted","business":"Quiet"}});
+    let cases = [
+        (
+            "invoices",
+            json!({"account":"synthetic-account","command":{"action":"preview","selection":"INBOX/1/1","target":"accounting"}}),
+        ),
+        (
+            "invoices",
+            json!({"account":"synthetic-account","command":{"action":"send","selection":"INBOX/1/1","target":"accounting","receipt":"a".repeat(64),"confirmation_action":"yes"}}),
+        ),
+        (
+            "invoices",
+            json!({"account":"synthetic-account","command":{"action":"prepare_mail_app","selection":"INBOX/1/1","target":"accounting"}}),
+        ),
+        (
+            "unsubscribe",
+            json!({"account":"synthetic-account","command":{"action":"preview","input":input}}),
+        ),
+        (
+            "unsubscribe",
+            json!({"account":"synthetic-account","command":{"action":"confirm","input":input,"receipt":"a".repeat(64),"confirmation_action":"yes","mail_confirmation_action":"yes"}}),
+        ),
+        (
+            "subscription-review",
+            json!({"command":{"action":"preview","input":list_input}}),
+        ),
+        (
+            "subscription-review",
+            json!({"command":{"action":"confirm","input":list_input,"receipt":"a".repeat(64),"confirmation_action":"yes","mail_confirmation_action":"yes"}}),
+        ),
+    ];
+    for (path, body) in cases {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/accounts/{path}"))
+                    .header("Host", super::ADDRESS)
+                    .header("Origin", super::ORIGIN)
+                    .header("Content-Type", "application/json")
+                    .header("X-Mailroom-Token", state.token.as_str())
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        assert_eq!(
+            state
+                .accounts
+                .repository_accesses
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+    assert!(
+        state
+            .accounts
+            .confirmations
+            .lock()
+            .unwrap()
+            .offer(crate::confirmation::Plan {
+                actions: vec![],
+                exact_receipt: "a".repeat(64)
+            })
+            .is_err()
+    );
 }

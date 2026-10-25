@@ -37,6 +37,20 @@ pub trait CredentialBackend: Send + Sync {
 }
 
 pub struct OsCredentials;
+#[cfg(target_os = "macos")]
+impl CredentialBackend for OsCredentials {
+    // Ordinary keyring access does not establish application trust or per-access consent.
+    fn get(&self, _: &str) -> Result<SecretValue, AcquisitionError> {
+        Err(AcquisitionError::Credentials)
+    }
+    fn put(&self, _: &str, _: &SecretValue) -> Result<(), AcquisitionError> {
+        Err(AcquisitionError::Credentials)
+    }
+    fn delete(&self, _: &str) -> Result<(), AcquisitionError> {
+        Err(AcquisitionError::Credentials)
+    }
+}
+#[cfg(not(target_os = "macos"))]
 impl CredentialBackend for OsCredentials {
     fn get(&self, reference: &str) -> Result<SecretValue, AcquisitionError> {
         keyring::Entry::new("mailroom", reference)

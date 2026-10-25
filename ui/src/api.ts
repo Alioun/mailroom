@@ -234,3 +234,22 @@ export async function forgetAccount(account: string, preview: ForgetPreview): Pr
 export async function replaceAccountPassword(account: string, password: string): Promise<void> { lifecycleSaved.parse(await accountPost('lifecycle', { action: 'replace_password', account, password })) }
 export async function rotateAccount(account: string): Promise<void> { lifecycleSaved.parse(await accountPost('lifecycle', { action: 'rotate', account, confirmed: true })) }
 export async function recoverAccount(account: string): Promise<void> { lifecycleSaved.parse(await accountPost('lifecycle', { action: 'recover', account })) }
+
+const proposalChange = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('addition'), rule: z.record(z.string(), z.json()) }),
+  z.object({ kind: z.literal('patch'), patch: z.record(z.string(), z.json()) }),
+])
+const proposalSelection = z.object({ account: z.string(), generation: z.string(), candidates: z.array(z.object({ id: z.string(), change: proposalChange })) })
+const proposalGeneration = z.object({
+  account: z.string(), generation: z.string(), semantics: z.string(), analysis: z.string(), revision: z.number(),
+  candidates: z.array(z.object({ id: z.string(), sender_claim: z.string(), change: proposalChange, observations: z.array(z.object({ message: z.string(), subject: z.string(), folders: z.array(z.string()) })), rationale: z.string(), uncertainty: z.string(), rejected: z.boolean(), prior_rejections: z.number(), impact: proofPreview })),
+  unresolved: z.array(z.object({ sender_claim: z.string(), messages: z.number(), reason: z.string() })),
+  current: proofPreview, decisions: z.object({ history: z.array(z.object({ candidate: z.string(), generation: z.string(), disposition: z.enum(['accept', 'reject']), target: z.string(), as_of: z.number() })) }), limitations: z.string(),
+})
+const proposalReview = z.object({ selection: proposalSelection, disposition: z.enum(['accept', 'reject']), changes: z.array(proposalChange), original_documents: documents, resulting_documents: documents, document_diff: z.string(), current: proofPreview, resulting: proofPreview, receipt: z.string(), acceptance_available: z.boolean(), effects: z.string() })
+export type ProposalGeneration = z.infer<typeof proposalGeneration>
+export type ProposalReview = z.infer<typeof proposalReview>
+export type ProposalSelection = z.infer<typeof proposalSelection>
+export async function openProposals(account: string): Promise<ProposalGeneration> { return proposalGeneration.parse(await accountPost('proposals', { account, command: { action: 'open' } })) }
+export async function reviewProposals(account: string, selection: ProposalSelection, disposition: ProposalReview['disposition']): Promise<ProposalReview> { return proposalReview.parse(await accountPost('proposals', { account, command: { action: 'preview', selection, disposition } })) }
+export async function confirmProposals(account: string, review: ProposalReview): Promise<ProposalGeneration> { return proposalGeneration.parse(await accountPost('proposals', { account, command: { action: 'confirm', selection: review.selection, disposition: review.disposition, receipt: review.receipt, confirmed: true } })) }

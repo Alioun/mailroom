@@ -1,0 +1,35 @@
+# Organisational filing proposals
+
+The saved rule workspace has an Advanced panel for deterministic filing proposals. It reads saved local header observations and proposes exact local rule changes. Acceptance never uploads rules, creates provider folders, forwards mail, changes message flags or moves messages. Saved-account proof retains unknown recipient evidence and no Sieve capabilities.
+
+## Evidence and identity
+
+Only senders whose canonical received records consistently have bulk or platform markers qualify. These classifications are unauthenticated header claims. ESP infrastructure does not identify a service. Mixed, ambiguous or insufficient observations remain unresolved. Sender matching uses one valid raw From mailbox, never a claimed relay original.
+
+An enabled generic preset's Subject predicates can support a category when a strict majority of the sender's messages match. Language variants of a category combine without double-counting messages. Predicates retain the compiler's ASCII casemap. A unique existing folder can support a category only when the preset or existing owner rules already map that exact configured path. Ambiguous categories or folder mappings remain unresolved. There is no built-in sender catalogue or fallback category.
+
+Known disabled preset sender IDs use an enabling patch. Existing owner patches, including renamed IDs, are preserved. New sender rules use stable account-scoped `user.organisation.*` IDs. Both forms include `NonBulk`, so generated changes cannot take newsletters ahead of bulk filing. No rule approves invoice senders, assigns a role, changes read state or creates a forwarding target. Existing independent copy rules remain intact.
+
+Generation reuses proof's canonical input selection. Gmail copies deduplicate by message ID, combine placement labels and exclude a message if any copy is Sent. Candidate identity hashes the saved account/provider, exact raw documents, normalized census and versioned acquisition inputs, explicit as-of, pins, baseline, previous recorded artifact when selected, ledger projection, and generator, compiler, evaluator and report/PSL versions. Acquisition IDs and refresh timestamps are normalized away; topology is sorted. Completeness and whether the evidence is current at the explicit as-of remain semantic inputs. No wall-clock call, random acquisition ID, random proposal ID or UI timestamp enters candidate identity. Approval receipts still bind the exact acquisition instance and timestamps.
+
+Account and workspace revision changes invalidate approval without changing a candidate's semantic identity. Exact rejections therefore survive regeneration and restart. A source-byte change, acquisition refresh or changed behavior yields a new candidate requiring review. Earlier history remains visible. At most 64 candidates are offered per generation; additional observations retain an explained limit. The 512-decision bound rejects further decisions instead of pruning history.
+
+## Local review
+
+Selection and confirmation begin unchecked. Changing selection clears review and confirmation. Each candidate shows its exact addition or patch, source observations, rationale, uncertainty, earlier rejection count and current/resulting proof. Batch review shows the complete original and resulting documents, the override diff, exact selected changes, folder diff, omissions, pins and warnings.
+
+Empty, duplicate, unknown, altered, wrong-account and conflicting selections reject. Existing additions and patches cannot be overwritten. Acceptance leaves the preset's original bytes and ID/major pin intact. The override is serialized through the common typed document model; the full resulting bytes are visible before acceptance. This can change override formatting and comments. Unrelated configuration values remain intact.
+
+Accept and reject use distinct HMAC purposes. Their receipts bind the complete saved state, exact selection and changes, current and resulting proof, raw documents, ledger source version, rejections, baseline, warnings and effects. Key generation and recovery authority enter the existing purpose-binding boundary. Another feature's receipt grants no proposal authority.
+
+The protected account action reloads and reconciles the installed ledger under account, store and ledger locks before regenerating review. The whole-state save atomically records the selected rules and decisions. Rejection changes only proposal bookkeeping. No authoritative ledger or export file is written. Durable state revision consumes approval, so replay and duplicate retries cannot apply twice. A failed request requires a reload before another review.
+
+Compilation errors and failing pins block acceptance. Stale pins warn. After acceptance, the previous proof and download receipt are stale. Run fresh proof over the saved result. The existing recovery hold also blocks proposal confirmation; captured observations cannot resolve it.
+
+## Persistence and verification
+
+Internal schema 9 carries proposal decisions. Schemas 1 through 8 and their recovery bundles remain readable with no invented approvals. Encrypted reopen, rotation, single-account recovery and selected recovery preserve decisions. Restoration creates fresh authority and retains the read-only reconciliation hold.
+
+With any retained fake identity-verified and stopped, run `CARGO_PROFILE_TEST_OPT_LEVEL=1 node scripts/verify-organisational-proposals.mjs`. It uses synthetic accounts, a local test executable and file-backed fake credentials. It checks protected HTTP actions, exact rejection, restart, selected-only acceptance, aggregate preservation and stale/tampered/cross-purpose/cross-account/replay rejection. It retains paired metadata in `.audit/organisational-proposals-retained.json`. Run `node ui/scripts/verify-organisational-proposals.mjs` against that fixture for actual built Playwright verification, including server replacement, English/German controls and narrow layout.
+
+Separate synthetic engine tests demonstrate generated filing and newsletter priority. Held saved-account proof does not establish actual routing. Actual provider behavior, native protected launch and OS confirmation, Keychain access, agent integration, deployment, scale and daily readiness remain unverified or unimplemented. No real account is read by these verifiers. Docker/Sieve infrastructure remains unavailable.

@@ -15,6 +15,7 @@ fn fixture() -> (tempfile::TempDir, Accounts, Vec<AccountId>, InstalledLedger) {
             .unwrap();
         let store = repo.store(&a).unwrap();
         let mut saved = store.load_state().unwrap();
+        crate::rules::proposals::tests::seed(&mut saved, store.keys());
         saved.winddown.dismissed.insert(format!("decision-{n}"));
         store.save_state(&mut saved).unwrap();
         ids.push(a.id);
@@ -37,7 +38,7 @@ fn secret() -> SecretValue {
 }
 
 #[test]
-fn schema_eight_protocol_facts_round_trip_with_selected_recovery() {
+fn schema_nine_protocol_and_proposal_facts_round_trip_with_selected_recovery() {
     let (root, mut repo, ids, ledger) = fixture();
     crate::acquisition::install_provider_fixture(&mut repo, root.path());
     for id in &ids[..2] {
@@ -45,7 +46,7 @@ fn schema_eight_protocol_facts_round_trip_with_selected_recovery() {
             .unwrap();
     }
     let (manifest, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
-    assert!(manifest.accounts.iter().all(|m| m.state_schema == 8));
+    assert!(manifest.accounts.iter().all(|m| m.state_schema == 9));
     let fresh_root = tempfile::tempdir().unwrap();
     let fresh = persistent_accounts(fresh_root.path());
     let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();

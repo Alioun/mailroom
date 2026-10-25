@@ -2,6 +2,7 @@ pub(super) mod backlog;
 pub(super) mod invoices;
 pub(super) mod ledger;
 pub(super) mod lifecycle;
+pub(super) mod proposals;
 pub(super) mod recovery;
 pub(super) mod subscription_review;
 pub(super) mod unsubscribe;

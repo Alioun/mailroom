@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Proposals from './Proposals.svelte'
   import { onMount } from 'svelte'
   import { ToggleGroup } from '@ark-ui/svelte/toggle-group'
   import { load, evaluate, openWorkspace, saveWorkspace, previewWorkspace, downloadSieve, type WorkspaceView, type ProofPreview, type Sample, type Preview, type Pin } from './api'
@@ -117,6 +118,7 @@
       {#if workspace?.exports.length}<p>{lang === 'en' ? 'Last recorded local export' : 'Letzter gespeicherter lokaler Export'} · {workspace.exports[workspace.exports.length - 1]?.identity}</p><p>{workspace.exports[workspace.exports.length - 1]?.provenance}</p>{#if !workspace.exports[workspace.exports.length - 1]?.usable}<p role="status">{lang === 'en' ? 'Recorded export is obsolete or belongs to another engine. Use current folders.' : 'Gespeicherter Export ist veraltet oder gehört zu einer anderen Engine. Aktuelle Ordner verwenden.'}</p>{/if}{:else}<p>{lang === 'en' ? 'No recorded export baseline.' : 'Kein gespeicherter Exportvergleich.'}</p>{/if}
     </div>
   {/if}
+  {#if account}<Proposals {account} {lang} disabled={dirty || frozen} onChanged={reloadWorkspace} />{/if}
   <details><summary>{t.edit}</summary>
     <div class="rule-documents"><label>{t.preset}<textarea bind:value={preset} oninput={reset} spellcheck="false" rows="14" disabled={frozen}></textarea></label><label>{t.overrides}<textarea bind:value={overrides} oninput={reset} spellcheck="false" rows="14" disabled={frozen}></textarea></label></div>
   </details>

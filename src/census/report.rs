@@ -268,7 +268,7 @@ fn esp(h: &HeaderRecord) -> BTreeSet<EspObservation> {
     }
     found
 }
-fn classify(h: &HeaderRecord, wrote: bool) -> SenderClass {
+pub(crate) fn classify(h: &HeaderRecord, wrote: bool) -> SenderClass {
     if has(h, "list-id")
         && values(h, "list-post").any(|v| v.to_ascii_lowercase().contains("<mailto:"))
     {

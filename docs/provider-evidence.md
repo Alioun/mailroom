@@ -31,7 +31,7 @@ Wind-down consumes an unambiguous current protocol count and its observation sou
 
 ## Persistence and recovery
 
-Internal encrypted-state schema 8 adds these facts. Schemas 1 through 7 still decode with empty acquisition evidence. New saves write 8. Older readers reject 8 instead of silently ignoring new semantics. Both single-account and selected-account recovery validators accept schemas 1 through 8. Outer recovery envelope versions and resource bounds remain unchanged. See [Recovery bundle format](recovery-format.md).
+Internal encrypted-state schema 8 adds these facts. Schemas 1 through 7 still decode with empty acquisition evidence. The later proposal aggregate advances new saves to schema 9. Both single-account and selected-account recovery validators now accept schemas 1 through 9. Older readers reject the newer schema instead of silently ignoring new semantics. Outer recovery envelope versions and resource bounds remain unchanged. See [Recovery bundle format](recovery-format.md).
 
 Every census save preserves the other AccountState aggregates through the existing authenticated whole-state save. Rotation and recovery carry the captured facts without changing stable identities. Restore changes approval authority and retains the reconciliation hold. A passive scan cannot clear it. No reconciliation bypass is installed.
 
@@ -41,4 +41,6 @@ Rust tests install local fake TLS connections through a private test-only factor
 
 `scripts/verify-provider-evidence.mjs` builds and starts that fixture. It verifies ciphertext reopening in a separate process, server replacement, current and failed refreshes, topology changes, zero and ambiguous counts, conservative saved-account proof, stale report and proof rejection, HTTP protections and redacted wire commands. It retains paired process metadata under `.audit/provider-evidence-retained.json`. Stop and verify that process before rebuilding its executable. `ui/scripts/verify-provider-evidence.mjs` drives the actual built UI against the retained fixture, including English, German, failed refresh, reload, reports and narrow layout. Existing recovery and lifecycle verifiers remain applicable.
 
-These checks establish local fake-server behavior. Actual provider behavior, credentials, protected Keychain access, protected native launch and authenticated IPC remain unimplemented or unperformed. No provider query or mutation is authorized by these facts. ManageSieve, proposal generation, deployment, trusted recipient and DKIM provenance, historical delivery evidence, personal-scale acceptance and daily readiness remain later work.
+These checks establish local fake-server behavior. Actual provider behavior, credentials, protected Keychain access, protected native launch and authenticated IPC remain unimplemented or unperformed. No provider query or mutation is authorized by these facts. ManageSieve, deployment, trusted recipient and DKIM provenance, historical delivery evidence, personal-scale acceptance and daily readiness remain later work.
+
+[Organisational filing proposals](organisational-proposals.md) now consume saved observations for local review. They add no provider or recipient authority.

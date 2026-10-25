@@ -7,7 +7,7 @@ fn secret() -> SecretValue {
 }
 
 #[test]
-fn schema_eight_protocol_facts_round_trip_with_single_account_recovery() {
+fn schema_nine_protocol_and_proposal_facts_round_trip_with_single_account_recovery() {
     let (root, mut repo, account) = fixture();
     crate::acquisition::install_provider_fixture(&mut repo, root.path());
     repo.scan(
@@ -19,7 +19,7 @@ fn schema_eight_protocol_facts_round_trip_with_single_account_recovery() {
     let before = state(&repo, &account);
     assert!(before.census.acquisition.is_protocol());
     let (manifest, bundle) = capture(&repo, &account, root.path());
-    assert_eq!(manifest.state_schema, 8);
+    assert_eq!(manifest.state_schema, 9);
     let fresh_root = tempfile::tempdir().unwrap();
     let fresh = persistent_accounts(fresh_root.path());
     let preview = fresh.restore_preview(&bundle, &secret()).unwrap();
@@ -48,6 +48,7 @@ fn fixture() -> (tempfile::TempDir, Accounts, Account) {
         .unwrap();
     let store = repo.store(&a).unwrap();
     let mut saved = store.load_state().unwrap();
+    crate::rules::proposals::tests::seed(&mut saved, store.keys());
     saved
         .winddown
         .dismissed
@@ -364,4 +365,81 @@ fn partial_bundle_publication_and_oversized_input_preserve_usable_copies_and_sou
     assert!(fresh.restore_preview(&oversized, &secret()).is_err());
     assert!(!fresh.paths.config.exists());
     assert!(!fresh.paths.data.exists());
+}
+
+#[test]
+fn organisational_decisions_survive_real_rotation_and_recovery_without_approval_authority() {
+    use crate::rules::proposals::{self, Disposition, Selected, Selection};
+    let (root, repo, account) = fixture();
+    let store = repo.store(&account).unwrap();
+    let mut saved = store.load_state().unwrap();
+    let g = proposals::generate(&saved, account.provider, store.keys()).unwrap();
+    let selection = Selection {
+        account: g.account,
+        generation: g.generation,
+        candidates: vec![Selected {
+            id: g.candidates[0].id.clone(),
+            change: g.candidates[0].change.clone(),
+        }],
+    };
+    let old = proposals::review(
+        &saved,
+        account.provider,
+        store.keys(),
+        &selection,
+        Disposition::Accept,
+    )
+    .unwrap();
+    let decisions = serde_json::to_value(&saved.proposals).unwrap();
+    drop(store);
+    repo.rotate(&account.id, &root.path().join("external-reality"))
+        .unwrap();
+    let account = repo.load(&account.id).unwrap();
+    let store = repo.store(&account).unwrap();
+    saved = store.load_state().unwrap();
+    assert_eq!(serde_json::to_value(&saved.proposals).unwrap(), decisions);
+    assert!(
+        proposals::confirm(
+            &mut saved,
+            account.provider,
+            store.keys(),
+            &selection,
+            Disposition::Accept,
+            &old.receipt
+        )
+        .is_err()
+    );
+    let current = proposals::review(
+        &saved,
+        account.provider,
+        store.keys(),
+        &selection,
+        Disposition::Accept,
+    )
+    .unwrap();
+    drop(store);
+    let (_, bundle) = capture(&repo, &account, root.path());
+    let fresh_root = tempfile::tempdir().unwrap();
+    let fresh = persistent_accounts(fresh_root.path());
+    let preview = fresh.restore_preview(&bundle, &secret()).unwrap();
+    fresh
+        .restore(&bundle, &secret(), &preview, |_| Ok(()))
+        .unwrap();
+    let restored = fresh.load(&account.id).unwrap();
+    let store = fresh.store(&restored).unwrap();
+    let mut saved = store.load_state().unwrap();
+    assert_eq!(serde_json::to_value(&saved.proposals).unwrap(), decisions);
+    assert!(
+        proposals::confirm(
+            &mut saved,
+            account.provider,
+            store.keys(),
+            &selection,
+            Disposition::Accept,
+            &current.receipt
+        )
+        .is_err()
+    );
+    assert!(store.recovery_pending());
+    assert!(store.save_state(&mut saved).is_err());
 }

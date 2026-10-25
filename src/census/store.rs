@@ -189,6 +189,8 @@ impl CensusKeys {
 #[serde(deny_unknown_fields)]
 pub struct AccountState {
     #[serde(default)]
+    pub proposals: crate::rules::proposals::Decisions,
+    #[serde(default)]
     pub winddown: crate::winddown::Aggregate,
     #[serde(default)]
     pub ledger: crate::ledger::Projection,
@@ -210,6 +212,7 @@ pub struct AccountState {
 impl AccountState {
     fn new(census: Census) -> Self {
         Self {
+            proposals: Default::default(),
             revision: 0,
             winddown: Default::default(),
             ledger: Default::default(),
@@ -384,10 +387,14 @@ impl EncryptedStore {
         if state.census.account != self.keys.account {
             return Err(CensusError::AccountMismatch);
         }
+        state
+            .proposals
+            .validate()
+            .map_err(|_| CensusError::Storage)?;
         state.census.acquisition.validate(&state.census.account)?;
         let snapshot =
             Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
-        self.stage_snapshot(8, &snapshot)
+        self.stage_snapshot(9, &snapshot)
     }
 
     fn stage_snapshot(
@@ -503,7 +510,7 @@ impl EncryptedStore {
             )
             .map_err(|_| CensusError::Storage)?;
         let snapshot = Zeroizing::new(snapshot);
-        if !matches!(version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8) {
+        if !matches!(version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9) {
             return Err(CensusError::UnsupportedVersion);
         }
         if account != self.keys.account.as_str() {
@@ -514,9 +521,16 @@ impl EncryptedStore {
         } else {
             serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?
         };
+        if version < 9 && !state.proposals.history.is_empty() {
+            return Err(CensusError::UnsupportedVersion);
+        }
         if state.exports.len() > crate::rules::workspace::HISTORY_LIMIT {
             return Err(CensusError::Storage);
         }
+        state
+            .proposals
+            .validate()
+            .map_err(|_| CensusError::Storage)?;
         state.census.acquisition.validate(&state.census.account)?;
         state.census.acquisition.interrupted();
         let census = &mut state.census;
@@ -566,7 +580,7 @@ mod tests {
 
     #[test]
     fn historical_schemas_decode_without_inventing_acquisition_evidence() {
-        for version in 1..=7 {
+        for version in 1..=8 {
             let directory = tempfile::tempdir().unwrap();
             let account = AccountId::new("historical-schema").unwrap();
             let store = EncryptedStore::new(
@@ -588,6 +602,9 @@ mod tests {
                     .unwrap()
                     .remove("acquisition");
             }
+            if version > 1 {
+                value.as_object_mut().unwrap().remove("proposals");
+            }
             store
                 .stage_snapshot(version, &serde_json::to_string(&value).unwrap())
                 .unwrap()
@@ -596,8 +613,9 @@ mod tests {
             let mut state = store.load_state().unwrap();
             assert_eq!(state.census.acquisition, Default::default());
             assert!(state.exports.is_empty());
+            assert!(state.proposals.history.is_empty());
             store.save_state(&mut state).unwrap();
-            assert_eq!(store.schema_version().unwrap(), 8);
+            assert_eq!(store.schema_version().unwrap(), 9);
             assert_eq!(store.load().unwrap().acquisition, Default::default());
         }
     }

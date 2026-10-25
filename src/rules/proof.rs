@@ -107,14 +107,14 @@ pub struct PinResult {
     pub expected: Destination,
     pub actual: Vec<Destination>,
 }
-struct InputMessage<'a> {
-    id: String,
-    record: &'a MessageRecord,
-    folders: BTreeSet<String>,
+pub(super) struct InputMessage<'a> {
+    pub(super) id: String,
+    pub(super) record: &'a MessageRecord,
+    pub(super) folders: BTreeSet<String>,
     sent: bool,
 }
 
-fn messages(census: &Census, gmail: bool) -> Vec<InputMessage<'_>> {
+pub(super) fn messages(census: &Census, gmail: bool) -> Vec<InputMessage<'_>> {
     let mut result: BTreeMap<String, InputMessage<'_>> = BTreeMap::new();
     for (folder, f) in &census.folders {
         for m in f.messages.values() {

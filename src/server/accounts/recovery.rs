@@ -42,7 +42,12 @@ fn fake_secret(root: &Path, create: bool) -> Result<SecretValue, AcquisitionErro
             .map(SecretValue::new)
             .map_err(|_| AcquisitionError::Credentials);
     }
-    if !create {
+    if !create
+        || root
+            .join("bundles")
+            .try_exists()
+            .map_err(|_| AcquisitionError::Storage)?
+    {
         return Err(AcquisitionError::CredentialMissing);
     }
     std::fs::create_dir_all(root).map_err(|_| AcquisitionError::Storage)?;
@@ -169,6 +174,31 @@ async fn production_recovery_denies_before_repository_access() {
             0
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn missing_fake_recovery_key_never_replaces_a_captured_bundle_key() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    let original = fake_secret(root, true).unwrap();
+    std::fs::create_dir(root.join("bundles")).unwrap();
+    std::fs::rename(
+        root.join("separately-held-fake-recovery-key"),
+        root.join("lost-fake-recovery-key-preserved"),
+    )
+    .unwrap();
+    assert!(matches!(
+        fake_secret(root, true),
+        Err(AcquisitionError::CredentialMissing)
+    ));
+    assert!(!root.join("separately-held-fake-recovery-key").exists());
+    assert!(
+        std::fs::read(root.join("lost-fake-recovery-key-preserved"))
+            .unwrap()
+            .as_slice()
+            == original.bytes()
+    );
 }
 
 #[cfg(test)]

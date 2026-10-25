@@ -205,6 +205,15 @@ try {
     if (phase !== 'restore_committed') await stop()
   }
   assert.equal((await stat(join(lost, 'config/lifecycle', `${account}.lock`))).ino, lockInode)
+  const separateKey = join(directory, 'synthetic-recovery/separately-held-fake-recovery-key')
+  const preservedKey = `${separateKey}-preserved-during-loss-test`
+  await rename(separateKey, preservedKey)
+  try {
+    await recovery({ action: 'capture_preview', account }, 422)
+    assert.equal(await stat(separateKey).then(() => true, () => false), false)
+    assert.deepEqual(await readFile(join(directory, 'synthetic-recovery/bundles', `${bundle}.jwe`)), bundleBytes)
+  } finally { await rename(preservedKey, separateKey) }
+  checks.push('Missing separate fake recovery key denies capture without generating a replacement or changing the captured bundle')
   const retained = { pid: server.pid, binary, binary_sha256, directory, installation, account, bundle, base, branch: execFileSync('git', ['branch', '--show-current'], { cwd: root, encoding: 'utf8' }).trim(), head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim() }
   await writeFile(join(root, '.audit/recovery-retained.json'), JSON.stringify(retained, null, 2) + '\n')
   await writeFile(join(root, '.audit/recovery-runtime-results.json'), JSON.stringify({ checks, directory, installation, bundle, primary_ciphertext_sha256: sha(originalCipher), captured_local_hashes: before.hashes, post_snapshot_external_hashes: afterEffects.hashes, external_ciphertext_hashes: external, captured_history: { backlog: before.histories[0].backlog.map(r => ({ id: r.id, status: r.status })), invoice_sends: before.histories[0].invoice_sends.map(r => ({ id: r.id, status: r.status })), unsubscribe: before.histories[0].unsubscribe.map(r => ({ id: r.id, status: r.status })), winddown_decisions: before.histories[0].winddown.length, exports: before.histories[0].exports.length }, ledger_sha256: sha(ledgerBytes), lost_source_lock_inode: lockInode }, null, 2) + '\n')

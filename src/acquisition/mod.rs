@@ -3,6 +3,7 @@ mod imap;
 mod scan;
 pub(crate) mod synthetic;
 use crate::census::CensusError;
+pub use accounts::lifecycle;
 pub use accounts::{
     Account, AccountPaths, Accounts, CredentialBackend, OsCredentials, Provider, SecretValue,
 };
@@ -14,6 +15,8 @@ use serde::Serialize;
 pub enum AcquisitionError {
     InvalidInput,
     Credentials,
+    CredentialMissing,
+    LifecyclePending,
     Storage,
     Tls,
     Authentication,
@@ -30,6 +33,8 @@ impl std::fmt::Display for AcquisitionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::InvalidInput => "Invalid account input",
+            Self::CredentialMissing => "Credential missing. Existing encrypted data was retained.",
+            Self::LifecyclePending => "Local lifecycle recovery is required. Existing files were retained.",
             Self::Credentials => "Credential unavailable. Restore the existing credential; saved data was retained.",
             Self::Storage => "Encrypted state unavailable. Retain existing files and restore the original key.",
             Self::Tls => "Secure connection failed. Check connectivity and provider availability.",

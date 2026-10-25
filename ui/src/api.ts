@@ -216,3 +216,17 @@ export type SubscriptionReviewPreview = z.infer<typeof subscriptionReviewPreview
 export async function openSubscriptionReview(as_of: number): Promise<SubscriptionReviewView> { return subscriptionReviewView.parse(await accountPost('subscription-review', { command: { action: 'open', as_of } })) }
 export async function previewSubscriptionReview(input: SubscriptionReviewInput): Promise<SubscriptionReviewPreview> { return subscriptionReviewPreview.parse(await accountPost('subscription-review', { command: { action: 'preview', input } })) }
 export async function confirmSubscriptionReview(input: SubscriptionReviewInput, plan: SubscriptionReviewPreview): Promise<SubscriptionReviewView> { return subscriptionReviewView.parse(await accountPost('subscription-review', { command: { action: 'confirm', input, receipt: plan.receipt, confirmation_action: plan.confirmation_action, mail_confirmation_action: plan.local_mail_confirmation } })) }
+
+const lifecycleResource = z.object({ path: z.string(), bytes: z.number(), digest: z.string() })
+const forgetPreview = z.object({ account: z.string(), revision: z.number(), generation: z.number(), resources: z.array(lifecycleResource), credential_references: z.array(z.string()), consequences: z.object({ en: z.string(), de: z.string() }), receipt: z.string().length(64) })
+const lifecycleRecovery = z.object({ account: z.string(), state: z.enum(['creating', 'replacing', 'forgetting', 'rotating', 'forgotten']) })
+const lifecycleStatus = z.object({ recovery: z.array(lifecycleRecovery), production_available: z.literal(false) })
+const lifecycleSaved = z.object({ saved: z.literal(true), recovery: z.array(lifecycleRecovery) })
+export type ForgetPreview = z.infer<typeof forgetPreview>
+export type LifecycleStatus = z.infer<typeof lifecycleStatus>
+export async function readLifecycle(): Promise<LifecycleStatus> { return lifecycleStatus.parse(await accountPost('lifecycle', { action: 'status' })) }
+export async function previewForget(account: string): Promise<ForgetPreview> { return forgetPreview.parse(await accountPost('lifecycle', { action: 'forget_preview', account })) }
+export async function forgetAccount(account: string, preview: ForgetPreview): Promise<void> { lifecycleSaved.parse(await accountPost('lifecycle', { action: 'forget', account, preview, confirmed: true })) }
+export async function replaceAccountPassword(account: string, password: string): Promise<void> { lifecycleSaved.parse(await accountPost('lifecycle', { action: 'replace_password', account, password })) }
+export async function rotateAccount(account: string): Promise<void> { lifecycleSaved.parse(await accountPost('lifecycle', { action: 'rotate', account, confirmed: true })) }
+export async function recoverAccount(account: string): Promise<void> { lifecycleSaved.parse(await accountPost('lifecycle', { action: 'recover', account })) }

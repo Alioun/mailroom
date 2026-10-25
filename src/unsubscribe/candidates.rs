@@ -246,7 +246,7 @@ pub(crate) fn report(
             .iter()
             .filter(|(_, m)| seen(m) && date(m).is_some_and(|d| d >= start && d <= as_of))
             .count();
-        let id = keys.binding_for(
+        let id = keys.identity_binding_for(
             b"mailroom/subscription/v1",
             &serde_json::to_vec(&(census.account.as_str(), &key))
                 .map_err(|_| "Subscription encoding")?,

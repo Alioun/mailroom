@@ -1,19 +1,20 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import Reports from './Reports.svelte'
+  import Lifecycle from './Lifecycle.svelte'
   import Ledger from './Ledger.svelte'
   import Winddown from './Winddown.svelte'
   import Backlog from './Backlog.svelte'
   import Invoices from './Invoices.svelte'
   import Unsubscribe from './Unsubscribe.svelte'
   import RulesProof from './RulesProof.svelte'
-  import { readAccountStatus, listAccounts, connectAccount, syntheticAccount, scanAccount, cancelAccount, openAccount, confirmAccount, type Account, type AccountStatus, type AccountView } from './api'
+  import { readAccountStatus, listAccounts, syntheticAccount, scanAccount, cancelAccount, openAccount, confirmAccount, type Account, type AccountStatus, type AccountView } from './api'
   let unsubscribe: Unsubscribe | undefined = $state()
   let { lang }: { lang: 'en' | 'de' } = $props()
   const strings = {
     en: {
-      title: 'Connect an account', detail: 'Owner-run, read-only access to mailbox.org or Gmail. Use an existing password or app password. Connection checks TLS, login and folder discovery. No account settings change.',
-      provider: 'Provider', login: 'Login address', password: 'Existing password or app password', connect: 'Connect account privately', secret: 'The password goes to the OS credential store. It is never saved in configuration or browser storage.',
+      title: 'Accounts', detail: 'Saved account census and local lifecycle. Production account creation requires a protected installation. Real provider writes remain locked.',
+      protectedUnavailable: 'Protected account installation is unavailable. New production connections are locked.',
       synthetic: 'Synthetic account verification. Temporary files and fake credentials only. No provider or OS credential store is contacted.', add: 'Add synthetic account', addGmail: 'Add synthetic Gmail account',
       load: 'Load saved accounts', choose: 'Choose an account', scan: 'Run or resume account census', cancel: 'Cancel account census', open: 'Open saved census',
       idle: 'Ready', running: 'Account action running', cancelled: 'Account census cancelled', complete: 'Account action complete', failed: 'Account action failed', saved: 'headers saved', folders: 'folders',
@@ -23,8 +24,8 @@
       loadError: 'Could not read the local response. Reload or retry the action.',
     },
     de: {
-      title: 'Konto verbinden', detail: 'Nur vom Kontoinhaber ausgeführter Lesezugriff auf mailbox.org oder Gmail. Nutze ein vorhandenes Passwort oder App-Passwort. Die Verbindung prüft TLS, Anmeldung und Ordner. Kontoeinstellungen bleiben unverändert.',
-      provider: 'Anbieter', login: 'Anmeldeadresse', password: 'Vorhandenes Passwort oder App-Passwort', connect: 'Konto vertraulich verbinden', secret: 'Das Passwort geht in den Zugangsdaten-Speicher des Betriebssystems. Es wird weder in der Konfiguration noch im Browserspeicher abgelegt.',
+      title: 'Konten', detail: 'Gespeicherte Kontoerfassung und lokale Kontoverwaltung. Neue produktive Konten erfordern eine geschützte Installation. Anbieteränderungen bleiben gesperrt.',
+      protectedUnavailable: 'Geschützte Kontoinstallation fehlt. Neue produktive Verbindungen sind gesperrt.',
       synthetic: 'Synthetische Kontoprüfung. Nur temporäre Dateien und erfundene Zugangsdaten. Kein Anbieter oder Zugangsdaten-Speicher des Betriebssystems wird kontaktiert.', add: 'Synthetisches Konto hinzufügen', addGmail: 'Synthetisches Gmail-Konto hinzufügen',
       load: 'Gespeicherte Konten laden', choose: 'Konto wählen', scan: 'Kontoerfassung starten oder fortsetzen', cancel: 'Kontoerfassung abbrechen', open: 'Gespeicherte Erfassung öffnen',
       idle: 'Bereit', running: 'Kontoaktion läuft', cancelled: 'Kontoerfassung abgebrochen', complete: 'Kontoaktion abgeschlossen', failed: 'Kontoaktion fehlgeschlagen', saved: 'Kopfzeilen gespeichert', folders: 'Ordner',
@@ -38,16 +39,17 @@
   let status = $state<AccountStatus | null>(null)
   let accounts = $state<Account[]>([])
   let selected = $state('')
-  let provider = $state<Account['provider']>('mailbox_org')
-  let login = $state('')
-  let password = $state('')
   let view = $state<AccountView | null>(null)
   let busy = $state(false)
   let error = $state('')
   let running = $derived(status?.job?.progress.state === 'running')
   let active = true
   let polling = false
+  let cacheEpoch = $state(0)
   let revision = 0
+  async function lifecycleChanged() {
+    revision += 1; view = null; cacheEpoch += 1; status = await readAccountStatus(); accounts = await listAccounts(); if (!accounts.some(a => a.id === selected)) selected = ''
+  }
   function accept(next: AccountStatus) {
     status = next
     if (next.job?.account) {
@@ -69,15 +71,10 @@
       if (active && requestedRevision === revision) accept(next)
     } catch { if (active) error = t.loadError } finally { polling = false }
   }
-  async function connect() {
-    const input = { provider, login, password }; password = ''; view = null; selected = ''
-    await act(async () => { accept(await connectAccount(input)) })
-    input.password = ''
-  }
   onMount(() => {
     active = true; void refresh()
     const timer = setInterval(() => { if (status?.job?.progress.state === 'running') void refresh() }, 250)
-    return () => { active = false; password = ''; clearInterval(timer) }
+    return () => { active = false; clearInterval(timer) }
   })
 </script>
 
@@ -89,13 +86,7 @@
     <button disabled={busy || running} onclick={() => act(async () => { selected = ''; view = null; accept(await syntheticAccount()) })}>{t.add}</button>
     <button disabled={busy || running} onclick={() => act(async () => { selected = ''; view = null; accept(await syntheticAccount(true)) })}>{t.addGmail}</button>
   {:else if status}
-    <form class="account-form" onsubmit={(event) => { event.preventDefault(); void connect() }}>
-      <label>{t.provider}<select bind:value={provider} disabled={busy || running}><option value="mailbox_org">mailbox.org</option><option value="gmail">Gmail</option></select></label>
-      <label>{t.login}<input type="email" bind:value={login} autocomplete="off" spellcheck={false} required disabled={busy || running} /></label>
-      <label>{t.password}<input type="password" bind:value={password} autocomplete="off" required maxlength="1024" disabled={busy || running} /></label>
-      <p class="help">{t.secret}</p>
-      <button class="primary" type="submit" disabled={busy || running || !password || !login}>{t.connect}</button>
-    </form>
+    <p>{t.protectedUnavailable}</p>
   {/if}
   {#if error}<p role="alert">{error}</p>{/if}
   <div class="census-actions">
@@ -111,6 +102,7 @@
     <div aria-live="polite"><p class="scan-state">{t[status.job.progress.state]}</p><p>{status.job.progress.saved} {t.saved} · {status.job.progress.folders} {t.folders}</p></div>
     {#if status.job.error}<p role="alert">{t.error}</p>{/if}
   {/if}
+  {#key `${selected}:${status?.synthetic}`}<Lifecycle account={selected} synthetic={status?.synthetic ?? false} {lang} onChanged={lifecycleChanged} />{/key}
   {#if view}
     <p class="scan-state">{t[view.census.acquisition_state]}</p>
     <h3>{t.addresses}</h3><p class="help">{t.ownership}</p>
@@ -118,6 +110,6 @@
     {#key view}<Reports account={selected} {lang} /><Winddown account={selected} {lang} onBulkHandoff={async (senders, asOf) => { await unsubscribe?.prepareHandoff(selected, senders, asOf) }} /><Ledger account={selected} {lang} /><RulesProof account={selected} {lang} /><Backlog account={selected} {lang} /><Invoices account={selected} {lang} />{/key}
     <details><summary>{t.details}</summary>{#each Object.entries(view.census.folders) as [name, folder] (name)}<h3>{name}</h3><p>{Object.keys(folder.messages).length} {t.saved} · UIDVALIDITY {folder.uidvalidity}</p>{#each Object.values(folder.messages) as message (message.uid)}<p>{message.headers.subject} · {message.headers.direction} · UID {message.uid}</p>{/each}{/each}</details>
   {/if}
-  <Unsubscribe {lang} bind:this={unsubscribe} />
+  {#key cacheEpoch}<Unsubscribe {lang} bind:this={unsubscribe} />{/key}
   <p class="help">{t.limits}</p>
 </section>

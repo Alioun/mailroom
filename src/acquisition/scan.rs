@@ -52,6 +52,8 @@ impl Accounts {
     pub fn probe(&self, id: &AccountId, cancel: Cancellation) -> Result<usize, AcquisitionError> {
         let account = self.load(id)?;
         let permit = policy::read_permit(account.provider)?;
+        let _store = self.store(&account)?;
+        _store.load_state()?;
         let password = self.password(&account)?;
         retry_read(&cancel, || {
             let mut source =

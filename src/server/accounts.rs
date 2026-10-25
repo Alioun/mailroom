@@ -1,6 +1,7 @@
 pub(super) mod backlog;
 pub(super) mod invoices;
 pub(super) mod ledger;
+pub(super) mod lifecycle;
 pub(super) mod subscription_review;
 pub(super) mod unsubscribe;
 pub(super) mod winddown;
@@ -28,6 +29,8 @@ pub(super) struct AccountController {
     source: AccountSource,
     job: Mutex<Option<Job>>,
     operation: Mutex<()>,
+    admission: Mutex<()>,
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     ledger: Option<crate::ledger::InstalledLedger>,
 }
 enum AccountSource {
@@ -73,6 +76,8 @@ impl AccountController {
             source,
             job: Mutex::new(None),
             operation: Mutex::new(()),
+            admission: Mutex::new(()),
+            worker: Mutex::new(None),
         }
     }
     fn repository(&self) -> Result<Arc<Accounts>, AcquisitionError> {
@@ -143,9 +148,15 @@ fn failure(error: AcquisitionError) -> Response {
         .into_response()
 }
 fn input<T>(value: Result<Json<T>, JsonRejection>) -> Result<T, Response> {
-    value
-        .map(|Json(v)| v)
-        .map_err(|_| failure(AcquisitionError::InvalidInput))
+    match value {
+        Ok(Json(value)) => Ok(value),
+        Err(error) if error.status() == StatusCode::PAYLOAD_TOO_LARGE => Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({"error":"Account request exceeds the body limit"})),
+        )
+            .into_response()),
+        Err(_) => Err(failure(AcquisitionError::InvalidInput)),
+    }
 }
 pub(super) async fn status(State(state): State<Arc<AppState>>) -> Response {
     Json(json!({"synthetic": state.accounts.synthetic(), "job": state.accounts.job.lock().expect("account job").clone()})).into_response()
@@ -159,16 +170,12 @@ pub(super) struct ConnectRequest {
 }
 pub(super) async fn connect(
     State(state): State<Arc<AppState>>,
-    body: Result<Json<ConnectRequest>, JsonRejection>,
+    _body: Result<Json<ConnectRequest>, JsonRejection>,
 ) -> Response {
-    let input = match input(body) {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    if state.accounts.synthetic() || !policy::authorize(Operation::Connect).allowed {
+    if state.accounts.synthetic() {
         return failure(AcquisitionError::InvalidInput);
     }
-    launch_connection(state, input).await
+    (StatusCode::FORBIDDEN, Json(json!({"error":"Protected account installation is unavailable. Production account creation is denied before credential or provider access."}))).into_response()
 }
 pub(super) async fn synthetic(
     State(state): State<Arc<AppState>>,
@@ -206,12 +213,16 @@ async fn synthetic_connection(state: Arc<AppState>, provider: Provider) -> Respo
     .await
 }
 async fn launch_connection(state: Arc<AppState>, input: ConnectRequest) -> Response {
+    let admission = match state.accounts.admission.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => return failure(AcquisitionError::LifecyclePending),
+    };
     let cancel = match state.accounts.reserve() {
         Ok(c) => c,
         Err(e) => return failure(e),
     };
     let worker = state.clone();
-    tokio::task::spawn_blocking(move || {
+    let handle = std::thread::spawn(move || {
         let _operation = worker.accounts.operation.lock().expect("account operation");
         let result = (|| {
             let repo = worker.accounts.repository()?;
@@ -224,11 +235,13 @@ async fn launch_connection(state: Arc<AppState>, input: ConnectRequest) -> Respo
                 .as_mut()
                 .expect("reserved account job")
                 .account = Some(account.clone());
-            let folders = if worker.accounts.synthetic() {
-                1
+            let probe = if worker.accounts.synthetic() {
+                Ok(1)
             } else {
-                repo.probe(&account.id, cancel)?
+                repo.probe(&account.id, cancel)
             };
+            repo.connection_observed(&account.id, probe.is_ok())?;
+            let folders = probe?;
             worker
                 .accounts
                 .job
@@ -242,6 +255,8 @@ async fn launch_connection(state: Arc<AppState>, input: ConnectRequest) -> Respo
         })();
         worker.accounts.finish(result);
     });
+    *state.accounts.worker.lock().expect("account worker") = Some(handle);
+    drop(admission);
     status(State(state)).await
 }
 #[derive(Deserialize)]
@@ -260,12 +275,16 @@ pub(super) async fn scan(
     if !policy::authorize(Operation::Census).allowed {
         return failure(AcquisitionError::InvalidInput);
     }
+    let admission = match state.accounts.admission.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => return failure(AcquisitionError::LifecyclePending),
+    };
     let cancel = match state.accounts.reserve() {
         Ok(c) => c,
         Err(e) => return failure(e),
     };
     let worker = state.clone();
-    tokio::task::spawn_blocking(move || {
+    let handle = std::thread::spawn(move || {
         let _operation = worker.accounts.operation.lock().expect("account operation");
         let result = (|| {
             let repo = worker.accounts.repository()?;
@@ -298,6 +317,8 @@ pub(super) async fn scan(
         })();
         worker.accounts.finish(result);
     });
+    *state.accounts.worker.lock().expect("account worker") = Some(handle);
+    drop(admission);
     status(State(state)).await
 }
 pub(super) async fn cancel(

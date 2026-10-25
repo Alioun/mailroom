@@ -1,3 +1,4 @@
+pub mod lifecycle;
 use super::AcquisitionError;
 use crate::census::{AccountId, Census, CensusKeys, EncryptedStore, LocalSecret};
 use rand::{RngCore, rngs::OsRng};
@@ -32,6 +33,7 @@ impl<'de> Deserialize<'de> for SecretValue {
 pub trait CredentialBackend: Send + Sync {
     fn get(&self, reference: &str) -> Result<SecretValue, AcquisitionError>;
     fn put(&self, reference: &str, value: &SecretValue) -> Result<(), AcquisitionError>;
+    fn delete(&self, reference: &str) -> Result<(), AcquisitionError>;
 }
 
 pub struct OsCredentials;
@@ -40,12 +42,24 @@ impl CredentialBackend for OsCredentials {
         keyring::Entry::new("mailroom", reference)
             .and_then(|entry| entry.get_secret())
             .map(SecretValue::new)
-            .map_err(|_| AcquisitionError::Credentials)
+            .map_err(|e| {
+                if matches!(e, keyring::Error::NoEntry) {
+                    AcquisitionError::CredentialMissing
+                } else {
+                    AcquisitionError::Credentials
+                }
+            })
     }
     fn put(&self, reference: &str, value: &SecretValue) -> Result<(), AcquisitionError> {
         keyring::Entry::new("mailroom", reference)
             .and_then(|entry| entry.set_secret(value.bytes()))
             .map_err(|_| AcquisitionError::Credentials)
+    }
+    fn delete(&self, reference: &str) -> Result<(), AcquisitionError> {
+        match keyring::Entry::new("mailroom", reference).and_then(|e| e.delete_credential()) {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err(AcquisitionError::Credentials),
+        }
     }
 }
 
@@ -72,6 +86,21 @@ pub struct Account {
     pub login: String,
     password_ref: String,
     local_secret_ref: String,
+    #[serde(default)]
+    generation: u64,
+    #[serde(default)]
+    identity_ref: Option<String>,
+    #[serde(default)]
+    connection: ConnectionState,
+}
+
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionState {
+    #[default]
+    Unverified,
+    Observed,
+    Failed,
 }
 
 #[derive(Clone)]
@@ -107,52 +136,15 @@ impl Accounts {
         login: String,
         password: &SecretValue,
     ) -> Result<Account, AcquisitionError> {
-        if login.is_empty()
-            || login.len() > 320
-            || login.chars().any(char::is_control)
-            || password.bytes().is_empty()
-            || password.bytes().len() > 1024
-            || password.text()?.chars().any(char::is_control)
-        {
-            return Err(AcquisitionError::InvalidInput);
-        }
-        private_directory(&self.paths.config)?;
-        let mut random = [0; 16];
-        OsRng.fill_bytes(&mut random);
-        let id = AccountId::new(&data_encoding::HEXLOWER.encode(&random))?;
-        let account = Account {
-            password_ref: format!("{}-password", id.as_str()),
-            local_secret_ref: format!("{}-census-key", id.as_str()),
-            id,
-            provider,
-            login,
-        };
-        let mut key = Zeroizing::new(vec![0; 32]);
-        OsRng.fill_bytes(&mut key);
-        self.backend
-            .put(&account.local_secret_ref, &SecretValue::new(key.to_vec()))?;
-        self.backend.put(&account.password_ref, password)?;
-        let store = self.store(&account)?;
-        let mut census = Census::new(account.id.clone());
-        census.account_login = Some(account.login.trim().to_lowercase());
-        store.save(&census)?;
-        let mut file = tempfile::NamedTempFile::new_in(&self.paths.config)
-            .map_err(|_| AcquisitionError::Storage)?;
-        serde_json::to_writer(&mut file, &account).map_err(|_| AcquisitionError::Storage)?;
-        file.flush()
-            .and_then(|_| file.as_file().sync_all())
-            .map_err(|_| AcquisitionError::Storage)?;
-        file.persist_noclobber(self.metadata_path(&account.id))
-            .map_err(|_| AcquisitionError::Storage)?;
-        fs::File::open(&self.paths.config)
-            .and_then(|f| f.sync_all())
-            .map_err(|_| AcquisitionError::Storage)?;
-        Ok(account)
+        self.create_transaction(provider, login, password)
     }
     fn metadata_path(&self, id: &AccountId) -> PathBuf {
         self.paths.config.join(format!("{}.json", id.as_str()))
     }
     pub fn load(&self, id: &AccountId) -> Result<Account, AcquisitionError> {
+        self.load_metadata(id)
+    }
+    fn load_metadata(&self, id: &AccountId) -> Result<Account, AcquisitionError> {
         let path = self.metadata_path(id);
         let metadata = fs::symlink_metadata(&path).map_err(|_| AcquisitionError::Storage)?;
         if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 4096 {
@@ -161,12 +153,7 @@ impl Accounts {
         let account: Account =
             serde_json::from_slice(&fs::read(path).map_err(|_| AcquisitionError::Storage)?)
                 .map_err(|_| AcquisitionError::Storage)?;
-        if account.id != *id
-            || account.password_ref != format!("{}-password", id.as_str())
-            || account.local_secret_ref != format!("{}-census-key", id.as_str())
-        {
-            return Err(AcquisitionError::InvalidInput);
-        }
+        self.validate_account(&account, id)?;
         Ok(account)
     }
     pub fn list(&self) -> Result<Vec<Account>, AcquisitionError> {
@@ -197,12 +184,15 @@ impl Accounts {
         self.backend.get(&account.password_ref)
     }
     pub fn store(&self, account: &Account) -> Result<EncryptedStore, AcquisitionError> {
-        let value = self.backend.get(&account.local_secret_ref)?;
-        let secret = LocalSecret::from_bytes(value.bytes().to_vec())?;
-        Ok(EncryptedStore::new(
-            self.paths.data.clone(),
-            CensusKeys::derive(&secret, &account.id),
-        )?)
+        let lease = self.lock_account(&account.id)?;
+        self.require_ready(&account.id)?;
+        let current = self.load_metadata(&account.id)?;
+        if serde_json::to_vec(&current).ok() != serde_json::to_vec(account).ok() {
+            return Err(AcquisitionError::InvalidInput);
+        }
+        let mut store = self.open_store(&current, &self.paths.data, 0)?;
+        store.retain_account_lease(lease);
+        Ok(store)
     }
 }
 
@@ -234,13 +224,17 @@ mod tests {
     #[derive(Default)]
     struct FakeBackend(Mutex<BTreeMap<String, Zeroizing<Vec<u8>>>>);
     impl CredentialBackend for FakeBackend {
+        fn delete(&self, reference: &str) -> Result<(), AcquisitionError> {
+            self.0.lock().unwrap().remove(reference);
+            Ok(())
+        }
         fn get(&self, reference: &str) -> Result<SecretValue, AcquisitionError> {
             self.0
                 .lock()
                 .unwrap()
                 .get(reference)
                 .map(|v| SecretValue::new(v.to_vec()))
-                .ok_or(AcquisitionError::Credentials)
+                .ok_or(AcquisitionError::CredentialMissing)
         }
         fn put(&self, reference: &str, value: &SecretValue) -> Result<(), AcquisitionError> {
             self.0
@@ -313,7 +307,7 @@ mod tests {
         backend.0.lock().unwrap().remove(&account.local_secret_ref);
         assert!(matches!(
             reconstructed.store(&account),
-            Err(AcquisitionError::Credentials)
+            Err(AcquisitionError::CredentialMissing)
         ));
         assert_eq!(
             fs::read(
@@ -335,17 +329,38 @@ mod tests {
 #[cfg(test)]
 pub(crate) mod process_tests {
     use super::*;
-    struct FileFake(PathBuf);
+    pub(crate) struct FileFake(pub(crate) PathBuf);
     impl CredentialBackend for FileFake {
+        fn delete(&self, reference: &str) -> Result<(), AcquisitionError> {
+            lifecycle::remove_file(&self.0.join(reference))?;
+            if self.0.exists() {
+                for entry in fs::read_dir(&self.0).map_err(|_| AcquisitionError::Storage)? {
+                    let path = entry.map_err(|_| AcquisitionError::Storage)?.path();
+                    if path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|s| s.starts_with(&format!(".{reference}.stage-")))
+                    {
+                        lifecycle::remove_file(&path)?;
+                    }
+                }
+            }
+            Ok(())
+        }
         fn get(&self, reference: &str) -> Result<SecretValue, AcquisitionError> {
             fs::read(self.0.join(reference))
                 .map(SecretValue::new)
-                .map_err(|_| AcquisitionError::Credentials)
+                .map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        AcquisitionError::CredentialMissing
+                    } else {
+                        AcquisitionError::Credentials
+                    }
+                })
         }
         fn put(&self, reference: &str, value: &SecretValue) -> Result<(), AcquisitionError> {
-            fs::create_dir_all(&self.0)
-                .and_then(|_| fs::write(self.0.join(reference), value.bytes()))
-                .map_err(|_| AcquisitionError::Credentials)
+            private_directory(&self.0)?;
+            lifecycle::write_new_secret(&self.0.join(reference), value.bytes())
         }
     }
     pub(crate) fn persistent_accounts(root: &std::path::Path) -> Accounts {

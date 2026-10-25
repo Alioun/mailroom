@@ -16,7 +16,11 @@ try {
   })
   await page.goto('http://127.0.0.1:4173')
   await page.getByText('Synthetic account verification.', { exact: false }).waitFor()
-  assert.equal(await page.locator('input[type=password]').count(), 0)
+  assert.equal(await page.locator('input[type=password]:not(.lifecycle input)').count(), 0)
+  for (const input of await page.locator('.lifecycle input[type=password]').all()) {
+    assert.equal(await input.inputValue(), '')
+    assert.equal(await input.getAttribute('autocomplete'), 'off')
+  }
   await page.getByRole('button', { name: 'Add synthetic account', exact: true }).click()
   await page.getByText('Account action complete', { exact: true }).waitFor()
   await page.getByRole('button', { name: 'Run or resume account census', exact: true }).click()
@@ -39,7 +43,7 @@ try {
   assert.equal(await page.locator('.account-addresses').getByRole('checkbox', { name: 'Confirm own address owner@example.test', exact: true }).isChecked(), true)
   await page.getByRole('radio', { name: 'Deutsch', exact: true }).click()
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.getByRole('heading', { name: 'Konto verbinden', exact: true }).waitFor()
+  await page.getByRole('heading', { name: 'Konten', exact: true }).waitFor()
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
   await page.screenshot({ path: `${artifacts}/german-narrow.png`, fullPage: true })
   assert.deepEqual(errors, [])

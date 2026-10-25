@@ -359,7 +359,10 @@ pub fn derive(
         .collect();
     let mut rows = BTreeMap::new();
     for sender in local.senders {
-        let id = token(source.keys, b"winddown-row/v1", &sender.sender);
+        let id = source.keys.identity_binding_for(
+            b"winddown-row/v1",
+            &serde_json::to_vec(&sender.sender).map_err(error)?,
+        );
         let group = if sender.relay_claims.is_empty()
             && sender.classes.len() == 1
             && sender.raw_from.len() == 1

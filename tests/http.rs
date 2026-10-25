@@ -694,3 +694,39 @@ async fn production_winddown_denies_before_loading_any_account() {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
+
+#[tokio::test]
+async fn production_lifecycle_denies_before_repository_or_credential_access() {
+    for body in [
+        r#"{"action":"status"}"#,
+        r#"{"action":"replace_password","account":"synthetic","password":"synthetic-only"}"#,
+        r#"{"action":"forget_preview","account":"synthetic"}"#,
+        r#"{"action":"forget","account":"synthetic","preview":{},"confirmed":true}"#,
+        r#"{"action":"rotate","account":"synthetic","confirmed":true}"#,
+        r#"{"action":"recover","account":"synthetic"}"#,
+    ] {
+        let response = request(
+            "/api/accounts/lifecycle",
+            body,
+            Some(server::ORIGIN),
+            server::ADDRESS,
+            "application/json",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+    }
+}
+
+#[tokio::test]
+async fn production_creation_is_denied_before_credential_and_provider_access() {
+    let response = request(
+        "/api/accounts/connect",
+        r#"{"provider":"mailbox_org","login":"owner@example.test","password":"synthetic-only"}"#,
+        Some(server::ORIGIN),
+        server::ADDRESS,
+        "application/json",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}

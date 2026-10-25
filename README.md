@@ -12,7 +12,7 @@ Install Rust with Cargo and Node.js 22.12 or newer with npm. From this checkout,
 
 Open <http://127.0.0.1:4173>. The launcher installs locked UI dependencies, builds the UI and Rust binary, and starts the server. Stop it with Ctrl+C. Use this exact URL because the server rejects other Host headers.
 
-For an owner-run connection walkthrough, use `./scripts/connect-account.sh`. Connect an account with an existing credential in the hidden UI field. It goes directly to the OS credential backend. Choose the saved account, run or resume its census, and open the local result. No account settings change. No agent runs credentialed steps. The OS adapters and actual provider behavior have not been validated with real accounts.
+New production connections are locked until protected credential installation is implemented. The owner-run `./scripts/connect-account.sh` walkthrough cannot complete a new connection during this gate. For an existing saved account, choose it, run or resume its census, and open the local result. No account settings change. No agent runs credentialed steps. The OS adapters and actual provider behavior have not been validated with real accounts.
 
 For fake-only account verification, start the built binary with `./target/debug/mailroom --synthetic-accounts`. This mode uses temporary encrypted files, fake credentials and 100 invented headers. It cannot connect to a provider or the OS backend. The UI labels the mode explicitly.
 
@@ -52,6 +52,8 @@ node ui/scripts/verify-rules.mjs
 The Sieve check builds an isolated image and runs check-sieve and Pigeonhole against synthetic artifacts. It starts no global service and mounts no credentials or personal directories. Its runtime container has no network access.
 
 ## Account boundary
+
+[Local account lifecycle](docs/account-lifecycle.md) adds synthetic-only password replacement, interrupted-creation cleanup, exact local forgetting and safe key generations. New production connections and lifecycle changes remain unavailable until protected credential installation is implemented. The existing connection wizard cannot complete a new production connection during this gate.
 
 Read-only adapters use fixed provider TLS endpoints. There are no write-enable flags or caller-supplied source URLs. The central policy denies rule upload and activation, folder creation, moves, flags, forwarding changes, sends and unsubscribe requests. The new proof route reads the saved census under the existing account-operation lock. It assigns no recipient trust or forwarding authority.
 

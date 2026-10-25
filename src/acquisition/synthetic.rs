@@ -13,13 +13,20 @@ use zeroize::Zeroizing;
 #[derive(Default)]
 struct MemoryCredentials(Mutex<BTreeMap<String, Zeroizing<Vec<u8>>>>);
 impl CredentialBackend for MemoryCredentials {
+    fn delete(&self, reference: &str) -> Result<(), AcquisitionError> {
+        self.0
+            .lock()
+            .expect("synthetic credentials")
+            .remove(reference);
+        Ok(())
+    }
     fn get(&self, reference: &str) -> Result<SecretValue, AcquisitionError> {
         self.0
             .lock()
             .expect("synthetic credentials")
             .get(reference)
             .map(|v| SecretValue::new(v.to_vec()))
-            .ok_or(AcquisitionError::Credentials)
+            .ok_or(AcquisitionError::CredentialMissing)
     }
     fn put(&self, reference: &str, value: &SecretValue) -> Result<(), AcquisitionError> {
         self.0
@@ -116,6 +123,7 @@ pub(crate) fn scan(
     let account = accounts.load(id)?;
     let store = accounts.store(&account)?;
     let mut census = store.load()?;
+    super::lifecycle::boundary("acquisition_running")?;
     scan::run(
         &mut SyntheticMail,
         account.provider,

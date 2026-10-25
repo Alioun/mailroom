@@ -46,6 +46,8 @@ pub struct CensusKeys {
     account: AccountId,
     encryption: Zeroizing<[u8; 32]>,
     placeholders: Zeroizing<[u8; 32]>,
+    identity: Option<Zeroizing<Vec<u8>>>,
+    generation: u64,
 }
 
 impl CensusKeys {
@@ -65,18 +67,56 @@ impl CensusKeys {
             account: account.clone(),
             encryption,
             placeholders,
+            identity: None,
+            generation: 0,
         }
     }
 
+    pub(crate) fn identity_material(&self) -> Vec<u8> {
+        let mut value = self.placeholders.to_vec();
+        for k in [
+            self.synthetic_mailbox_keys(),
+            self.synthetic_invoice_keys(),
+            self.synthetic_unsubscribe_keys(),
+        ] {
+            value.extend_from_slice(k.placeholders.as_ref());
+        }
+        value
+    }
+    pub(crate) fn rotated(
+        secret: &LocalSecret,
+        account: &AccountId,
+        identity: &[u8],
+        generation: u64,
+    ) -> Result<Self, CensusError> {
+        if identity.len() != 128 {
+            return Err(CensusError::Authentication);
+        }
+        let mut keys = Self::derive(secret, account);
+        keys.placeholders.copy_from_slice(&identity[..32]);
+        keys.identity = Some(Zeroizing::new(identity.to_vec()));
+        keys.generation = generation;
+        Ok(keys)
+    }
     pub(crate) fn binding(&self, value: &[u8]) -> String {
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.placeholders.as_ref())
             .expect("valid HMAC key");
         mac.update(b"mailroom/report-binding/v1\0");
+        if self.generation > 0 {
+            mac.update(&self.generation.to_be_bytes());
+        }
         mac.update(value);
         data_encoding::HEXLOWER.encode(&mac.finalize().into_bytes())
     }
 
     pub(crate) fn binding_for(&self, purpose: &[u8], value: &[u8]) -> String {
+        if self.generation == 0 {
+            return self.identity_binding_for(purpose, value);
+        }
+        let payload = [self.generation.to_be_bytes().as_slice(), value].concat();
+        self.identity_binding_for(purpose, &payload)
+    }
+    pub(crate) fn identity_binding_for(&self, purpose: &[u8], value: &[u8]) -> String {
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.placeholders.as_ref())
             .expect("valid HMAC key");
         mac.update(b"mailroom/purpose-binding/v1\0");
@@ -103,10 +143,21 @@ impl CensusKeys {
         let mut bytes = Zeroizing::new(vec![0; 32]);
         hkdf.expand(b"independent-fake-state", &mut bytes)
             .expect("HKDF length");
-        Self::derive(
+        let mut keys = Self::derive(
             &LocalSecret::from_bytes(bytes.to_vec()).expect("key length"),
             &self.account,
-        )
+        );
+        if let Some(identity) = &self.identity {
+            let offset = match purpose {
+                b"mailroom/synthetic-mailbox/v1" => 32,
+                b"mailroom/synthetic-invoice-transport/v1" => 64,
+                _ => 96,
+            };
+            keys.placeholders
+                .copy_from_slice(&identity[offset..offset + 32]);
+        }
+        keys.generation = self.generation;
+        keys
     }
 
     pub fn placeholder(&self, kind: &str, value: &str) -> String {
@@ -165,6 +216,7 @@ pub struct EncryptedStore {
     keys: CensusKeys,
     lock: fs::File,
     loaded: Cell<bool>,
+    account_lease: Option<fs::File>,
 }
 
 impl Drop for EncryptedStore {
@@ -196,37 +248,62 @@ impl EncryptedStore {
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
                 .map_err(|_| CensusError::Storage)?;
         }
-        let lock_path = directory.join(format!("{}.lock", keys.account.as_str()));
-        let mut options = fs::OpenOptions::new();
-        options.read(true).write(true).create(true).truncate(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        if lock_path
-            .symlink_metadata()
-            .is_ok_and(|m| m.file_type().is_symlink())
-        {
-            return Err(CensusError::Storage);
-        }
-        let lock = options.open(lock_path).map_err(|_| CensusError::Storage)?;
-        lock.try_lock().map_err(|_| CensusError::Storage)?;
+        let lock = Self::lock_directory(&directory, &keys.account)?;
         Ok(Self {
             directory,
             keys,
             lock,
             loaded: Cell::new(false),
+            account_lease: None,
         })
     }
 
+    pub(crate) fn lock_directory(
+        directory: &std::path::Path,
+        account: &AccountId,
+    ) -> Result<fs::File, CensusError> {
+        fs::create_dir_all(directory).map_err(|_| CensusError::Storage)?;
+        let metadata = fs::symlink_metadata(directory).map_err(|_| CensusError::Storage)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(CensusError::Storage);
+        }
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let lock = options
+            .open(directory.join(format!("{}.lock", account.as_str())))
+            .map_err(|_| CensusError::Storage)?;
+        if !lock.metadata().map_err(|_| CensusError::Storage)?.is_file() {
+            return Err(CensusError::Storage);
+        }
+        lock.try_lock().map_err(|_| CensusError::Storage)?;
+        Ok(lock)
+    }
+    pub(crate) fn retain_account_lease(&mut self, lease: fs::File) {
+        self.account_lease = Some(lease);
+    }
+    pub(crate) fn replace_keys(&mut self, keys: CensusKeys) {
+        self.keys = keys;
+        self.loaded.set(false);
+    }
     pub fn keys(&self) -> &CensusKeys {
         &self.keys
     }
 
     pub fn path(&self) -> PathBuf {
-        self.directory
-            .join(format!("{}.census.enc", self.keys.account.as_str()))
+        self.directory.join(if self.keys.generation == 0 {
+            format!("{}.census.enc", self.keys.account.as_str())
+        } else {
+            format!(
+                "{}.g{}.census.enc",
+                self.keys.account.as_str(),
+                self.keys.generation
+            )
+        })
     }
 
     fn context(&self) -> Vec<u8> {
@@ -286,7 +363,10 @@ impl EncryptedStore {
         self.stage_state(&state)
     }
 
-    fn stage_state(&self, state: &AccountState) -> Result<tempfile::NamedTempFile, CensusError> {
+    pub(crate) fn stage_state(
+        &self,
+        state: &AccountState,
+    ) -> Result<tempfile::NamedTempFile, CensusError> {
         if state.census.account != self.keys.account {
             return Err(CensusError::AccountMismatch);
         }
@@ -323,8 +403,10 @@ impl EncryptedStore {
                 },
             )
             .map_err(|_| CensusError::Storage)?;
-        let mut temporary =
-            tempfile::NamedTempFile::new_in(&self.directory).map_err(|_| CensusError::Storage)?;
+        let mut temporary = tempfile::Builder::new()
+            .prefix(&format!(".{}.stage-", self.keys.account.as_str()))
+            .tempfile_in(&self.directory)
+            .map_err(|_| CensusError::Storage)?;
         temporary
             .write_all(MAGIC)
             .and_then(|_| temporary.write_all(&nonce))
@@ -337,6 +419,15 @@ impl EncryptedStore {
         Ok(temporary)
     }
 
+    pub(crate) fn install_snapshot(&self, state: &AccountState) -> Result<(), CensusError> {
+        self.stage_state(state)?
+            .persist_noclobber(self.path())
+            .map_err(|_| CensusError::Storage)?;
+        fs::File::open(&self.directory)
+            .and_then(|f| f.sync_all())
+            .map_err(|_| CensusError::Storage)?;
+        Ok(())
+    }
     pub fn load(&self) -> Result<Census, CensusError> {
         Ok(self.load_state()?.census)
     }

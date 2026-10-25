@@ -215,7 +215,7 @@ fn open(bytes: &[u8], secret: &SecretValue) -> Result<Captured, AcquisitionError
 fn validate_captured(captured: &Captured) -> Result<(), AcquisitionError> {
     let m = &captured.manifest;
     if m.version != 1
-        || !(1..=9).contains(&m.state_schema)
+        || !(1..=10).contains(&m.state_schema)
         || m.account != captured.account.id
         || m.provider != captured.account.provider
         || m.login != captured.account.login

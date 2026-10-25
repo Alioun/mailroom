@@ -38,17 +38,29 @@ fn secret() -> SecretValue {
 }
 
 #[test]
-fn schema_nine_protocol_and_proposal_facts_round_trip_with_selected_recovery() {
+fn schema_ten_protocol_and_proposal_sieve_facts_round_trip_with_selected_recovery() {
     let (root, mut repo, ids, ledger) = fixture();
     crate::acquisition::install_provider_fixture(&mut repo, root.path());
+    let fake = crate::acquisition::SieveFake::start("normal", None);
+    repo.install_sieve_fixture(&fake);
     for id in &ids[..2] {
+        {
+            let store = repo.store(&repo.load(id).unwrap()).unwrap();
+            let mut saved = store.load_state().unwrap();
+            crate::acquisition::sieve_discovery::tests::seed(&mut saved, store.keys());
+            store.save_state(&mut saved).unwrap();
+        }
         repo.scan(id, crate::acquisition::Cancellation::default(), |_| {})
             .unwrap();
     }
+    for id in &ids[..2] {
+        repo.discover_sieve(id, crate::acquisition::Cancellation::default())
+            .unwrap();
+    }
     let (manifest, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
-    assert!(manifest.accounts.iter().all(|m| m.state_schema == 9));
+    assert!(manifest.accounts.iter().all(|m| m.state_schema == 10));
     let fresh_root = tempfile::tempdir().unwrap();
-    let fresh = persistent_accounts(fresh_root.path());
+    let mut fresh = persistent_accounts(fresh_root.path());
     let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();
     fs::remove_file(fresh_root.path().join("ledger/addresses.yaml")).unwrap();
     let preview = fresh
@@ -66,7 +78,17 @@ fn schema_nine_protocol_and_proposal_facts_round_trip_with_selected_recovery() {
         );
         assert!(after.load().unwrap().acquisition.is_protocol());
         assert!(after.recovery_pending());
+        assert!(after.load_state().unwrap().sieve.last_successful.is_some());
     }
+    fresh.install_sieve_fixture(&fake);
+    let commands = fake.commands.lock().unwrap().len();
+    for id in &ids[..2] {
+        assert_eq!(
+            fresh.discover_sieve(id, crate::acquisition::Cancellation::default()),
+            Err(AcquisitionError::LifecyclePending)
+        );
+    }
+    assert_eq!(fake.commands.lock().unwrap().len(), commands);
 }
 fn capture(
     repo: &Accounts,

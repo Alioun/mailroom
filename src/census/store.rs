@@ -189,6 +189,8 @@ impl CensusKeys {
 #[serde(deny_unknown_fields)]
 pub struct AccountState {
     #[serde(default)]
+    pub sieve: super::sieve::Facts,
+    #[serde(default)]
     pub proposals: crate::rules::proposals::Decisions,
     #[serde(default)]
     pub winddown: crate::winddown::Aggregate,
@@ -212,6 +214,7 @@ pub struct AccountState {
 impl AccountState {
     fn new(census: Census) -> Self {
         Self {
+            sieve: Default::default(),
             proposals: Default::default(),
             revision: 0,
             winddown: Default::default(),
@@ -391,10 +394,11 @@ impl EncryptedStore {
             .proposals
             .validate()
             .map_err(|_| CensusError::Storage)?;
+        state.sieve.validate(&state.census.account)?;
         state.census.acquisition.validate(&state.census.account)?;
         let snapshot =
             Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
-        self.stage_snapshot(9, &snapshot)
+        self.stage_snapshot(10, &snapshot)
     }
 
     fn stage_snapshot(
@@ -510,17 +514,25 @@ impl EncryptedStore {
             )
             .map_err(|_| CensusError::Storage)?;
         let snapshot = Zeroizing::new(snapshot);
-        if !matches!(version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9) {
+        if !matches!(version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10) {
             return Err(CensusError::UnsupportedVersion);
         }
         if account != self.keys.account.as_str() {
             return Err(CensusError::AccountMismatch);
         }
         let mut state: AccountState = if version == 1 {
-            AccountState::new(serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?)
+            let legacy: serde_json::Value =
+                serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?;
+            if legacy.get("sieve").is_some() {
+                return Err(CensusError::UnsupportedVersion);
+            }
+            AccountState::new(serde_json::from_value(legacy).map_err(|_| CensusError::Storage)?)
         } else {
             serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?
         };
+        if version < 10 && state.sieve != Default::default() {
+            return Err(CensusError::UnsupportedVersion);
+        }
         if version < 9 && !state.proposals.history.is_empty() {
             return Err(CensusError::UnsupportedVersion);
         }
@@ -531,7 +543,9 @@ impl EncryptedStore {
             .proposals
             .validate()
             .map_err(|_| CensusError::Storage)?;
+        state.sieve.validate(&state.census.account)?;
         state.census.acquisition.validate(&state.census.account)?;
+        state.sieve.interrupted();
         state.census.acquisition.interrupted();
         let census = &mut state.census;
         if census.account != self.keys.account {
@@ -580,7 +594,7 @@ mod tests {
 
     #[test]
     fn historical_schemas_decode_without_inventing_acquisition_evidence() {
-        for version in 1..=8 {
+        for version in 1..=9 {
             let directory = tempfile::tempdir().unwrap();
             let account = AccountId::new("historical-schema").unwrap();
             let store = EncryptedStore::new(
@@ -604,6 +618,7 @@ mod tests {
             }
             if version > 1 {
                 value.as_object_mut().unwrap().remove("proposals");
+                value.as_object_mut().unwrap().remove("sieve");
             }
             store
                 .stage_snapshot(version, &serde_json::to_string(&value).unwrap())
@@ -615,8 +630,36 @@ mod tests {
             assert!(state.exports.is_empty());
             assert!(state.proposals.history.is_empty());
             store.save_state(&mut state).unwrap();
-            assert_eq!(store.schema_version().unwrap(), 9);
+            assert_eq!(store.schema_version().unwrap(), 10);
             assert_eq!(store.load().unwrap().acquisition, Default::default());
+        }
+    }
+
+    #[test]
+    fn sieve_semantics_cannot_be_smuggled_under_old_schema_or_invented_in_ten() {
+        for version in [1, 2, 8, 9, 10] {
+            let directory = tempfile::tempdir().unwrap();
+            let account = AccountId::new("sieve-schema-boundary").unwrap();
+            let store = EncryptedStore::new(
+                directory.path().into(),
+                CensusKeys::derive(&LocalSecret::random(), &account),
+            )
+            .unwrap();
+            let mut saved = AccountState::new(Census::new(account));
+            saved.sieve.version = 1;
+            let value = if version == 1 {
+                let mut value = serde_json::to_value(&saved.census).unwrap();
+                value["sieve"] = serde_json::to_value(&saved.sieve).unwrap();
+                value
+            } else {
+                serde_json::to_value(&saved).unwrap()
+            };
+            store
+                .stage_snapshot(version, &serde_json::to_string(&value).unwrap())
+                .unwrap()
+                .persist(store.path())
+                .unwrap();
+            assert!(store.load_state().is_err());
         }
     }
 

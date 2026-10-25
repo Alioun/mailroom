@@ -2,6 +2,7 @@ pub mod acquisition;
 pub mod demo;
 mod headers;
 pub mod report;
+pub mod sieve;
 mod store;
 
 pub use headers::{HEADER_FIELDS, parse_headers};

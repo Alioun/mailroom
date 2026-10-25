@@ -31,7 +31,7 @@ Wind-down consumes an unambiguous current protocol count and its observation sou
 
 ## Persistence and recovery
 
-Internal encrypted-state schema 8 adds these facts. Schemas 1 through 7 still decode with empty acquisition evidence. The later proposal aggregate advances new saves to schema 9. Both single-account and selected-account recovery validators now accept schemas 1 through 9. Older readers reject the newer schema instead of silently ignoring new semantics. Outer recovery envelope versions and resource bounds remain unchanged. See [Recovery bundle format](recovery-format.md).
+Internal encrypted-state schema 8 adds these facts. Schemas 1 through 7 still decode with empty acquisition evidence. The later proposal aggregate advances new saves to schema 9. Both single-account and selected-account recovery validators now accept schemas 1 through 10. Older readers reject the newer schema instead of silently ignoring new semantics. Outer recovery envelope versions and resource bounds remain unchanged. See [Recovery bundle format](recovery-format.md).
 
 Every census save preserves the other AccountState aggregates through the existing authenticated whole-state save. Rotation and recovery carry the captured facts without changing stable identities. Restore changes approval authority and retains the reconciliation hold. A passive scan cannot clear it. No reconciliation bypass is installed.
 

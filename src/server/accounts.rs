@@ -2,6 +2,7 @@ pub(super) mod backlog;
 pub(super) mod invoices;
 pub(super) mod ledger;
 pub(super) mod lifecycle;
+pub(super) mod managesieve;
 pub(super) mod proposals;
 pub(super) mod recovery;
 pub(super) mod subscription_review;
@@ -48,6 +49,8 @@ enum AccountSource {
 }
 #[derive(Clone, Serialize)]
 struct Job {
+    #[serde(skip)]
+    sieve_account: Option<AccountId>,
     account: Option<Account>,
     progress: ScanProgress,
     error: Option<AcquisitionError>,
@@ -117,6 +120,7 @@ impl AccountController {
         }
         let cancel = Cancellation::default();
         *job = Some(Job {
+            sieve_account: None,
             account: None,
             progress: ScanProgress {
                 state: ScanState::Running,
@@ -976,4 +980,28 @@ async fn production_consequential_routes_deny_before_repository_or_confirmation_
             })
             .is_err()
     );
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn managesieve_server_fixture() {
+    let Some(root) = std::env::var_os("MAILROOM_SIEVE_FIXTURE") else {
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let fake = acquisition::SieveFake::start("normal", Some(root.join("sieve-mode")));
+    let mut repo = acquisition::persistent_test_accounts(root);
+    repo.install_sieve_fixture(&fake);
+    let mut state = AppState::new(true);
+    state.accounts.source = AccountSource::Synthetic {
+        accounts: Arc::new(repo),
+        _directory: tempfile::tempdir().unwrap(),
+        mailboxes: root.join("mailboxes"),
+    };
+    state.accounts.ledger =
+        Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
+    let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
+    axum::serve(listener, super::router(Arc::new(state)))
+        .await
+        .unwrap();
 }

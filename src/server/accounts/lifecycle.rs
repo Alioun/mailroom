@@ -70,9 +70,13 @@ pub(in crate::server) async fn handle(
         if !matches!(request, Request::Status { .. }) {
             if let Some(job) = state.accounts.job.lock().expect("account job").as_ref() {
                 if job
-                    .account
+                    .sieve_account
                     .as_ref()
-                    .is_some_and(|a| Some(&a.id) == request.account())
+                    .is_some_and(|id| Some(id) == request.account())
+                    || job
+                        .account
+                        .as_ref()
+                        .is_some_and(|a| Some(&a.id) == request.account())
                 {
                     job.cancel.cancel();
                 }
@@ -113,9 +117,12 @@ pub(in crate::server) async fn handle(
         }
         let mut job = state.accounts.job.lock().expect("account job");
         if job.as_ref().is_some_and(|j| {
-            j.account
+            j.sieve_account
                 .as_ref()
-                .is_some_and(|a| Some(&a.id) == request.account())
+                .is_some_and(|id| Some(id) == request.account())
+                || j.account
+                    .as_ref()
+                    .is_some_and(|a| Some(&a.id) == request.account())
         }) {
             *job = None;
         }

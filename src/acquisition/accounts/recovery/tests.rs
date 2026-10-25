@@ -7,21 +7,31 @@ fn secret() -> SecretValue {
 }
 
 #[test]
-fn schema_nine_protocol_and_proposal_facts_round_trip_with_single_account_recovery() {
+fn schema_ten_protocol_and_proposal_sieve_facts_round_trip_with_single_account_recovery() {
     let (root, mut repo, account) = fixture();
     crate::acquisition::install_provider_fixture(&mut repo, root.path());
+    let fake = crate::acquisition::SieveFake::start("normal", None);
+    repo.install_sieve_fixture(&fake);
+    {
+        let store = repo.store(&account).unwrap();
+        let mut saved = store.load_state().unwrap();
+        crate::acquisition::sieve_discovery::tests::seed(&mut saved, store.keys());
+        store.save_state(&mut saved).unwrap();
+    }
     repo.scan(
         &account.id,
         crate::acquisition::Cancellation::default(),
         |_| {},
     )
     .unwrap();
+    repo.discover_sieve(&account.id, crate::acquisition::Cancellation::default())
+        .unwrap();
     let before = state(&repo, &account);
     assert!(before.census.acquisition.is_protocol());
     let (manifest, bundle) = capture(&repo, &account, root.path());
-    assert_eq!(manifest.state_schema, 9);
+    assert_eq!(manifest.state_schema, 10);
     let fresh_root = tempfile::tempdir().unwrap();
-    let fresh = persistent_accounts(fresh_root.path());
+    let mut fresh = persistent_accounts(fresh_root.path());
     let preview = fresh.restore_preview(&bundle, &secret()).unwrap();
     let restored = fresh
         .restore(&bundle, &secret(), &preview, |_| Ok(()))
@@ -34,7 +44,16 @@ fn schema_nine_protocol_and_proposal_facts_round_trip_with_single_account_recove
         encoded(&before).unwrap().as_slice(),
         encoded(&after).unwrap().as_slice()
     );
+    assert!(after.sieve.last_successful.is_some());
     assert!(store.save_state(&mut after).is_err());
+    drop(store);
+    fresh.install_sieve_fixture(&fake);
+    let commands = fake.commands.lock().unwrap().len();
+    assert_eq!(
+        fresh.discover_sieve(&account.id, crate::acquisition::Cancellation::default()),
+        Err(AcquisitionError::LifecyclePending)
+    );
+    assert_eq!(fake.commands.lock().unwrap().len(), commands);
 }
 fn fixture() -> (tempfile::TempDir, Accounts, Account) {
     let root = tempfile::tempdir().unwrap();

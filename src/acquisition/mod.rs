@@ -1,6 +1,8 @@
 mod accounts;
 mod imap;
+mod managesieve;
 mod scan;
+mod sieve_discovery;
 pub(crate) mod synthetic;
 use crate::census::CensusError;
 pub use accounts::lifecycle;
@@ -51,3 +53,5 @@ impl std::error::Error for AcquisitionError {}
 pub(crate) use accounts::process_tests::persistent_accounts as persistent_test_accounts;
 #[cfg(test)]
 pub(crate) use imap::tests::install_provider_fixture;
+#[cfg(test)]
+pub(crate) use managesieve::tests::Fake as SieveFake;

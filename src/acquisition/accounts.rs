@@ -142,6 +142,7 @@ impl AccountPaths {
 pub struct Accounts {
     pub(crate) paths: AccountPaths,
     backend: Arc<dyn CredentialBackend>,
+    pub(super) sieve_source: Option<Arc<super::managesieve::InstalledSource>>,
     #[cfg(test)]
     pub(super) imap_factory: Option<super::imap::TestConnection>,
 }
@@ -150,6 +151,7 @@ impl Accounts {
         Self {
             paths,
             backend,
+            sieve_source: None,
             #[cfg(test)]
             imap_factory: None,
         }
@@ -203,6 +205,24 @@ impl Accounts {
             }
         }
         Ok(accounts)
+    }
+    pub(super) fn sieve_authority(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+    ) -> Result<String, AcquisitionError> {
+        let identity = serde_json::to_vec(&(
+            account.id.as_str(),
+            account.provider,
+            &account.password_ref,
+            &account.local_secret_ref,
+            account.generation,
+            &account.restored,
+        ))
+        .map_err(|_| AcquisitionError::Storage)?;
+        Ok(store
+            .keys()
+            .binding_for(b"mailroom/sieve-source/v1", &identity))
     }
     pub(crate) fn password(&self, account: &Account) -> Result<SecretValue, AcquisitionError> {
         self.backend.get(&account.password_ref)

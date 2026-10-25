@@ -3,6 +3,7 @@ pub mod backlog;
 pub mod census;
 pub(crate) mod confirmation;
 pub mod engine;
+mod file_lock;
 pub mod invoice;
 pub mod ledger;
 pub mod policy;

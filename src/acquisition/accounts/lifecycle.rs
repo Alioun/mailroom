@@ -1,4 +1,5 @@
 use super::*;
+use crate::file_lock::ExclusiveFileLock;
 use std::{io::Read, path::Path};
 
 const LIMIT: u64 = 1024 * 1024;
@@ -80,7 +81,10 @@ impl Accounts {
             .join("lifecycle")
             .join(format!("{}.json", id.as_str()))
     }
-    pub(super) fn lock_account(&self, id: &AccountId) -> Result<fs::File, AcquisitionError> {
+    pub(super) fn lock_account(
+        &self,
+        id: &AccountId,
+    ) -> Result<ExclusiveFileLock, AcquisitionError> {
         private_directory(&self.paths.config.join("lifecycle"))?;
         let path = self
             .paths
@@ -102,9 +106,10 @@ impl Accounts {
         {
             return Err(AcquisitionError::Storage);
         }
-        file.try_lock()
-            .map_err(|_| AcquisitionError::LifecyclePending)?;
-        Ok(file)
+        ExclusiveFileLock::try_lock(file).map_err(|error| match error {
+            fs::TryLockError::WouldBlock => AcquisitionError::LifecyclePending,
+            fs::TryLockError::Error(_) => AcquisitionError::Storage,
+        })
     }
     pub(super) fn require_ready(&self, id: &AccountId) -> Result<(), AcquisitionError> {
         if self

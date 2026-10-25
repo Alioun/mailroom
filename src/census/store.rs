@@ -1,4 +1,5 @@
 use super::{AccountId, Census, CensusError};
+use crate::file_lock::ExclusiveFileLock;
 use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit, Payload},
@@ -214,15 +215,9 @@ impl AccountState {
 pub struct EncryptedStore {
     directory: PathBuf,
     keys: CensusKeys,
-    lock: fs::File,
+    _lock: ExclusiveFileLock,
     loaded: Cell<bool>,
-    account_lease: Option<fs::File>,
-}
-
-impl Drop for EncryptedStore {
-    fn drop(&mut self) {
-        let _ = self.lock.unlock();
-    }
+    account_lease: Option<ExclusiveFileLock>,
 }
 
 impl EncryptedStore {
@@ -252,7 +247,7 @@ impl EncryptedStore {
         Ok(Self {
             directory,
             keys,
-            lock,
+            _lock: lock,
             loaded: Cell::new(false),
             account_lease: None,
         })
@@ -261,7 +256,7 @@ impl EncryptedStore {
     pub(crate) fn lock_directory(
         directory: &std::path::Path,
         account: &AccountId,
-    ) -> Result<fs::File, CensusError> {
+    ) -> Result<ExclusiveFileLock, CensusError> {
         fs::create_dir_all(directory).map_err(|_| CensusError::Storage)?;
         let metadata = fs::symlink_metadata(directory).map_err(|_| CensusError::Storage)?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -280,10 +275,9 @@ impl EncryptedStore {
         if !lock.metadata().map_err(|_| CensusError::Storage)?.is_file() {
             return Err(CensusError::Storage);
         }
-        lock.try_lock().map_err(|_| CensusError::Storage)?;
-        Ok(lock)
+        ExclusiveFileLock::try_lock(lock).map_err(|_| CensusError::Storage)
     }
-    pub(crate) fn retain_account_lease(&mut self, lease: fs::File) {
+    pub(crate) fn retain_account_lease(&mut self, lease: ExclusiveFileLock) {
         self.account_lease = Some(lease);
     }
     pub(crate) fn replace_keys(&mut self, keys: CensusKeys) {

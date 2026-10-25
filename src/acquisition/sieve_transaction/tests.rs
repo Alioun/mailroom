@@ -480,13 +480,14 @@ pub(crate) fn later_provider_change(repo: &Accounts, account: &Account) {
     session.logout().unwrap();
 }
 
-fn independent_effects(root: &Path, store: &EncryptedStore) -> [String; 3] {
+pub(crate) fn independent_effects(root: &Path, store: &EncryptedStore) -> [String; 3] {
     let directory = root.join("mailboxes");
     let mut mailbox = EncryptedStore::new(directory.clone(), store.keys().synthetic_mailbox_keys())
         .unwrap()
         .load_state()
         .unwrap();
     mailbox.synthetic_sieve = None;
+    mailbox.synthetic_folders = None;
     mailbox.revision = 0;
     let invoice = EncryptedStore::new(
         directory.join("invoice-transport"),

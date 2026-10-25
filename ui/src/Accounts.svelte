@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import ManageSieve from './ManageSieve.svelte'
   import SieveTransactions from './SieveTransactions.svelte'
+  import FolderProvisioning from './FolderProvisioning.svelte'
   import AcquisitionEvidence from './AcquisitionEvidence.svelte'
   import Reports from './Reports.svelte'
   import Lifecycle from './Lifecycle.svelte'
@@ -108,7 +109,7 @@
   {/if}
   {#key status?.synthetic}<Recovery {accounts} account={selected} synthetic={status?.synthetic ?? false} {lang} onChanged={lifecycleChanged} />{/key}
   {#key `${selected}:${status?.synthetic}`}<Lifecycle account={selected} synthetic={status?.synthetic ?? false} {lang} onChanged={lifecycleChanged} />{/key}
-  {#key `${selected}:${cacheEpoch}`}<ManageSieve account={selected} {lang} /><SieveTransactions account={selected} {lang} />{/key}
+  {#key `${selected}:${cacheEpoch}`}<ManageSieve account={selected} {lang} /><SieveTransactions account={selected} {lang} /><FolderProvisioning account={selected} {lang} />{/key}
   {#if view}
     <p class="scan-state">{t[view.census.acquisition_state]}</p>
     <AcquisitionEvidence evidence={view.evidence} {lang} />

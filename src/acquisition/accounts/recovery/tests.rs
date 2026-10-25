@@ -76,7 +76,7 @@ fn schema_ten_protocol_and_proposal_sieve_facts_round_trip_with_single_account_r
     let before = state(&repo, &account);
     assert!(before.census.acquisition.is_protocol());
     let (manifest, bundle) = capture(&repo, &account, root.path());
-    assert_eq!(manifest.state_schema, 11);
+    assert_eq!(manifest.state_schema, 12);
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let preview = fresh.restore_preview(&bundle, &secret()).unwrap();
@@ -508,4 +508,57 @@ fn organisational_decisions_survive_real_rotation_and_recovery_without_approval_
     );
     assert!(store.recovery_pending());
     assert!(store.save_state(&mut saved).is_err());
+}
+
+#[test]
+fn folder_journal_restores_held_without_reverting_later_independent_topology() {
+    let root = tempfile::tempdir().unwrap();
+    let (repo, account, fake) =
+        crate::acquisition::folder_provisioning::tests::install(root.path());
+    crate::acquisition::folder_provisioning::tests::commit_synthetic_folders(&repo, &account);
+    let before = state(&repo, &account);
+    let (manifest, bundle) = capture(&repo, &account, root.path());
+    assert_eq!(manifest.state_schema, 12);
+    crate::acquisition::folder_provisioning::tests::later_folder_change(
+        &repo,
+        &account,
+        root.path(),
+    );
+    let independent = repo.fixture_sieve_store(&account.id, root.path()).unwrap();
+    let later = fs::read(independent.path()).unwrap();
+    let fresh_root = tempfile::tempdir().unwrap();
+    let mut fresh = persistent_accounts(fresh_root.path());
+    let preview = fresh.restore_preview(&bundle, &secret()).unwrap();
+    fresh
+        .restore(&bundle, &secret(), &preview, |_| Ok(()))
+        .unwrap();
+    fake.install(&mut fresh);
+    let account = fresh.load(&account.id).unwrap();
+    let store = fresh.store(&account).unwrap();
+    let mut restored = store.load_state().unwrap();
+    assert!(restored.folder_provisioning == before.folder_provisioning);
+    assert!(store.recovery_pending());
+    assert!(
+        fresh
+            .folder_preview(
+                &account,
+                &store,
+                &restored,
+                crate::acquisition::Cancellation::default()
+            )
+            .is_err()
+    );
+    let id = restored.folder_provisioning.history[0].id.clone();
+    assert!(
+        fresh
+            .folder_reconcile(
+                &account,
+                &store,
+                &mut restored,
+                &id,
+                crate::acquisition::Cancellation::default()
+            )
+            .is_err()
+    );
+    assert_eq!(fs::read(independent.path()).unwrap(), later);
 }

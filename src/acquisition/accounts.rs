@@ -140,6 +140,7 @@ impl AccountPaths {
 }
 
 pub struct Accounts {
+    pub(super) folder_source: Option<Arc<super::folder_provisioning::transport::InstalledSource>>,
     pub(crate) paths: AccountPaths,
     backend: Arc<dyn CredentialBackend>,
     pub(super) sieve_write: Option<Arc<super::managesieve::FixtureOwnership>>,
@@ -160,6 +161,7 @@ impl Accounts {
         Self {
             paths,
             backend,
+            folder_source: None,
             sieve_source: None,
             sieve_write: None,
             #[cfg(test)]

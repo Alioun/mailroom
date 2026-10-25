@@ -290,6 +290,10 @@ fn router(state: Arc<AppState>) -> Router {
             post(accounts::managesieve::handle),
         )
         .route(
+            "/api/accounts/folders",
+            post(accounts::folder_provisioning::handle),
+        )
+        .route(
             "/api/accounts/sieve-transactions",
             post(accounts::sieve_transactions::handle),
         )

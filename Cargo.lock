@@ -1340,6 +1340,7 @@ dependencies = [
  "hkdf 0.12.4",
  "hmac 0.12.1",
  "http-body-util",
+ "icu_normalizer",
  "icu_properties",
  "idna",
  "imap",

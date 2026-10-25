@@ -1,4 +1,5 @@
 pub(super) mod backlog;
+pub(super) mod folder_provisioning;
 pub(super) mod invoices;
 pub(super) mod ledger;
 pub(super) mod lifecycle;
@@ -50,6 +51,8 @@ enum AccountSource {
 }
 #[derive(Clone, Serialize)]
 struct Job {
+    #[serde(skip)]
+    folder_account: Option<AccountId>,
     #[serde(skip)]
     sieve_account: Option<AccountId>,
     account: Option<Account>,
@@ -121,6 +124,7 @@ impl AccountController {
         }
         let cancel = Cancellation::default();
         *job = Some(Job {
+            folder_account: None,
             sieve_account: None,
             account: None,
             progress: ScanProgress {
@@ -1015,6 +1019,28 @@ async fn managesieve_transactions_server_fixture() {
     };
     let root = std::path::Path::new(&root);
     let (repo, _account, _fake) = acquisition::sieve_transaction::tests::install(root);
+    let mut state = AppState::new(true);
+    state.accounts.source = AccountSource::Synthetic {
+        accounts: Arc::new(repo),
+        _directory: tempfile::tempdir().unwrap(),
+        mailboxes: root.join("mailboxes"),
+    };
+    state.accounts.ledger =
+        Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
+    let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
+    axum::serve(listener, super::router(Arc::new(state)))
+        .await
+        .unwrap();
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn folder_provisioning_server_fixture() {
+    let Some(root) = std::env::var_os("MAILROOM_FOLDERS_FIXTURE") else {
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let (repo, _account, _fake) = acquisition::folder_provisioning::tests::install(root);
     let mut state = AppState::new(true);
     state.accounts.source = AccountSource::Synthetic {
         accounts: Arc::new(repo),

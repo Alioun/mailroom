@@ -15,6 +15,7 @@ hkdf = "0.12"
 hmac = "0.12"
 idna = "1.1.0"
 icu_properties = "=2.4.0"
+icu_normalizer = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
 imap = "3.0.0-alpha.15"
 imap-proto = "0.16"
 keyring = "4.2"

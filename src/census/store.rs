@@ -189,6 +189,10 @@ impl CensusKeys {
 #[serde(deny_unknown_fields)]
 pub struct AccountState {
     #[serde(default)]
+    pub folder_provisioning: super::folder_provisioning::FolderJournal,
+    #[serde(default)]
+    pub synthetic_folders: Option<super::folder_provisioning::FakeProvider>,
+    #[serde(default)]
     pub sieve_transactions: super::sieve_transaction::Journal,
     #[serde(default)]
     pub synthetic_sieve: Option<super::sieve_transaction::FakeProvider>,
@@ -218,6 +222,8 @@ pub struct AccountState {
 impl AccountState {
     fn new(census: Census) -> Self {
         Self {
+            folder_provisioning: Default::default(),
+            synthetic_folders: None,
             sieve: Default::default(),
             sieve_transactions: Default::default(),
             synthetic_sieve: None,
@@ -402,6 +408,14 @@ impl EncryptedStore {
             .map_err(|_| CensusError::Storage)?;
         state.sieve.validate(&state.census.account)?;
         state.sieve_transactions.validate(&state.census.account)?;
+        state.folder_provisioning.validate(&state.census.account)?;
+        if state
+            .synthetic_folders
+            .as_ref()
+            .is_some_and(|f| !f.validate())
+        {
+            return Err(CensusError::Storage);
+        }
         if state.synthetic_sieve.as_ref().is_some_and(|f| {
             !f.address.ip().is_loopback()
                 || f.epoch.is_empty()
@@ -415,7 +429,7 @@ impl EncryptedStore {
         state.census.acquisition.validate(&state.census.account)?;
         let snapshot =
             Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
-        self.stage_snapshot(11, &snapshot)
+        self.stage_snapshot(12, &snapshot)
     }
 
     fn stage_snapshot(
@@ -531,7 +545,7 @@ impl EncryptedStore {
             )
             .map_err(|_| CensusError::Storage)?;
         let snapshot = Zeroizing::new(snapshot);
-        if !matches!(version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11) {
+        if !matches!(version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12) {
             return Err(CensusError::UnsupportedVersion);
         }
         if account != self.keys.account.as_str() {
@@ -540,7 +554,9 @@ impl EncryptedStore {
         let mut state: AccountState = if version == 1 {
             let legacy: serde_json::Value =
                 serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?;
-            if legacy.get("sieve").is_some()
+            if legacy.get("folder_provisioning").is_some()
+                || legacy.get("synthetic_folders").is_some()
+                || legacy.get("sieve").is_some()
                 || legacy.get("sieve_transactions").is_some()
                 || legacy.get("synthetic_sieve").is_some()
             {
@@ -550,6 +566,12 @@ impl EncryptedStore {
         } else {
             serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?
         };
+        if version < 12
+            && (state.folder_provisioning != Default::default()
+                || state.synthetic_folders.is_some())
+        {
+            return Err(CensusError::UnsupportedVersion);
+        }
         if version < 11
             && (state.sieve_transactions != Default::default()
                 || state.synthetic_sieve.is_some()
@@ -572,6 +594,14 @@ impl EncryptedStore {
             .map_err(|_| CensusError::Storage)?;
         state.sieve.validate(&state.census.account)?;
         state.sieve_transactions.validate(&state.census.account)?;
+        state.folder_provisioning.validate(&state.census.account)?;
+        if state
+            .synthetic_folders
+            .as_ref()
+            .is_some_and(|f| !f.validate())
+        {
+            return Err(CensusError::Storage);
+        }
         if state.synthetic_sieve.as_ref().is_some_and(|f| {
             !f.address.ip().is_loopback()
                 || f.epoch.is_empty()
@@ -585,6 +615,7 @@ impl EncryptedStore {
         state.census.acquisition.validate(&state.census.account)?;
         state.sieve.interrupted();
         state.sieve_transactions.interrupted();
+        state.folder_provisioning.interrupted();
         state.census.acquisition.interrupted();
         let census = &mut state.census;
         if census.account != self.keys.account {
@@ -632,6 +663,53 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
+    fn old_schemas_reject_folder_semantics_and_twelve_round_trips() {
+        let root = tempfile::tempdir().unwrap();
+        let (repo, account, _fake) =
+            crate::acquisition::folder_provisioning::tests::install(root.path());
+        crate::acquisition::folder_provisioning::tests::commit_synthetic_folders(&repo, &account);
+        let store = repo.store(&account).unwrap();
+        let saved = store.load_state().unwrap();
+        for version in 1..=11 {
+            let mut value = if version == 1 {
+                serde_json::to_value(&saved.census).unwrap()
+            } else {
+                serde_json::to_value(&saved).unwrap()
+            };
+            value["folder_provisioning"] =
+                serde_json::to_value(&saved.folder_provisioning).unwrap();
+            store
+                .stage_snapshot(version, &serde_json::to_string(&value).unwrap())
+                .unwrap()
+                .persist(store.path())
+                .unwrap();
+            assert!(matches!(
+                store.load_state(),
+                Err(CensusError::UnsupportedVersion)
+            ));
+        }
+        store
+            .stage_state(&saved)
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        assert_eq!(store.schema_version().unwrap(), 12);
+        assert!(store.load_state().unwrap().folder_provisioning == saved.folder_provisioning);
+        let mut bad = saved.clone();
+        bad.folder_provisioning.history[0].plan.entries[0]
+            .name
+            .wire
+            .push('x');
+        assert!(store.stage_state(&bad).is_err());
+        let mut bad = saved.clone();
+        bad.folder_provisioning.history[0].steps[0]
+            .name
+            .decoded
+            .push('x');
+        assert!(store.stage_state(&bad).is_err());
+    }
+
+    #[test]
     fn old_schemas_reject_real_transaction_semantics_and_eleven_round_trips() {
         let root = tempfile::tempdir().unwrap();
         let (repo, account, _fake) =
@@ -664,7 +742,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 11);
+        assert_eq!(store.schema_version().unwrap(), 12);
         assert!(store.load_state().unwrap().sieve_transactions == state.sieve_transactions);
         let mut malformed = state.clone();
         malformed.sieve_transactions.history[0].after.bodies[1]
@@ -712,7 +790,7 @@ mod tests {
             assert!(state.exports.is_empty());
             assert!(state.proposals.history.is_empty());
             store.save_state(&mut state).unwrap();
-            assert_eq!(store.schema_version().unwrap(), 11);
+            assert_eq!(store.schema_version().unwrap(), 12);
             assert_eq!(store.load().unwrap().acquisition, Default::default());
         }
     }

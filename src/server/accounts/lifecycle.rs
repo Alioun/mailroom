@@ -70,9 +70,13 @@ pub(in crate::server) async fn handle(
         if !matches!(request, Request::Status { .. }) {
             if let Some(job) = state.accounts.job.lock().expect("account job").as_ref() {
                 if job
-                    .sieve_account
+                    .folder_account
                     .as_ref()
                     .is_some_and(|id| Some(id) == request.account())
+                    || job
+                        .sieve_account
+                        .as_ref()
+                        .is_some_and(|id| Some(id) == request.account())
                     || job
                         .account
                         .as_ref()
@@ -117,9 +121,12 @@ pub(in crate::server) async fn handle(
         }
         let mut job = state.accounts.job.lock().expect("account job");
         if job.as_ref().is_some_and(|j| {
-            j.sieve_account
+            j.folder_account
                 .as_ref()
                 .is_some_and(|id| Some(id) == request.account())
+                || j.sieve_account
+                    .as_ref()
+                    .is_some_and(|id| Some(id) == request.account())
                 || j.account
                     .as_ref()
                     .is_some_and(|a| Some(&a.id) == request.account())
@@ -134,6 +141,58 @@ pub(in crate::server) async fn handle(
         Ok(Err(e)) => failure(e),
         Err(_) => failure(AcquisitionError::Storage),
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn lifecycle_cancels_and_joins_folder_work_before_rotation_and_clears_its_job() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let root = tempfile::tempdir().unwrap();
+    let (repo, account, _fake) = acquisition::folder_provisioning::tests::install(root.path());
+    let mut app = AppState::new(true);
+    app.accounts.source = AccountSource::Synthetic {
+        accounts: Arc::new(repo),
+        _directory: tempfile::tempdir().unwrap(),
+        mailboxes: root.path().join("mailboxes"),
+    };
+    let state = Arc::new(app);
+    let cancel = state.accounts.reserve().unwrap();
+    state
+        .accounts
+        .job
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .folder_account = Some(account.id.clone());
+    let cancelled_before_join = Arc::new(AtomicBool::new(false));
+    let observed = cancelled_before_join.clone();
+    let worker = state.clone();
+    let (started, ready) = std::sync::mpsc::sync_channel(1);
+    let worker_handle = std::thread::spawn(move || {
+        let _operation = worker.accounts.operation.lock().unwrap();
+        started.send(()).unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !cancel.is_cancelled() && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        observed.store(cancel.is_cancelled(), Ordering::SeqCst);
+        worker.accounts.finish(Err(AcquisitionError::Cancelled));
+    });
+    *state.accounts.worker.lock().unwrap() = Some(worker_handle);
+    ready.recv().unwrap();
+    let response = handle(
+        State(state.clone()),
+        Ok(Json(Request::Rotate {
+            account: account.id,
+            confirmed: true,
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(cancelled_before_join.load(Ordering::SeqCst));
+    assert!(state.accounts.worker.lock().unwrap().is_none());
+    assert!(state.accounts.job.lock().unwrap().is_none());
 }
 
 #[cfg(test)]

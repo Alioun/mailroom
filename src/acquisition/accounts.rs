@@ -142,10 +142,17 @@ impl AccountPaths {
 pub struct Accounts {
     pub(crate) paths: AccountPaths,
     backend: Arc<dyn CredentialBackend>,
+    #[cfg(test)]
+    pub(super) imap_factory: Option<super::imap::TestConnection>,
 }
 impl Accounts {
     pub fn new(paths: AccountPaths, backend: Arc<dyn CredentialBackend>) -> Self {
-        Self { paths, backend }
+        Self {
+            paths,
+            backend,
+            #[cfg(test)]
+            imap_factory: None,
+        }
     }
     pub fn create(
         &self,
@@ -210,6 +217,62 @@ impl Accounts {
         let mut store = self.open_store(&current, &self.paths.data, 0)?;
         store.retain_account_lease(lease);
         Ok(store)
+    }
+}
+
+#[cfg(test)]
+mod provider_attempt_tests {
+    use super::*;
+    use crate::{acquisition::Cancellation, census::ScanState};
+
+    #[test]
+    fn missing_credential_and_pre_cancelled_scan_record_new_attempts_without_refreshing_success() {
+        let root = tempfile::tempdir().unwrap();
+        let mut repo = super::process_tests::persistent_accounts(root.path());
+        crate::acquisition::install_provider_fixture(&mut repo, root.path());
+        let account = repo
+            .create(
+                Provider::Gmail,
+                "attempt@example.test".into(),
+                &SecretValue::new(b"invented".to_vec()),
+            )
+            .unwrap();
+        repo.scan(&account.id, Cancellation::default(), |_| {})
+            .unwrap();
+        let good = repo.store(&account).unwrap().load().unwrap();
+        let id = good.acquisition.latest.as_ref().unwrap().id.clone();
+        repo.backend.delete(&account.password_ref).unwrap();
+        assert_eq!(
+            repo.scan(&account.id, Cancellation::default(), |_| {}),
+            Err(AcquisitionError::CredentialMissing)
+        );
+        let saved = repo.store(&account).unwrap().load().unwrap();
+        assert_eq!(
+            saved.acquisition.latest.as_ref().unwrap().state,
+            ScanState::Failed
+        );
+        assert_ne!(saved.acquisition.latest.as_ref().unwrap().id, id);
+        assert_eq!(
+            saved.acquisition.last_successful,
+            good.acquisition.last_successful
+        );
+        let id = saved.acquisition.latest.unwrap().id;
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert_eq!(
+            repo.scan(&account.id, cancel, |_| {}),
+            Err(AcquisitionError::Cancelled)
+        );
+        let saved = repo.store(&account).unwrap().load().unwrap();
+        assert_eq!(
+            saved.acquisition.latest.as_ref().unwrap().state,
+            ScanState::Cancelled
+        );
+        assert_ne!(saved.acquisition.latest.unwrap().id, id);
+        assert_eq!(
+            saved.acquisition.last_successful,
+            good.acquisition.last_successful
+        );
     }
 }
 

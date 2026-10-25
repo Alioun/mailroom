@@ -64,6 +64,15 @@ impl Report {
                 date(source.coverage_through)
             ));
         }
+        for source in &self.sources {
+            if let Some(crate::census::acquisition::CountObservation::Observed {
+                observed_at,
+                ..
+            }) = &source.spam_observation
+            {
+                out.push_str(&format!("Spam count observation {} via STATUS MESSAGES. Current mailbox total only; historical Spam coverage remains unknown.\n", date(Some(*observed_at))));
+            }
+        }
         let mut tail = 0;
         for row in &self.rows {
             if row.messages < 3 {

@@ -48,9 +48,23 @@ pub(crate) fn accounts(root: &std::path::Path) -> Accounts {
 }
 struct SyntheticMail;
 impl MailRead for SyntheticMail {
+    fn adapter(&self) -> &'static str {
+        "mailroom/synthetic/v1"
+    }
+    fn capabilities(&self) -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+    fn count(&mut self, _: &Folder) -> crate::census::acquisition::CountObservation {
+        crate::census::acquisition::CountObservation::unknown(
+            crate::census::acquisition::UnknownCount::NotRequested,
+        )
+    }
     fn folders(&mut self) -> Result<Vec<Folder>, AcquisitionError> {
         Ok(vec![Folder {
             roles: BTreeSet::new(),
+            attributes: BTreeSet::new(),
+            delimiter: Some("/".into()),
+            selectable: true,
             wire: "INBOX".into(),
             name: "INBOX".into(),
             sent: false,

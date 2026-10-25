@@ -1,9 +1,15 @@
 use super::{
     Accounts, AcquisitionError, Provider,
-    imap::{BATCH, MailRead, ReadOnlyImap, record},
+    imap::{BATCH, MailRead, record},
 };
 use crate::{
-    census::{AccountId, Census, EncryptedStore, ScanState},
+    census::{
+        AccountId, Census, EncryptedStore, ScanState,
+        acquisition::{
+            self, CountObservation, CountSource, FolderObservation, Selection, Snapshot,
+            UnknownCount,
+        },
+    },
     policy,
 };
 use serde::Serialize;
@@ -57,7 +63,7 @@ impl Accounts {
         let password = self.password(&account)?;
         retry_read(&cancel, || {
             let mut source =
-                ReadOnlyImap::connect(&permit, &account.login, &password, cancel.clone())?;
+                self.connect_read(&permit, &account.login, &password, cancel.clone())?;
             Ok(source.folders()?.len())
         })
     }
@@ -72,14 +78,18 @@ impl Accounts {
         let store = self.store(&account)?;
         // Missing keys or files never start a replacement census.
         let mut census = store.load()?;
-        let password = self.password(&account)?;
-        census.acquisition_state = ScanState::Running;
-        store.save(&census)?;
+        begin(&mut census, &store, account.provider, acquisition::ADAPTER)?;
+        let mut attempt = 0;
         let outcome = retry_read(&cancel, || {
+            if attempt > 0 {
+                census = store.load()?;
+                begin(&mut census, &store, account.provider, acquisition::ADAPTER)?;
+            }
+            attempt += 1;
+            let password = self.password(&account)?;
             let mut source =
-                ReadOnlyImap::connect(&permit, &account.login, &password, cancel.clone())?;
-            census = store.load()?;
-            run(
+                self.connect_read(&permit, &account.login, &password, cancel.clone())?;
+            run_started(
                 &mut source,
                 account.provider,
                 &mut census,
@@ -107,6 +117,7 @@ impl Accounts {
             } else {
                 ScanState::Failed
             };
+            saved.acquisition.finish(saved.acquisition_state);
             store.save(&saved)?;
             return Err(error);
         }
@@ -141,28 +152,103 @@ pub(super) fn run(
     census: &mut Census,
     store: &EncryptedStore,
     cancel: &Cancellation,
+    progress: impl FnMut(ScanProgress),
+) -> Result<(), AcquisitionError> {
+    begin(census, store, provider, source.adapter())?;
+    run_started(source, provider, census, store, cancel, progress)
+}
+fn begin(
+    census: &mut Census,
+    store: &EncryptedStore,
+    provider: Provider,
+    adapter: &str,
+) -> Result<(), AcquisitionError> {
+    census.acquisition.begin(provider, adapter);
+    census.acquisition_state = ScanState::Running;
+    store.save(census)?;
+    Ok(())
+}
+fn run_started(
+    source: &mut impl MailRead,
+    provider: Provider,
+    census: &mut Census,
+    store: &EncryptedStore,
+    cancel: &Cancellation,
     mut progress: impl FnMut(ScanProgress),
 ) -> Result<(), AcquisitionError> {
     census.acquisition_state = ScanState::Running;
+    census
+        .acquisition
+        .latest
+        .as_mut()
+        .expect("started attempt")
+        .session = Some(acquisition::SessionObservation {
+        observed_at: acquisition::now(),
+        imap_capabilities: source.capabilities(),
+    });
     store.save(census)?;
     let outcome = (|| {
         cancel.check()?;
         let folders = source.folders()?;
-        for folder in &folders {
-            census
-                .folder_roles
-                .insert(folder.name.clone(), folder.roles.clone());
+        let all_candidates: Vec<_> = folders.iter().filter(|f| f.all && !f.excluded).collect();
+        if provider == Provider::Gmail && all_candidates.len() > 1 {
+            return Err(AcquisitionError::Incomplete);
         }
         let all = if provider == Provider::Gmail {
-            folders
-                .iter()
-                .find(|f| f.all && !f.excluded)
-                .map(|f| f.name.clone())
+            all_candidates.first().map(|f| f.name.clone())
         } else {
             None
         };
+        let attempt_id = census
+            .acquisition
+            .latest
+            .as_ref()
+            .expect("started attempt")
+            .id
+            .clone();
+        let mut snapshot = Snapshot {
+            version: 1,
+            adapter: source.adapter().into(),
+            account: census.account.clone(),
+            provider,
+            attempt_id,
+            topology_observed_at: acquisition::now(),
+            completed_at: None,
+            imap_capabilities: source.capabilities(),
+            folders: folders
+                .iter()
+                .map(|f| {
+                    let selection = if !f.selectable {
+                        Selection::NotSelectable
+                    } else if f.excluded {
+                        Selection::SystemRole
+                    } else if all.as_ref().is_some_and(|name| *name != f.name) {
+                        Selection::GmailLabel
+                    } else {
+                        Selection::Selected
+                    };
+                    FolderObservation {
+                        wire: f.wire.clone(),
+                        name: f.name.clone(),
+                        delimiter: f.delimiter.clone(),
+                        attributes: f.attributes.clone(),
+                        roles: f.roles.clone(),
+                        selectable: f.selectable,
+                        selection,
+                        count: CountObservation::unknown(if f.selectable {
+                            UnknownCount::NotRequested
+                        } else {
+                            UnknownCount::NotSelectable
+                        }),
+                        uidvalidity: None,
+                        selected_complete: false,
+                    }
+                })
+                .collect(),
+        };
+        checkpoint(census, store, &snapshot)?;
         let selected: Vec<_> = folders
-            .into_iter()
+            .iter()
             .filter(|f| !f.excluded && all.as_ref().is_none_or(|name| *name == f.name))
             .collect();
         let names: BTreeSet<_> = selected.iter().map(|f| f.name.clone()).collect();
@@ -170,6 +256,18 @@ pub(super) fn run(
         for folder in selected {
             cancel.check()?;
             let (validity, inventory) = source.inventory(&folder)?;
+            let observation = snapshot
+                .folders
+                .iter_mut()
+                .find(|f| f.name == folder.name)
+                .expect("listed folder");
+            observation.uidvalidity = Some(validity);
+            observation.count = CountObservation::Observed {
+                messages: inventory.len() as u32,
+                observed_at: acquisition::now(),
+                source: CountSource::ExamineSearch,
+            };
+            checkpoint(census, store, &snapshot)?;
             let mut metadata = BTreeMap::new();
             for batch in inventory.iter().copied().collect::<Vec<_>>().chunks(BATCH) {
                 cancel.check()?;
@@ -231,18 +329,66 @@ pub(super) fn run(
                 progress(ScanProgress::current(census, ScanState::Running));
                 throttle(cancel)?;
             }
+            snapshot
+                .folders
+                .iter_mut()
+                .find(|f| f.name == folder.name)
+                .expect("listed folder")
+                .selected_complete = true;
+            checkpoint(census, store, &snapshot)?;
+        }
+        let mut optional: Vec<_> = folders
+            .iter()
+            .filter(|f| {
+                f.selectable
+                    && snapshot
+                        .folders
+                        .iter()
+                        .any(|o| o.name == f.name && o.selection != Selection::Selected)
+            })
+            .collect();
+        optional.sort_by_key(|f| (!f.roles.contains("junk"), f.name.clone()));
+        for (index, folder) in optional.into_iter().enumerate() {
+            cancel.check()?;
+            let count = if index < acquisition::MAX_OPTIONAL_COUNTS {
+                source.count(folder)
+            } else {
+                CountObservation::unknown(UnknownCount::Budget)
+            };
+            snapshot
+                .folders
+                .iter_mut()
+                .find(|f| f.name == folder.name)
+                .expect("listed folder")
+                .count = count;
+            if index < acquisition::MAX_OPTIONAL_COUNTS {
+                checkpoint(census, store, &snapshot)?;
+                throttle(cancel)?;
+            }
         }
         cancel.check()?;
         // A failed folder scan must not turn a partial LIST into deletion of other saved folders.
-        census.folders.retain(|name, _| names.contains(name));
-        census.acquisition_state = ScanState::Complete;
-        census.last_completed_at = Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| AcquisitionError::Storage)?
-                .as_secs() as i64,
-        );
-        store.save(census)?;
+        let mut completed = census.clone();
+        completed.folders.retain(|name, _| names.contains(name));
+        completed.acquisition_state = ScanState::Complete;
+        let completed_at = acquisition::now();
+        completed.last_completed_at = Some(completed_at);
+        snapshot.completed_at = Some(completed_at);
+        completed.folder_roles = snapshot
+            .folders
+            .iter()
+            .map(|f| (f.name.clone(), f.roles.clone()))
+            .collect();
+        completed
+            .acquisition
+            .latest
+            .as_mut()
+            .expect("started attempt")
+            .checkpoint = Some(snapshot.clone());
+        completed.acquisition.finish(ScanState::Complete);
+        completed.acquisition.last_successful = Some(snapshot);
+        store.save(&completed)?;
+        *census = completed;
         progress(ScanProgress::current(census, ScanState::Complete));
         Ok(())
     })();
@@ -267,6 +413,7 @@ pub(super) fn run(
             ScanState::Failed
         };
         census.acquisition_state = state;
+        census.acquisition.finish(state);
         for folder in census
             .folders
             .values_mut()
@@ -278,6 +425,20 @@ pub(super) fn run(
         progress(ScanProgress::current(census, state));
     }
     outcome
+}
+fn checkpoint(
+    census: &mut Census,
+    store: &EncryptedStore,
+    snapshot: &Snapshot,
+) -> Result<(), AcquisitionError> {
+    census
+        .acquisition
+        .latest
+        .as_mut()
+        .expect("started attempt")
+        .checkpoint = Some(snapshot.clone());
+    store.save(census)?;
+    Ok(())
 }
 fn throttle(cancel: &Cancellation) -> Result<(), AcquisitionError> {
     for _ in 0..5 {
@@ -302,6 +463,15 @@ mod tests {
         fail_metadata: bool,
     }
     impl MailRead for FakeMail {
+        fn adapter(&self) -> &'static str {
+            "mailroom/synthetic/v1"
+        }
+        fn capabilities(&self) -> BTreeSet<String> {
+            BTreeSet::new()
+        }
+        fn count(&mut self, _: &Folder) -> CountObservation {
+            CountObservation::unknown(UnknownCount::NotRequested)
+        }
         fn folders(&mut self) -> Result<Vec<Folder>, AcquisitionError> {
             Ok(self.folders.clone())
         }
@@ -326,6 +496,9 @@ mod tests {
         FakeMail {
             folders: vec![Folder {
                 roles: BTreeSet::new(),
+                attributes: BTreeSet::new(),
+                delimiter: Some("/".into()),
+                selectable: true,
                 wire: "Inbox".into(),
                 name: "Inbox".into(),
                 all: false,

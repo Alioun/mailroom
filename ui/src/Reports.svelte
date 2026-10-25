@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AcquisitionEvidence from './AcquisitionEvidence.svelte'
   import { readReport, reviewSummary, exportSummary, type CensusReport, type SummaryPreview } from './api'
   let { account, lang }: { account: string; lang: 'en' | 'de' } = $props()
   const strings = {
@@ -12,7 +13,7 @@
       limits: 'Report semantics and limitations', ownDomains: 'Confirmed own domains',
       unknown_authentication: 'Header observations are unauthenticated. Relay originals are claims. DKIM unsubscribe coverage remains unknown.',
       current_flags_and_dates: 'Monthly volume uses header Date and current Seen flags. The latest read message date is not the time it was read. Invalid and future dates stay outside date windows.',
-      gmail_topology: 'Gmail arrivals use INTERNALDATE for received canonical messages. Full label topology and excluded Spam/Trash counts are unavailable.',
+      gmail_topology: 'Gmail arrivals use INTERNALDATE for received canonical messages. Discovered topology and optional current counts are shown in local acquisition evidence. Unknown counts stay unknown. Current counts do not establish historical Spam coverage.',
       subject_tokens: 'Keywords occur in at least three distinct received messages per sender, with digits masked. Keywords, folders, labels and List-Ids always use keyed placeholders in the summary.',
       classification: 'A discussion list suggests people on a list. A complete one-click pair suggests bulk. ESP or Auto-Submitted suggests platform. Confirmed Sent correspondence without list/bulk markers suggests person. Mixed or insufficient evidence stays unknown. No class grants authentication or permission.',
     },
@@ -26,7 +27,7 @@
       limits: 'Bedeutung und Grenzen des Berichts', ownDomains: 'Bestätigte eigene Domains',
       unknown_authentication: 'Kopfzeilen sind unbestätigte Angaben. Relay-Originale sind Behauptungen. Die DKIM-Abdeckung der Abmeldekopfzeilen bleibt unbekannt.',
       current_flags_and_dates: 'Monatsvolumen nutzt das Nachrichtendatum und aktuelle Gelesen-Markierungen. Das Datum der neuesten gelesenen Nachricht ist nicht der Lesezeitpunkt. Ungültige und zukünftige Daten bleiben außerhalb der Zeitfenster.',
-      gmail_topology: 'Gmail-Eingänge nutzen INTERNALDATE der eindeutigen empfangenen Nachrichten. Vollständige Label-Struktur und Zahlen ausgeschlossener Spam/Papierkorb-Nachrichten fehlen.',
+      gmail_topology: 'Gmail-Eingänge nutzen INTERNALDATE der eindeutigen empfangenen Nachrichten. Entdeckte Ordner und optionale aktuelle Anzahlen stehen in den lokalen Erfassungsbelegen. Unbekannte Zahlen bleiben unbekannt. Aktuelle Zahlen belegen keine historische Spamabdeckung.',
       subject_tokens: 'Stichwörter kommen in mindestens drei verschiedenen empfangenen Nachrichten pro Absender vor, mit maskierten Ziffern. Stichwörter, Ordner, Labels und Listen-IDs bleiben in der Zusammenfassung verschlüsselt abgeleitete Platzhalter.',
       classification: 'Diskussionslisten deuten auf Personen in Listen. Ein vollständiges One-Click-Paar deutet auf Massenmail. ESP oder Auto-Submitted deutet auf Plattformmail. Bestätigte eigene Korrespondenz ohne Listenmerkmale deutet auf Personen. Gemischte oder unzureichende Belege bleiben unbekannt. Keine Klasse weist Echtheit oder Berechtigungen nach.',
     },
@@ -74,6 +75,7 @@
   {#if error}<p role="alert">{error}</p>{/if}
   {#if report}
     <p class="scan-state" role="status">{report.complete ? t.complete : t.partial} · {report.state}</p>
+    <AcquisitionEvidence evidence={report.acquisition} {lang} />
     <p>{report.canonical_messages} {t.messages} · {report.received.messages} {t.received} · {report.sent} {t.sent} · {report.saved_records} {t.saved}</p>
     <p>{t.flags}: {report.received.seen}/{report.received.messages} {t.seen} · {report.received.flagged} {t.flagged} · {report.received.answered} {t.answered}</p>
     <p>{t.ownDomains}: {report.own_domains.join(', ') || t.empty}</p>

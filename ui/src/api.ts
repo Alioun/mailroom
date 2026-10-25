@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { evidenceView } from './acquisition-evidence'
 
 z.config({ jitless: true })
 
@@ -77,6 +78,7 @@ const accountStatus = z.object({
   job: z.object({ account: account.nullable(), progress: z.object({ state: z.enum(['idle', 'running', 'cancelled', 'complete', 'failed']), saved: z.number(), folders: z.number() }), error: z.string().nullable() }).nullable(),
 })
 const accountView = z.object({
+  evidence: evidenceView,
   addresses: censusStatus.shape.addresses,
   census: z.object({ account: z.string(), acquisition_state: censusStatus.shape.state, folders: z.record(z.string(), z.object({
     uidvalidity: z.number(), state: censusStatus.shape.state,
@@ -105,6 +107,7 @@ const reportCounts = z.object({
   last_12_months: z.number(), last_13_months: z.number(), read_last_6_months: z.number(),
 })
 const report = z.object({
+  acquisition: evidenceView,
   version: z.string(), analysis_version: z.string(), as_of: z.number(), state: censusStatus.shape.state, complete: z.boolean(),
   folders: z.array(z.object({ folder: z.string(), state: censusStatus.shape.state, inventory: z.number(), saved: z.number() })),
   saved_records: z.number(), canonical_messages: z.number(), received: reportCounts, sent: z.number(),

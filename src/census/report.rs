@@ -34,7 +34,7 @@ impl ReportLimitation {
                 "Monthly volume uses header Date. Read rate uses current Seen flags. Latest read message date is the message Date, not the time it was read. Invalid and future dates are counted separately and excluded from windows."
             }
             Self::GmailTopology => {
-                "Gmail arrivals use INTERNALDATE for received canonical messages only. Full Gmail label topology and excluded Spam/Trash counts are unavailable."
+                "Gmail arrivals use INTERNALDATE for received canonical messages only. Discovered topology and optional current counts appear only in local acquisition evidence. Unknown counts stay unknown. Current counts do not establish historical Spam coverage."
             }
             Self::SubjectTokens => {
                 "Subject keywords are local tokens occurring in at least three distinct canonical received messages per sender, with digits masked. Summary keywords, folders, labels and List-Ids always use keyed placeholders."
@@ -171,6 +171,7 @@ pub struct Report {
     pub analysis_version: &'static str,
     pub as_of: i64,
     pub state: ScanState,
+    pub acquisition: super::acquisition::EvidenceView,
     pub complete: bool,
     pub folders: Vec<FolderReport>,
     pub saved_records: usize,
@@ -362,6 +363,7 @@ impl Census {
             analysis_version: ANALYSIS_VERSION,
             as_of,
             state: self.acquisition_state,
+            acquisition: self.acquisition.view(as_of),
             complete: self.acquisition_state == ScanState::Complete
                 && self.folders.values().all(|f| {
                     f.state == ScanState::Complete && f.live_uids.len() == f.messages.len()

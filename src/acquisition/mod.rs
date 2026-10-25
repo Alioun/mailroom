@@ -49,3 +49,5 @@ impl std::error::Error for AcquisitionError {}
 
 #[cfg(test)]
 pub(crate) use accounts::process_tests::persistent_accounts as persistent_test_accounts;
+#[cfg(test)]
+pub(crate) use imap::tests::install_provider_fixture;

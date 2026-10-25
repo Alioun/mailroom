@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { countObservation } from './acquisition-evidence'
 import { localFetch } from './api'
 const settings = z.object({ winding_down: z.boolean(), comparisons: z.record(z.string(), z.array(z.string())) })
 const row = z.object({
@@ -11,7 +12,7 @@ const row = z.object({
   reasons: z.array(z.string()), settings_link: z.string().nullable(), service_associations: z.array(z.string()),
 })
 export const reportSchema = z.object({ version: z.string(), semantics: z.string(), census_analysis: z.string(), sender_data_version: z.string(), ledger_version: z.string(), account: z.string(), as_of: z.number(), boundary: z.number(), settings,
-  sources: z.array(z.object({ account: z.string(), revision: z.number(), census_version: z.string(), complete: z.boolean(), owned_addresses: z.array(z.string()), spam_count: z.number().nullable(), coverage_since: z.number().nullable(), coverage_through: z.number().nullable() })),
+  sources: z.array(z.object({ account: z.string(), revision: z.number(), census_version: z.string(), complete: z.boolean(), owned_addresses: z.array(z.string()), spam_count: z.number().nullable(), spam_observation: countObservation.nullable(), coverage_since: z.number().nullable(), coverage_through: z.number().nullable() })),
   rows: z.array(row), counts: z.record(z.string(), z.number()), blockers: z.array(z.string()), verdict: z.string(), effects: z.string(),
 })
 const opened = z.object({ report: reportSchema, terminal: z.string(), available: z.array(z.object({ account: z.string(), login: z.string(), owned_addresses: z.array(z.string()) })) })

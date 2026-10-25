@@ -5,6 +5,37 @@ use crate::census::AccountState;
 fn secret() -> SecretValue {
     SecretValue::new(vec![0x71; 32])
 }
+
+#[test]
+fn schema_eight_protocol_facts_round_trip_with_single_account_recovery() {
+    let (root, mut repo, account) = fixture();
+    crate::acquisition::install_provider_fixture(&mut repo, root.path());
+    repo.scan(
+        &account.id,
+        crate::acquisition::Cancellation::default(),
+        |_| {},
+    )
+    .unwrap();
+    let before = state(&repo, &account);
+    assert!(before.census.acquisition.is_protocol());
+    let (manifest, bundle) = capture(&repo, &account, root.path());
+    assert_eq!(manifest.state_schema, 8);
+    let fresh_root = tempfile::tempdir().unwrap();
+    let fresh = persistent_accounts(fresh_root.path());
+    let preview = fresh.restore_preview(&bundle, &secret()).unwrap();
+    let restored = fresh
+        .restore(&bundle, &secret(), &preview, |_| Ok(()))
+        .unwrap();
+    assert!(restored.reconciliation_required);
+    let account = fresh.load(&account.id).unwrap();
+    let store = fresh.store(&account).unwrap();
+    let mut after = store.load_state().unwrap();
+    assert_eq!(
+        encoded(&before).unwrap().as_slice(),
+        encoded(&after).unwrap().as_slice()
+    );
+    assert!(store.save_state(&mut after).is_err());
+}
 fn fixture() -> (tempfile::TempDir, Accounts, Account) {
     let root = tempfile::tempdir().unwrap();
     let repo = persistent_accounts(root.path());

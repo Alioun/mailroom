@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import AcquisitionEvidence from './AcquisitionEvidence.svelte'
   import Reports from './Reports.svelte'
   import Lifecycle from './Lifecycle.svelte'
   import Recovery from './Recovery.svelte'
@@ -107,6 +108,7 @@
   {#key `${selected}:${status?.synthetic}`}<Lifecycle account={selected} synthetic={status?.synthetic ?? false} {lang} onChanged={lifecycleChanged} />{/key}
   {#if view}
     <p class="scan-state">{t[view.census.acquisition_state]}</p>
+    <AcquisitionEvidence evidence={view.evidence} {lang} />
     <h3>{t.addresses}</h3><p class="help">{t.ownership}</p>
     <ul class="account-addresses">{#each view.addresses as address (address.address)}<li><label><input type="checkbox" checked={address.confirmed} disabled={busy || running} onchange={(event) => { const checked = event.currentTarget.checked; void act(async () => { view = await confirmAccount(selected, address.address, checked) }) }} />{t.confirm} {address.address}</label><p class="help">{address.evidence.join(', ')}</p></li>{/each}</ul>
     {#key view}<Reports account={selected} {lang} /><Winddown account={selected} {lang} onBulkHandoff={async (senders, asOf) => { await unsubscribe?.prepareHandoff(selected, senders, asOf) }} /><Ledger account={selected} {lang} /><RulesProof account={selected} {lang} /><Backlog account={selected} {lang} /><Invoices account={selected} {lang} />{/key}

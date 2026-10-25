@@ -118,7 +118,7 @@
       {#each Object.entries(settings.comparisons) as [id, addresses] (id)}<p>{id} · {addresses.join(', ')}</p><button onclick={() => { delete settings.comparisons[id]; reset() }}>{t.removeSource} {id}</button>{/each}
       <button onclick={() => act(() => review({ kind: 'settings', settings: $state.snapshot(settings) }))}>{t.reviewSettings}</button>
     </fieldset>
-    <details><summary>{t.evidence}</summary>{#each view.report.sources as source (source.account)}<p>{source.account} · {source.census_version} · {source.complete} · {t.spam}: {source.spam_count ?? t.unknown} · {date(source.coverage_since)} / {date(source.coverage_through)}</p>{/each}<p>{view.report.census_analysis} · {view.report.sender_data_version} · {view.report.ledger_version}</p></details>
+    <details><summary>{t.evidence}</summary>{#each view.report.sources as source (source.account)}<p>{source.account} · {source.census_version} · {source.complete} · {t.spam}: {source.spam_count ?? t.unknown} · {source.spam_observation?.kind === 'observed' ? `${date(source.spam_observation.observed_at)} · STATUS MESSAGES` : ''} · {date(source.coverage_since)} / {date(source.coverage_through)}</p>{/each}<p>{view.report.census_analysis} · {view.report.sender_data_version} · {view.report.ledger_version}</p></details>
     {#each groups as group (group)}
       <h4>{t[group]}</h4>
       {#if !view.report.rows.some(row => row.group === group)}<p>{t.noRows}</p>{/if}

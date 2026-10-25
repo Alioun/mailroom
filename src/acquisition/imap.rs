@@ -1,6 +1,10 @@
 use super::{AcquisitionError, Provider, SecretValue, scan::Cancellation};
 use crate::{
-    census::{Direction, HEADER_FIELDS, MessageRecord, parse_headers},
+    census::{
+        Direction, HEADER_FIELDS, MessageRecord,
+        acquisition::{CountObservation, CountSource, UnknownCount, now},
+        parse_headers,
+    },
     policy::ReadPermit,
 };
 use imap_proto::{
@@ -21,6 +25,9 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Clone)]
 pub(super) struct Folder {
     pub roles: BTreeSet<String>,
+    pub attributes: BTreeSet<String>,
+    pub delimiter: Option<String>,
+    pub selectable: bool,
     pub wire: String,
     pub name: String,
     pub sent: bool,
@@ -63,6 +70,9 @@ impl Metadata {
 }
 
 pub(super) trait MailRead {
+    fn adapter(&self) -> &'static str;
+    fn capabilities(&self) -> BTreeSet<String>;
+    fn count(&mut self, folder: &Folder) -> CountObservation;
     fn folders(&mut self) -> Result<Vec<Folder>, AcquisitionError>;
     fn inventory(&mut self, folder: &Folder) -> Result<(u32, BTreeSet<u32>), AcquisitionError>;
     fn metadata(&mut self, uids: &[u32]) -> Result<BTreeMap<u32, Metadata>, AcquisitionError>;
@@ -108,6 +118,7 @@ pub(super) struct ReadOnlyImap {
     cancel: Cancellation,
     gmail: bool,
     special_use: bool,
+    capabilities: BTreeSet<String>,
 }
 impl ReadOnlyImap {
     pub fn connect(
@@ -170,16 +181,38 @@ impl ReadOnlyImap {
             cancel,
             gmail,
             special_use: false,
+            capabilities: BTreeSet::new(),
         };
         result.reset()?;
-        let capabilities = result
+        let raw = result
             .session
-            .capabilities()
+            .run_command_and_read_response("CAPABILITY")
             .map_err(|_| AcquisitionError::Protocol)?;
-        if !capabilities.has_str("IMAP4rev1") || (gmail && !capabilities.has_str("X-GM-EXT-1")) {
+        let mut rest = raw.as_slice();
+        while !rest.is_empty() {
+            let (remaining, response) =
+                imap_proto::parser::parse_response(rest).map_err(|_| AcquisitionError::Protocol)?;
+            if let Response::Capabilities(values) = response {
+                for value in values {
+                    let value = match value {
+                        imap_proto::Capability::Imap4rev1 => "IMAP4REV1".to_owned(),
+                        imap_proto::Capability::Auth(v) => format!("AUTH={v}").to_ascii_uppercase(),
+                        imap_proto::Capability::Atom(v) => v.to_ascii_uppercase(),
+                    };
+                    if value.len() > 256 || result.capabilities.len() >= 256 {
+                        return Err(AcquisitionError::Incomplete);
+                    }
+                    result.capabilities.insert(value);
+                }
+            }
+            rest = remaining;
+        }
+        if !result.capabilities.contains("IMAP4REV1")
+            || (gmail && !result.capabilities.contains("X-GM-EXT-1"))
+        {
             return Err(AcquisitionError::Protocol);
         }
-        result.special_use = capabilities.has_str("SPECIAL-USE");
+        result.special_use = result.capabilities.contains("SPECIAL-USE");
         Ok(result)
     }
     fn reset(&self) -> Result<(), AcquisitionError> {
@@ -216,6 +249,39 @@ impl ReadOnlyImap {
     }
 }
 impl MailRead for ReadOnlyImap {
+    fn adapter(&self) -> &'static str {
+        crate::census::acquisition::ADAPTER
+    }
+    fn capabilities(&self) -> BTreeSet<String> {
+        self.capabilities.clone()
+    }
+    fn count(&mut self, folder: &Folder) -> CountObservation {
+        if !folder.selectable {
+            return CountObservation::unknown(UnknownCount::NotSelectable);
+        }
+        if self.reset().is_err() {
+            return CountObservation::unknown(UnknownCount::Unavailable);
+        }
+        let mailbox = format!(
+            "\"{}\"",
+            folder.wire.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        let raw = match self
+            .session
+            .run_command_and_read_response(format!("STATUS {mailbox} (MESSAGES)"))
+        {
+            Ok(raw) => raw,
+            Err(imap::error::Error::No(_)) | Err(imap::error::Error::Bad(_)) => {
+                return CountObservation::unknown(UnknownCount::Denied);
+            }
+            Err(imap::error::Error::Parse(_)) => {
+                return CountObservation::unknown(UnknownCount::Malformed);
+            }
+            Err(_) => return CountObservation::unknown(UnknownCount::Unavailable),
+        };
+        parse_count(&raw, &folder.wire)
+    }
+
     fn folders(&mut self) -> Result<Vec<Folder>, AcquisitionError> {
         self.reset()?;
         if !self.special_use && !self.gmail {
@@ -238,13 +304,33 @@ impl MailRead for ReadOnlyImap {
             if let Response::MailboxData(MailboxDatum::List {
                 name_attributes: attrs,
                 name,
-                ..
+                delimiter,
             }) = response
             {
+                if folders.len() >= crate::census::acquisition::MAX_FOLDERS
+                    || attrs.len() > 128
+                    || delimiter
+                        .as_ref()
+                        .is_some_and(|d| d.chars().count() != 1 || d.chars().any(char::is_control))
+                {
+                    return Err(AcquisitionError::Incomplete);
+                }
+                let attributes: BTreeSet<String> = attrs.iter().map(attribute_name).collect();
+                if attributes.iter().any(|a| a.len() > 256) {
+                    return Err(AcquisitionError::Incomplete);
+                }
+                let selectable = !attrs.contains(&NameAttribute::NoSelect)
+                    && !attributes
+                        .iter()
+                        .any(|a| a.eq_ignore_ascii_case("\\NonExistent"));
                 folders.push(Folder {
+                    attributes,
+                    selectable,
+                    delimiter: delimiter.map(|d| d.to_string()),
                     roles: attrs
                         .iter()
                         .filter_map(|a| match a {
+                            NameAttribute::Flagged => Some("flagged".into()),
                             NameAttribute::Archive => Some("archive".into()),
                             NameAttribute::Sent => Some("sent".into()),
                             NameAttribute::All => Some("all".into()),
@@ -259,15 +345,16 @@ impl MailRead for ReadOnlyImap {
                     name: decode_name(&name)?,
                     sent: attrs.contains(&NameAttribute::Sent),
                     all: attrs.contains(&NameAttribute::All),
-                    excluded: attrs.iter().any(|a| {
-                        matches!(
-                            a,
-                            NameAttribute::NoSelect
-                                | NameAttribute::Junk
-                                | NameAttribute::Trash
-                                | NameAttribute::Drafts
-                        )
-                    }),
+                    excluded: !selectable
+                        || attrs.iter().any(|a| {
+                            matches!(
+                                a,
+                                NameAttribute::NoSelect
+                                    | NameAttribute::Junk
+                                    | NameAttribute::Trash
+                                    | NameAttribute::Drafts
+                            )
+                        }),
                 });
             }
             rest = remaining;
@@ -449,6 +536,9 @@ fn decode_name(wire: &str) -> Result<String, AcquisitionError> {
         rest = &rest[end + 1..];
     }
     result.push_str(rest);
+    if result.len() > 4096 || result.chars().any(char::is_control) {
+        return Err(AcquisitionError::Protocol);
+    }
     Ok(result)
 }
 
@@ -473,4 +563,86 @@ pub(super) fn record(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+
+fn attribute_name(attribute: &NameAttribute<'_>) -> String {
+    let name = match attribute {
+        NameAttribute::NoInferiors => "NoInferiors",
+        NameAttribute::NoSelect => "Noselect",
+        NameAttribute::Marked => "Marked",
+        NameAttribute::Unmarked => "Unmarked",
+        NameAttribute::All => "All",
+        NameAttribute::Archive => "Archive",
+        NameAttribute::Drafts => "Drafts",
+        NameAttribute::Flagged => "Flagged",
+        NameAttribute::Junk => "Junk",
+        NameAttribute::Sent => "Sent",
+        NameAttribute::Trash => "Trash",
+        NameAttribute::Extension(v) => return v.to_string(),
+        _ => "Unknown",
+    };
+    format!("\\{name}")
+}
+fn parse_count(raw: &[u8], wire: &str) -> CountObservation {
+    let mut rest = raw;
+    let mut values = Vec::new();
+    let mut responses = 0;
+    while !rest.is_empty() {
+        let Ok((remaining, response)) = imap_proto::parser::parse_response(rest) else {
+            return CountObservation::unknown(UnknownCount::Malformed);
+        };
+        if let Response::MailboxData(MailboxDatum::Status { mailbox, status }) = response {
+            if mailbox != wire {
+                return CountObservation::unknown(UnknownCount::Ambiguous);
+            }
+            responses += 1;
+            for v in status {
+                if let imap_proto::StatusAttribute::Messages(n) = v {
+                    values.push(n);
+                }
+            }
+        }
+        rest = remaining;
+    }
+    match values.as_slice() {
+        [messages] if responses == 1 => CountObservation::Observed {
+            messages: *messages,
+            observed_at: now(),
+            source: CountSource::StatusMessages,
+        },
+        [] => CountObservation::unknown(UnknownCount::Missing),
+        _ => CountObservation::unknown(UnknownCount::Ambiguous),
+    }
+}
+
+#[cfg(test)]
+pub(super) type TestConnection = Arc<
+    dyn Fn(&ReadPermit, &str, &SecretValue, Cancellation) -> Result<ReadOnlyImap, AcquisitionError>
+        + Send
+        + Sync,
+>;
+impl super::Accounts {
+    pub(super) fn connect_read(
+        &self,
+        permit: &ReadPermit,
+        login: &str,
+        password: &SecretValue,
+        cancel: Cancellation,
+    ) -> Result<ReadOnlyImap, AcquisitionError> {
+        #[cfg(test)]
+        if let Some(factory) = &self.imap_factory {
+            return factory(permit, login, password, cancel);
+        }
+        ReadOnlyImap::connect(permit, login, password, cancel)
+    }
+    pub(crate) fn installed_test_transport(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.imap_factory.is_some()
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
+}

@@ -169,6 +169,7 @@ pub struct SourceVersion {
     pub complete: bool,
     pub owned_addresses: BTreeSet<String>,
     pub spam_count: Option<usize>,
+    pub spam_observation: Option<crate::census::acquisition::CountObservation>,
     pub coverage_since: Option<i64>,
     pub coverage_through: Option<i64>,
 }
@@ -217,6 +218,20 @@ fn safe_link(link: &str) -> bool {
                 .is_some_and(|a| !a.as_str().contains('@') && !a.host().is_empty())
     }) && !link.contains(['?', '#'])
 }
+fn current_spam(
+    census: &crate::census::Census,
+    as_of: i64,
+) -> (
+    Option<usize>,
+    Option<crate::census::acquisition::CountObservation>,
+) {
+    if census.acquisition.is_protocol() {
+        let observation = census.acquisition.view(as_of).spam;
+        (observation.messages(), Some(observation))
+    } else {
+        (census.winddown_evidence.spam_count, None)
+    }
+}
 fn evidence_issues(
     source: &Source<'_>,
     complete: bool,
@@ -228,7 +243,7 @@ fn evidence_issues(
     if !complete {
         issues.insert("incomplete_acquisition".into());
     }
-    if e.spam_count.is_none() {
+    if current_spam(&source.state.census, as_of).0.is_none() {
         issues.insert("spam_count_unknown".into());
     }
     if !e.complete_since.is_some_and(|v| v <= boundary) {
@@ -322,7 +337,8 @@ pub fn derive(
             census_version: r.version,
             complete: r.complete,
             owned_addresses: s.state.census.confirmed_own_addresses.clone(),
-            spam_count: s.state.census.winddown_evidence.spam_count,
+            spam_count: current_spam(&s.state.census, as_of).0,
+            spam_observation: current_spam(&s.state.census, as_of).1,
             coverage_since: s.state.census.winddown_evidence.complete_since,
             coverage_through: s.state.census.winddown_evidence.complete_through,
         });

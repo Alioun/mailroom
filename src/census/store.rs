@@ -384,9 +384,10 @@ impl EncryptedStore {
         if state.census.account != self.keys.account {
             return Err(CensusError::AccountMismatch);
         }
+        state.census.acquisition.validate(&state.census.account)?;
         let snapshot =
             Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
-        self.stage_snapshot(7, &snapshot)
+        self.stage_snapshot(8, &snapshot)
     }
 
     fn stage_snapshot(
@@ -502,7 +503,7 @@ impl EncryptedStore {
             )
             .map_err(|_| CensusError::Storage)?;
         let snapshot = Zeroizing::new(snapshot);
-        if !matches!(version, 1 | 2 | 3 | 4 | 5 | 6 | 7) {
+        if !matches!(version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8) {
             return Err(CensusError::UnsupportedVersion);
         }
         if account != self.keys.account.as_str() {
@@ -516,6 +517,8 @@ impl EncryptedStore {
         if state.exports.len() > crate::rules::workspace::HISTORY_LIMIT {
             return Err(CensusError::Storage);
         }
+        state.census.acquisition.validate(&state.census.account)?;
+        state.census.acquisition.interrupted();
         let census = &mut state.census;
         if census.account != self.keys.account {
             return Err(CensusError::AccountMismatch);
@@ -560,6 +563,44 @@ impl EncryptedStore {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn historical_schemas_decode_without_inventing_acquisition_evidence() {
+        for version in 1..=7 {
+            let directory = tempfile::tempdir().unwrap();
+            let account = AccountId::new("historical-schema").unwrap();
+            let store = EncryptedStore::new(
+                directory.path().into(),
+                CensusKeys::derive(&LocalSecret::random(), &account),
+            )
+            .unwrap();
+            let census = Census::new(account);
+            let mut value = if version == 1 {
+                serde_json::to_value(&census).unwrap()
+            } else {
+                serde_json::to_value(AccountState::new(census)).unwrap()
+            };
+            if version == 1 {
+                value.as_object_mut().unwrap().remove("acquisition");
+            } else {
+                value["census"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("acquisition");
+            }
+            store
+                .stage_snapshot(version, &serde_json::to_string(&value).unwrap())
+                .unwrap()
+                .persist(store.path())
+                .unwrap();
+            let mut state = store.load_state().unwrap();
+            assert_eq!(state.census.acquisition, Default::default());
+            assert!(state.exports.is_empty());
+            store.save_state(&mut state).unwrap();
+            assert_eq!(store.schema_version().unwrap(), 8);
+            assert_eq!(store.load().unwrap().acquisition, Default::default());
+        }
+    }
 
     #[test]
     fn interruption_before_atomic_replacement_retains_the_previous_snapshot() {

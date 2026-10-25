@@ -322,7 +322,7 @@ pub(super) async fn scan(
                     .expect("reserved account job")
                     .progress = progress
             };
-            if worker.accounts.synthetic() {
+            if worker.accounts.synthetic() && !repo.installed_test_transport() {
                 acquisition::synthetic::scan(&repo, &account.id, cancel, progress)?;
             } else {
                 repo.scan(&account.id, cancel, progress)?;
@@ -400,6 +400,7 @@ pub(super) async fn confirm(
 #[derive(Serialize)]
 struct CensusView {
     census: Census,
+    evidence: crate::census::acquisition::EvidenceView,
     addresses: Vec<crate::census::AddressCandidate>,
 }
 async fn census_action(
@@ -422,7 +423,7 @@ async fn census_action(
         let repo = state.accounts.repository()?;
         let account = repo.load(&id)?;
         let store = repo.store(&account)?;
-        if state.accounts.synthetic() {
+        if state.accounts.synthetic() && !repo.installed_test_transport() {
             let mut saved = store.load_state()?;
             if crate::invoice::initialize_synthetic(&mut saved) {
                 store.save_state(&mut saved)?;
@@ -433,7 +434,12 @@ async fn census_action(
             census.confirm_address(&address, confirmed)?;
             store.save(&census)?;
         }
+        let mut evidence = census.acquisition.view(crate::census::acquisition::now());
+        if store.recovery_pending() {
+            evidence.historical();
+        }
         Ok::<_, AcquisitionError>(CensusView {
+            evidence,
             addresses: census.own_address_candidates(),
             census,
         })
@@ -548,11 +554,14 @@ async fn report_action(
         let account = repo.load(&request.account)?;
         let store = repo.store(&account)?;
         let census = store.load()?;
-        let report = census.report(
+        let mut report = census.report(
             store.keys(),
             request.as_of,
             account.provider == Provider::Gmail,
         )?;
+        if store.recovery_pending() {
+            report.acquisition.historical();
+        }
         if let Some(review) = review {
             if report.version != review.version {
                 return Err(AcquisitionError::InvalidInput);
@@ -836,6 +845,29 @@ fn sync_ledger(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn provider_evidence_server_fixture() {
+    let Some(root) = std::env::var_os("MAILROOM_PROVIDER_EVIDENCE_FIXTURE") else {
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let mut repo = acquisition::persistent_test_accounts(root);
+    acquisition::install_provider_fixture(&mut repo, root);
+    let mut state = AppState::new(true);
+    state.accounts.source = AccountSource::Synthetic {
+        accounts: Arc::new(repo),
+        _directory: tempfile::tempdir().unwrap(),
+        mailboxes: root.join("mailboxes"),
+    };
+    state.accounts.ledger =
+        Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
+    let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
+    axum::serve(listener, super::router(Arc::new(state)))
+        .await
+        .unwrap();
 }
 
 #[cfg(test)]

@@ -63,3 +63,5 @@ This is a local web confirmation and browser download. It does not implement the
 - Unsubscribe logs remain absent. The [synthetic backlog workflow](backlog.md) now persists its own journal. Rules, invoice forwarding, address ledger, unsubscribe execution and full wind-down statuses remain later personal features.
 
 Provider OX coexistence, exact recipient semantics, forwarding behavior and accounting intake acceptance remain owner-run evidence. Business roles, the signup domain/mechanism, invoice sender approvals and accounting targets remain owner decisions. Own-address confirmation and classifier observations do not settle any of them.
+
+Versioned protocol observations and attempt freshness appear only in local account and report views. They are covered by the existing full-Census report binding and stay out of agent summaries. See [Read-only acquisition evidence](provider-evidence.md).

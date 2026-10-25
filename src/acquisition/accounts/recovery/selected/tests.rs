@@ -35,6 +35,38 @@ fn fixture() -> (tempfile::TempDir, Accounts, Vec<AccountId>, InstalledLedger) {
 fn secret() -> SecretValue {
     SecretValue::new(vec![0x72; 32])
 }
+
+#[test]
+fn schema_eight_protocol_facts_round_trip_with_selected_recovery() {
+    let (root, mut repo, ids, ledger) = fixture();
+    crate::acquisition::install_provider_fixture(&mut repo, root.path());
+    for id in &ids[..2] {
+        repo.scan(id, crate::acquisition::Cancellation::default(), |_| {})
+            .unwrap();
+    }
+    let (manifest, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
+    assert!(manifest.accounts.iter().all(|m| m.state_schema == 8));
+    let fresh_root = tempfile::tempdir().unwrap();
+    let fresh = persistent_accounts(fresh_root.path());
+    let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();
+    fs::remove_file(fresh_root.path().join("ledger/addresses.yaml")).unwrap();
+    let preview = fresh
+        .selected_restore_preview(&bundle, &secret(), true, Some(&target))
+        .unwrap();
+    fresh
+        .selected_restore(&bundle, &secret(), &preview, Some(&target), |_| Ok(()))
+        .unwrap();
+    for id in &ids[..2] {
+        let before = repo.store(&repo.load(id).unwrap()).unwrap();
+        let after = fresh.store(&fresh.load(id).unwrap()).unwrap();
+        assert_eq!(
+            encoded(&before.load_state().unwrap()).unwrap().as_slice(),
+            encoded(&after.load_state().unwrap()).unwrap().as_slice()
+        );
+        assert!(after.load().unwrap().acquisition.is_protocol());
+        assert!(after.recovery_pending());
+    }
+}
 fn capture(
     repo: &Accounts,
     ids: &[AccountId],

@@ -1,3 +1,4 @@
+pub mod acquisition;
 pub mod demo;
 mod headers;
 pub mod report;
@@ -183,6 +184,8 @@ impl FolderCensus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Census {
     #[serde(default)]
+    pub acquisition: acquisition::AcquisitionFacts,
+    #[serde(default)]
     pub winddown_evidence: crate::winddown::AcquisitionEvidence,
     #[serde(default)]
     pub folder_roles: BTreeMap<String, BTreeSet<String>>,
@@ -208,6 +211,7 @@ impl Census {
     pub fn new(account: AccountId) -> Self {
         Self {
             winddown_evidence: Default::default(),
+            acquisition: Default::default(),
             account,
             folder_roles: BTreeMap::new(),
             folders: BTreeMap::new(),

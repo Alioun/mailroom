@@ -299,6 +299,12 @@ try {
     checks.push(`Actual multi-account SIGKILL/replacement at ${phase}, all-account hold, exact ciphertext/history/ledger, fresh authority, stable identities and external bytes retained`)
     if (phase !== phases.at(-1)) await stop()
   }
+  const comparisonSource = await readFile(join(installation, 'unrelated-fixture-id'), 'utf8')
+  const winddown = await post('winddown', { account: comparisonSource, as_of: sample.as_of, command: { action: 'open' } })
+  assert.ok(winddown.available.every(a => !selected.includes(a.account)), 'Restored accounts cannot supply current comparison observations')
+  assert.ok(winddown.report.sources.every(a => !selected.includes(a.account)))
+  await post('winddown', { account: comparisonSource, as_of: sample.as_of, command: { action: 'preview', version: winddown.report.version, change: { kind: 'settings', settings: { winding_down: true, comparisons: { [account]: ['team@home.example.test'] } } } } }, 422)
+  checks.push('Restored comparison accounts remain unavailable to wind-down and cannot promote captured observations into a current source')
   for (const id of selected) assert.equal((await stat(join(lost, 'config/lifecycle', `${id}.lock`))).ino, sourceInodes[id])
   const retained = { pid: server.pid, binary, binary_sha256, directory, installation, account, accounts: selected, bundle, base, ledger: join(installation, 'ledger'), branch: execFileSync('git', ['branch', '--show-current'], { cwd: root, encoding: 'utf8' }).trim(), head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim() }
   await writeFile(join(root, '.audit/recovery-selected-retained.json'), JSON.stringify(retained, null, 2) + '\n')

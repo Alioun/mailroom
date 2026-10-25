@@ -69,6 +69,7 @@ pub(in crate::server) async fn handle(
         for a in repo.list().map_err(|e| e.to_string())? {
             if a.id == request.account { continue; }
             let s = repo.store(&a).map_err(|e| e.to_string())?;
+            if s.recovery_pending() { continue; }
             let v = s.load_state().map_err(|e| e.to_string())?;
             available.push(json!({"account":a.id,"login":a.login,"owned_addresses":v.census.confirmed_own_addresses}));
             if saved.winddown.settings.comparisons.contains_key(a.id.as_str()) || proposed.is_some_and(|p| p.comparisons.contains_key(a.id.as_str())) { loaded.push((a, s, v)); }

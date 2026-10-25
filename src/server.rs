@@ -289,6 +289,10 @@ fn router(state: Arc<AppState>) -> Router {
             "/api/accounts/managesieve",
             post(accounts::managesieve::handle),
         )
+        .route(
+            "/api/accounts/sieve-transactions",
+            post(accounts::sieve_transactions::handle),
+        )
         .route("/api/accounts/proof/preview", post(accounts::proof_preview))
         .route(
             "/api/accounts/proof/download",

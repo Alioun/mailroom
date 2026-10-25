@@ -116,6 +116,7 @@ impl Accounts {
         };
         a.failure = result.err();
         if result.is_ok() {
+            saved.sieve.invalidated_by_write = None;
             saved.sieve.last_successful = Some(Baseline {
                 attempt: a.id.clone(),
                 observed_at: now(),

@@ -142,16 +142,26 @@ impl AccountPaths {
 pub struct Accounts {
     pub(crate) paths: AccountPaths,
     backend: Arc<dyn CredentialBackend>,
+    pub(super) sieve_write: Option<Arc<super::managesieve::FixtureOwnership>>,
     pub(super) sieve_source: Option<Arc<super::managesieve::InstalledSource>>,
     #[cfg(test)]
     pub(super) imap_factory: Option<super::imap::TestConnection>,
 }
 impl Accounts {
+    #[cfg(test)]
+    pub(crate) fn fixture_sieve_store(
+        &self,
+        id: &AccountId,
+        root: &std::path::Path,
+    ) -> Result<EncryptedStore, AcquisitionError> {
+        self.open_store(&self.load(id)?, &root.join("mailboxes"), 1)
+    }
     pub fn new(paths: AccountPaths, backend: Arc<dyn CredentialBackend>) -> Self {
         Self {
             paths,
             backend,
             sieve_source: None,
+            sieve_write: None,
             #[cfg(test)]
             imap_factory: None,
         }

@@ -7,6 +7,53 @@ fn secret() -> SecretValue {
 }
 
 #[test]
+fn transactions_round_trip_without_resumption_authority_under_single_recovery_hold() {
+    let root = tempfile::tempdir().unwrap();
+    let (repo, account, fake) = crate::acquisition::sieve_transaction::tests::install(root.path());
+    crate::acquisition::sieve_transaction::tests::commit_fixture_transaction(&repo, &account);
+    let before = state(&repo, &account);
+    let (_, bundle) = capture(&repo, &account, root.path());
+    crate::acquisition::sieve_transaction::tests::later_provider_change(&repo, &account);
+    let independent = repo.fixture_sieve_store(&account.id, root.path()).unwrap();
+    let later_effects = fs::read(independent.path()).unwrap();
+    let fresh_root = tempfile::tempdir().unwrap();
+    let mut fresh = persistent_accounts(fresh_root.path());
+    let preview = fresh.restore_preview(&bundle, &secret()).unwrap();
+    fresh
+        .restore(&bundle, &secret(), &preview, |_| Ok(()))
+        .unwrap();
+    fake.install(&mut fresh, &account.id);
+    let restored = fresh.load(&account.id).unwrap();
+    let store = fresh.store(&restored).unwrap();
+    let mut saved = store.load_state().unwrap();
+    assert!(saved.sieve_transactions == before.sieve_transactions);
+    assert!(
+        fresh
+            .transaction_preview(
+                &restored,
+                &store,
+                &saved,
+                None,
+                crate::acquisition::Cancellation::default()
+            )
+            .is_err()
+    );
+    let id = saved.sieve_transactions.history[0].id.clone();
+    assert!(
+        fresh
+            .transaction_reconcile(
+                &restored,
+                &store,
+                &mut saved,
+                &id,
+                crate::acquisition::Cancellation::default()
+            )
+            .is_err()
+    );
+    assert!(fs::read(independent.path()).unwrap() == later_effects);
+}
+
+#[test]
 fn schema_ten_protocol_and_proposal_sieve_facts_round_trip_with_single_account_recovery() {
     let (root, mut repo, account) = fixture();
     crate::acquisition::install_provider_fixture(&mut repo, root.path());
@@ -29,7 +76,7 @@ fn schema_ten_protocol_and_proposal_sieve_facts_round_trip_with_single_account_r
     let before = state(&repo, &account);
     assert!(before.census.acquisition.is_protocol());
     let (manifest, bundle) = capture(&repo, &account, root.path());
-    assert_eq!(manifest.state_schema, 10);
+    assert_eq!(manifest.state_schema, 11);
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let preview = fresh.restore_preview(&bundle, &secret()).unwrap();

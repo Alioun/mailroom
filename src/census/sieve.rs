@@ -99,6 +99,8 @@ pub struct Baseline {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Facts {
+    #[serde(default)]
+    pub invalidated_by_write: Option<String>,
     pub version: u32,
     pub latest: Option<Attempt>,
     pub last_successful: Option<Baseline>,
@@ -112,7 +114,7 @@ impl Facts {
         }
     }
     pub fn current(&self, context: Option<&Context>, recovery_hold: bool) -> bool {
-        if recovery_hold {
+        if recovery_hold || self.invalidated_by_write.is_some() {
             return false;
         }
         matches!((&self.latest, &self.last_successful, context), (Some(a), Some(b), Some(c)) if a.outcome == Outcome::Complete && a.id == b.attempt && a.context == *c && b.context == *c)
@@ -123,6 +125,14 @@ impl Facts {
             return Ok(());
         }
         if self.version != 1 || self.latest.is_none() {
+            return Err(fail);
+        }
+        if self.invalidated_by_write.as_ref().is_some_and(|id| {
+            id.len() != 64
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }) {
             return Err(fail);
         }
         let a = self.latest.as_ref().unwrap();
@@ -174,7 +184,7 @@ impl Facts {
         Ok(())
     }
 }
-fn validate_context(c: &Context, account: &AccountId) -> Result<(), CensusError> {
+pub(super) fn validate_context(c: &Context, account: &AccountId) -> Result<(), CensusError> {
     if c.account != *account
         || c.adapter != ADAPTER
         || c.profile != "installed-loopback-starttls-plain"

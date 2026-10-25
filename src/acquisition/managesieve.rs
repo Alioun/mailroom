@@ -38,6 +38,36 @@ impl InstalledSource {
         Ok(SieveReadPermit(self))
     }
 }
+pub(super) struct FixtureOwnership {
+    pub account: crate::census::AccountId,
+    pub target: String,
+    pub epoch: String,
+    pub source_identity: String,
+}
+pub(super) struct SieveWritePermit<'a> {
+    source: &'a InstalledSource,
+    pub ownership: &'a FixtureOwnership,
+}
+impl InstalledSource {
+    pub(super) fn write_permit<'a>(
+        &'a self,
+        ownership: &'a FixtureOwnership,
+        account: &crate::census::AccountId,
+    ) -> Result<SieveWritePermit<'a>, Error> {
+        self.permit()?;
+        if ownership.account != *account
+            || ownership.epoch.is_empty()
+            || ownership.source_identity != self.identity()
+            || !crate::census::sieve::valid_script_name(&ownership.target)
+        {
+            return Err(Error::Unsupported);
+        }
+        Ok(SieveWritePermit {
+            source: self,
+            ownership,
+        })
+    }
+}
 pub(super) struct SieveReadPermit<'a>(&'a InstalledSource);
 
 enum Stream {
@@ -75,12 +105,14 @@ enum Token {
 }
 
 pub(super) struct Session {
+    source_identity: String,
     stream: Stream,
     cancel: Cancellation,
     end: Instant,
     command_end: Instant,
     timeout: Duration,
     total: usize,
+    written: usize,
     remaining: usize,
     buffer: Vec<u8>,
     cursor: usize,
@@ -129,12 +161,14 @@ impl Session {
         .map_err(|_| Error::Connect)?;
         tcp.set_nonblocking(true).map_err(|_| Error::Connect)?;
         let mut session = Self {
+            source_identity: source.identity(),
             stream: Stream::Plain(tcp),
             cancel,
             end,
             command_end: end,
             timeout: source.command_timeout.min(Duration::from_secs(15)),
             total: 0,
+            written: 0,
             remaining: RESPONSE,
             buffer: vec![],
             cursor: 0,
@@ -209,6 +243,10 @@ impl Session {
         check(&self.cancel, self.command_end.min(self.end))
     }
     fn command(&mut self, bytes: &[u8], limit: usize) -> Result<(), Error> {
+        if bytes.len() > ATTEMPT - self.written {
+            return Err(Error::Limit);
+        }
+        self.written += bytes.len();
         self.begin(limit);
         let mut offset = 0;
         while offset < bytes.len() {
@@ -549,6 +587,91 @@ impl Session {
         let bytes = bytes.clone();
         self.status_only()?;
         Ok(bytes)
+    }
+    fn write_authorized(&self, permit: &SieveWritePermit<'_>) -> Result<(), Error> {
+        if self.source_identity != permit.source.identity() {
+            return Err(Error::Unsupported);
+        }
+        Ok(())
+    }
+    pub(super) fn check_script(
+        &mut self,
+        permit: &SieveWritePermit<'_>,
+        bytes: &[u8],
+    ) -> Result<(), Error> {
+        self.write_authorized(permit)?;
+        if self.capabilities()?.get("VERSION").map(String::as_str) != Some("1.0") {
+            return Err(Error::Unsupported);
+        }
+        if bytes.len() > SCRIPT {
+            return Err(Error::Limit);
+        }
+        let command = Zeroizing::new(
+            [
+                format!("CHECKSCRIPT {{{}+}}\r\n", bytes.len()).as_bytes(),
+                bytes,
+                b"\r\n",
+            ]
+            .concat(),
+        );
+        self.command(&command, RESPONSE)?;
+        self.status_only()
+    }
+    pub(super) fn have_space(
+        &mut self,
+        permit: &SieveWritePermit<'_>,
+        bytes: usize,
+    ) -> Result<(), Error> {
+        self.write_authorized(permit)?;
+        if bytes > SCRIPT {
+            return Err(Error::Limit);
+        }
+        let name = &permit.ownership.target;
+        let command = format!("HAVESPACE {{{}+}}\r\n{} {}\r\n", name.len(), name, bytes);
+        self.command(command.as_bytes(), RESPONSE)?;
+        self.status_only()
+    }
+    pub(super) fn put_script(
+        &mut self,
+        permit: &SieveWritePermit<'_>,
+        bytes: &[u8],
+    ) -> Result<(), Error> {
+        self.write_authorized(permit)?;
+        if bytes.len() > SCRIPT {
+            return Err(Error::Limit);
+        }
+        let name = &permit.ownership.target;
+        let command = Zeroizing::new(
+            [
+                format!(
+                    "PUTSCRIPT {{{}+}}\r\n{} {{{}+}}\r\n",
+                    name.len(),
+                    name,
+                    bytes.len()
+                )
+                .as_bytes(),
+                bytes,
+                b"\r\n",
+            ]
+            .concat(),
+        );
+        self.command(&command, RESPONSE)?;
+        self.status_only()
+    }
+    pub(super) fn set_active(
+        &mut self,
+        permit: &SieveWritePermit<'_>,
+        enabled: bool,
+    ) -> Result<(), Error> {
+        self.write_authorized(permit)?;
+        let name = if enabled {
+            permit.ownership.target.as_str()
+        } else {
+            ""
+        };
+        let command = format!("SETACTIVE {{{}+}}\r\n{}\r\n", name.len(), name);
+        self.command(command.as_bytes(), RESPONSE)?;
+        self.status_only()
     }
     pub(super) fn logout(&mut self) -> Result<(), Error> {
         self.command(b"LOGOUT\r\n", RESPONSE)?;

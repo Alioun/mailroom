@@ -5,6 +5,7 @@ pub(super) mod lifecycle;
 pub(super) mod managesieve;
 pub(super) mod proposals;
 pub(super) mod recovery;
+pub(super) mod sieve_transactions;
 pub(super) mod subscription_review;
 pub(super) mod unsubscribe;
 pub(super) mod winddown;
@@ -992,6 +993,28 @@ async fn managesieve_server_fixture() {
     let fake = acquisition::SieveFake::start("normal", Some(root.join("sieve-mode")));
     let mut repo = acquisition::persistent_test_accounts(root);
     repo.install_sieve_fixture(&fake);
+    let mut state = AppState::new(true);
+    state.accounts.source = AccountSource::Synthetic {
+        accounts: Arc::new(repo),
+        _directory: tempfile::tempdir().unwrap(),
+        mailboxes: root.join("mailboxes"),
+    };
+    state.accounts.ledger =
+        Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
+    let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
+    axum::serve(listener, super::router(Arc::new(state)))
+        .await
+        .unwrap();
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn managesieve_transactions_server_fixture() {
+    let Some(root) = std::env::var_os("MAILROOM_SIEVE_TRANSACTIONS_FIXTURE") else {
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let (repo, _account, _fake) = acquisition::sieve_transaction::tests::install(root);
     let mut state = AppState::new(true);
     state.accounts.source = AccountSource::Synthetic {
         accounts: Arc::new(repo),

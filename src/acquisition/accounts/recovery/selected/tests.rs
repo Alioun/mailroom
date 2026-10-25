@@ -38,6 +38,51 @@ fn secret() -> SecretValue {
 }
 
 #[test]
+fn selected_recovery_preserves_transaction_journal_and_cannot_resume_effects() {
+    let root = tempfile::tempdir().unwrap();
+    let (repo, account, fake) = crate::acquisition::sieve_transaction::tests::install(root.path());
+    crate::acquisition::sieve_transaction::tests::commit_fixture_transaction(&repo, &account);
+    let ledger = InstalledLedger::install(root.path().join("ledger")).unwrap();
+    let (_, bundle) = capture(
+        &repo,
+        std::slice::from_ref(&account.id),
+        &ledger,
+        root.path(),
+    );
+    crate::acquisition::sieve_transaction::tests::later_provider_change(&repo, &account);
+    let independent = repo.fixture_sieve_store(&account.id, root.path()).unwrap();
+    let later_effects = fs::read(independent.path()).unwrap();
+    let fresh_root = tempfile::tempdir().unwrap();
+    let mut fresh = persistent_accounts(fresh_root.path());
+    let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();
+    fs::remove_file(fresh_root.path().join("ledger/addresses.yaml")).unwrap();
+    let p = fresh
+        .selected_restore_preview(&bundle, &secret(), true, Some(&target))
+        .unwrap();
+    fresh
+        .selected_restore(&bundle, &secret(), &p, Some(&target), |_| Ok(()))
+        .unwrap();
+    fake.install(&mut fresh, &account.id);
+    let original = repo.store(&account).unwrap().load_state().unwrap();
+    let restored = fresh.load(&account.id).unwrap();
+    let store = fresh.store(&restored).unwrap();
+    let saved = store.load_state().unwrap();
+    assert!(saved.sieve_transactions == original.sieve_transactions);
+    assert!(
+        fresh
+            .transaction_preview(
+                &restored,
+                &store,
+                &saved,
+                Some(&original.sieve_transactions.history[0].id),
+                crate::acquisition::Cancellation::default()
+            )
+            .is_err()
+    );
+    assert!(fs::read(independent.path()).unwrap() == later_effects);
+}
+
+#[test]
 fn schema_ten_protocol_and_proposal_sieve_facts_round_trip_with_selected_recovery() {
     let (root, mut repo, ids, ledger) = fixture();
     crate::acquisition::install_provider_fixture(&mut repo, root.path());
@@ -58,7 +103,7 @@ fn schema_ten_protocol_and_proposal_sieve_facts_round_trip_with_selected_recover
             .unwrap();
     }
     let (manifest, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
-    assert!(manifest.accounts.iter().all(|m| m.state_schema == 10));
+    assert!(manifest.accounts.iter().all(|m| m.state_schema == 11));
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();

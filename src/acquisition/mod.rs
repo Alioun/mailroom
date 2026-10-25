@@ -3,6 +3,7 @@ mod imap;
 mod managesieve;
 mod scan;
 mod sieve_discovery;
+pub(crate) mod sieve_transaction;
 pub(crate) mod synthetic;
 use crate::census::CensusError;
 pub use accounts::lifecycle;

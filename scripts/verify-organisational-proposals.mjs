@@ -125,7 +125,7 @@ try {
   assert.equal((await fetch(`${base}/api/accounts/status`, { headers: { 'X-Mailroom-Token': oldToken } })).status, 403)
   g = await open(account)
   assert.equal(g.candidates[0].rejected, true)
-  assert.equal((await observe(account)).schema, 10)
+  assert.equal((await observe(account)).schema, 11)
   checks.push('Durable rejection survives actual process replacement and encrypted independent reopen; documents unchanged')
   let selected = selection(g, [1])
   let reviewed = await preview(account, selected)

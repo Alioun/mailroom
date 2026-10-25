@@ -598,71 +598,6 @@ async fn report_action(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ProofRequest {
-    account: AccountId,
-    documents: crate::engine::Documents,
-    as_of: i64,
-    pins: Vec<crate::rules::proof::Pin>,
-    baseline: crate::rules::proof::Baseline,
-    previous: Option<crate::engine::Documents>,
-}
-pub(super) async fn proof(
-    State(state): State<Arc<AppState>>,
-    body: Result<Json<ProofRequest>, JsonRejection>,
-) -> Response {
-    let request = match input(body) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    match tokio::task::spawn_blocking(move || {
-        let _operation = state.accounts.operation.lock().expect("account operation");
-        if state
-            .accounts
-            .job
-            .lock()
-            .expect("account job")
-            .as_ref()
-            .is_some_and(|j| j.progress.state == ScanState::Running)
-        {
-            return Err(AcquisitionError::InvalidInput);
-        }
-        let repo = state.accounts.repository()?;
-        let account = repo.load(&request.account)?;
-        let census = repo.store(&account)?.load()?;
-        let engine = if account.provider == Provider::Gmail {
-            crate::rules::Engine::GmailBacklog
-        } else {
-            crate::rules::Engine::MailboxSieve
-        };
-        let context = crate::rules::EngineContext::local(request.account.as_str().into(), engine);
-        let artifact = crate::engine::artifact(&request.documents, &context)
-            .map_err(|_| AcquisitionError::InvalidInput)?;
-        let previous = request
-            .previous
-            .as_ref()
-            .map(|d| crate::engine::artifact(d, &context))
-            .transpose()
-            .map_err(|_| AcquisitionError::InvalidInput)?;
-        crate::rules::proof::prove(
-            artifact,
-            &census,
-            request.as_of,
-            &request.pins,
-            request.baseline,
-            previous.as_ref(),
-        )
-        .map_err(|_| AcquisitionError::InvalidInput)
-    })
-    .await
-    {
-        Ok(Ok(proof)) => Json(proof).into_response(),
-        Ok(Err(e)) => failure(e),
-        Err(_) => failure(AcquisitionError::Storage),
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct WorkspaceSaveRequest {
     account: AccountId,
     revision: u64,
@@ -765,6 +700,7 @@ async fn workspace_action(
         let account = repo.load(&id)?;
         let store = repo.store(&account)?;
         let mut saved = store.load_state()?;
+        let context = repo.workspace_context(&account, &store)?;
         let ledger_guard = state
             .accounts
             .ledger
@@ -772,17 +708,17 @@ async fn workspace_action(
             .map(|l| l.lock())
             .transpose()
             .map_err(|_| AcquisitionError::Storage)?;
-        sync_ledger(&mut saved, &store, account.provider, ledger_guard.as_ref())
+        sync_ledger(&mut saved, &store, &context, ledger_guard.as_ref())
             .map_err(|_| AcquisitionError::InvalidInput)?;
         match action {
-            WorkspaceAction::Open => Ok(json!(workspace::view(&saved, account.provider))),
+            WorkspaceAction::Open => Ok(json!(workspace::view(&saved, &context))),
             WorkspaceAction::Save { revision, input } => {
                 if revision != saved.revision {
                     return Err(AcquisitionError::InvalidInput);
                 }
                 crate::ledger::validate_workspace_edit(&saved, &input)
                     .map_err(|_| AcquisitionError::InvalidInput)?;
-                workspace::validate(&input, &saved, account.provider)
+                workspace::validate(&input, &saved, &context)
                     .map_err(|_| AcquisitionError::InvalidInput)?;
                 let revision = saved.workspace.as_ref().map_or(Ok(1), |w| {
                     w.revision.checked_add(1).ok_or(AcquisitionError::Storage)
@@ -790,14 +726,14 @@ async fn workspace_action(
                 saved.workspace = Some(Workspace { revision, input });
                 if let Some(guard) = &ledger_guard {
                     let snapshot = guard.read().map_err(|_| AcquisitionError::Storage)?;
-                    crate::ledger::reconcile(&mut saved, &snapshot, account.provider)
+                    crate::ledger::reconcile(&mut saved, &snapshot, &context)
                         .map_err(|_| AcquisitionError::InvalidInput)?;
                 }
                 store.save_state(&mut saved)?;
-                Ok(json!(workspace::view(&saved, account.provider)))
+                Ok(json!(workspace::view(&saved, &context)))
             }
             WorkspaceAction::Preview => {
-                let proof = workspace::preview(&saved, account.provider, store.keys())
+                let proof = workspace::preview(&saved, &context, store.keys())
                     .map_err(|_| AcquisitionError::InvalidInput)?;
                 ledger_fresh(&saved, ledger_guard.as_ref())
                     .map_err(|_| AcquisitionError::InvalidInput)?;
@@ -805,7 +741,7 @@ async fn workspace_action(
             }
             WorkspaceAction::Download { receipt } => {
                 let preview =
-                    workspace::confirm_export(&mut saved, account.provider, store.keys(), &receipt)
+                    workspace::confirm_export(&mut saved, &context, store.keys(), &receipt)
                         .map_err(|_| AcquisitionError::InvalidInput)?;
                 ledger_fresh(&saved, ledger_guard.as_ref())
                     .map_err(|_| AcquisitionError::InvalidInput)?;
@@ -814,7 +750,7 @@ async fn workspace_action(
                     "filename": preview.filename,
                     "sieve": preview.proof.artifact.executable(),
                     "identity": preview.proof.artifact.identity(),
-                    "workspace": workspace::view(&saved, account.provider)
+                    "workspace": workspace::view(&saved, &context)
                 }))
             }
         }
@@ -842,7 +778,7 @@ fn ledger_fresh(
 fn sync_ledger(
     saved: &mut crate::census::AccountState,
     store: &crate::census::EncryptedStore,
-    provider: Provider,
+    context: &workspace::WorkspaceContext,
     guard: Option<&crate::ledger::file::LockedLedger<'_>>,
 ) -> Result<(), String> {
     if store.recovery_pending() {
@@ -850,7 +786,7 @@ fn sync_ledger(
     }
     if let Some(guard) = guard {
         let snapshot = guard.read()?;
-        if saved.workspace.is_some() && crate::ledger::reconcile(saved, &snapshot, provider)? {
+        if saved.workspace.is_some() && crate::ledger::reconcile(saved, &snapshot, context)? {
             store.save_state(saved).map_err(|e| e.to_string())?;
         }
     }
@@ -1040,7 +976,12 @@ async fn folder_provisioning_server_fixture() {
         return;
     };
     let root = std::path::Path::new(&root);
-    let (repo, _account, _fake) = acquisition::folder_provisioning::tests::install(root);
+    let (mut repo, account, _fake) = acquisition::folder_provisioning::tests::install(root);
+    if let Ok(epoch) = std::fs::read_to_string(root.join("workspace-authority")) {
+        if !epoch.is_empty() {
+            repo.install_synthetic_workspace(&account, &epoch);
+        }
+    }
     let mut state = AppState::new(true);
     state.accounts.source = AccountSource::Synthetic {
         accounts: Arc::new(repo),

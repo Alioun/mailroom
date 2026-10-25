@@ -30,6 +30,8 @@ pub struct Workspace {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExportRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_binding: Option<String>,
     pub semantics: String,
     pub proof_semantics: String,
     #[serde(with = "super::program::persisted")]
@@ -66,17 +68,59 @@ pub struct ProofPreview {
     pub previous: Option<ExportInfo>,
     pub filename: &'static str,
 }
-fn context(account: &str, provider: Provider) -> EngineContext {
-    EngineContext::local(
-        account.into(),
-        match provider {
-            Provider::MailboxOrg => Engine::MailboxSieve,
-            Provider::Gmail => Engine::GmailBacklog,
-        },
-    )
+/// Resolved by the account repository, never accepted as request input.
+#[derive(Clone, Serialize)]
+pub struct WorkspaceContext {
+    provider: Provider,
+    account: Option<crate::census::AccountId>,
+    engine: EngineContext,
+    binding: String,
+}
+impl WorkspaceContext {
+    pub fn local(provider: Provider) -> Self {
+        Self {
+            provider,
+            account: None,
+            engine: EngineContext::local(
+                String::new(),
+                match provider {
+                    Provider::MailboxOrg => Engine::MailboxSieve,
+                    Provider::Gmail => Engine::GmailBacklog,
+                },
+            ),
+            binding: "uninstalled-local-v1".into(),
+        }
+    }
+    pub fn provider(&self) -> Provider {
+        self.provider
+    }
+    pub(crate) fn bound(
+        account: crate::census::AccountId,
+        provider: Provider,
+        engine: EngineContext,
+        binding: String,
+    ) -> Self {
+        Self {
+            provider,
+            account: Some(account),
+            engine,
+            binding,
+        }
+    }
+    pub(crate) fn binding(&self) -> &str {
+        &self.binding
+    }
+    fn engine(&self, account: &crate::census::AccountId) -> Result<EngineContext, String> {
+        if self.account.as_ref().is_some_and(|id| id != account) {
+            return Err("Workspace context belongs to another account".into());
+        }
+        let mut engine = self.engine.clone();
+        engine.account = account.as_str().into();
+        Ok(engine)
+    }
 }
 impl ExportRecord {
-    fn info(&self, context: &EngineContext) -> ExportInfo {
+    fn info(&self, context: &WorkspaceContext, account: &crate::census::AccountId) -> ExportInfo {
         ExportInfo {
             identity: self.artifact.identity().into(),
             semantics: self.semantics.clone(),
@@ -85,39 +129,44 @@ impl ExportRecord {
             provenance: self.provenance.clone(),
             usable: self.semantics == SEMANTICS
                 && self.proof_semantics == proof::SEMANTICS
-                && self.artifact.context().account == context.account
-                && self.artifact.context().engine == context.engine,
+                && self.context_binding.as_deref() == Some(context.binding())
+                && context
+                    .engine(account)
+                    .is_ok_and(|c| *self.artifact.context() == c),
         }
     }
 }
-pub fn view(state: &AccountState, provider: Provider) -> WorkspaceView {
-    let context = context(state.census.account.as_str(), provider);
+pub fn view(state: &AccountState, context: &WorkspaceContext) -> WorkspaceView {
     WorkspaceView {
         revision: state.revision,
         workspace: state.workspace.clone(),
-        exports: state.exports.iter().map(|e| e.info(&context)).collect(),
-        engine: context.engine,
+        exports: state
+            .exports
+            .iter()
+            .map(|e| e.info(context, &state.census.account))
+            .collect(),
+        engine: context.engine.engine.clone(),
     }
 }
 fn compile_input(
     input: &WorkspaceInput,
     state: &AccountState,
-    provider: Provider,
+    context: &WorkspaceContext,
 ) -> Result<CompiledArtifact, String> {
     let account = state.census.account.as_str();
     if input.pins.iter().any(|p| p.account != account) {
         return Err("Pins belong to the selected account".into());
     }
-    let context = context(account, provider);
-    engine::artifact(&input.documents, &context)
+    let engine = context.engine(&state.census.account)?;
+    engine::artifact(&input.documents, &engine)
 }
 
 pub fn validate(
     input: &WorkspaceInput,
     state: &AccountState,
-    provider: Provider,
+    context: &WorkspaceContext,
 ) -> Result<(), String> {
-    let artifact = compile_input(input, state, provider)?;
+    let artifact = compile_input(input, state, context)?;
     // Saving is allowed before an export exists. Previous-baseline availability is checked for proof.
     proof::prove(
         artifact,
@@ -131,7 +180,7 @@ pub fn validate(
 }
 pub fn preview(
     state: &AccountState,
-    provider: Provider,
+    context: &WorkspaceContext,
     keys: &CensusKeys,
 ) -> Result<ProofPreview, String> {
     let workspace = state
@@ -139,19 +188,18 @@ pub fn preview(
         .as_ref()
         .ok_or("Save the account's rule workspace first")?;
     let input = &workspace.input;
-    let context = context(state.census.account.as_str(), provider);
     let last = state.exports.last();
-    let previous = last.map(|e| e.info(&context));
+    let previous = last.map(|e| e.info(context, &state.census.account));
     let baseline = if input.baseline == Baseline::Previous {
         let record = last.ok_or("No recorded local export baseline")?;
-        if !record.info(&context).usable {
+        if !record.info(context, &state.census.account).usable {
             return Err("Recorded export uses obsolete semantics or another engine".into());
         }
         Some(&record.artifact)
     } else {
         None
     };
-    let artifact = compile_input(input, state, provider)?;
+    let artifact = compile_input(input, state, context)?;
     let proof = proof::prove(
         artifact,
         &state.census,
@@ -164,7 +212,7 @@ pub fn preview(
         serde_json::to_vec(&(
             RECEIPT_VERSION,
             SEMANTICS,
-            provider,
+            context,
             state,
             &proof,
             proof.artifact.executable().as_bytes(),
@@ -173,7 +221,7 @@ pub fn preview(
         .map_err(|_| "Cannot bind proof")?,
     );
     let receipt = keys.binding_for(RECEIPT_VERSION.as_bytes(), &payload);
-    let download_available = provider == Provider::MailboxOrg && proof.gate != "blocked";
+    let download_available = context.provider == Provider::MailboxOrg && proof.gate != "blocked";
     Ok(ProofPreview {
         proof,
         receipt,
@@ -187,18 +235,19 @@ pub fn preview(
 }
 pub fn confirm_export(
     state: &mut AccountState,
-    provider: Provider,
+    context: &WorkspaceContext,
     keys: &CensusKeys,
     receipt: &str,
 ) -> Result<ProofPreview, String> {
     use subtle::ConstantTimeEq;
-    let preview = preview(state, provider, keys)?;
+    let preview = preview(state, context, keys)?;
     if !preview.download_available
         || !bool::from(preview.receipt.as_bytes().ct_eq(receipt.as_bytes()))
     {
         return Err("Proof changed or download is blocked. Run and review a fresh proof".into());
     }
     state.exports.push(ExportRecord {
+        context_binding: Some(context.binding.clone()),
         semantics: SEMANTICS.into(),
         proof_semantics: proof::SEMANTICS.into(),
         artifact: preview.proof.artifact.clone(),

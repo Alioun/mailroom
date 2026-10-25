@@ -40,22 +40,23 @@ pub(in crate::server) async fn handle(
         let store = repo.store(&account).map_err(|e| e.to_string())?;
         if store.recovery_pending() { return Err("Fresh provider evidence and reconciliation required after recovery".into()); }
         let mut saved = store.load_state().map_err(|e| e.to_string())?;
+        let context = repo.workspace_context(&account, &store).map_err(|e| e.to_string())?;
         let installed = state.accounts.ledger.as_ref().ok_or("No installed ledger")?;
         let guard = installed.lock()?;
         let snapshot = guard.read()?;
-        let changed = ledger::reconcile(&mut saved, &snapshot, account.provider)?;
+        let changed = ledger::reconcile(&mut saved, &snapshot, &context)?;
         if changed { store.save_state(&mut saved).map_err(|e| e.to_string())?; }
         match request.command {
             Action::Open => Ok(json!(ledger::view(&saved, snapshot, changed))),
-            Action::Preview { batch } => ledger::review(&saved, &snapshot, account.provider, store.keys(), &batch).map(|v| json!(v)),
+            Action::Preview { batch } => ledger::review(&saved, &snapshot, &context, store.keys(), &batch).map(|v| json!(v)),
             Action::Confirm { batch, receipt, confirmed } => {
                 use subtle::ConstantTimeEq;
                 if !confirmed { return Err("Exact ledger review requires confirmation".into()); }
-                let review = ledger::review(&saved, &snapshot, account.provider, store.keys(), &batch)?;
+                let review = ledger::review(&saved, &snapshot, &context, store.keys(), &batch)?;
                 if !bool::from(review.receipt.as_bytes().ct_eq(receipt.as_bytes())) { return Err("Ledger review changed. Reload and review again".into()); }
                 let new_source = guard.replace(&snapshot.content_version, &review.resulting_document)?;
                 boundary("file");
-                ledger::reconcile(&mut saved, &new_source, account.provider)?;
+                ledger::reconcile(&mut saved, &new_source, &context)?;
                 // This second replacement is not atomic with the authoritative file save.
                 // Recovery always reconstructs from the file and never retries its old write.
                 store.save_state(&mut saved).map_err(|_| "Ledger file saved. Projection save unconfirmed. Reload to reconcile from the file; do not repeat the old confirmation".to_string())?;

@@ -1,5 +1,4 @@
 use crate::{
-    acquisition::Provider,
     census::{AccountState, CensusKeys, Direction, ScanState},
     rules::{
         config::{self, Category, LedgerEntry, LedgerStatus},
@@ -193,7 +192,7 @@ fn projected(d: &Document) -> Vec<LedgerEntry> {
 pub fn reconcile(
     state: &mut AccountState,
     snapshot: &Snapshot,
-    provider: Provider,
+    context: &workspace::WorkspaceContext,
 ) -> Result<bool, String> {
     validate(&snapshot.document)?;
     let old = &state.ledger;
@@ -242,7 +241,7 @@ pub fn reconcile(
         next.input.documents.override_yaml =
             serde_yaml_ng::to_string(&overrides).map_err(|_| "Cannot encode projection")?;
     }
-    workspace::validate(&next.input, state, provider)?;
+    workspace::validate(&next.input, state, context)?;
     next.revision = next
         .revision
         .checked_add(1)
@@ -346,7 +345,7 @@ pub fn view(state: &AccountState, snapshot: Snapshot, changed: bool) -> View {
 pub fn review(
     state: &AccountState,
     source: &Snapshot,
-    provider: Provider,
+    context: &workspace::WorkspaceContext,
     keys: &CensusKeys,
     batch: &Batch,
 ) -> Result<Review, String> {
@@ -399,8 +398,8 @@ pub fn review(
         document: document.clone(),
     };
     let mut next = state.clone();
-    reconcile(&mut next, &candidate, provider)?;
-    let proof = workspace::preview(&next, provider, keys)?;
+    reconcile(&mut next, &candidate, context)?;
+    let proof = workspace::preview(&next, context, keys)?;
     let resulting_overrides = next
         .workspace
         .as_ref()

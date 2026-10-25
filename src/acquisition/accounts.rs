@@ -140,6 +140,7 @@ impl AccountPaths {
 }
 
 pub struct Accounts {
+    pub(super) workspace_authority: Option<super::workspace_authority::SyntheticWorkspaceAuthority>,
     pub(super) folder_source: Option<Arc<super::folder_provisioning::transport::InstalledSource>>,
     pub(crate) paths: AccountPaths,
     backend: Arc<dyn CredentialBackend>,
@@ -162,11 +163,42 @@ impl Accounts {
             paths,
             backend,
             folder_source: None,
+            workspace_authority: None,
             sieve_source: None,
             sieve_write: None,
             #[cfg(test)]
             imap_factory: None,
         }
+    }
+    #[cfg(test)]
+    pub(crate) fn track_credential_accesses(&mut self) -> Arc<std::sync::atomic::AtomicUsize> {
+        struct Tracked {
+            backend: Arc<dyn CredentialBackend>,
+            accesses: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl CredentialBackend for Tracked {
+            fn get(&self, reference: &str) -> Result<SecretValue, AcquisitionError> {
+                self.accesses
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.backend.get(reference)
+            }
+            fn put(&self, reference: &str, value: &SecretValue) -> Result<(), AcquisitionError> {
+                self.accesses
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.backend.put(reference, value)
+            }
+            fn delete(&self, reference: &str) -> Result<(), AcquisitionError> {
+                self.accesses
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.backend.delete(reference)
+            }
+        }
+        let accesses = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        self.backend = Arc::new(Tracked {
+            backend: self.backend.clone(),
+            accesses: accesses.clone(),
+        });
+        accesses
     }
     pub fn create(
         &self,
@@ -525,11 +557,15 @@ pub(crate) mod process_tests {
                 },
             });
             store.save_state(&mut state).unwrap();
-            let proof =
-                crate::rules::workspace::preview(&state, account.provider, store.keys()).unwrap();
+            let proof = crate::rules::workspace::preview(
+                &state,
+                &crate::rules::workspace::WorkspaceContext::local(account.provider),
+                store.keys(),
+            )
+            .unwrap();
             crate::rules::workspace::confirm_export(
                 &mut state,
-                account.provider,
+                &crate::rules::workspace::WorkspaceContext::local(account.provider),
                 store.keys(),
                 &proof.receipt,
             )
@@ -545,11 +581,15 @@ pub(crate) mod process_tests {
             assert_eq!(state.exports.len(), 1);
             assert_eq!(
                 state.exports[0].artifact.executable(),
-                crate::rules::workspace::preview(&state, account.provider, store.keys())
-                    .unwrap()
-                    .proof
-                    .artifact
-                    .executable()
+                crate::rules::workspace::preview(
+                    &state,
+                    &crate::rules::workspace::WorkspaceContext::local(account.provider),
+                    store.keys()
+                )
+                .unwrap()
+                .proof
+                .artifact
+                .executable()
             );
             let census = state.census;
             assert_eq!(census.folders["INBOX"].messages.len(), 1);

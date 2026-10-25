@@ -76,7 +76,7 @@ fn schema_ten_protocol_and_proposal_sieve_facts_round_trip_with_single_account_r
     let before = state(&repo, &account);
     assert!(before.census.acquisition.is_protocol());
     let (manifest, bundle) = capture(&repo, &account, root.path());
-    assert_eq!(manifest.state_schema, 12);
+    assert_eq!(manifest.state_schema, 13);
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let preview = fresh.restore_preview(&bundle, &secret()).unwrap();
@@ -439,7 +439,12 @@ fn organisational_decisions_survive_real_rotation_and_recovery_without_approval_
     let (root, repo, account) = fixture();
     let store = repo.store(&account).unwrap();
     let mut saved = store.load_state().unwrap();
-    let g = proposals::generate(&saved, account.provider, store.keys()).unwrap();
+    let g = proposals::generate(
+        &saved,
+        &crate::rules::workspace::WorkspaceContext::local(account.provider),
+        store.keys(),
+    )
+    .unwrap();
     let selection = Selection {
         account: g.account,
         generation: g.generation,
@@ -450,7 +455,7 @@ fn organisational_decisions_survive_real_rotation_and_recovery_without_approval_
     };
     let old = proposals::review(
         &saved,
-        account.provider,
+        &crate::rules::workspace::WorkspaceContext::local(account.provider),
         store.keys(),
         &selection,
         Disposition::Accept,
@@ -467,7 +472,7 @@ fn organisational_decisions_survive_real_rotation_and_recovery_without_approval_
     assert!(
         proposals::confirm(
             &mut saved,
-            account.provider,
+            &crate::rules::workspace::WorkspaceContext::local(account.provider),
             store.keys(),
             &selection,
             Disposition::Accept,
@@ -477,7 +482,7 @@ fn organisational_decisions_survive_real_rotation_and_recovery_without_approval_
     );
     let current = proposals::review(
         &saved,
-        account.provider,
+        &crate::rules::workspace::WorkspaceContext::local(account.provider),
         store.keys(),
         &selection,
         Disposition::Accept,
@@ -498,7 +503,7 @@ fn organisational_decisions_survive_real_rotation_and_recovery_without_approval_
     assert!(
         proposals::confirm(
             &mut saved,
-            account.provider,
+            &crate::rules::workspace::WorkspaceContext::local(account.provider),
             store.keys(),
             &selection,
             Disposition::Accept,
@@ -513,12 +518,20 @@ fn organisational_decisions_survive_real_rotation_and_recovery_without_approval_
 #[test]
 fn folder_journal_restores_held_without_reverting_later_independent_topology() {
     let root = tempfile::tempdir().unwrap();
-    let (repo, account, fake) =
+    let (mut repo, account, fake) =
         crate::acquisition::folder_provisioning::tests::install(root.path());
-    crate::acquisition::folder_provisioning::tests::commit_synthetic_folders(&repo, &account);
+    crate::acquisition::folder_provisioning::tests::commit_saved_workspace_folders(
+        &mut repo,
+        &account,
+        root.path(),
+    );
     let before = state(&repo, &account);
     let (manifest, bundle) = capture(&repo, &account, root.path());
-    assert_eq!(manifest.state_schema, 12);
+    assert_eq!(manifest.state_schema, 13);
+    let effects = crate::acquisition::sieve_transaction::tests::independent_effects(
+        root.path(),
+        &repo.store(&account).unwrap(),
+    );
     crate::acquisition::folder_provisioning::tests::later_folder_change(
         &repo,
         &account,
@@ -536,7 +549,7 @@ fn folder_journal_restores_held_without_reverting_later_independent_topology() {
     let account = fresh.load(&account.id).unwrap();
     let store = fresh.store(&account).unwrap();
     let mut restored = store.load_state().unwrap();
-    assert!(restored.folder_provisioning == before.folder_provisioning);
+    assert!(serde_json::to_value(&restored).unwrap() == serde_json::to_value(&before).unwrap());
     assert!(store.recovery_pending());
     assert!(
         fresh
@@ -561,4 +574,9 @@ fn folder_journal_restores_held_without_reverting_later_independent_topology() {
             .is_err()
     );
     assert_eq!(fs::read(independent.path()).unwrap(), later);
+    drop(independent);
+    assert_eq!(
+        crate::acquisition::sieve_transaction::tests::independent_effects(root.path(), &store),
+        effects
+    );
 }

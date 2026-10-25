@@ -26,7 +26,10 @@ fn protocol(_: Failure) -> AcquisitionError {
     AcquisitionError::Protocol
 }
 fn save(store: &EncryptedStore, state: &mut AccountState) -> Result<(), AcquisitionError> {
-    store.save_state(state).map_err(Into::into)
+    store.save_state(state)?;
+    #[cfg(test)]
+    tests::progress_evidence(state);
+    Ok(())
 }
 impl Accounts {
     pub(crate) fn folders_installed(&self) -> bool {
@@ -50,11 +53,10 @@ impl Accounts {
         store: &EncryptedStore,
     ) -> Result<Context, AcquisitionError> {
         let source = self.folder_source(account)?;
-        let password = self.password(account)?;
         let authority = zeroize::Zeroizing::new(
             serde_json::to_vec(&(
                 &account.login,
-                password.bytes(),
+                self.workspace_context(account, store)?.binding(),
                 self.sieve_authority(account, store)?,
             ))
             .map_err(|_| invalid())?,
@@ -97,8 +99,12 @@ impl Accounts {
         {
             return Err(invalid());
         }
-        let p = crate::rules::workspace::preview(saved, account.provider, store.keys())
-            .map_err(|_| invalid())?;
+        let p = crate::rules::workspace::preview(
+            saved,
+            &self.workspace_context(account, store)?,
+            store.keys(),
+        )
+        .map_err(|_| invalid())?;
         if !p.download_available || p.proof.gate == "blocked" {
             return Err(invalid());
         }
@@ -106,7 +112,7 @@ impl Accounts {
         let mut session = self.folder_session(account, cancel)?;
         let before = session.observe().map_err(protocol)?;
         let plan = FolderPlan::build(p.proof.artifact.folders(), &before).map_err(protocol)?;
-        let proof = serde_json::json!({"gate":p.proof.gate,"semantics":p.proof.semantics,"pins":p.proof.pins,"warnings":p.proof.warnings,"runtime_cross_check":p.proof.runtime_cross_check});
+        let proof = serde_json::json!({"gate":p.proof.gate,"semantics":p.proof.semantics,"pins":p.proof.pins,"warnings":p.proof.warnings,"runtime_cross_check":p.proof.runtime_cross_check,"recipient_evidence":p.proof.artifact.context().recipient_evidence,"capabilities":p.proof.artifact.context().capabilities,"context_binding":self.workspace_context(account, store)?.binding()});
         let payload = zeroize::Zeroizing::new(
             serde_json::to_vec(&(
                 saved,
@@ -336,7 +342,17 @@ impl Accounts {
             return Ok(());
         }
         let mut session = self.folder_session(account, cancel)?;
-        let observed = session.observe().map_err(protocol)?;
+        let observed = match session.observe() {
+            Ok(observed) => observed,
+            Err(Failure::Unsupported | Failure::UnsupportedName) => {
+                if op.status != Status::Conflict {
+                    op.status = Status::Conflict;
+                    save(store, saved)?;
+                }
+                return Err(AcquisitionError::Protocol);
+            }
+            Err(error) => return Err(protocol(error)),
+        };
         let previous = op.clone();
         if let Some(step) = op.steps.last_mut() {
             if model::desired_delta(&step.before, &observed, &step.name) {

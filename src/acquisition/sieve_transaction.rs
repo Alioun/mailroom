@@ -186,8 +186,12 @@ impl Accounts {
                 serde_json::json!({"compensates": id, "fresh_provider_match":true}),
             )
         } else {
-            let p = crate::rules::workspace::preview(saved, account.provider, store.keys())
-                .map_err(|_| invalid())?;
+            let p = crate::rules::workspace::preview(
+                saved,
+                &self.workspace_context(account, store)?,
+                store.keys(),
+            )
+            .map_err(|_| invalid())?;
             if !p.download_available || p.proof.gate == "blocked" {
                 return Err(invalid());
             }

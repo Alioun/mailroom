@@ -134,8 +134,13 @@ fn execute(
         .map(|l| l.lock())
         .transpose()
         .map_err(|_| AcquisitionError::Storage)?;
-    sync_ledger(&mut saved, &store, account.provider, guard.as_ref())
-        .map_err(|_| AcquisitionError::InvalidInput)?;
+    sync_ledger(
+        &mut saved,
+        &store,
+        &repo.workspace_context(&account, &store)?,
+        guard.as_ref(),
+    )
+    .map_err(|_| AcquisitionError::InvalidInput)?;
     ledger_fresh(&saved, guard.as_ref()).map_err(|_| AcquisitionError::InvalidInput)?;
     match &request.command {
         Action::Preview {} => Ok(json!(

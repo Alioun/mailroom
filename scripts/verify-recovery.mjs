@@ -36,6 +36,7 @@ async function stop(signal = 'SIGTERM') {
   assert.equal(execFileSync('ps', ['-p', String(server.pid), '-o', 'command='], { cwd: root, encoding: 'utf8' }).trim(), `${binary} --exact server::accounts::durable_browser_server_fixture --nocapture`)
   assert.ok(execFileSync('lsof', ['-a', '-p', String(server.pid), '-d', 'cwd', '-Fn'], { cwd: root, encoding: 'utf8' }).includes(`\nn${root.replace(/\/$/, '')}\n`))
   assert.equal(sha(await readFile(binary)), binary_sha256)
+  assert.ok(execFileSync('lsof', ['-nP', '-a', '-p', String(server.pid), '-iTCP:4173', '-sTCP:LISTEN'], { cwd: root, encoding: 'utf8' }).includes('127.0.0.1:4173'))
   const done = once(server, 'exit'); server.kill(signal); await done; server = undefined
 }
 async function post(path, body, expected = 200) {

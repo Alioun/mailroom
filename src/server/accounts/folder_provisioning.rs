@@ -116,8 +116,13 @@ fn execute(
         .map(|l| l.lock())
         .transpose()
         .map_err(|_| AcquisitionError::Storage)?;
-    sync_ledger(&mut saved, &store, account.provider, guard.as_ref())
-        .map_err(|_| AcquisitionError::InvalidInput)?;
+    sync_ledger(
+        &mut saved,
+        &store,
+        &repo.workspace_context(&account, &store)?,
+        guard.as_ref(),
+    )
+    .map_err(|_| AcquisitionError::InvalidInput)?;
     ledger_fresh(&saved, guard.as_ref()).map_err(|_| AcquisitionError::InvalidInput)?;
     match &request.command {
         Action::Preview {} => Ok(json!(
@@ -143,7 +148,8 @@ fn execute(
 }
 #[cfg(test)]
 #[tokio::test]
-async fn absent_read_only_and_wrong_account_deny_without_repository_access() {
+async fn absent_read_only_and_wrong_account_deny_without_repository_credentials_helper_or_network()
+{
     use tower::ServiceExt;
     for installation in 0..4 {
         let mut app = AppState::new(installation != 0);
@@ -166,8 +172,19 @@ async fn absent_read_only_and_wrong_account_deny_without_repository_access() {
             };
             folder_fake = Some(fake);
         }
+        let credential_accesses = match &mut app.accounts.source {
+            AccountSource::Synthetic { accounts, .. } => {
+                Some(Arc::get_mut(accounts).unwrap().track_credential_accesses())
+            }
+            AccountSource::Os => None,
+        };
         let state = Arc::new(app);
         for action in ["preview", "confirm", "status", "cancel", "reconcile"] {
+            let command = match action {
+                "confirm" => json!({"action":action,"receipt":"a".repeat(64),"confirmed":true}),
+                "reconcile" => json!({"action":action,"operation":"a".repeat(64)}),
+                _ => json!({"action":action}),
+            };
             let response = super::super::router(state.clone())
                 .oneshot(
                     axum::http::Request::builder()
@@ -178,7 +195,7 @@ async fn absent_read_only_and_wrong_account_deny_without_repository_access() {
                         .header("Content-Type", "application/json")
                         .header("X-Mailroom-Token", state.token.as_str())
                         .body(axum::body::Body::from(
-                            json!({"account":"invented","command":{"action":action}}).to_string(),
+                            json!({"account":"invented","command":command}).to_string(),
                         ))
                         .unwrap(),
                 )
@@ -200,6 +217,16 @@ async fn absent_read_only_and_wrong_account_deny_without_repository_access() {
                 .load(std::sync::atomic::Ordering::SeqCst),
             0
         );
+        assert_eq!(state.accounts.confirmations.lock().unwrap().accesses, 0);
+        if let Some(accesses) = credential_accesses {
+            assert_eq!(accesses.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+        if let Some(fake) = &folder_fake {
+            assert_eq!(
+                fake.connections.load(std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+        }
         if let Some(fake) = &read_fake {
             assert!(fake.commands.lock().unwrap().is_empty());
         }

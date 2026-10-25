@@ -76,6 +76,8 @@ impl Token {
     }
 }
 pub(super) struct Session {
+    #[cfg(test)]
+    pending_writes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     source: String,
     stream: TlsStream<TcpStream>,
     cancel: Cancellation,
@@ -162,6 +164,8 @@ impl Session {
             }
         };
         let mut s = Self {
+            #[cfg(test)]
+            pending_writes: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             source: source.identity(),
             stream,
             cancel,
@@ -409,7 +413,12 @@ impl Session {
             match self.stream.write(&bytes[offset..]) {
                 Ok(0) => return Err(Error::Eof),
                 Ok(n) => offset += n,
-                Err(e) if pending(&e) => std::thread::sleep(POLL),
+                Err(e) if pending(&e) => {
+                    #[cfg(test)]
+                    self.pending_writes
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(POLL);
+                }
                 Err(_) => return Err(Error::Eof),
             }
         }
@@ -417,7 +426,12 @@ impl Session {
             self.check()?;
             match self.stream.flush() {
                 Ok(()) => break,
-                Err(e) if pending(&e) => std::thread::sleep(POLL),
+                Err(e) if pending(&e) => {
+                    #[cfg(test)]
+                    self.pending_writes
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(POLL);
+                }
                 Err(_) => return Err(Error::Eof),
             }
         }
@@ -590,5 +604,109 @@ impl Session {
     }
     pub(super) fn logout(&mut self) {
         let _ = self.execute(b"LOGOUT");
+    }
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+    use std::{os::fd::AsRawFd, sync::atomic::Ordering};
+
+    #[test]
+    fn saturated_verified_tls_writes_reach_pending_and_obey_cancel_and_absolute_deadline() {
+        for cancelled in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (_repo, account, fake) =
+                crate::acquisition::folder_provisioning::tests::install(root.path());
+            std::fs::write(root.path().join("folder-mode"), "stall_write").unwrap();
+            let cancel = Cancellation::default();
+            let mut session = Session::connect(
+                &fake.source.permit(&account.id).unwrap(),
+                &account.login,
+                &SecretValue::new(b"invented".to_vec()),
+                cancel.clone(),
+            )
+            .unwrap();
+            let ready_end = Instant::now() + Duration::from_secs(2);
+            while !root.path().join("write-stalled").exists() {
+                assert!(Instant::now() < ready_end);
+                std::thread::sleep(POLL);
+            }
+            let size: libc::c_int = 4096;
+            assert_eq!(
+                unsafe {
+                    libc::setsockopt(
+                        session.stream.get_ref().as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_SNDBUF,
+                        (&size as *const libc::c_int).cast(),
+                        std::mem::size_of_val(&size) as libc::socklen_t,
+                    )
+                },
+                0
+            );
+            let fill_end = Instant::now() + Duration::from_secs(1);
+            let padding = vec![b'X'; 64 * 1024];
+            let mut saturated = false;
+            let mut filled = 0;
+            while filled < TOTAL / 2 && Instant::now() < fill_end {
+                match session.stream.write(&padding) {
+                    Ok(n) => filled += n,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        saturated = true;
+                        break;
+                    }
+                    Err(_) => panic!("Synthetic TLS saturation failed"),
+                }
+            }
+            assert!(
+                saturated,
+                "Actual TLS write must report WouldBlock after bounded synthetic padding"
+            );
+            session.timeout = Duration::from_secs(2);
+            session.command_end = Instant::now() + Duration::from_secs(2);
+            session.end = Instant::now()
+                + if cancelled {
+                    Duration::from_secs(2)
+                } else {
+                    Duration::from_millis(150)
+                };
+            let observed = session.pending_writes.clone();
+            let stopping = if cancelled {
+                Some(std::thread::spawn(move || {
+                    let end = Instant::now() + Duration::from_secs(2);
+                    while observed.load(Ordering::SeqCst) == 0 {
+                        assert!(
+                            Instant::now() < end,
+                            "Actual TLS write must reach pending before cancellation"
+                        );
+                        std::thread::sleep(POLL);
+                    }
+                    cancel.cancel();
+                }))
+            } else {
+                None
+            };
+            let started = Instant::now();
+            let result = session.execute(b"CAPABILITY");
+            assert_eq!(
+                result.unwrap_err(),
+                if cancelled {
+                    Error::Cancelled
+                } else {
+                    Error::Deadline
+                }
+            );
+            assert!(
+                session.pending_writes.load(Ordering::SeqCst) > 0,
+                "Observed actual native TLS/socket pending write, not a missing response"
+            );
+            assert!(started.elapsed() < Duration::from_secs(1));
+            if let Some(stopping) = stopping {
+                stopping.join().unwrap();
+            }
+            std::fs::write(root.path().join("release-write"), b"release").unwrap();
+            drop(session);
+        }
     }
 }

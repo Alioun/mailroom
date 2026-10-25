@@ -12,6 +12,7 @@ assert.equal(await fetch(`${base}/api/session`).then(() => true, () => false), f
 const build = execFileSync('cargo', ['test', '--locked', '--lib', '--no-run', '--message-format=json'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 })
 const binary = build.trim().split('\n').map(JSON.parse).find(a => a.reason === 'compiler-artifact' && a.profile.test && a.executable)?.executable
 assert.ok(binary)
+const fixtureBinaryHash = createHash('sha256').update(await readFile(binary)).digest('hex')
 const directory = await mkdtemp(join(root, '.audit/account-lifecycle-fixture-'))
 let server, token, sample
 const results = []
@@ -29,7 +30,13 @@ async function start(boundary) {
   }
   throw Error('Fake lifecycle startup timeout')
 }
-async function stop(signal = 'SIGTERM') { const done = once(server, 'exit'); server.kill(signal); await done; server = undefined }
+async function stop(signal = 'SIGTERM') {
+  assert.equal(execFileSync('ps', ['-p', String(server.pid), '-o', 'command='], { cwd: root, encoding: 'utf8' }).trim(), `${binary} --exact server::accounts::durable_browser_server_fixture --nocapture`)
+  assert.ok(execFileSync('lsof', ['-a', '-p', String(server.pid), '-d', 'cwd', '-Fn'], { cwd: root, encoding: 'utf8' }).includes(`\nn${root.replace(/\/$/, '')}\n`))
+  assert.ok(execFileSync('lsof', ['-nP', '-a', '-p', String(server.pid), '-iTCP:4173', '-sTCP:LISTEN'], { cwd: root, encoding: 'utf8' }).includes('127.0.0.1:4173'))
+  assert.equal(createHash('sha256').update(await readFile(binary)).digest('hex'), fixtureBinaryHash)
+  const done = once(server, 'exit'); server.kill(signal); await done; server = undefined
+}
 async function post(path, body, expected = 200) {
   const response = await fetch(`${base}/api/accounts/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Mailroom-Token': token }, body: JSON.stringify(body) })
   const value = await response.json()

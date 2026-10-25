@@ -46,7 +46,7 @@ pub(in crate::server) async fn handle(
         if store.recovery_pending() && !matches!(request.command, Action::Open { .. }) { return Err("Fresh provider evidence and reconciliation required after recovery".into()); }
         let mut saved = store.load_state().map_err(|_| "Account state unavailable")?;
         let ledger_guard = state.accounts.ledger.as_ref().map(|l| l.lock()).transpose()?;
-        sync_ledger(&mut saved, &store, account.provider, ledger_guard.as_ref())?;
+        sync_ledger(&mut saved, &store, &repo.workspace_context(&account, &store).map_err(|e| e.to_string())?, ledger_guard.as_ref())?;
         let mut installed = match &state.accounts.source { AccountSource::Synthetic { mailboxes, .. } => Some(InstalledSynthetic::open(mailboxes, &store, &saved)?), _ => None };
         let as_of = match request.command {
             Action::Open { as_of } => as_of,

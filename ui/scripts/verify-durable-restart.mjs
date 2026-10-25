@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { chromium } from 'playwright'
@@ -12,6 +13,7 @@ assert.equal(await fetch('http://127.0.0.1:4173/api/session').then(() => true, (
 const build = execFileSync('cargo', ['test', '--locked', '--lib', '--no-run', '--message-format=json'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
 const binary = build.trim().split('\n').map(line => JSON.parse(line)).find(a => a.reason === 'compiler-artifact' && a.profile.test && a.executable)?.executable
 assert.ok(binary, 'Missing compiled test fixture')
+const fixtureBinaryHash = createHash('sha256').update(await readFile(binary)).digest('hex')
 const directory = await mkdtemp(join(root, '.audit/durable-restart-'))
 let server
 let browser
@@ -27,6 +29,10 @@ async function start() {
 }
 async function stop() {
   if (!server) return
+  assert.equal(execFileSync('ps', ['-p', String(server.pid), '-o', 'command='], { cwd: root, encoding: 'utf8' }).trim(), `${binary} --exact server::accounts::durable_browser_server_fixture --nocapture`)
+  assert.ok(execFileSync('lsof', ['-a', '-p', String(server.pid), '-d', 'cwd', '-Fn'], { cwd: root, encoding: 'utf8' }).includes(`\nn${root.replace(/\/$/, '')}\n`))
+  assert.ok(execFileSync('lsof', ['-nP', '-a', '-p', String(server.pid), '-iTCP:4173', '-sTCP:LISTEN'], { cwd: root, encoding: 'utf8' }).includes('127.0.0.1:4173'))
+  assert.equal(createHash('sha256').update(await readFile(binary)).digest('hex'), fixtureBinaryHash)
   const exited = once(server, 'exit')
   server.kill('SIGTERM')
   await exited
@@ -72,8 +78,9 @@ try {
   const before = await (await comparison).json()
   const previousToken = await page.evaluate(async () => (await (await fetch('/api/session')).json()).token)
   for (const part of ['config', 'data']) {
-    for (const file of await readdir(join(directory, part))) {
-      const bytes = await readFile(join(directory, part, file))
+    for (const file of await readdir(join(directory, part), { withFileTypes: true })) {
+      if (!file.isFile()) continue
+      const bytes = await readFile(join(directory, part, file.name))
       for (const marker of ['synthetic-private-restart-target@example.test', 'synthetic-private-restart-document-marker', 'preset_yaml', 'override_yaml']) assert.equal(bytes.includes(Buffer.from(marker)), false)
     }
   }
@@ -102,5 +109,5 @@ try {
 } finally {
   if (browser) await browser.close()
   await stop()
-  await rm(directory, { recursive: true, force: true })
+  console.log('Synthetic restart fixture preserved.')
 }

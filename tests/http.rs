@@ -362,7 +362,6 @@ async fn synthetic_account_flow_uses_fake_credentials_and_preserves_http_authori
         "synthetic",
         "synthetic-gmail",
         "report",
-        "proof",
         "workspace/open",
         "workspace/save",
         "proof/preview",
@@ -428,9 +427,15 @@ async fn synthetic_account_flow_uses_fake_credentials_and_preserves_http_authori
     assert_eq!(report["sent"], 1);
     let sample: serde_json::Value =
         serde_json::from_str(include_str!("../examples/sample.json")).unwrap();
-    let proof_request = serde_json::json!({"account":id,"documents":sample["documents"],"as_of":as_of,"pins":[],"baseline":"current","previous":null});
-    let (code, proof) = post(&app, token, "proof", proof_request.clone()).await;
+    let (_, workspace) = post(&app, token, "workspace/open", account.clone()).await;
+    let save_request = serde_json::json!({"account":id,"revision":workspace["revision"],"input":{"documents":sample["documents"],"as_of":as_of,"pins":[],"baseline":"current"}});
+    assert_eq!(
+        post(&app, token, "workspace/save", save_request).await.0,
+        StatusCode::OK
+    );
+    let (code, preview) = post(&app, token, "proof/preview", account.clone()).await;
     assert_eq!(code, StatusCode::OK);
+    let proof = &preview["proof"];
     assert_eq!(proof["counts"]["messages"], 99);
     assert_eq!(proof["counts"]["review"], 99);
     assert_eq!(proof["counts"]["copies"], 0);
@@ -438,10 +443,15 @@ async fn synthetic_account_flow_uses_fake_credentials_and_preserves_http_authori
         proof["artifact"]["context"]["recipient_evidence"],
         "unknown"
     );
-    let mut injected = proof_request;
-    injected["context"] = sample["context"].clone();
     assert_eq!(
-        post(&app, token, "proof", injected).await.0,
+        post(
+            &app,
+            token,
+            "proof/preview",
+            serde_json::json!({"account":id,"context":sample["context"]})
+        )
+        .await
+        .0,
         StatusCode::UNPROCESSABLE_ENTITY
     );
 

@@ -151,7 +151,14 @@ fn prepare(
             );
         }
         let mut saved = store.load_state().map_err(|_| "Census unavailable")?;
-        sync_ledger(&mut saved, &store, account.provider, guard)?;
+        sync_ledger(
+            &mut saved,
+            &store,
+            &repo
+                .workspace_context(&account, &store)
+                .map_err(|e| e.to_string())?,
+            guard,
+        )?;
         let installed = InstalledSynthetic::open(mailboxes, &store, &saved)?;
         let single = ReviewInput {
             as_of: input.as_of,
@@ -215,7 +222,14 @@ fn view(state: &AppState, as_of: i64) -> Result<serde_json::Value, String> {
             .as_ref()
             .map(|l| l.lock())
             .transpose()?;
-        sync_ledger(&mut saved, &store, account.provider, snapshot.as_ref())?;
+        sync_ledger(
+            &mut saved,
+            &store,
+            &repo
+                .workspace_context(&account, &store)
+                .map_err(|e| e.to_string())?,
+            snapshot.as_ref(),
+        )?;
         drop(snapshot);
         if saved.census.folders.is_empty() {
             continue;

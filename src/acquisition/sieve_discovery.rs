@@ -32,7 +32,14 @@ impl Accounts {
             profile: "installed-loopback-starttls-plain".into(),
             source_epoch: source.identity(),
             tls_identity: source.tls_name.clone(),
-            authority: self.sieve_authority(account, store)?,
+            authority: store.keys().binding_for(
+                b"mailroom/sieve-workspace-authority/v1",
+                &serde_json::to_vec(&(
+                    self.sieve_authority(account, store)?,
+                    self.workspace_context(account, store)?.binding(),
+                ))
+                .map_err(|_| AcquisitionError::Storage)?,
+            ),
             adapter: sieve::ADAPTER.into(),
         })
     }

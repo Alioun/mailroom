@@ -275,7 +275,6 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/accounts/open", post(accounts::open))
         .route("/api/accounts/confirm", post(accounts::confirm))
         .route("/api/accounts/report", post(accounts::report))
-        .route("/api/accounts/proof", post(accounts::proof))
         .route(
             "/api/accounts/workspace/open",
             post(accounts::workspace_open),

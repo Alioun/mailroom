@@ -6,6 +6,7 @@ mod scan;
 mod sieve_discovery;
 pub(crate) mod sieve_transaction;
 pub(crate) mod synthetic;
+mod workspace_authority;
 use crate::census::CensusError;
 pub use accounts::lifecycle;
 pub(crate) use accounts::recovery;

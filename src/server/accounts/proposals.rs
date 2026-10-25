@@ -40,22 +40,23 @@ pub(in crate::server) async fn handle(
         let account = repo.load(&request.account).map_err(|e| e.to_string())?;
         let store = repo.store(&account).map_err(|e| e.to_string())?;
         let mut saved = store.load_state().map_err(|e| e.to_string())?;
+        let context = repo.workspace_context(&account, &store).map_err(|e| e.to_string())?;
         let guard = state.accounts.ledger.as_ref().map(|l| l.lock()).transpose()?;
-        sync_ledger(&mut saved, &store, account.provider, guard.as_ref())?;
+        sync_ledger(&mut saved, &store, &context, guard.as_ref())?;
         match request.command {
-            Action::Open {} => Ok(json!(proposals::generate(&saved, account.provider, store.keys())?)),
+            Action::Open {} => Ok(json!(proposals::generate(&saved, &context, store.keys())?)),
             Action::Preview { selection, disposition } => {
-                let review = proposals::review(&saved, account.provider, store.keys(), &selection, disposition)?;
+                let review = proposals::review(&saved, &context, store.keys(), &selection, disposition)?;
                 ledger_fresh(&saved, guard.as_ref())?;
                 Ok(json!(review))
             }
             Action::Confirm { selection, disposition, receipt, confirmed } => {
                 if store.recovery_pending() { return Err("Fresh provider evidence and reconciliation required after recovery".into()); }
                 if !confirmed { return Err("Confirm the exact displayed proposal review first".into()); }
-                proposals::confirm(&mut saved, account.provider, store.keys(), &selection, disposition, &receipt)?;
+                proposals::confirm(&mut saved, &context, store.keys(), &selection, disposition, &receipt)?;
                 ledger_fresh(&saved, guard.as_ref())?;
                 store.save_state(&mut saved).map_err(|e| e.to_string())?;
-                Ok(json!(proposals::generate(&saved, account.provider, store.keys())?))
+                Ok(json!(proposals::generate(&saved, &context, store.keys())?))
             }
         }
     }).await {

@@ -242,9 +242,10 @@ fn normalized_observations(state: &AccountState) -> crate::census::Census {
 
 pub fn generate(
     state: &AccountState,
-    provider: Provider,
+    context: &workspace::WorkspaceContext,
     keys: &CensusKeys,
 ) -> Result<Generation, String> {
+    let provider = context.provider();
     state.proposals.validate()?;
     let workspace = state
         .workspace
@@ -253,7 +254,7 @@ pub fn generate(
     let input = &workspace.input;
     let (preset, overrides) =
         config::documents(&input.documents.preset_yaml, &input.documents.override_yaml)?;
-    let current = workspace::preview(state, provider, keys)?;
+    let current = workspace::preview(state, context, keys)?;
     let account = state.census.account.as_str();
     let generation = identity(&(
         SEMANTICS,
@@ -488,7 +489,7 @@ pub fn generate(
             ));
             continue;
         }
-        let impact = match workspace::preview(&result, provider, keys) {
+        let impact = match workspace::preview(&result, context, keys) {
             Ok(proof) => proof,
             Err(_) => {
                 unresolved.push(unresolved_reason("Candidate does not compile with current owner rules. Existing configuration retained."));
@@ -594,12 +595,13 @@ fn document_diff(before: &str, after: &str) -> String {
 }
 pub fn review(
     state: &AccountState,
-    provider: Provider,
+    context: &workspace::WorkspaceContext,
     keys: &CensusKeys,
     selection: &Selection,
     disposition: Disposition,
 ) -> Result<Review, String> {
-    let generation = generate(state, provider, keys)?;
+    let provider = context.provider();
+    let generation = generate(state, context, keys)?;
     if selection.account != generation.account
         || selection.generation != generation.generation
         || selection.candidates.is_empty()
@@ -639,7 +641,7 @@ pub fn review(
         state.clone()
     };
     let current = generation.current;
-    let resulting = workspace::preview(&result, provider, keys)?;
+    let resulting = workspace::preview(&result, context, keys)?;
     let original_documents = state
         .workspace
         .as_ref()
@@ -698,14 +700,14 @@ pub fn review(
 }
 pub fn confirm(
     state: &mut AccountState,
-    provider: Provider,
+    context: &workspace::WorkspaceContext,
     keys: &CensusKeys,
     selection: &Selection,
     disposition: Disposition,
     receipt: &str,
 ) -> Result<(), String> {
     use subtle::ConstantTimeEq;
-    let review = review(state, provider, keys, selection, disposition)?;
+    let review = review(state, context, keys, selection, disposition)?;
     if !review.acceptance_available
         || !bool::from(review.receipt.as_bytes().ct_eq(receipt.as_bytes()))
     {

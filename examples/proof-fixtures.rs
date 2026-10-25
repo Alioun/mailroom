@@ -61,7 +61,7 @@ fn main() {
                 let (_, mut overrides) = config::documents(&w.preset_yaml, &w.override_yaml).unwrap();
                 overrides.additions.insert(0, serde_json::from_value(json!({"id":"user.mute.ledger","category":"newsletters","stage":"from","folder":"Quiet","mark_read":true,"when":[{"kind":"list_id_exact","value":"<ledger-muted.example.test>"}]})).unwrap());
                 w.override_yaml = serde_yaml_ng::to_string(&overrides).unwrap();
-                mailroom::ledger::reconcile(&mut state,&snapshot,mailroom::acquisition::Provider::MailboxOrg).unwrap();
+                mailroom::ledger::reconcile(&mut state,&snapshot,&mailroom::rules::workspace::WorkspaceContext::local(mailroom::acquisition::Provider::MailboxOrg)).unwrap();
                 source["documents"]["override_yaml"] = state.workspace.unwrap().input.documents.override_yaml.into();
                 for (id, recipient, subject, list) in [
                     ("ledger-active","active@home.example.test","Order",""),

@@ -1,4 +1,5 @@
 use super::*;
+use crate::acquisition::Provider;
 use crate::{
     census::{AccountId, EncryptedStore, LocalSecret},
     engine::PreviewInput,
@@ -138,7 +139,12 @@ fn exact_review_binds_account_changes_semantics_and_preserves_independent_state(
     let snapshot = guard.read().unwrap();
     let (store, mut saved) = state(root.path(), "first");
     let (_, other) = state(root.path(), "second");
-    reconcile(&mut saved, &snapshot, Provider::MailboxOrg).unwrap();
+    reconcile(
+        &mut saved,
+        &snapshot,
+        &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+    )
+    .unwrap();
     let before = serde_json::to_value(&saved).unwrap();
     let batch = Batch {
         content_version: snapshot.content_version.clone(),
@@ -149,7 +155,7 @@ fn exact_review_binds_account_changes_semantics_and_preserves_independent_state(
     let reviewed = review(
         &saved,
         &snapshot,
-        Provider::MailboxOrg,
+        &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
         store.keys(),
         &batch,
     )
@@ -158,7 +164,7 @@ fn exact_review_binds_account_changes_semantics_and_preserves_independent_state(
         review(
             &saved,
             &snapshot,
-            Provider::MailboxOrg,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
             store.keys(),
             &batch
         )
@@ -172,7 +178,7 @@ fn exact_review_binds_account_changes_semantics_and_preserves_independent_state(
         review(
             &saved,
             &snapshot,
-            Provider::MailboxOrg,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
             store.keys(),
             &changed
         )
@@ -184,7 +190,7 @@ fn exact_review_binds_account_changes_semantics_and_preserves_independent_state(
         review(
             &other,
             &snapshot,
-            Provider::MailboxOrg,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
             store.keys(),
             &batch
         )
@@ -194,7 +200,7 @@ fn exact_review_binds_account_changes_semantics_and_preserves_independent_state(
         review(
             &other,
             &snapshot,
-            Provider::MailboxOrg,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
             store.keys(),
             &batch
         )
@@ -205,11 +211,32 @@ fn exact_review_binds_account_changes_semantics_and_preserves_independent_state(
     let written = guard
         .replace(&snapshot.content_version, &reviewed.resulting_document)
         .unwrap();
-    reconcile(&mut saved, &written, Provider::MailboxOrg).unwrap();
+    reconcile(
+        &mut saved,
+        &written,
+        &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+    )
+    .unwrap();
     store.save_state(&mut saved).unwrap();
-    assert!(review(&saved, &written, Provider::MailboxOrg, store.keys(), &batch).is_err());
+    assert!(
+        review(
+            &saved,
+            &written,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+            store.keys(),
+            &batch
+        )
+        .is_err()
+    );
     let once = serde_json::to_vec(&saved).unwrap();
-    assert!(!reconcile(&mut saved, &written, Provider::MailboxOrg).unwrap());
+    assert!(
+        !reconcile(
+            &mut saved,
+            &written,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg)
+        )
+        .unwrap()
+    );
     assert_eq!(serde_json::to_vec(&saved).unwrap(), once);
     let after = serde_json::to_value(&saved).unwrap();
     for key in [
@@ -260,9 +287,19 @@ fn recovery_uses_newest_owner_file_and_invalidates_proof_without_prior_refresh()
     let guard = adapter.lock().unwrap();
     let initial = guard.read().unwrap();
     let (store, mut saved) = state(root.path(), "first");
-    reconcile(&mut saved, &initial, Provider::MailboxOrg).unwrap();
+    reconcile(
+        &mut saved,
+        &initial,
+        &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+    )
+    .unwrap();
     store.save_state(&mut saved).unwrap();
-    let proof = workspace::preview(&saved, Provider::MailboxOrg, store.keys()).unwrap();
+    let proof = workspace::preview(
+        &saved,
+        &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+        store.keys(),
+    )
+    .unwrap();
     let mut d = initial.document;
     d.enabled = true;
     d.entries.push(entry("ledger@signup.example.test"));
@@ -275,11 +312,16 @@ fn recovery_uses_newest_owner_file_and_invalidates_proof_without_prior_refresh()
     )
     .unwrap();
     let mut recovered = store.load_state().unwrap();
-    reconcile(&mut recovered, &guard.read().unwrap(), Provider::MailboxOrg).unwrap();
+    reconcile(
+        &mut recovered,
+        &guard.read().unwrap(),
+        &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+    )
+    .unwrap();
     assert!(
         workspace::confirm_export(
             &mut recovered,
-            Provider::MailboxOrg,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
             store.keys(),
             &proof.receipt
         )
@@ -321,7 +363,14 @@ fn conflicting_independent_entries_and_original_approvals_are_not_claimed() {
         content_version: "source".into(),
         document: d,
     };
-    assert!(reconcile(&mut saved.clone(), &snapshot, Provider::MailboxOrg).is_err());
+    assert!(
+        reconcile(
+            &mut saved.clone(),
+            &snapshot,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg)
+        )
+        .is_err()
+    );
     let mut e = entry("ledger@signup.example.test");
     e.association = Some(Association {
         sender_domains: BTreeSet::from(["example.org".into()]),
@@ -350,7 +399,7 @@ fn conflicting_independent_entries_and_original_approvals_are_not_claimed() {
         review(
             &saved,
             &snapshot,
-            Provider::MailboxOrg,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
             store.keys(),
             &batch
         )
@@ -362,7 +411,7 @@ fn conflicting_independent_entries_and_original_approvals_are_not_claimed() {
         review(
             &saved,
             &snapshot,
-            Provider::MailboxOrg,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
             store.keys(),
             &batch
         )

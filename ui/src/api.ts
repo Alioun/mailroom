@@ -133,9 +133,6 @@ export async function exportSummary(account: string, report: CensusReport, appro
 
 export type Documents = z.infer<typeof documents>
 export type Pin = z.infer<typeof pin>
-export async function proveAccount(account: string, input: { documents: Documents; as_of: number; pins: Pin[]; baseline: Sample['baseline']; previous: Documents | null }): Promise<Preview> {
-  return preview.parse(await accountPost('proof', { account, ...input }))
-}
 
 const workspaceInput = z.object({ documents, pins: z.array(pin), as_of: z.number(), baseline: sample.shape.baseline })
 const exportInfo = z.object({ identity: z.string(), semantics: z.string(), proof_semantics: z.string(), exported_at: z.number(), provenance: z.string(), usable: z.boolean() })

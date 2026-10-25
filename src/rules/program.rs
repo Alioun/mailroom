@@ -12,14 +12,14 @@ pub enum Engine {
     MailboxSieve,
     GmailBacklog,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceSource {
     Unknown,
     SyntheticDeliveredTo,
     SyntheticOriginalTo,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineContext {
     pub account: String,

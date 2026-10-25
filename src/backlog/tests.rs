@@ -209,8 +209,12 @@ fn bound_receipts_reject_tamper_replay_revision_selection_and_download_authority
     assert_ne!(before.receipt, p(&state, &store, &mailbox, false).receipt);
     let id = begin(&mut state, &store, &mailbox, false);
     assert!(start(&mut state, before, &id).is_err());
-    let download =
-        crate::rules::workspace::preview(&state, Provider::MailboxOrg, store.keys()).unwrap();
+    let download = crate::rules::workspace::preview(
+        &state,
+        &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+        store.keys(),
+    )
+    .unwrap();
     assert_ne!(download.receipt, id);
 }
 #[test]

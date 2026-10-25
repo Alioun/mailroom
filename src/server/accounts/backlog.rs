@@ -68,7 +68,7 @@ pub(in crate::server) async fn handle(
         let ledger_guard = if matches!(request.command, Action::Stop { .. }) { None } else { state.accounts.ledger.as_ref().map(|l| l.lock()).transpose()? };
         // Stop must persist even when the authoritative ledger needs repair.
         if !matches!(request.command, Action::Stop { .. }) {
-            sync_ledger(&mut saved, &store, account.provider, ledger_guard.as_ref())?;
+            sync_ledger(&mut saved, &store, &repo.workspace_context(&account, &store).map_err(|e| e.to_string())?, ledger_guard.as_ref())?;
         }
         let mut mailbox = match &state.accounts.source {
             AccountSource::Synthetic { mailboxes, .. } if saved.census.acquisition_state == ScanState::Complete => Some(SyntheticMailbox::open(mailboxes, &store, &saved.census).map_err(|e| e.to_string())?),

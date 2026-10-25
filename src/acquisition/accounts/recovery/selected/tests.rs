@@ -103,7 +103,7 @@ fn schema_ten_protocol_and_proposal_sieve_facts_round_trip_with_selected_recover
             .unwrap();
     }
     let (manifest, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
-    assert!(manifest.accounts.iter().all(|m| m.state_schema == 12));
+    assert!(manifest.accounts.iter().all(|m| m.state_schema == 13));
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();
@@ -509,21 +509,24 @@ fn selected_installation_lease_excludes_disjoint_restore_and_creation_without_ch
 #[test]
 fn selected_folder_journal_restores_held_and_retains_later_independent_effects() {
     let root = tempfile::tempdir().unwrap();
-    let (repo, account, fake) =
+    let (mut repo, account, fake) =
         crate::acquisition::folder_provisioning::tests::install(root.path());
-    crate::acquisition::folder_provisioning::tests::commit_synthetic_folders(&repo, &account);
-    let before = repo
-        .store(&account)
-        .unwrap()
-        .load_state()
-        .unwrap()
-        .folder_provisioning;
+    crate::acquisition::folder_provisioning::tests::commit_saved_workspace_folders(
+        &mut repo,
+        &account,
+        root.path(),
+    );
+    let before = repo.store(&account).unwrap().load_state().unwrap();
     let ledger = InstalledLedger::install(root.path().join("ledger")).unwrap();
     let (_, bundle) = capture(
         &repo,
         std::slice::from_ref(&account.id),
         &ledger,
         root.path(),
+    );
+    let effects = crate::acquisition::sieve_transaction::tests::independent_effects(
+        root.path(),
+        &repo.store(&account).unwrap(),
     );
     crate::acquisition::folder_provisioning::tests::later_folder_change(
         &repo,
@@ -546,7 +549,11 @@ fn selected_folder_journal_restores_held_and_retains_later_independent_effects()
     let account = fresh.load(&account.id).unwrap();
     let store = fresh.store(&account).unwrap();
     let mut restored = store.load_state().unwrap();
-    assert!(restored.folder_provisioning == before);
+    assert!(serde_json::to_value(&restored).unwrap() == serde_json::to_value(&before).unwrap());
+    assert_eq!(
+        fs::read(fresh_root.path().join("ledger/addresses.yaml")).unwrap(),
+        fs::read(root.path().join("ledger/addresses.yaml")).unwrap()
+    );
     assert!(store.recovery_pending());
     assert!(
         fresh
@@ -571,4 +578,9 @@ fn selected_folder_journal_restores_held_and_retains_later_independent_effects()
             .is_err()
     );
     assert_eq!(fs::read(independent.path()).unwrap(), later);
+    drop(independent);
+    assert_eq!(
+        crate::acquisition::sieve_transaction::tests::independent_effects(root.path(), &store),
+        effects
+    );
 }

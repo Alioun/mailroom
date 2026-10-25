@@ -99,6 +99,8 @@ struct Pending {
     created: Instant,
 }
 pub(crate) struct Boundary {
+    #[cfg(test)]
+    pub(crate) accesses: usize,
     pending: BTreeMap<String, Pending>,
     expected_helper: Option<ExpectedHelper>,
 }
@@ -111,6 +113,8 @@ struct ExpectedHelper {
 impl Default for Boundary {
     fn default() -> Self {
         Self {
+            #[cfg(test)]
+            accesses: 0,
             pending: BTreeMap::new(),
             expected_helper: None,
         }
@@ -130,6 +134,8 @@ impl Confirmed {
 impl Boundary {
     pub fn synthetic() -> Self {
         Self {
+            #[cfg(test)]
+            accesses: 0,
             pending: BTreeMap::new(),
             expected_helper: Some(ExpectedHelper {
                 path: "in-process synthetic helper".into(),
@@ -139,6 +145,10 @@ impl Boundary {
         }
     }
     pub fn offer(&mut self, plan: Plan) -> Result<(String, Request), String> {
+        #[cfg(test)]
+        {
+            self.accesses += 1;
+        }
         if self.expected_helper.is_none() {
             return Err(NATIVE_GAP.into());
         }

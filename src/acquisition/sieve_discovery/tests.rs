@@ -39,7 +39,7 @@ fn encrypted_actual_discovery_refresh_failures_reopen_and_exact_aggregate_preser
         .unwrap();
     let store = repo.store(&account).unwrap();
     let state = store.load_state().unwrap();
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), 13);
     let baseline = state.sieve.last_successful.clone().unwrap();
     assert!(baseline.bodies[0].bytes == PRIVATE_SCRIPT);
     assert!(
@@ -200,8 +200,19 @@ pub(crate) fn seed(state: &mut AccountState, keys: &crate::census::CensusKeys) {
             message_id_hash: identity.message_id_hash.clone(),
             expected: proof::Destination::Inbox,
         });
-    let export = workspace::preview(state, Provider::MailboxOrg, keys).unwrap();
-    workspace::confirm_export(state, Provider::MailboxOrg, keys, &export.receipt).unwrap();
+    let export = workspace::preview(
+        state,
+        &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+        keys,
+    )
+    .unwrap();
+    workspace::confirm_export(
+        state,
+        &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+        keys,
+        &export.receipt,
+    )
+    .unwrap();
     let plan = backlog::preview(
         state,
         Provider::MailboxOrg,
@@ -315,7 +326,7 @@ fn sieve_currentness_password_key_source_rotation_and_census_save_preserve_histo
         let store = repo.store(&account).unwrap();
         crate::rules::workspace::preview(
             &store.load_state().unwrap(),
-            account.provider,
+            &crate::rules::workspace::WorkspaceContext::local(account.provider),
             store.keys(),
         )
         .unwrap()
@@ -329,7 +340,7 @@ fn sieve_currentness_password_key_source_rotation_and_census_save_preserve_histo
     assert!(
         crate::rules::workspace::confirm_export(
             &mut saved,
-            account.provider,
+            &crate::rules::workspace::WorkspaceContext::local(account.provider),
             store.keys(),
             &old_proof
         )
@@ -468,9 +479,19 @@ fn sieve_evidence_invalidates_download_and_proposal_receipts_without_compiler_au
         .history
         .retain(|d| d.disposition == Disposition::Accept);
     store.save_state(&mut saved).unwrap();
-    let old_proof = workspace::preview(&saved, account.provider, store.keys()).unwrap();
+    let old_proof = workspace::preview(
+        &saved,
+        &crate::rules::workspace::WorkspaceContext::local(account.provider),
+        store.keys(),
+    )
+    .unwrap();
     assert!(old_proof.download_available);
-    let generated = proposals::generate(&saved, account.provider, store.keys()).unwrap();
+    let generated = proposals::generate(
+        &saved,
+        &crate::rules::workspace::WorkspaceContext::local(account.provider),
+        store.keys(),
+    )
+    .unwrap();
     let candidate = generated.candidates.first().unwrap();
     let selected = Selection {
         account: generated.account,
@@ -482,7 +503,7 @@ fn sieve_evidence_invalidates_download_and_proposal_receipts_without_compiler_au
     };
     let old_review = proposals::review(
         &saved,
-        account.provider,
+        &crate::rules::workspace::WorkspaceContext::local(account.provider),
         store.keys(),
         &selected,
         Disposition::Reject,
@@ -496,7 +517,7 @@ fn sieve_evidence_invalidates_download_and_proposal_receipts_without_compiler_au
     assert!(
         workspace::confirm_export(
             &mut saved,
-            account.provider,
+            &crate::rules::workspace::WorkspaceContext::local(account.provider),
             store.keys(),
             &old_proof.receipt
         )
@@ -505,7 +526,7 @@ fn sieve_evidence_invalidates_download_and_proposal_receipts_without_compiler_au
     assert!(
         proposals::confirm(
             &mut saved,
-            account.provider,
+            &crate::rules::workspace::WorkspaceContext::local(account.provider),
             store.keys(),
             &selected,
             Disposition::Reject,
@@ -516,7 +537,7 @@ fn sieve_evidence_invalidates_download_and_proposal_receipts_without_compiler_au
     assert!(
         proposals::confirm(
             &mut saved,
-            account.provider,
+            &crate::rules::workspace::WorkspaceContext::local(account.provider),
             store.keys(),
             &selected,
             Disposition::Reject,
@@ -524,7 +545,12 @@ fn sieve_evidence_invalidates_download_and_proposal_receipts_without_compiler_au
         )
         .is_err()
     );
-    let fresh = workspace::preview(&saved, account.provider, store.keys()).unwrap();
+    let fresh = workspace::preview(
+        &saved,
+        &crate::rules::workspace::WorkspaceContext::local(account.provider),
+        store.keys(),
+    )
+    .unwrap();
     assert_ne!(fresh.receipt, old_proof.receipt);
     assert_eq!(
         fresh.proof.artifact.identity(),

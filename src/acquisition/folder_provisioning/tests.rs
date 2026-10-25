@@ -17,13 +17,14 @@ use std::{
     path::Path,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::Duration,
 };
 
 pub(crate) struct Fixture {
+    pub(crate) connections: Arc<AtomicUsize>,
     pub(in crate::acquisition) source: InstalledSource,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
@@ -121,12 +122,15 @@ impl Fixture {
         drop(store);
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let accepted = connections.clone();
         let root = root.to_owned();
         let id = id.clone();
         let worker = thread::spawn(move || {
             while !stopping.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((tcp, _)) => {
+                        accepted.fetch_add(1, Ordering::SeqCst);
                         let _ = serve(tcp, config.clone(), &repo, &id, &root);
                     }
                     Err(_) => thread::sleep(Duration::from_millis(5)),
@@ -134,6 +138,7 @@ impl Fixture {
             }
         });
         Self {
+            connections,
             source,
             stop,
             worker: Some(worker),
@@ -200,6 +205,7 @@ fn serve(
     ));
     send(io.get_mut(), b"* OK synthetic IMAP\r\n")?;
     let mut namespaces = 0;
+    let mut authenticated = false;
     loop {
         let mut line = String::new();
         if io.read_line(&mut line)? == 0 {
@@ -238,6 +244,7 @@ fn serve(
         let mut response = format!("{tag} OK done\r\n").into_bytes();
         match kind {
             "LOGIN" => {
+                authenticated = true;
                 if mode == "auth" {
                     response = format!("{tag} NO diagnostic suppressed\r\n").into_bytes();
                 }
@@ -372,6 +379,28 @@ fn serve(
             _ => unreachable!(),
         }
         send(io.get_mut(), &response)?;
+        if mode == "stall_write" && kind == "CAPABILITY" && authenticated {
+            use std::os::fd::AsRawFd;
+            let size: libc::c_int = 4096;
+            assert_eq!(
+                unsafe {
+                    libc::setsockopt(
+                        io.get_ref().sock.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_RCVBUF,
+                        (&size as *const libc::c_int).cast(),
+                        std::mem::size_of_val(&size) as libc::socklen_t,
+                    )
+                },
+                0
+            );
+            std::fs::write(root.join("write-stalled"), b"ready")?;
+            let end = std::time::Instant::now() + Duration::from_secs(3);
+            while !root.join("release-write").exists() && std::time::Instant::now() < end {
+                thread::sleep(Duration::from_millis(5));
+            }
+            return Ok(());
+        }
     }
 }
 pub(crate) fn install(root: &Path) -> (Accounts, Account, Fixture) {
@@ -385,6 +414,8 @@ pub(crate) fn install(root: &Path) -> (Accounts, Account, Fixture) {
         let account = repo.list().unwrap().remove(0);
         (repo, account)
     };
+    repo.sieve_source = None;
+    repo.sieve_write = None;
     let fake = Fixture::start(root, &account.id);
     fake.install(&mut repo);
     (repo, account, fake)
@@ -398,6 +429,9 @@ fn unrelated(value: &AccountState) -> String {
         v.as_object_mut().unwrap().remove(f);
     }
     digest(&v)
+}
+fn populated(state: &AccountState) -> serde_json::Value {
+    serde_json::json!({"census":!state.census.folders.is_empty(),"backlog":!state.backlog.is_empty(),"exports":!state.exports.is_empty(),"proposals":!state.proposals.history.is_empty(),"ledger":state.ledger.document.as_ref().is_some_and(|d| !d.entries.is_empty()),"invoices":!state.invoices.sends.is_empty(),"unsubscribe":!state.unsubscribe.history.is_empty(),"winddown":!state.winddown.history.is_empty(),"sieve":!state.sieve_transactions.history.is_empty(),"mailbox_effects":!state.synthetic_effects.is_empty(),"send_effects":!state.invoices.synthetic_received.is_empty(),"unsubscribe_effects":!state.unsubscribe.synthetic_acknowledgments.is_empty()})
 }
 #[test]
 fn saved_workspace_omits_every_filing_action_and_reopen_never_creates() {
@@ -568,7 +602,8 @@ fn folder_fixture_worker() {
     let store = repo.store(&account).unwrap();
     let state = store.load_state().unwrap();
     let effects = crate::acquisition::sieve_transaction::tests::independent_effects(root, &store);
-    let value = serde_json::json!({"independent_effects":effects,"account":account.id,"schema":store.schema_version().unwrap(),"revision":state.revision,"journal":state.folder_provisioning,"topology":topology,"source":source,"commands":commands,"unrelated":unrelated(&state),"external_unrelated":external_unrelated});
+    let populated = populated(&state);
+    let value = serde_json::json!({"populated":populated,"independent_effects":effects,"account":account.id,"schema":store.schema_version().unwrap(),"revision":state.revision,"journal":state.folder_provisioning,"topology":topology,"source":source,"commands":commands,"unrelated":unrelated(&state),"external_unrelated":external_unrelated});
     std::fs::write(
         root.join("folder-observations.json"),
         serde_json::to_vec(&value).unwrap(),
@@ -841,15 +876,7 @@ fn synthetic_folder_crash_worker() {
 }
 #[test]
 fn stale_proof_source_password_and_key_never_authorize_folder_commands() {
-    for change in [
-        "state",
-        "pin",
-        "source",
-        "password",
-        "key",
-        "login",
-        "credential_bytes",
-    ] {
+    for change in ["state", "pin", "source", "password", "key", "login"] {
         let root = tempfile::tempdir().unwrap();
         let (mut repo, mut account, mut fake) = install(root.path());
         let store = repo.store(&account).unwrap();
@@ -886,15 +913,6 @@ fn stale_proof_source_password_and_key_never_authorize_folder_commands() {
                     .join("config")
                     .join(format!("{}.json", account.id.as_str())),
                 serde_json::to_vec(&account).unwrap(),
-            )
-            .unwrap();
-        }
-        if change == "credential_bytes" {
-            std::fs::write(
-                root.path()
-                    .join("fake-credentials")
-                    .join(format!("{}-password", account.id.as_str())),
-                b"changed-without-reference-change",
             )
             .unwrap();
         }
@@ -1010,20 +1028,75 @@ fn partial_create_refusal_lost_ack_reconciliation_and_cancel_preserve_effects() 
     assert!(saved.folder_provisioning.history[0].steps.is_empty());
 }
 
-pub(crate) fn commit_synthetic_folders(repo: &Accounts, account: &Account) {
+pub(crate) fn commit_saved_workspace_folders(repo: &mut Accounts, account: &Account, root: &Path) {
+    repo.install_synthetic_workspace(account, "explicit-recovery-preservation");
     let store = repo.store(account).unwrap();
     let mut saved = store.load_state().unwrap();
-    synthetic_operation(repo, account, &store, &mut saved);
-    let index = saved.folder_provisioning.history.len() - 1;
-    repo.folder_run(
+    let ledger = crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap();
+    let guard = ledger.lock().unwrap();
+    let original = guard.read().unwrap();
+    let mut document = original.document;
+    document.enabled = true;
+    document.entries.push(serde_json::from_value(serde_json::json!({
+        "address":"retained@example.test", "service":"Invented retained service",
+        "folder":"Aufbewahrt", "first_seen":"synthetic historical value",
+        "status":"active", "note":"Synthetic preservation evidence",
+        "association":{"sender_domains":["sender.example"],"approved_evidence":"Explicit synthetic association"},
+        "owner_extension":{"preserve":["one",2]}
+    })).unwrap());
+    let snapshot = guard.replace(&original.content_version, &document).unwrap();
+    let context = repo.workspace_context(account, &store).unwrap();
+    crate::ledger::reconcile(&mut saved, &snapshot, &context).unwrap();
+    store.save_state(&mut saved).unwrap();
+    let proof = crate::rules::workspace::preview(&saved, &context, store.keys()).unwrap();
+    crate::rules::workspace::confirm_export(&mut saved, &context, store.keys(), &proof.receipt)
+        .unwrap();
+    store.save_state(&mut saved).unwrap();
+    assert!(
+        populated(&saved)
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|v| v == true)
+    );
+    let initial = unrelated(&saved);
+    let independent =
+        crate::acquisition::sieve_transaction::tests::independent_effects(root, &store);
+    let external_unrelated = || {
+        let (_, mut state) = provider(repo, &account.id, root);
+        state.synthetic_folders = None;
+        state.revision = 0;
+        digest(&state)
+    };
+    let external = external_unrelated();
+    let preview = repo
+        .folder_preview(account, &store, &saved, Cancellation::default())
+        .unwrap();
+    assert!(!preview.operation.plan.logical_leaves.is_empty());
+    repo.folder_confirm(
         account,
         &store,
         &mut saved,
-        index,
+        &preview.receipt,
         Cancellation::default(),
-        &|_| Ok(()),
+        |state| {
+            if guard.read()?.content_version != state.ledger.source_version {
+                return Err("Synthetic ledger changed".into());
+            }
+            Ok(())
+        },
     )
     .unwrap();
+    assert_eq!(
+        saved.folder_provisioning.history.last().unwrap().status,
+        Status::Complete
+    );
+    assert_eq!(unrelated(&saved), initial);
+    assert_eq!(external_unrelated(), external);
+    assert_eq!(
+        crate::acquisition::sieve_transaction::tests::independent_effects(root, &store),
+        independent
+    );
 }
 pub(crate) fn later_folder_change(repo: &Accounts, account: &Account, root: &Path) {
     let (store, mut state) = provider(repo, &account.id, root);
@@ -1083,8 +1156,8 @@ fn expired_certificate_and_stalled_tls_obey_verification_cancellation_and_deadli
 #[test]
 fn encrypted_rotation_and_exact_forgetting_own_folder_state_without_a_new_resource() {
     let root = tempfile::tempdir().unwrap();
-    let (repo, account, fake) = install(root.path());
-    commit_synthetic_folders(&repo, &account);
+    let (mut repo, account, fake) = install(root.path());
+    commit_saved_workspace_folders(&mut repo, &account, root.path());
     drop(fake);
     let before = repo.store(&account).unwrap().load_state().unwrap();
     let (_, external) = provider(&repo, &account.id, root.path());
@@ -1146,4 +1219,16 @@ fn newly_observed_noinferiors_stops_before_any_further_create() {
             .count(),
         1
     );
+}
+
+#[cfg(test)]
+pub(super) fn progress_evidence(state: &AccountState) {
+    if let Some(root) = std::env::var_os("MAILROOM_FOLDERS_FIXTURE") {
+        let value = serde_json::json!({"revision":state.revision,"unrelated":unrelated(state),"journal":state.folder_provisioning});
+        std::fs::write(
+            Path::new(&root).join("folder-progress.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+    }
 }

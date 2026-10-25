@@ -364,6 +364,13 @@ impl EncryptedStore {
         if state.census.account != self.keys.account {
             return Err(CensusError::AccountMismatch);
         }
+        if state
+            .exports
+            .iter()
+            .any(|e| e.context_binding.as_ref().is_some_and(|b| b.len() > 128))
+        {
+            return Err(CensusError::Storage);
+        }
         if state.exports.len() > crate::rules::workspace::HISTORY_LIMIT {
             return Err(CensusError::Storage);
         }
@@ -429,7 +436,7 @@ impl EncryptedStore {
         state.census.acquisition.validate(&state.census.account)?;
         let snapshot =
             Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
-        self.stage_snapshot(12, &snapshot)
+        self.stage_snapshot(13, &snapshot)
     }
 
     fn stage_snapshot(
@@ -545,7 +552,10 @@ impl EncryptedStore {
             )
             .map_err(|_| CensusError::Storage)?;
         let snapshot = Zeroizing::new(snapshot);
-        if !matches!(version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12) {
+        if !matches!(
+            version,
+            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13
+        ) {
             return Err(CensusError::UnsupportedVersion);
         }
         if account != self.keys.account.as_str() {
@@ -566,6 +576,9 @@ impl EncryptedStore {
         } else {
             serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?
         };
+        if version < 13 && state.exports.iter().any(|e| e.context_binding.is_some()) {
+            return Err(CensusError::UnsupportedVersion);
+        }
         if version < 12
             && (state.folder_provisioning != Default::default()
                 || state.synthetic_folders.is_some())
@@ -584,6 +597,13 @@ impl EncryptedStore {
         }
         if version < 9 && !state.proposals.history.is_empty() {
             return Err(CensusError::UnsupportedVersion);
+        }
+        if state
+            .exports
+            .iter()
+            .any(|e| e.context_binding.as_ref().is_some_and(|b| b.len() > 128))
+        {
+            return Err(CensusError::Storage);
         }
         if state.exports.len() > crate::rules::workspace::HISTORY_LIMIT {
             return Err(CensusError::Storage);
@@ -663,11 +683,76 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
-    fn old_schemas_reject_folder_semantics_and_twelve_round_trips() {
+    fn pre_thirteen_exports_default_to_unusable_and_reject_authority_smuggling() {
         let root = tempfile::tempdir().unwrap();
         let (repo, account, _fake) =
             crate::acquisition::folder_provisioning::tests::install(root.path());
-        crate::acquisition::folder_provisioning::tests::commit_synthetic_folders(&repo, &account);
+        let store = repo.store(&account).unwrap();
+        let saved = store.load_state().unwrap();
+        assert!(!saved.exports.is_empty());
+        let mut legacy = serde_json::to_value(&saved).unwrap();
+        for export in legacy["exports"].as_array_mut().unwrap() {
+            export.as_object_mut().unwrap().remove("context_binding");
+        }
+        for version in [11, 12] {
+            let mut compatible = legacy.clone();
+            if version < 12 {
+                compatible
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("folder_provisioning");
+                compatible
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("synthetic_folders");
+            }
+            store
+                .stage_snapshot(version, &serde_json::to_string(&compatible).unwrap())
+                .unwrap()
+                .persist(store.path())
+                .unwrap();
+            let loaded = store.load_state().unwrap();
+            assert!(loaded.exports.iter().all(|e| e.context_binding.is_none()));
+            let context = repo.workspace_context(&account, &store).unwrap();
+            assert!(
+                crate::rules::workspace::view(&loaded, &context)
+                    .exports
+                    .iter()
+                    .all(|e| !e.usable)
+            );
+            compatible["exports"][0]["context_binding"] = serde_json::json!("caller-claim");
+            store
+                .stage_snapshot(version, &serde_json::to_string(&compatible).unwrap())
+                .unwrap()
+                .persist(store.path())
+                .unwrap();
+            assert!(matches!(
+                store.load_state(),
+                Err(CensusError::UnsupportedVersion)
+            ));
+        }
+        store
+            .stage_state(&saved)
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        assert_eq!(store.schema_version().unwrap(), 13);
+        assert_eq!(
+            serde_json::to_value(store.load_state().unwrap().exports).unwrap(),
+            serde_json::to_value(&saved.exports).unwrap()
+        );
+    }
+
+    #[test]
+    fn old_schemas_reject_folder_semantics_and_current_round_trips() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut repo, account, _fake) =
+            crate::acquisition::folder_provisioning::tests::install(root.path());
+        crate::acquisition::folder_provisioning::tests::commit_saved_workspace_folders(
+            &mut repo,
+            &account,
+            root.path(),
+        );
         let store = repo.store(&account).unwrap();
         let saved = store.load_state().unwrap();
         for version in 1..=11 {
@@ -676,6 +761,14 @@ mod tests {
             } else {
                 serde_json::to_value(&saved).unwrap()
             };
+            if let Some(exports) = value
+                .get_mut("exports")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for export in exports {
+                    export.as_object_mut().unwrap().remove("context_binding");
+                }
+            }
             value["folder_provisioning"] =
                 serde_json::to_value(&saved.folder_provisioning).unwrap();
             store
@@ -693,7 +786,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 12);
+        assert_eq!(store.schema_version().unwrap(), 13);
         assert!(store.load_state().unwrap().folder_provisioning == saved.folder_provisioning);
         let mut bad = saved.clone();
         bad.folder_provisioning.history[0].plan.entries[0]
@@ -742,7 +835,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 12);
+        assert_eq!(store.schema_version().unwrap(), 13);
         assert!(store.load_state().unwrap().sieve_transactions == state.sieve_transactions);
         let mut malformed = state.clone();
         malformed.sieve_transactions.history[0].after.bodies[1]
@@ -790,7 +883,7 @@ mod tests {
             assert!(state.exports.is_empty());
             assert!(state.proposals.history.is_empty());
             store.save_state(&mut state).unwrap();
-            assert_eq!(store.schema_version().unwrap(), 12);
+            assert_eq!(store.schema_version().unwrap(), 13);
             assert_eq!(store.load().unwrap().acquisition, Default::default());
         }
     }

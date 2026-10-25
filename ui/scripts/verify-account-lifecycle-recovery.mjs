@@ -14,6 +14,7 @@ async function verifyAndStop(signal = 'SIGTERM') {
   assert.equal(execFileSync('ps', ['-p', String(retained.pid), '-o', 'command='], { cwd: root, encoding: 'utf8' }).trim(), `${retained.binary} --exact server::accounts::durable_browser_server_fixture --nocapture`)
   assert.ok(execFileSync('lsof', ['-a', '-p', String(retained.pid), '-d', 'cwd', '-Fn'], { cwd: root, encoding: 'utf8' }).includes(`\nn${root.replace(/\/$/, '')}\n`))
   assert.equal(createHash('sha256').update(await readFile(retained.binary)).digest('hex'), retained.binary_sha256)
+  assert.ok(execFileSync('lsof', ['-nP', '-a', '-p', String(retained.pid), '-iTCP:4173', '-sTCP:LISTEN'], { cwd: root, encoding: 'utf8' }).includes('127.0.0.1:4173'))
   if (child) { const exited = once(child, 'exit'); child.kill(signal); await exited; child = undefined }
   else process.kill(retained.pid, signal)
   for (let i = 0; i < 200; i++) {

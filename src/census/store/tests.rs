@@ -121,11 +121,21 @@ fn receipts_bind_raw_documents_state_pins_proof_and_exact_bytes() {
         input: input(),
     });
     store.save_state(&mut state).unwrap();
-    let preview = workspace::preview(&state, Provider::MailboxOrg, store.keys()).unwrap();
+    let preview = workspace::preview(
+        &state,
+        &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+        store.keys(),
+    )
+    .unwrap();
     let rejects = |state: &mut AccountState| {
         assert!(
-            workspace::confirm_export(state, Provider::MailboxOrg, store.keys(), &preview.receipt)
-                .is_err()
+            workspace::confirm_export(
+                state,
+                &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+                store.keys(),
+                &preview.receipt
+            )
+            .is_err()
         );
     };
     let before = state.clone();
@@ -138,11 +148,15 @@ fn receipts_bind_raw_documents_state_pins_proof_and_exact_bytes() {
         .override_yaml
         .push_str("\n# formatting only\n");
     assert_eq!(
-        workspace::preview(&state, Provider::MailboxOrg, store.keys())
-            .unwrap()
-            .proof
-            .artifact
-            .identity(),
+        workspace::preview(
+            &state,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+            store.keys()
+        )
+        .unwrap()
+        .proof
+        .artifact
+        .identity(),
         preview.proof.artifact.identity()
     );
     rejects(&mut state);
@@ -175,18 +189,28 @@ fn receipts_bind_raw_documents_state_pins_proof_and_exact_bytes() {
             expected: crate::rules::proof::Destination::Inbox,
         });
     rejects(&mut state);
-    let stale = workspace::preview(&state, Provider::MailboxOrg, store.keys()).unwrap();
+    let stale = workspace::preview(
+        &state,
+        &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+        store.keys(),
+    )
+    .unwrap();
     assert_eq!(stale.proof.pins[0].status, "stale");
     assert!(stale.download_available);
     state = before.clone();
     assert!(
-        workspace::confirm_export(&mut state, Provider::Gmail, store.keys(), &preview.receipt)
-            .is_err()
+        workspace::confirm_export(
+            &mut state,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::Gmail),
+            store.keys(),
+            &preview.receipt
+        )
+        .is_err()
     );
     assert!(
         workspace::confirm_export(
             &mut state,
-            Provider::MailboxOrg,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
             store.keys(),
             &"0".repeat(64)
         )
@@ -194,7 +218,7 @@ fn receipts_bind_raw_documents_state_pins_proof_and_exact_bytes() {
     );
     let export = workspace::confirm_export(
         &mut state,
-        Provider::MailboxOrg,
+        &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
         store.keys(),
         &preview.receipt,
     )
@@ -215,10 +239,15 @@ fn receipts_bind_raw_documents_state_pins_proof_and_exact_bytes() {
         preview.proof.artifact.identity()
     );
     for _ in 0..12 {
-        let fresh = workspace::preview(&state, Provider::MailboxOrg, store.keys()).unwrap();
+        let fresh = workspace::preview(
+            &state,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+            store.keys(),
+        )
+        .unwrap();
         workspace::confirm_export(
             &mut state,
-            Provider::MailboxOrg,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
             store.keys(),
             &fresh.receipt,
         )
@@ -228,15 +257,26 @@ fn receipts_bind_raw_documents_state_pins_proof_and_exact_bytes() {
     assert_eq!(state.exports.len(), workspace::HISTORY_LIMIT);
     state.workspace.as_mut().unwrap().input.baseline = crate::rules::proof::Baseline::Previous;
     assert_eq!(
-        workspace::preview(&state, Provider::MailboxOrg, store.keys())
-            .unwrap()
-            .previous
-            .unwrap()
-            .identity,
+        workspace::preview(
+            &state,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+            store.keys()
+        )
+        .unwrap()
+        .previous
+        .unwrap()
+        .identity,
         preview.proof.artifact.identity()
     );
     state.exports.last_mut().unwrap().semantics = "obsolete-test".into();
-    assert!(workspace::preview(&state, Provider::MailboxOrg, store.keys()).is_err());
+    assert!(
+        workspace::preview(
+            &state,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+            store.keys()
+        )
+        .is_err()
+    );
 }
 #[test]
 fn synthetic_lock_worker() {
@@ -384,21 +424,47 @@ fn obsolete_copy_semantics_do_not_become_a_usable_export_baseline() {
         revision: 1,
         input: input(),
     });
-    let preview = workspace::preview(&state, Provider::MailboxOrg, store.keys()).unwrap();
+    let preview = workspace::preview(
+        &state,
+        &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+        store.keys(),
+    )
+    .unwrap();
     workspace::confirm_export(
         &mut state,
-        Provider::MailboxOrg,
+        &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
         store.keys(),
         &preview.receipt,
     )
     .unwrap();
     state.exports[0].semantics = "mailroom-sieve-subset-v2".into();
     state.exports[0].proof_semantics = "parsed-emitted-sieve-subset-v2".into();
-    assert!(!workspace::view(&state, Provider::MailboxOrg).exports[0].usable);
+    assert!(
+        !workspace::view(
+            &state,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg)
+        )
+        .exports[0]
+            .usable
+    );
     state.workspace.as_mut().unwrap().input.baseline = crate::rules::proof::Baseline::Previous;
-    assert!(workspace::preview(&state, Provider::MailboxOrg, store.keys()).is_err());
+    assert!(
+        workspace::preview(
+            &state,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+            store.keys()
+        )
+        .is_err()
+    );
     state.workspace.as_mut().unwrap().input.baseline = crate::rules::proof::Baseline::Current;
-    assert!(workspace::preview(&state, Provider::MailboxOrg, store.keys()).is_ok());
+    assert!(
+        workspace::preview(
+            &state,
+            &crate::rules::workspace::WorkspaceContext::local(Provider::MailboxOrg),
+            store.keys()
+        )
+        .is_ok()
+    );
 }
 
 #[test]

@@ -646,3 +646,78 @@ fn credential_errors_and_failed_retirement_retain_retry_information_without_fals
     repo.recover(&a.id, &effects).unwrap();
     assert!(!repo.metadata_path(&a.id).exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn released_locks_do_not_remain_owned_by_an_unrelated_child_before_exec() {
+    use std::{
+        io::{Read, Write},
+        os::{
+            fd::AsRawFd,
+            unix::{net::UnixStream, process::CommandExt},
+        },
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let repo = persistent_accounts(root.path());
+    let a = account(&repo);
+    let effects = root.path().join("mailboxes");
+    populate(&repo, &a, &effects);
+    let before = snapshots(&repo, &a, &effects);
+    for kind in ["lifecycle", "store", "recovery_store"] {
+        let lease: Box<dyn std::any::Any> = match kind {
+            "lifecycle" => Box::new(repo.lock_account(&a.id).unwrap()),
+            "store" => Box::new(repo.store(&a).unwrap()),
+            _ => Box::new(EncryptedStore::lock_directory(&repo.paths.data, &a.id).unwrap()),
+        };
+        let (mut parent, child) = UnixStream::pair().unwrap();
+        parent
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let child_fd = child.as_raw_fd();
+        let spawning = std::thread::spawn(move || {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "acquisition::accounts::lifecycle::tests::lifecycle_process_worker",
+                ])
+                .env_remove("MAILROOM_LIFECYCLE_PROCESS_DIR")
+                .stdout(std::process::Stdio::null());
+            unsafe {
+                command.pre_exec(move || {
+                    let mut byte = 1u8;
+                    if libc::write(child_fd, (&byte as *const u8).cast(), 1) != 1
+                        || libc::read(child_fd, (&mut byte as *mut u8).cast(), 1) != 1
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let result = command.status();
+            drop(child);
+            result.unwrap()
+        });
+        let mut ready = [0];
+        parent.read_exact(&mut ready).unwrap();
+        assert_eq!(ready, [1]);
+        assert!(
+            repo.rotate(&a.id, &effects).is_err(),
+            "{kind} must exclude a real competing operation"
+        );
+        drop(lease);
+        let recovery = repo.recover(&a.id, &effects);
+        let reopened = repo.lock_stores(&a, &effects);
+        parent.write_all(&[1]).unwrap();
+        assert!(spawning.join().unwrap().success());
+        recovery
+            .unwrap_or_else(|e| panic!("{kind} remains locked after its owner released it: {e:?}"));
+        let after: Vec<Vec<u8>> = reopened
+            .unwrap()
+            .iter()
+            .map(|s| serde_json::to_vec(&s.load_state().unwrap()).unwrap())
+            .collect();
+        assert_eq!(after, before, "{kind}");
+    }
+}

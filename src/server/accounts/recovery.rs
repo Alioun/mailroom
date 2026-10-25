@@ -77,8 +77,9 @@ pub(in crate::server) async fn handle(
         Err(e) => return e,
     };
     match tokio::task::spawn_blocking(move || -> Result<serde_json::Value, AcquisitionError> {
-        let _admission = state.accounts.admission.lock().expect("account admission");
-        if state.accounts.job.lock().expect("account job").as_ref().is_some_and(|j| j.progress.state == ScanState::Running) {return Err(AcquisitionError::LifecyclePending);}
+        let status_only = matches!(request, Request::Status);
+        let _admission = if status_only { None } else { Some(state.accounts.admission.lock().expect("account admission")) };
+        if !status_only && state.accounts.job.lock().expect("account job").as_ref().is_some_and(|j| j.progress.state == ScanState::Running) {return Err(AcquisitionError::LifecyclePending);}
         let _operation = state.accounts.operation.lock().expect("account operation");
         let repo = state.accounts.repository()?;
         let AccountSource::Synthetic { mailboxes, .. } = &state.accounts.source else {return Err(AcquisitionError::InvalidInput);};
@@ -168,4 +169,18 @@ async fn production_recovery_denies_before_repository_access() {
             0
         );
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn recovery_status_is_available_while_account_admission_is_closed() {
+    let state = Arc::new(AppState::new(true));
+    let admission = state.accounts.admission.lock().unwrap();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        handle(State(state.clone()), Ok(Json(Request::Status))),
+    )
+    .await;
+    drop(admission);
+    assert_eq!(response.unwrap().status(), StatusCode::OK);
 }

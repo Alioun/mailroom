@@ -1,3 +1,4 @@
+pub mod imap_move;
 mod synthetic;
 pub(crate) use synthetic::SyntheticMailbox;
 

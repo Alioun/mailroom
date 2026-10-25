@@ -16,6 +16,18 @@ const RESPONSE: usize = 512 * 1024;
 const TOTAL: usize = 16 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(5);
 
+#[cfg(test)]
+pub(in crate::acquisition) mod message_move;
+
+struct Endpoint<'a> {
+    address: SocketAddr,
+    tls_name: &'a str,
+    root: &'a [u8],
+    identity: String,
+    command_timeout: Duration,
+    operation_timeout: Duration,
+}
+
 pub(in crate::acquisition) struct InstalledSource {
     pub account: AccountId,
     pub address: SocketAddr,
@@ -88,6 +100,7 @@ pub(super) struct Session {
     written: usize,
     remaining: usize,
     tag: u32,
+    code_limit: usize,
 }
 fn guard(cancel: &Cancellation, end: Instant) -> Result<(), Error> {
     if cancel.is_cancelled() {
@@ -128,6 +141,27 @@ impl Session {
         cancel: Cancellation,
     ) -> Result<Self, Error> {
         let source = permit.0;
+        Self::open(
+            Endpoint {
+                address: source.address,
+                tls_name: &source.tls_name,
+                root: &source.root,
+                identity: source.identity(),
+                command_timeout: source.command_timeout,
+                operation_timeout: source.operation_timeout,
+            },
+            login,
+            password,
+            cancel,
+        )
+    }
+
+    fn open(
+        source: Endpoint<'_>,
+        login: &str,
+        password: &SecretValue,
+        cancel: Cancellation,
+    ) -> Result<Self, Error> {
         let end = Instant::now() + source.operation_timeout.min(Duration::from_secs(60));
         guard(&cancel, end)?;
         let user = Zeroizing::new(quoted(login.as_bytes())?);
@@ -148,10 +182,10 @@ impl Session {
         builder.min_protocol_version(Some(native_tls::Protocol::Tlsv12));
         builder.disable_built_in_roots(true);
         builder.add_root_certificate(
-            native_tls::Certificate::from_der(&source.root).map_err(|_| Error::Tls)?,
+            native_tls::Certificate::from_der(source.root).map_err(|_| Error::Tls)?,
         );
         let connector = builder.build().map_err(|_| Error::Tls)?;
-        let mut handshake = connector.connect(&source.tls_name, tcp);
+        let mut handshake = connector.connect(source.tls_name, tcp);
         let stream = loop {
             guard(&cancel, command_end)?;
             match handshake {
@@ -166,7 +200,7 @@ impl Session {
         let mut s = Self {
             #[cfg(test)]
             pending_writes: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            source: source.identity(),
+            source: source.identity,
             stream,
             cancel,
             end,
@@ -176,6 +210,7 @@ impl Session {
             written: 0,
             remaining: RESPONSE,
             tag: 0,
+            code_limit: 256,
         };
         let greeting = s.row()?;
         if greeting.first().and_then(Token::atom) != Some("*")
@@ -345,7 +380,7 @@ impl Session {
                                 }
                                 break;
                             }
-                            if b == 0 || b == b'\n' || text.len() >= 8192 {
+                            if b == 0 || b == b'\n' || text.len() >= 8192.max(self.code_limit + 1) {
                                 return Err(Error::Limit);
                             }
                             text.push(b);
@@ -355,7 +390,7 @@ impl Session {
                                 .iter()
                                 .position(|b| *b == b']')
                                 .ok_or(Error::Protocol)?;
-                            if close > 256 || !text[..=close].is_ascii() {
+                            if close > self.code_limit || !text[..=close].is_ascii() {
                                 return Err(Error::Protocol);
                             }
                             tokens.push(Token::Atom(
@@ -396,7 +431,7 @@ impl Session {
             _ => Err(Error::Protocol),
         }
     }
-    fn execute(&mut self, command: &[u8]) -> Result<Vec<Vec<Token>>, Error> {
+    fn begin(&mut self, command: &[u8]) -> Result<String, Error> {
         self.check()?;
         self.command_end = (Instant::now() + self.timeout).min(self.end);
         self.remaining = RESPONSE;
@@ -435,6 +470,10 @@ impl Session {
                 Err(_) => return Err(Error::Eof),
             }
         }
+        Ok(tag)
+    }
+    fn execute(&mut self, command: &[u8]) -> Result<Vec<Vec<Token>>, Error> {
+        let tag = self.begin(command)?;
         let mut rows = vec![];
         loop {
             let row = self.row()?;

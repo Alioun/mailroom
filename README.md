@@ -55,9 +55,9 @@ See [Exact-action confirmation](docs/macos-confirmation.md) for the synthetic si
 
 ## Encrypted recovery development
 
-[Encrypted recovery](docs/recovery-format.md) captures one synthetic account with a separately held recovery key. It authenticates an absent-account restore and preserves later independent mailbox and transport effects. Restored accounts remain read-only pending fresh provider evidence and reconciliation. Production creation and restoration are denied while native launch and protected Keychain implementation are missing.
+[Encrypted recovery](docs/recovery-format.md) captures an explicit set of up to eight synthetic accounts and optionally the installed authoritative ledger with a separately held recovery key. It authenticates an absent-account restore and preserves later independent mailbox and transport effects. Restored accounts remain read-only pending fresh provider evidence and reconciliation. Production creation and restoration are denied while native launch and protected Keychain implementation are missing.
 
-Inspect the [owner-run recovery wizard](scripts/recovery-wizard.sh) with `bash scripts/recovery-wizard.sh --plan`. Planning requests no secret and creates no backup. With port 4173 free, run `CARGO_PROFILE_TEST_OPT_LEVEL=1 node scripts/verify-recovery.mjs`, then `node ui/scripts/verify-recovery.mjs` against its paired synthetic fixture.
+Inspect the [owner-run recovery wizard](scripts/recovery-wizard.sh) with `bash scripts/recovery-wizard.sh --plan`. Planning requests no secret and creates no backup. With port 4173 free, run `CARGO_PROFILE_TEST_OPT_LEVEL=1 node scripts/verify-recovery-selected-state.mjs`, then `node ui/scripts/verify-recovery-selected-state.mjs` against its paired synthetic fixture.
 
 ## Account boundary
 

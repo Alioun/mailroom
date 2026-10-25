@@ -100,7 +100,7 @@ impl InstalledLedger {
                         guard.read()?;
                     }
                 }
-            } else {
+            } else if guard.raw()?.is_some() {
                 guard.read()?;
             }
             drop(guard);
@@ -213,24 +213,118 @@ impl LockedLedger<'_> {
         #[cfg(unix)]
         {
             self.check_identity()?;
-            let file = open_at(&self.directory, "addresses.yaml", libc::O_RDONLY, 0)?;
+            let bytes = self.raw()?.ok_or(ERROR)?;
+            let document = decode_recovery_bytes(&bytes)?;
+            Ok(Snapshot {
+                content_version: digest(&bytes),
+                document,
+            })
+        }
+    }
+    pub(crate) fn raw(&self) -> Result<Option<Vec<u8>>, String> {
+        #[cfg(not(unix))]
+        {
+            Err(ERROR.into())
+        }
+        #[cfg(unix)]
+        {
+            self.check_identity()?;
+            let fd = unsafe {
+                libc::openat(
+                    self.directory.as_raw_fd(),
+                    c"addresses.yaml".as_ptr(),
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                )
+            };
+            if fd < 0 {
+                return if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+                    Ok(None)
+                } else {
+                    Err(ERROR.into())
+                };
+            }
+            let file = unsafe { File::from_raw_fd(fd) };
             private_regular(&file)?;
             if file.metadata().map_err(|_| ERROR)?.len() > 1024 * 1024 {
-                return Err("Private ledger exceeds size limit".into());
+                return Err(ERROR.into());
             }
             let mut bytes = Vec::new();
             file.take(1024 * 1024 + 1)
                 .read_to_end(&mut bytes)
                 .map_err(|_| ERROR)?;
-            let value: serde_json::Value = serde_yaml_ng::from_slice(&bytes)
-                .map_err(|_| "Unsupported private ledger YAML. Original file retained")?;
-            let document: Document = serde_json::from_value(value)
-                .map_err(|_| "Unsupported private ledger model. Original file retained")?;
-            validate(&document)?;
-            Ok(Snapshot {
-                content_version: digest(&bytes),
-                document,
-            })
+            if bytes.len() > 1024 * 1024 {
+                return Err(ERROR.into());
+            }
+            Ok(Some(bytes))
+        }
+    }
+    pub(crate) fn restore_exact(&self, expected: Option<&str>, bytes: &[u8]) -> Result<(), String> {
+        #[cfg(not(unix))]
+        {
+            let _ = (expected, bytes);
+            Err(ERROR.into())
+        }
+        #[cfg(unix)]
+        {
+            decode_recovery_bytes(bytes)?;
+            let current = self.raw()?;
+            if current.as_deref() == Some(bytes) {
+                return Ok(());
+            }
+            if current.as_ref().map(|b| digest(b)).as_deref() != expected || current.is_some() {
+                return Err("Current owner ledger differs. No restoration published".into());
+            }
+            let name = format!(
+                ".recovery-ledger-{}-{:032x}.stage",
+                digest(bytes),
+                rand::random::<u128>()
+            );
+            let mut staged = open_at(
+                &self.directory,
+                &name,
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                0o600,
+            )?;
+            staged
+                .write_all(bytes)
+                .and_then(|_| staged.sync_all())
+                .map_err(|_| ERROR)?;
+            if self.raw()?.is_some() {
+                return Err("Ledger appeared during recovery".into());
+            }
+            let from = std::ffi::CString::new(name.as_str()).map_err(|_| ERROR)?;
+            let fd = self.directory.as_raw_fd();
+            // Exclusive rename preserves the one-link guard across process death.
+            #[cfg(target_os = "macos")]
+            let result = unsafe {
+                libc::renameatx_np(
+                    fd,
+                    from.as_ptr(),
+                    fd,
+                    c"addresses.yaml".as_ptr(),
+                    libc::RENAME_EXCL,
+                )
+            };
+            #[cfg(target_os = "linux")]
+            let result = unsafe {
+                libc::renameat2(
+                    fd,
+                    from.as_ptr(),
+                    fd,
+                    c"addresses.yaml".as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            };
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            let result = -1;
+            if result != 0 {
+                return Err(ERROR.into());
+            }
+            self.directory.sync_all().map_err(|_| ERROR)?;
+            if self.raw()?.as_deref() != Some(bytes) {
+                return Err(ERROR.into());
+            }
+            Ok(())
         }
     }
     pub fn replace(&self, expected: &str, document: &Document) -> Result<Snapshot, String> {
@@ -282,4 +376,16 @@ impl LockedLedger<'_> {
             result
         }
     }
+}
+
+pub(crate) fn decode_recovery_bytes(bytes: &[u8]) -> Result<Document, String> {
+    if bytes.len() > 1024 * 1024 {
+        return Err(ERROR.into());
+    }
+    let value: serde_json::Value = serde_yaml_ng::from_slice(bytes)
+        .map_err(|_| "Unsupported private ledger YAML. Original file retained")?;
+    let document: Document = serde_json::from_value(value)
+        .map_err(|_| "Unsupported private ledger model. Original file retained")?;
+    validate(&document)?;
+    Ok(document)
 }

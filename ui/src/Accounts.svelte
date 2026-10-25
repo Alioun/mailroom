@@ -103,7 +103,7 @@
     <div aria-live="polite"><p class="scan-state">{t[status.job.progress.state]}</p><p>{status.job.progress.saved} {t.saved} · {status.job.progress.folders} {t.folders}</p></div>
     {#if status.job.error}<p role="alert">{t.error}</p>{/if}
   {/if}
-  {#key status?.synthetic}<Recovery account={selected} synthetic={status?.synthetic ?? false} {lang} onChanged={lifecycleChanged} />{/key}
+  {#key status?.synthetic}<Recovery {accounts} account={selected} synthetic={status?.synthetic ?? false} {lang} onChanged={lifecycleChanged} />{/key}
   {#key `${selected}:${status?.synthetic}`}<Lifecycle account={selected} synthetic={status?.synthetic ?? false} {lang} onChanged={lifecycleChanged} />{/key}
   {#if view}
     <p class="scan-state">{t[view.census.acquisition_state]}</p>

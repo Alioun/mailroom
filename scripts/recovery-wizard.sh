@@ -214,7 +214,7 @@ if [[ "${1:-}" == "--plan" ]]; then
   printf '%s\n' \
     '1. Verify protected native launch, authenticated IPC and Keychain implementation before real recovery.' \
     '2. Privately generate and separately store a random 256-bit recovery key through the future protected adapter.' \
-    '3. Review exact account, captured resources, boundary and exclusions; approve creation once.' \
+    '3. Review the exact selected account set, optional authoritative ledger, captured resources, boundary and exclusions; approve creation once.' \
     '4. Keep the completed encrypted bundle outside this Mac, apart from its key, and verify local authentication in an isolated installation.' \
     '5. Reconnect privately, acquire fresh provider evidence and reconcile later effects before any operation resumes.' \
     'HOLD: production creation, private key entry, restore and reconnection are unavailable in this build. No storage provider, schedule, retention or escrow is selected.'
@@ -236,15 +236,15 @@ say "Never paste it into chat, argv, browser storage, receipts or logs."
 say "Keep the key apart from the encrypted bundle. This wizard requests and records no secret."
 pause "Record your separate storage arrangement privately."
 stage "Review the exact capture"
-say "Review the selected account, schema, generation, revision, capture time and exact resource hashes."
+say "Review every selected account, schema, generation, revision, capture time and exact resource hashes."
 say "Approve this exact plan once through protected native confirmation after that implementation is accepted."
-say "Provider passwords, external mail effects and authoritative shared ledger files are excluded."
+say "Authoritative ledger inclusion is optional and initially unchecked. Review its exact bytes and source version. Provider passwords and external mail effects are excluded."
 pause "Record that real capture remains blocked."
 stage "Verify outside this installation"
 say "Keep the durable encrypted bundle outside this Mac in a location you choose."
 say "Retain a usable copy while authenticating an isolated restoration with only its separate recovery key."
 say "Verify rules, decisions and histories exactly before replacing or losing any original state."
-say "This build supports synthetic absent-account restoration only. Real restoration remains denied."
+say "This build supports synthetic selected absent-account restoration. Shared ledger restoration requires explicit approval of an absent or identical target. Current differing owner bytes reject. Real restoration remains denied."
 pause "Record the unperformed real restoration checks."
 stage "Reconcile before resuming"
 say "Reconnect only through the future protected private credential flow. Provider passwords were not captured."

@@ -1,0 +1,407 @@
+use super::*;
+use crate::acquisition::accounts::process_tests::persistent_accounts;
+
+fn fixture() -> (tempfile::TempDir, Accounts, Vec<AccountId>, InstalledLedger) {
+    let root = tempfile::tempdir().unwrap();
+    let repo = persistent_accounts(root.path());
+    let mut ids = vec![];
+    for n in 0..3 {
+        let a = repo
+            .create(
+                Provider::MailboxOrg,
+                format!("selected-{n}@example.test"),
+                &SecretValue::new(b"invented".to_vec()),
+            )
+            .unwrap();
+        let store = repo.store(&a).unwrap();
+        let mut saved = store.load_state().unwrap();
+        saved.winddown.dismissed.insert(format!("decision-{n}"));
+        store.save_state(&mut saved).unwrap();
+        ids.push(a.id);
+    }
+    for n in 0..2 {
+        let a = repo.load(&ids[n]).unwrap();
+        let store = repo.store(&a).unwrap();
+        let mut saved = store.load_state().unwrap();
+        saved.winddown.settings.comparisons.insert(
+            ids[1 - n].as_str().into(),
+            BTreeSet::from(["synthetic-comparison".into()]),
+        );
+        store.save_state(&mut saved).unwrap();
+    }
+    let ledger = InstalledLedger::install(root.path().join("ledger")).unwrap();
+    (root, repo, ids, ledger)
+}
+fn secret() -> SecretValue {
+    SecretValue::new(vec![0x72; 32])
+}
+fn capture(
+    repo: &Accounts,
+    ids: &[AccountId],
+    ledger: &InstalledLedger,
+    root: &Path,
+) -> (SelectedManifest, PathBuf) {
+    let (p, _) = repo
+        .selected_capture_preview(ids, true, Some(ledger), 1792915200)
+        .unwrap();
+    let id = repo
+        .selected_capture(&p, &secret(), &root.join("bundles"), Some(ledger), |_| {
+            Ok(())
+        })
+        .unwrap();
+    (p, root.join("bundles").join(format!("{id}.jwe")))
+}
+#[test]
+fn selected_loss_restore_every_boundary_preserves_bytes_histories_and_authority() {
+    for phase in [
+        "selected_restore_intent",
+        "selected_restore_ledger",
+        "selected_restore_credentials",
+        "selected_restore_data",
+        "selected_restore_metadata",
+        "selected_restore_first_account",
+        "selected_restore_second_credentials",
+        "selected_restore_second_data",
+        "selected_restore_second_metadata",
+        "selected_restore_committed",
+    ] {
+        let (root, repo, ids, ledger) = fixture();
+        let (manifest, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
+        assert_eq!(manifest.excluded_accounts, vec![ids[2].clone()]);
+        let fresh_root = tempfile::tempdir().unwrap();
+        let fresh = persistent_accounts(fresh_root.path());
+        let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();
+        fs::remove_file(fresh_root.path().join("ledger/addresses.yaml")).unwrap();
+        let preview = fresh
+            .selected_restore_preview(&bundle, &secret(), true, Some(&target))
+            .unwrap();
+        lifecycle::FAIL.with(|f| *f.borrow_mut() = (Some(phase.into()), 0));
+        assert!(
+            fresh
+                .selected_restore(&bundle, &secret(), &preview, Some(&target), |_| Ok(()))
+                .is_err(),
+            "{phase}"
+        );
+        lifecycle::FAIL.with(|f| *f.borrow_mut() = (None, 0));
+        if phase != "selected_restore_committed" {
+            for id in &ids[..2] {
+                assert!(fresh.require_ready(id).is_err());
+            }
+            assert!(
+                fresh
+                    .selected_resume(&SecretValue::new(vec![9; 32]), Some(&target))
+                    .is_err()
+            );
+            fresh.selected_resume(&secret(), Some(&target)).unwrap();
+        }
+        for id in &ids[..2] {
+            let before = repo.store(&repo.load(id).unwrap()).unwrap();
+            let after = fresh.store(&fresh.load(id).unwrap()).unwrap();
+            assert_eq!(
+                fs::read(before.path()).unwrap(),
+                fs::read(after.path()).unwrap()
+            );
+            assert_eq!(
+                encoded(&before.load_state().unwrap()).unwrap().as_slice(),
+                encoded(&after.load_state().unwrap()).unwrap().as_slice()
+            );
+            assert_eq!(
+                before.keys().identity_binding_for(b"stable", b"op"),
+                after.keys().identity_binding_for(b"stable", b"op")
+            );
+            assert_ne!(
+                before.keys().binding_for(b"approval", b"op"),
+                after.keys().binding_for(b"approval", b"op")
+            );
+            assert!(after.save_state(&mut after.load_state().unwrap()).is_err());
+        }
+        assert_eq!(
+            ledger.lock().unwrap().raw().unwrap(),
+            target.lock().unwrap().raw().unwrap()
+        );
+        assert!(
+            fresh
+                .selected_restore_preview(&bundle, &secret(), true, Some(&target))
+                .is_err()
+        );
+    }
+}
+#[test]
+fn selected_stale_set_ledger_owner_edits_and_collisions_publish_nothing() {
+    let (root, repo, ids, ledger) = fixture();
+    assert!(
+        repo.selected_capture_preview(&[], false, Some(&ledger), 1)
+            .is_err()
+    );
+    assert!(
+        repo.selected_capture_preview(&[ids[0].clone(), ids[0].clone()], false, Some(&ledger), 1)
+            .is_err()
+    );
+    let (p, _) = repo
+        .selected_capture_preview(&ids[..2], true, Some(&ledger), 1)
+        .unwrap();
+    fs::write(
+        root.path().join("ledger/addresses.yaml"),
+        b"version: 1\nenabled: false\nentries: []\n# new owner edit\n",
+    )
+    .unwrap();
+    assert!(
+        repo.selected_capture(
+            &p,
+            &secret(),
+            &root.path().join("bundles"),
+            Some(&ledger),
+            |_| panic!("stale authorization")
+        )
+        .is_err()
+    );
+    let (_, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
+    let fresh_root = tempfile::tempdir().unwrap();
+    let fresh = persistent_accounts(fresh_root.path());
+    let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();
+    assert!(
+        fresh
+            .selected_restore_preview(&bundle, &secret(), true, Some(&target))
+            .is_err()
+    );
+    let p = fresh
+        .selected_restore_preview(&bundle, &secret(), false, Some(&target))
+        .unwrap();
+    let preserved = target.lock().unwrap().raw().unwrap();
+    fresh
+        .create(
+            Provider::MailboxOrg,
+            repo.load(&ids[1]).unwrap().login,
+            &SecretValue::new(b"unrelated-collision".to_vec()),
+        )
+        .unwrap();
+    assert!(
+        fresh
+            .selected_restore(&bundle, &secret(), &p, Some(&target), |_| panic!(
+                "collision authorization"
+            ))
+            .is_err()
+    );
+    assert!(!fresh.metadata_path(&ids[0]).exists());
+    assert!(!fresh.selected_marker().exists());
+    assert_eq!(target.lock().unwrap().raw().unwrap(), preserved);
+}
+#[test]
+fn selected_authenticates_every_resource_rejects_unknown_and_overlapping_identities() {
+    let (root, repo, ids, ledger) = fixture();
+    let (_, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
+    let original = fs::read(bundle).unwrap();
+    for attack in [
+        "duplicate",
+        "overlap",
+        "ledger",
+        "second_cipher",
+        "second_key",
+        "schema",
+    ] {
+        let mut c = selected_open(&original, &secret()).unwrap();
+        match attack {
+            "duplicate" => c.manifest.accounts[1] = c.manifest.accounts[0].clone(),
+            "overlap" => {
+                c.manifest.excluded_accounts = vec![c.manifest.accounts[0].account.clone()]
+            }
+            "ledger" => c.ledger.as_mut().unwrap().0[0] ^= 1,
+            "second_cipher" => {
+                c.accounts[1].ciphertext[0] ^= 1;
+                c.accounts[1].manifest.resources =
+                    inventory(&c.accounts[1].account, &c.accounts[1].ciphertext).unwrap();
+                c.manifest.accounts[1] = c.accounts[1].manifest.clone();
+            }
+            "second_key" => c.accounts[1].key.0[0] ^= 1,
+            _ => c.manifest.version = 999,
+        }
+        assert!(
+            selected_open(&seal(&c, &secret()).unwrap(), &secret()).is_err(),
+            "{attack}"
+        );
+    }
+    let (preview, _) = repo.capture_preview(&ids[0], 1792915200).unwrap();
+    let legacy = repo
+        .capture(
+            &preview,
+            &secret(),
+            &root.path().join("legacy-bundles"),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(
+        selected_open(
+            &fs::read(
+                root.path()
+                    .join("legacy-bundles")
+                    .join(format!("{legacy}.jwe"))
+            )
+            .unwrap(),
+            &secret()
+        )
+        .unwrap()
+        .accounts
+        .len(),
+        1
+    );
+}
+
+#[test]
+fn selected_unrelated_fixture_worker() {
+    let Some(root) = std::env::var_os("MAILROOM_SELECTED_UNRELATED_INSTALLATION") else {
+        return;
+    };
+    let repo = persistent_accounts(Path::new(&root));
+    let account = repo
+        .create(
+            Provider::MailboxOrg,
+            "unrelated-selected-recovery@example.test".into(),
+            &SecretValue::new(b"invented-fixture-password".to_vec()),
+        )
+        .unwrap();
+    fs::write(
+        Path::new(&root).join("unrelated-fixture-id"),
+        account.id.as_str(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn selected_ledger_restore_choices_preserve_owner_bytes_and_exact_target_identity() {
+    let (root, repo, ids, ledger) = fixture();
+    let (_, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
+    for include in [false, true] {
+        let target_root = tempfile::tempdir().unwrap();
+        let target_repo = persistent_accounts(target_root.path());
+        let target = InstalledLedger::install(target_root.path().join("ledger")).unwrap();
+        let path = target_root.path().join("ledger/addresses.yaml");
+        if !include {
+            fs::write(
+                &path,
+                b"version: 1\nenabled: false\nentries: []\n# owner-specific newer bytes\n",
+            )
+            .unwrap();
+        }
+        let before = fs::read(&path).unwrap();
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(&path).unwrap().ino()
+        };
+        let p = target_repo
+            .selected_restore_preview(&bundle, &secret(), include, Some(&target))
+            .unwrap();
+        target_repo
+            .selected_restore(&bundle, &secret(), &p, Some(&target), |_| Ok(()))
+            .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+        }
+    }
+    let target_root = tempfile::tempdir().unwrap();
+    let target_repo = persistent_accounts(target_root.path());
+    let target = InstalledLedger::install(target_root.path().join("ledger")).unwrap();
+    let path = target_root.path().join("ledger/addresses.yaml");
+    fs::remove_file(&path).unwrap();
+    let p = target_repo
+        .selected_restore_preview(&bundle, &secret(), true, Some(&target))
+        .unwrap();
+    fs::write(
+        &path,
+        b"version: 1\nenabled: false\nentries: []\n# concurrent owner edit\n",
+    )
+    .unwrap();
+    assert!(
+        target_repo
+            .selected_restore(&bundle, &secret(), &p, Some(&target), |_| panic!(
+                "stale target authorization"
+            ))
+            .is_err()
+    );
+    assert!(!target_repo.selected_marker().exists());
+    for id in &ids[..2] {
+        assert!(!target_repo.metadata_path(id).exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn selected_existing_generations_and_dangling_targets_reject_before_publication() {
+    use std::os::unix::fs::symlink;
+    let (root, repo, ids, ledger) = fixture();
+    let (_, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
+    for metadata in [false, true] {
+        let target_root = tempfile::tempdir().unwrap();
+        let target = persistent_accounts(target_root.path());
+        private_directory(&target.paths.data).unwrap();
+        private_directory(&target.paths.config).unwrap();
+        let path = if metadata {
+            target.metadata_path(&ids[1])
+        } else {
+            cipher_path(&target.paths.data, &ids[1], 17)
+        };
+        symlink(target_root.path().join("unknown-owner-resource"), &path).unwrap();
+        assert!(
+            target
+                .selected_restore_preview(&bundle, &secret(), false, None)
+                .is_err()
+        );
+        assert!(!target.metadata_path(&ids[0]).exists());
+        assert!(!target.selected_marker().exists());
+        assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+    }
+}
+
+#[test]
+fn selected_installation_lease_excludes_disjoint_restore_and_creation_without_changing_inode() {
+    let (root, repo, ids, ledger) = fixture();
+    let (_, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
+    let target_root = tempfile::tempdir().unwrap();
+    let target = persistent_accounts(target_root.path());
+    let lease = target.lock_installation().unwrap();
+    assert!(
+        target
+            .selected_restore_preview(&bundle, &secret(), false, None)
+            .is_err()
+    );
+    assert!(
+        target
+            .create(
+                Provider::Gmail,
+                "unrelated@example.test".into(),
+                &SecretValue::new(b"invented".to_vec())
+            )
+            .is_err()
+    );
+    #[cfg(unix)]
+    let inode = {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(target.paths.config.join("account-installation.lock"))
+            .unwrap()
+            .ino()
+    };
+    drop(lease);
+    target
+        .selected_restore_preview(&bundle, &secret(), false, None)
+        .unwrap();
+    target
+        .create(
+            Provider::Gmail,
+            "unrelated@example.test".into(),
+            &SecretValue::new(b"invented".to_vec()),
+        )
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            fs::metadata(target.paths.config.join("account-installation.lock"))
+                .unwrap()
+                .ino(),
+            inode
+        );
+    }
+}

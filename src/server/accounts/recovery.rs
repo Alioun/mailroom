@@ -1,11 +1,31 @@
 use super::*;
-use crate::acquisition::recovery::{self, Manifest, RestorePreview};
+use crate::acquisition::recovery::{
+    self, Manifest, RestorePreview,
+    selected::{SelectedManifest, SelectedRestorePreview, selected_restore_plan},
+};
 use std::path::{Path, PathBuf};
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(in crate::server) enum Request {
     Status,
+    SelectedCapturePreview {
+        accounts: Vec<AccountId>,
+        include_ledger: bool,
+    },
+    SelectedCapture {
+        preview: SelectedManifest,
+        receipt: String,
+    },
+    SelectedRestorePreview {
+        bundle: String,
+        restore_ledger: bool,
+    },
+    SelectedRestore {
+        preview: SelectedRestorePreview,
+        receipt: String,
+    },
+    SelectedResume,
     CapturePreview {
         account: AccountId,
     },
@@ -91,6 +111,8 @@ pub(in crate::server) async fn handle(
         let root = mailboxes.parent().ok_or(AcquisitionError::Storage)?.join("synthetic-recovery");
         if matches!(request, Request::Status) {
             let mut view = repo.recovery_view()?;
+            view["selected_pending"] = json!(repo.selected_pending()?);
+            view["limitations"] = json!(recovery::selected::SELECTED_LIMITATIONS);
             let directory = root.join("bundles");
             let mut bundles = vec![];
             if directory.exists() { for entry in std::fs::read_dir(directory).map_err(|_| AcquisitionError::Storage)? {
@@ -100,12 +122,38 @@ pub(in crate::server) async fn handle(
             bundles.sort(); view["bundles"] = json!(bundles);
             return Ok(view);
         }
-        let secret = fake_secret(&root, matches!(request, Request::CapturePreview { .. } | Request::Capture { .. }))?;
+        let secret = fake_secret(&root, matches!(request, Request::CapturePreview { .. } | Request::Capture { .. } | Request::SelectedCapturePreview { .. } | Request::SelectedCapture { .. }))?;
         let consent = |plan: crate::confirmation::Plan, receipt: &str| {
             state.accounts.confirmations.lock().expect("confirmations").confirm(receipt, &plan, &mut crate::confirmation::SyntheticBackend, || Ok(plan.clone())).map(|_| ()).map_err(|_| AcquisitionError::InvalidInput)
         };
         match request {
             Request::Status => unreachable!(),
+            Request::SelectedCapturePreview { accounts, include_ledger } => {
+                let (preview, plan) = repo.selected_capture_preview(&accounts, include_ledger, state.accounts.ledger.as_ref(), recovery::now())?;
+                let (receipt, confirmation) = state.accounts.confirmations.lock().expect("confirmations").offer(plan).map_err(|_| AcquisitionError::InvalidInput)?;
+                Ok(json!({"preview":preview,"receipt":receipt,"confirmation":confirmation}))
+            },
+            Request::SelectedCapture { preview, receipt } => {
+                let bundle = repo.selected_capture(&preview, &secret, &root.join("bundles"), state.accounts.ledger.as_ref(), |plan| consent(plan, &receipt))?;
+                Ok(json!({"bundle":bundle,"captured":true,"synthetic":true,"limitations":recovery::selected::SELECTED_LIMITATIONS}))
+            },
+            Request::SelectedRestorePreview { bundle, restore_ledger } => {
+                let preview = repo.selected_restore_preview(&bundle_path(&root, &bundle)?, &secret, restore_ledger, state.accounts.ledger.as_ref())?;
+                let (receipt, confirmation) = state.accounts.confirmations.lock().expect("confirmations").offer(selected_restore_plan(&preview)?).map_err(|_| AcquisitionError::InvalidInput)?;
+                Ok(json!({"preview":preview,"receipt":receipt,"confirmation":confirmation,"authenticated":true}))
+            },
+            Request::SelectedRestore { preview, receipt } => {
+                let restored = repo.selected_restore(&bundle_path(&root, &preview.bundle)?, &secret, &preview, state.accounts.ledger.as_ref(), |plan| consent(plan, &receipt))?;
+                *state.accounts.confirmations.lock().expect("confirmations") = crate::confirmation::Boundary::synthetic();
+                *state.accounts.job.lock().expect("account job") = None;
+                Ok(json!({"restored":restored,"local_restore_complete":true,"provider_authority":false}))
+            },
+            Request::SelectedResume => {
+                let restored = repo.selected_resume(&secret, state.accounts.ledger.as_ref())?;
+                *state.accounts.confirmations.lock().expect("confirmations") = crate::confirmation::Boundary::synthetic();
+                *state.accounts.job.lock().expect("account job") = None;
+                Ok(json!({"restored":restored,"local_restore_complete":true,"provider_authority":false}))
+            },
             Request::CapturePreview { account } => {
                 let (preview, plan) = repo.capture_preview(&account, recovery::now())?;
                 let (receipt, confirmation) = state.accounts.confirmations.lock().expect("confirmations").offer(plan).map_err(|_| AcquisitionError::InvalidInput)?;
@@ -145,6 +193,11 @@ async fn production_recovery_denies_before_repository_access() {
     let state = Arc::new(AppState::new(false));
     for action in [
         "status",
+        "selected_capture_preview",
+        "selected_capture",
+        "selected_restore_preview",
+        "selected_restore",
+        "selected_resume",
         "capture_preview",
         "capture",
         "restore_preview",

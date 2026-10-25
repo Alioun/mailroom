@@ -81,6 +81,10 @@ impl Accounts {
             .join("lifecycle")
             .join(format!("{}.json", id.as_str()))
     }
+    pub(super) fn lock_installation(&self) -> Result<ExclusiveFileLock, AcquisitionError> {
+        EncryptedStore::lock_directory(&self.paths.config, &AccountId::new("account-installation")?)
+            .map_err(AcquisitionError::from)
+    }
     pub(super) fn lock_account(
         &self,
         id: &AccountId,
@@ -112,6 +116,15 @@ impl Accounts {
         })
     }
     pub(super) fn require_ready(&self, id: &AccountId) -> Result<(), AcquisitionError> {
+        if self
+            .paths
+            .config
+            .join("recovery-selected.restore")
+            .try_exists()
+            .map_err(|_| AcquisitionError::Storage)?
+        {
+            return Err(AcquisitionError::LifecyclePending);
+        }
         if self
             .paths
             .config
@@ -258,6 +271,7 @@ impl Accounts {
         login: String,
         password: &SecretValue,
     ) -> Result<Account, AcquisitionError> {
+        let _installation = self.lock_installation()?;
         validate_password(password)?;
         if login.is_empty() || login.len() > 320 || login.chars().any(char::is_control) {
             return Err(AcquisitionError::InvalidInput);

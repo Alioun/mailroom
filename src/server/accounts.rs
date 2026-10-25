@@ -855,8 +855,12 @@ async fn durable_browser_server_fixture() {
         mailboxes: std::path::Path::new(&root).join("mailboxes"),
     };
     state.accounts.ledger = Some(
-        crate::ledger::InstalledLedger::install(std::path::Path::new(&root).join("ledger"))
-            .unwrap(),
+        crate::ledger::InstalledLedger::install(
+            std::env::var_os("MAILROOM_RECOVERY_LEDGER")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::Path::new(&root).join("ledger")),
+        )
+        .unwrap(),
     );
     let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
     axum::serve(listener, super::router(Arc::new(state)))

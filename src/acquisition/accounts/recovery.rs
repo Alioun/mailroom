@@ -131,7 +131,7 @@ fn publish_new(path: &Path, bytes: &[u8]) -> Result<(), AcquisitionError> {
         .map_err(|_| AcquisitionError::Storage)?;
     sync_dir(dir)
 }
-fn seal(captured: &Captured, secret: &SecretValue) -> Result<Vec<u8>, AcquisitionError> {
+fn seal(captured: &impl Serialize, secret: &SecretValue) -> Result<Vec<u8>, AcquisitionError> {
     if secret.bytes().len() != 32 {
         return Err(AcquisitionError::InvalidInput);
     }
@@ -162,7 +162,7 @@ fn seal(captured: &Captured, secret: &SecretValue) -> Result<Vec<u8>, Acquisitio
     )
     .into_bytes())
 }
-fn open(bytes: &[u8], secret: &SecretValue) -> Result<Captured, AcquisitionError> {
+fn open_plain(bytes: &[u8], secret: &SecretValue) -> Result<Zeroizing<Vec<u8>>, AcquisitionError> {
     if bytes.len() as u64 > MAX_BUNDLE || secret.bytes().len() != 32 {
         return Err(AcquisitionError::InvalidInput);
     }
@@ -204,8 +204,15 @@ fn open(bytes: &[u8], secret: &SecretValue) -> Result<Captured, AcquisitionError
     if plain.len() > MAX_PLAIN {
         return Err(AcquisitionError::InvalidInput);
     }
-    let captured: Captured =
-        serde_json::from_slice(&plain).map_err(|_| AcquisitionError::InvalidInput)?;
+    Ok(plain)
+}
+fn open(bytes: &[u8], secret: &SecretValue) -> Result<Captured, AcquisitionError> {
+    let captured: Captured = serde_json::from_slice(&open_plain(bytes, secret)?)
+        .map_err(|_| AcquisitionError::InvalidInput)?;
+    validate_captured(&captured)?;
+    Ok(captured)
+}
+fn validate_captured(captured: &Captured) -> Result<(), AcquisitionError> {
     let m = &captured.manifest;
     if m.version != 1
         || !(1..=7).contains(&m.state_schema)
@@ -230,8 +237,7 @@ fn open(bytes: &[u8], secret: &SecretValue) -> Result<Captured, AcquisitionError
     {
         return Err(AcquisitionError::InvalidInput);
     }
-    authenticate_resource(&captured)?;
-    Ok(captured)
+    authenticate_resource(captured)
 }
 fn exclusions() -> Vec<String> {
     [
@@ -462,6 +468,7 @@ impl Accounts {
         preview: &RestorePreview,
         authorize: impl FnOnce(crate::confirmation::Plan) -> Result<(), AcquisitionError>,
     ) -> Result<Restored, AcquisitionError> {
+        let _installation = self.lock_installation()?;
         let bytes = read_bounded(bundle, MAX_BUNDLE)?;
         let captured = open(&bytes, secret)?;
         let _lease = self.lock_account(&captured.account.id)?;
@@ -513,6 +520,7 @@ impl Accounts {
         id: &AccountId,
         secret: &SecretValue,
     ) -> Result<Restored, AcquisitionError> {
+        let _installation = self.lock_installation()?;
         let _lease = self.lock_account(id)?;
         let tx: Transaction =
             serde_json::from_slice(&read_bounded(&self.restore_marker(id), 64 * 1024)?)
@@ -654,3 +662,5 @@ pub(crate) fn restore_plan(
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) mod selected;

@@ -145,6 +145,36 @@ impl ReadOnlyImap {
             permit.provider() == Provider::Gmail,
         )
     }
+    pub(super) fn loopback(
+        permit: &super::folder_provisioning::transport::message_move::BacklogPermit<'_>,
+        read: &ReadPermit,
+        login: &str,
+        password: &SecretValue,
+        cancel: Cancellation,
+    ) -> Result<Self, AcquisitionError> {
+        let source = permit.source();
+        if read.provider() != Provider::MailboxOrg || source.login != login {
+            return Err(AcquisitionError::InvalidInput);
+        }
+        let tcp = TcpStream::connect_timeout(&source.address, TIMEOUT)
+            .map_err(|_| AcquisitionError::Tls)?;
+        let root =
+            native_tls::Certificate::from_der(&source.root).map_err(|_| AcquisitionError::Tls)?;
+        let connector = native_tls::TlsConnector::builder()
+            .disable_built_in_roots(true)
+            .add_root_certificate(root)
+            .build()
+            .map_err(|_| AcquisitionError::Tls)?;
+        Self::open(
+            tcp,
+            &source.tls_name,
+            connector,
+            login,
+            password,
+            cancel,
+            false,
+        )
+    }
     fn open(
         tcp: TcpStream,
         hostname: &str,
@@ -307,6 +337,7 @@ impl MailRead for ReadOnlyImap {
                 delimiter,
             }) = response
             {
+                let name = list_wire_name(&rest[..rest.len() - remaining.len()], &name)?;
                 if folders.len() >= crate::census::acquisition::MAX_FOLDERS
                     || attrs.len() > 128
                     || delimiter
@@ -341,7 +372,7 @@ impl MailRead for ReadOnlyImap {
                             _ => None,
                         })
                         .collect(),
-                    wire: name.to_string(),
+                    wire: name.clone(),
                     name: decode_name(&name)?,
                     sent: attrs.contains(&NameAttribute::Sent),
                     all: attrs.contains(&NameAttribute::All),
@@ -505,6 +536,30 @@ fn parse_fetches(
         rest = remaining;
     }
     Ok(())
+}
+
+fn list_wire_name(row: &[u8], name: &str) -> Result<String, AcquisitionError> {
+    // imap-proto borrows quoted contents without removing IMAP escapes. Literals are exact bytes.
+    let quoted = row
+        .strip_suffix(b"\"\r\n")
+        .and_then(|prefix| prefix.strip_suffix(name.as_bytes()))
+        .is_some_and(|prefix| prefix.ends_with(b"\""));
+    if !quoted {
+        return Ok(name.into());
+    }
+    let mut value = String::new();
+    let mut chars = name.chars();
+    while let Some(c) = chars.next() {
+        value.push(if c == '\\' {
+            match chars.next() {
+                Some(c @ ('\\' | '"')) => c,
+                _ => return Err(AcquisitionError::Protocol),
+            }
+        } else {
+            c
+        });
+    }
+    Ok(value)
 }
 
 fn decode_name(wire: &str) -> Result<String, AcquisitionError> {

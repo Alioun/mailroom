@@ -27,11 +27,11 @@ for (const filter of ['backlog::imap_move', 'transport::message_move']) {
   }).finally(() => output.close())
   commands.push({ command: ['cargo', ...args], ...result, log })
   await writeFile(join(audit, 'results.json'), JSON.stringify({
-    scope: 'Domain and test-only TLS transport. No saved-workspace HTTP or UI execution is implemented.',
-    end_to_end_acceptance: 'not_met',
+    scope: 'Direct domain and TLS transport checks. Saved-workspace HTTP and built UI run in separate verification scripts.',
+    end_to_end_acceptance: 'not_assessed_by_this_check',
     commands,
   }, null, 2) + '\n')
   assert.equal(result.code, 0, `Core check failed. See ${log}`)
 }
 
-console.log('PASS domain and test-only TLS transport checks. End-to-end backlog MOVE acceptance is NOT MET.')
+console.log('PASS direct domain and TLS transport checks. Saved-workspace acceptance is checked separately.')

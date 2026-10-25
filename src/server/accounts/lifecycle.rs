@@ -78,6 +78,10 @@ pub(in crate::server) async fn handle(
                         .as_ref()
                         .is_some_and(|id| Some(id) == request.account())
                     || job
+                        .backlog_account
+                        .as_ref()
+                        .is_some_and(|id| Some(id) == request.account())
+                    || job
                         .account
                         .as_ref()
                         .is_some_and(|a| Some(&a.id) == request.account())

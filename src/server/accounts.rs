@@ -1,4 +1,5 @@
 pub(super) mod backlog;
+pub(super) mod backlog_protocol;
 pub(super) mod folder_provisioning;
 pub(super) mod invoices;
 pub(super) mod ledger;
@@ -51,6 +52,8 @@ enum AccountSource {
 }
 #[derive(Clone, Serialize)]
 struct Job {
+    #[serde(skip)]
+    backlog_account: Option<AccountId>,
     #[serde(skip)]
     folder_account: Option<AccountId>,
     #[serde(skip)]
@@ -124,6 +127,7 @@ impl AccountController {
         }
         let cancel = Cancellation::default();
         *job = Some(Job {
+            backlog_account: None,
             folder_account: None,
             sieve_account: None,
             account: None,
@@ -1005,6 +1009,31 @@ async fn envelope_keyword_server_fixture() {
     let root = std::path::Path::new(&root);
     let (repo, _account, _folder, _sieve) =
         acquisition::workspace_authority::envelope_tests::install(root);
+    let mut state = AppState::new(true);
+    state.accounts.source = AccountSource::Synthetic {
+        accounts: Arc::new(repo),
+        _directory: tempfile::tempdir().unwrap(),
+        mailboxes: root.join("mailboxes"),
+    };
+    state.accounts.ledger =
+        Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
+    let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
+    axum::serve(listener, super::router(Arc::new(state)))
+        .await
+        .unwrap();
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn backlog_protocol_server_fixture() {
+    let Some(root) = std::env::var_os("MAILROOM_MOVE_FIXTURE") else {
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let (mut repo, _account, _fake) = acquisition::backlog::fixture_install(root);
+    if let Some(installation) = std::env::var_os("MAILROOM_MOVE_INSTALLATION") {
+        repo = acquisition::persistent_test_accounts(std::path::Path::new(&installation));
+    }
     let mut state = AppState::new(true);
     state.accounts.source = AccountSource::Synthetic {
         accounts: Arc::new(repo),

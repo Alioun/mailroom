@@ -182,7 +182,12 @@ pub(in crate::server) async fn handle(
         }
     }).await {
         Ok(Ok(value)) => Json(value).into_response(),
-        _ => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error":"Recovery rejected. Preserve bundle and separate secret. Refresh the exact preview or resume the interrupted restore. Fresh provider evidence is required; no remote retry or compensation is authorized."}))).into_response(),
+        result => {
+            #[cfg(test)]
+            if let Ok(Err(error)) = &result { eprintln!("Synthetic recovery rejection: {error:?}"); }
+            let _ = result;
+            (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error":"Recovery rejected. Preserve bundle and separate secret. Refresh the exact preview or resume the interrupted restore. Fresh provider evidence is required; no remote retry or compensation is authorized."}))).into_response()
+        },
     }
 }
 

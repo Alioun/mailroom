@@ -249,6 +249,10 @@ fn router(state: Arc<AppState>) -> Router {
             get(|| async { Json(policy::OPERATIONS.map(policy::authorize)) }),
         )
         .route("/api/accounts/backlog", post(accounts::backlog::handle))
+        .route(
+            "/api/accounts/backlog/protocol",
+            post(accounts::backlog_protocol::handle),
+        )
         .route("/api/accounts/invoices", post(accounts::invoices::handle))
         .route("/api/accounts/ledger", post(accounts::ledger::handle))
         .route("/api/accounts/winddown", post(accounts::winddown::handle))

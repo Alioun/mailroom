@@ -22,7 +22,7 @@ use std::{
     thread,
 };
 
-const HEADER: &[u8] = b"Message-ID: <identical@example.test>\r\n\r\n";
+const HEADER: &[u8] = b"From: updates@studio.example.com\r\nTo: owner@home.example.test\r\nDelivered-To: owner@home.example.test\r\nSubject: Release notes\r\nMessage-ID: <identical@example.test>\r\nDate: Sat, 24 Oct 2026 00:00:00 +0000\r\n\r\n";
 
 struct EvidenceRoot(Option<tempfile::TempDir>);
 impl EvidenceRoot {
@@ -51,7 +51,7 @@ impl Drop for EvidenceRoot {
     }
 }
 
-struct Fake {
+pub(crate) struct Fake {
     source: InstalledSource,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
@@ -100,9 +100,17 @@ fn folder(validity: u32, uids: &[u32]) -> FolderCensus {
 }
 
 impl Fake {
-    fn start(root: &Path, account: &Account) -> Self {
+    pub(crate) fn start(root: &Path, account: &Account) -> Self {
         let repo = persistent_test_accounts(root);
         let (store, mut state) = external(&repo, &account.id, root);
+        let initialized = state.synthetic_uid_next.contains_key("Filed/Receipts")
+            || state.synthetic_uid_next.contains_key("Personal/Studio")
+            || state
+                .synthetic_folders
+                .as_ref()
+                .unwrap()
+                .epoch
+                .starts_with("move-");
         let p = state.synthetic_folders.as_mut().unwrap();
         let listener = TcpListener::bind(p.address).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -115,18 +123,19 @@ impl Fake {
                 )
                 .unwrap(),
         );
-        p.inventory
-            .capabilities
-            .extend(["MOVE".into(), "UIDPLUS".into()]);
-        p.inventory.mailboxes = vec!["Filed/Receipts", "INBOX"]
-            .into_iter()
-            .map(|name| Mailbox {
-                name: ExactName::new(name).unwrap(),
-                delimiter: Some("/".into()),
-                attributes: BTreeSet::new(),
-            })
-            .collect();
-        if !state.census.folders.contains_key("Filed/Receipts") {
+        if !initialized {
+            p.epoch = format!("move-{}", p.epoch);
+            p.inventory.capabilities = ["IMAP4REV1", "NAMESPACE", "SPECIAL-USE", "MOVE", "UIDPLUS"]
+                .map(String::from)
+                .into();
+            p.inventory.mailboxes = ["Filed/Receipts", "INBOX"]
+                .into_iter()
+                .map(|name| Mailbox {
+                    name: ExactName::new(name).unwrap(),
+                    delimiter: Some("/".into()),
+                    attributes: BTreeSet::new(),
+                })
+                .collect();
             state.census.folders = [
                 ("INBOX".into(), folder(101, &[4, 8, 19, 99])),
                 ("Filed/Receipts".into(), folder(202, &[40])),
@@ -144,6 +153,37 @@ impl Fake {
                 .insert("\\Deleted".into());
             state.synthetic_uid_next.insert("Filed/Receipts".into(), 60);
             state.synthetic_uid_next.insert("INBOX".into(), 104);
+            if root.join("move-large").exists() {
+                let inbox = state.census.folders.get_mut("INBOX").unwrap();
+                for uid in (200..=1194).step_by(2) {
+                    inbox.live_uids.insert(uid);
+                    inbox.messages.insert(uid, record(uid));
+                }
+                state.synthetic_uid_next.insert("INBOX".into(), 2000);
+            }
+        }
+        if root.join("move-workflow").exists() {
+            let destination = "Personal/Studio";
+            if let Some(folder) = state.census.folders.remove("Filed/Receipts") {
+                state.census.folders.insert(destination.into(), folder);
+                let next = state.synthetic_uid_next.remove("Filed/Receipts").unwrap();
+                state.synthetic_uid_next.insert(destination.into(), next);
+                state
+                    .synthetic_folders
+                    .as_mut()
+                    .unwrap()
+                    .inventory
+                    .mailboxes = state
+                    .census
+                    .folders
+                    .keys()
+                    .map(|n| Mailbox {
+                        name: ExactName::new(n).unwrap(),
+                        delimiter: Some("/".into()),
+                        attributes: BTreeSet::new(),
+                    })
+                    .collect();
+            }
         }
         let p = state.synthetic_folders.as_ref().unwrap();
         let source = InstalledSource {
@@ -208,7 +248,9 @@ fn unquote(s: &str) -> std::io::Result<String> {
             c
         });
     }
-    Ok(text)
+    ExactName::from_wire(&text)
+        .map(|name| name.decoded)
+        .map_err(|_| std::io::ErrorKind::InvalidData.into())
 }
 
 fn serve(
@@ -226,7 +268,21 @@ fn serve(
         ServerConnection::new(config).unwrap(),
         tcp,
     ));
-    io.get_mut().write_all(b"* OK synthetic MOVE fixture\r\n")?;
+    let mode = std::fs::read_to_string(root.join("move-mode")).unwrap_or_default();
+    let greeting = match mode.as_str() {
+        "malformed_greeting" => b"* PREAUTH unsupported\r\n".as_slice(),
+        "referral" => b"* OK [REFERRAL imaps://unusable.example.test/] unsupported\r\n".as_slice(),
+        _ => b"* OK synthetic MOVE fixture\r\n".as_slice(),
+    };
+    if mode == "slow_greeting" {
+        for byte in greeting {
+            io.get_mut().write_all(&[*byte])?;
+            io.get_mut().flush()?;
+            thread::sleep(Duration::from_millis(250));
+        }
+    } else {
+        io.get_mut().write_all(greeting)?;
+    }
     io.get_mut().flush()?;
     let mut selected = None;
     let mut authenticated = false;
@@ -246,7 +302,19 @@ fn serve(
         let mode = std::fs::read_to_string(root.join("move-mode")).unwrap_or_default();
         let mut reply = String::new();
         if command == "CAPABILITY" {
-            reply = "* CAPABILITY IMAP4rev1 NAMESPACE MOVE UIDPLUS\r\n".into();
+            reply = format!(
+                "* CAPABILITY {}\r\n",
+                state
+                    .synthetic_folders
+                    .as_ref()
+                    .unwrap()
+                    .inventory
+                    .capabilities
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
         } else if command.starts_with("LOGIN ") {
             assert!(!authenticated);
             authenticated = true;
@@ -256,11 +324,14 @@ fn serve(
                 .unwrap()
                 .commands
                 .push("LOGIN".into());
+            if mode == "authentication_failed" {
+                reply = format!("{tag} NO refused\r\n");
+            }
         } else {
             assert!(authenticated);
             match command {
                 "NAMESPACE" => reply = "* NAMESPACE ((\"\" \"/\")) NIL NIL\r\n".into(),
-                "LIST \"\" \"*\"" => {
+                "LIST \"\" \"*\"" | "LIST \"\" \"*\" RETURN (SPECIAL-USE)" => {
                     for m in &state
                         .synthetic_folders
                         .as_ref()
@@ -269,27 +340,95 @@ fn serve(
                         .mailboxes
                     {
                         reply.push_str(&format!(
-                            "* LIST () \"/\" {}\r\n",
+                            "* LIST ({}) \"/\" {}\r\n",
+                            m.attributes.iter().cloned().collect::<Vec<_>>().join(" "),
                             String::from_utf8(quoted(m.name.wire.as_bytes()).unwrap()).unwrap()
                         ));
                     }
                 }
-                _ if command.starts_with("SELECT ") => {
-                    let name = unquote(&command[7..])?;
+                _ if command.starts_with("SELECT ") || command.starts_with("EXAMINE ") => {
+                    let read_only = command.starts_with("EXAMINE ");
+                    let name = unquote(&command[if read_only { 8 } else { 7 }..])?;
                     let folder = &state.census.folders[&name];
                     reply = format!(
                         "* {} EXISTS\r\n* OK [UIDVALIDITY {}] instance\r\n{tag} OK [READ-WRITE] selected\r\n",
                         folder.live_uids.len(),
                         folder.uidvalidity
                     );
+                    if read_only || mode == "read_only" {
+                        reply = reply.replace("READ-WRITE", "READ-ONLY");
+                    }
                     selected = Some(name);
                 }
+                "UID SEARCH ALL" => {
+                    let f = &state.census.folders[selected.as_ref().unwrap()];
+                    reply = format!(
+                        "* SEARCH {}\r\n",
+                        f.live_uids
+                            .iter()
+                            .map(u32::to_string)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                }
+                _ if command.starts_with("STATUS ") => {
+                    let (name, _) = command[7..].rsplit_once(" (MESSAGES)").unwrap();
+                    let name = unquote(name)?;
+                    reply = format!(
+                        "* STATUS {} (MESSAGES {})\r\n",
+                        String::from_utf8(
+                            quoted(ExactName::new(&name).unwrap().wire.as_bytes()).unwrap()
+                        )
+                        .unwrap(),
+                        state.census.folders[&name].live_uids.len()
+                    );
+                }
+                "LOGOUT" => {
+                    io.get_mut()
+                        .write_all(format!("* BYE\r\n{tag} OK logout\r\n").as_bytes())?;
+                    io.get_mut().flush()?;
+                    return Ok(());
+                }
                 _ if command.starts_with("UID FETCH ") => {
+                    if mode == "oversized_literal" {
+                        io.get_mut()
+                            .write_all(b"* 1 FETCH (UID 4 BODY[HEADER] {524289}\r\n")?;
+                        io.get_mut().flush()?;
+                        return Ok(());
+                    }
                     let set = command[10..].split_once(' ').unwrap().0;
                     let f = &state.census.folders[selected.as_ref().unwrap()];
+                    if mode == "unsolicited" && command.contains("(MESSAGE-ID)") {
+                        let requested: BTreeSet<u32> =
+                            set.split(',').map(|u| u.parse().unwrap()).collect();
+                        if let Some((seq, uid)) = f
+                            .live_uids
+                            .iter()
+                            .enumerate()
+                            .find(|(_, uid)| !requested.contains(uid))
+                        {
+                            let flags = f.messages[uid]
+                                .flags
+                                .iter()
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            reply.push_str(&format!("* {} FETCH (FLAGS ({flags}))\r\n* {} FETCH (UID {uid} FLAGS ({flags}))\r\n* {} EXISTS\r\n", seq + 1, seq + 1, f.live_uids.len()));
+                        }
+                    }
                     for uid in set.split(',').map(|u| u.parse::<u32>().unwrap()) {
                         if let Some(m) = f.messages.get(&uid) {
-                            reply.push_str(&format!("* 1 FETCH (UID {uid} FLAGS ({}) INTERNALDATE \"{}\" RFC822.SIZE {} BODY[HEADER.FIELDS (MESSAGE-ID)] {{{}}}\r\n{})\r\n",m.flags.iter().cloned().collect::<Vec<_>>().join(" "),m.internal_date,m.size,HEADER.len(),std::str::from_utf8(HEADER).unwrap()));
+                            let body = if let Some((_, fields)) = command.split_once("BODY.PEEK[") {
+                                let fields = fields.split_once(']').unwrap().0;
+                                format!(
+                                    " BODY[{fields}] {{{}}}\r\n{}",
+                                    HEADER.len(),
+                                    std::str::from_utf8(HEADER).unwrap()
+                                )
+                            } else {
+                                String::new()
+                            };
+                            reply.push_str(&format!("* 1 FETCH (UID {uid} FLAGS ({}) INTERNALDATE \"{}\" RFC822.SIZE {}{body})\r\n", m.flags.iter().cloned().collect::<Vec<_>>().join(" "), m.internal_date, m.size));
                         }
                     }
                 }
@@ -303,7 +442,7 @@ fn serve(
                         .collect::<Vec<_>>();
                     assert!(uids.len() <= 500);
                     assert!(!uids.contains(&99));
-                    if source == "INBOX" {
+                    if source == "INBOX" && !root.join("move-workflow").exists() {
                         assert_eq!(set, "4,8,19");
                         assert_eq!(target, "Filed/Receipts");
                     }
@@ -343,12 +482,21 @@ fn serve(
                         .append(true)
                         .open(root.join("move-wire-observations"))?;
                     log.write_all(b"UID MOVE\n")?;
+                    let mut exact = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(root.join("move-wire-exact.jsonl"))?;
+                    exact.write_all(&serde_json::to_vec(&serde_json::json!({"command":command,"source":source,"mapped":mapped,"validity":state.census.folders[&target].uidvalidity})).unwrap())?;
+                    exact.write_all(b"\n")?;
+                    exact.sync_all()?;
                     log.sync_all()?;
                     std::fs::write(root.join("move-effect-reached"), b"effect persisted")?;
+                    crate::acquisition::backlog::boundary("move_provider_effect");
                     if mode == "lost" {
                         return Ok(());
                     }
                     if mode == "slow" {
+                        drop(store);
                         thread::sleep(Duration::from_millis(1200));
                         return Ok(());
                     }
@@ -401,7 +549,14 @@ fn serve(
         }
         store.save_state(&mut state).unwrap();
         drop(store);
-        for chunk in reply.as_bytes().chunks(3) {
+        for chunk in reply
+            .as_bytes()
+            .chunks(if root.join("move-large").exists() {
+                256
+            } else {
+                3
+            })
+        {
             io.get_mut().write_all(chunk)?;
             io.get_mut().flush()?;
         }
@@ -793,6 +948,43 @@ fn failure_to_save_attempt_prevents_move_and_changed_metadata_blocks_admission()
 }
 
 #[test]
+fn malformed_slow_or_referred_greetings_and_failed_authentication_do_not_retry() {
+    for mode in [
+        "malformed_greeting",
+        "referral",
+        "slow_greeting",
+        "authentication_failed",
+    ] {
+        let root = EvidenceRoot::new();
+        let (repo, account, fake) = setup(root.path());
+        std::fs::write(root.path().join("move-mode"), mode).unwrap();
+        let result = fake.connect(&account, Cancellation::default());
+        assert!(
+            matches!(
+                (mode, result),
+                ("malformed_greeting", Err(Error::Protocol))
+                    | ("referral", Err(Error::UnknownCode))
+                    | ("slow_greeting", Err(Error::Deadline))
+                    | ("authentication_failed", Err(Error::Authentication))
+            ),
+            "{mode}"
+        );
+        let (_, state) = external(&repo, &account.id, root.path());
+        assert_eq!(
+            state
+                .synthetic_folders
+                .unwrap()
+                .commands
+                .iter()
+                .filter(|c| *c == "LOGIN")
+                .count(),
+            usize::from(mode == "authentication_failed")
+        );
+        assert!(!root.path().join("move-wire-observations").exists());
+    }
+}
+
+#[test]
 fn untrusted_and_expired_tls_are_rejected_before_login() {
     for mode in ["untrusted", "expired"] {
         let root = EvidenceRoot::new();
@@ -823,4 +1015,62 @@ fn untrusted_and_expired_tls_are_rejected_before_login() {
                 .any(|c| c == "LOGIN")
         );
     }
+}
+
+impl Fake {
+    pub(crate) fn install(&self, repo: &mut Accounts) {
+        let mut source = self.source.clone();
+        source.authority = "fixture-message-move/v1".into();
+        source.command_timeout = Duration::from_secs(3);
+        source.operation_timeout = Duration::from_secs(120);
+        repo.backlog_source = Some(Arc::new(source));
+        let source = repo.backlog_source.as_ref().unwrap().clone();
+        repo.imap_factory = Some(Arc::new(move |read, login, password, cancel| {
+            let binding = RuntimeBinding {
+                account: source.account.clone(),
+                provider: read.provider(),
+                login: login.into(),
+                source: source.identity(),
+                credential_key_recovery: "explicit-fixture-read-only".into(),
+                workspace: "read-only-no-recipient-authority".into(),
+                topology: "empty-personal-slash-profile".into(),
+            };
+            let permit = source
+                .runtime_permit(&binding)
+                .map_err(|_| crate::acquisition::AcquisitionError::InvalidInput)?;
+            crate::acquisition::imap::ReadOnlyImap::loopback(&permit, read, login, password, cancel)
+        }));
+    }
+}
+pub(crate) fn workflow_install(root: &Path) -> (Accounts, Account, Fake) {
+    std::fs::write(root.join("move-workflow"), b"explicit fixture").unwrap();
+    let (mut repo, account) = if let Ok(id) = std::fs::read_to_string(root.join("move-account-id"))
+    {
+        let repo = persistent_test_accounts(root);
+        let account = repo.load(&AccountId::new(&id).unwrap()).unwrap();
+        (repo, account)
+    } else {
+        let (repo, account, create) = crate::acquisition::folder_provisioning::tests::install(root);
+        drop(create);
+        std::fs::write(root.join("move-account-id"), account.id.as_str()).unwrap();
+        (repo, account)
+    };
+    let fake = Fake::start(root, &account);
+    fake.install(&mut repo);
+    if !std::fs::read_to_string(root.join("move-source"))
+        .is_ok_and(|source| source == "create_only")
+    {
+        repo.folder_source = None;
+    }
+    if std::fs::read_to_string(root.join("move-source"))
+        .is_ok_and(|source| matches!(source.as_str(), "read_only" | "create_only"))
+    {
+        repo.backlog_source = None;
+    }
+    if let Ok(epoch) = std::fs::read_to_string(root.join("workspace-authority")) {
+        if !epoch.is_empty() {
+            repo.install_synthetic_workspace(&account, &epoch);
+        }
+    }
+    (repo, account, fake)
 }

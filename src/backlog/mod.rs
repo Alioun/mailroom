@@ -1,4 +1,5 @@
 pub mod imap_move;
+pub mod protocol;
 mod synthetic;
 pub(crate) use synthetic::SyntheticMailbox;
 
@@ -193,186 +194,7 @@ pub(crate) fn preview(
         stopped_folders: BTreeSet::new(),
         diagnostics: proof.warnings.clone(),
     };
-    if provider != Provider::Gmail
-        && plan.options.scope == Scope::InboxUnfiled
-        && !census
-            .folder_roles
-            .values()
-            .any(|roles| roles.contains("archive"))
-    {
-        plan.diagnostics.push("Unfiled scope unsupported: no discovered Archive special-use role. Only evidenced Inbox mail can be considered.".into());
-    }
-    let decisions: BTreeMap<_, _> = proof.decisions.iter().map(|d| (d.id.as_str(), d)).collect();
-    let mut seen = BTreeSet::new();
-    let mut senders: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
-    for (folder, f) in &census.folders {
-        for m in f.messages.values() {
-            let id = if provider == Provider::Gmail {
-                m.gmail_message_id.as_ref().map(|v| format!("gmail/{v}"))
-            } else {
-                None
-            }
-            .unwrap_or_else(|| format!("{folder}/{}/{}", f.uidvalidity, m.uid));
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            let roles = census.folder_roles.get(folder).cloned().unwrap_or_default();
-            let labels = &m.gmail_labels;
-            let excluded = m.headers.direction == crate::census::Direction::Sent
-                || roles.iter().any(|r| {
-                    ["sent", "drafts", "junk", "spam", "trash", "noselect"].contains(&r.as_str())
-                })
-                || labels.iter().any(|l| {
-                    [
-                        "\\sent", "\\draft", "\\drafts", "\\spam", "\\junk", "\\trash",
-                    ]
-                    .contains(&l.to_ascii_lowercase().as_str())
-                })
-                || m.flags.iter().any(|f| f.eq_ignore_ascii_case("\\Draft"));
-            let inbox = if provider == Provider::Gmail {
-                labels.iter().any(|l| l.eq_ignore_ascii_case("\\Inbox"))
-            } else {
-                folder.eq_ignore_ascii_case("INBOX")
-            };
-            let unfiled = if provider == Provider::Gmail {
-                !labels.iter().any(|l| !l.starts_with('\\'))
-            } else {
-                roles.contains("archive")
-            };
-            let in_scope = match plan.options.scope {
-                Scope::Inbox => inbox,
-                Scope::InboxUnfiled => inbox || unfiled,
-                Scope::EveryFolder => true,
-            };
-            let reason = if excluded {
-                Some("excluded_role")
-            } else if provider != Provider::Gmail
-                && !inbox
-                && !census.folder_roles.contains_key(folder)
-            {
-                Some("unknown_folder_role")
-            } else if !in_scope {
-                Some("outside_scope")
-            } else if plan.options.protect_flagged
-                && m.flags.iter().any(|f| f.eq_ignore_ascii_case("\\Flagged"))
-            {
-                Some("flagged")
-            } else {
-                None
-            };
-            if let Some(reason) = reason {
-                *plan.excluded.entry(reason.into()).or_default() += 1;
-                continue;
-            }
-            let Some(d) = decisions.get(id.as_str()) else {
-                *plan.excluded.entry("missing_decision".into()).or_default() += 1;
-                continue;
-            };
-            if d.review {
-                plan.review += 1;
-            }
-            if matches!(d.destination, proof::Destination::Inbox) {
-                plan.unmatched += 1;
-                continue;
-            }
-            let dest = d.destination.label();
-            if folder == dest && provider != Provider::Gmail {
-                *plan.excluded.entry("already_filed".into()).or_default() += 1;
-                continue;
-            }
-            if !plan.artifact.folders().contains(folder) && !inbox && !unfiled {
-                plan.stopped_folders.insert(folder.clone());
-            }
-            let Some(hash) = &m.headers.message_id_hash else {
-                *plan.excluded.entry("missing_identity".into()).or_default() += 1;
-                continue;
-            };
-            let operation = if provider == Provider::Gmail {
-                if m.gmail_message_id.is_none() {
-                    *plan.excluded.entry("missing_gmail_id".into()).or_default() += 1;
-                    continue;
-                }
-                let add = if labels.contains(dest) {
-                    BTreeSet::new()
-                } else {
-                    BTreeSet::from([dest.into()])
-                };
-                let remove = labels
-                    .iter()
-                    .filter(|l| l.eq_ignore_ascii_case("\\Inbox"))
-                    .cloned()
-                    .collect();
-                Operation::Gmail { add, remove }
-            } else {
-                Operation::Imap {
-                    method: if installed.is_some_and(|m| !m.capabilities.contains("MOVE")) {
-                        MoveMethod::CopyUidExpunge
-                    } else {
-                        MoveMethod::UidMove
-                    },
-                }
-            };
-            if matches!(&operation, Operation::Gmail { add, remove } if add.is_empty() && remove.is_empty())
-            {
-                *plan.excluded.entry("already_filed".into()).or_default() += 1;
-                continue;
-            }
-            let group = plan.groups.entry(dest.into()).or_default();
-            group.count += 1;
-            *senders
-                .entry(dest.into())
-                .or_default()
-                .entry(d.from.clone())
-                .or_default() += 1;
-            plan.changes.push(Change {
-                source: Identity {
-                    folder: folder.clone(),
-                    uidvalidity: f.uidvalidity,
-                    uid: m.uid,
-                    message_id_hash: hash.clone(),
-                    gmail_id: m.gmail_message_id.clone(),
-                },
-                flags: m.flags.clone(),
-                original_labels: labels.clone(),
-                destination: dest.into(),
-                sender: d.from.clone(),
-                operation,
-            });
-        }
-    }
-    if let Some(selected) = &plan.options.selected {
-        if selected.iter().any(|d| !plan.groups.contains_key(d)) {
-            return Err("Unknown selected destination".into());
-        }
-    }
-    for (destination, group) in &mut plan.groups {
-        group.selected = plan
-            .options
-            .selected
-            .as_ref()
-            .is_none_or(|s| s.contains(destination));
-        let mut top: Vec<_> = senders
-            .remove(destination)
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        top.truncate(5);
-        group.top_senders = top;
-    }
-    plan.changes
-        .retain(|c| plan.groups[&c.destination].selected);
-    plan.stopped_folders.extend(
-        census
-            .folders
-            .keys()
-            .filter(|f| {
-                !f.eq_ignore_ascii_case("INBOX")
-                    && !plan.artifact.folders().contains(*f)
-                    && census.folder_roles.get(*f).is_some_and(BTreeSet::is_empty)
-            })
-            .cloned(),
-    );
+    project(&mut plan, census, &proof, installed)?;
     let payload = zeroize::Zeroizing::new(
         serde_json::to_vec(&(
             SEMANTICS,
@@ -716,3 +538,195 @@ pub(crate) fn undo(
 }
 #[cfg(test)]
 mod tests;
+
+fn project(
+    plan: &mut Plan,
+    census: &Census,
+    proof: &proof::Proof,
+    installed: Option<&SyntheticMailbox>,
+) -> Result<(), String> {
+    let provider = plan.provider;
+    if provider != Provider::Gmail
+        && plan.options.scope == Scope::InboxUnfiled
+        && !census
+            .folder_roles
+            .values()
+            .any(|roles| roles.contains("archive"))
+    {
+        plan.diagnostics.push("Unfiled scope unsupported: no discovered Archive special-use role. Only evidenced Inbox mail can be considered.".into());
+    }
+    let decisions: BTreeMap<_, _> = proof.decisions.iter().map(|d| (d.id.as_str(), d)).collect();
+    let mut seen = BTreeSet::new();
+    let mut senders: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    for (folder, f) in &census.folders {
+        for m in f.messages.values() {
+            let id = if provider == Provider::Gmail {
+                m.gmail_message_id.as_ref().map(|v| format!("gmail/{v}"))
+            } else {
+                None
+            }
+            .unwrap_or_else(|| format!("{folder}/{}/{}", f.uidvalidity, m.uid));
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let roles = census.folder_roles.get(folder).cloned().unwrap_or_default();
+            let labels = &m.gmail_labels;
+            let excluded = m.headers.direction == crate::census::Direction::Sent
+                || roles.iter().any(|r| {
+                    ["sent", "drafts", "junk", "spam", "trash", "noselect"].contains(&r.as_str())
+                })
+                || labels.iter().any(|l| {
+                    [
+                        "\\sent", "\\draft", "\\drafts", "\\spam", "\\junk", "\\trash",
+                    ]
+                    .contains(&l.to_ascii_lowercase().as_str())
+                })
+                || m.flags.iter().any(|f| f.eq_ignore_ascii_case("\\Draft"));
+            let inbox = if provider == Provider::Gmail {
+                labels.iter().any(|l| l.eq_ignore_ascii_case("\\Inbox"))
+            } else {
+                folder.eq_ignore_ascii_case("INBOX")
+            };
+            let unfiled = if provider == Provider::Gmail {
+                !labels.iter().any(|l| !l.starts_with('\\'))
+            } else {
+                roles.contains("archive")
+            };
+            let in_scope = match plan.options.scope {
+                Scope::Inbox => inbox,
+                Scope::InboxUnfiled => inbox || unfiled,
+                Scope::EveryFolder => true,
+            };
+            let reason = if excluded {
+                Some("excluded_role")
+            } else if provider != Provider::Gmail
+                && !inbox
+                && !census.folder_roles.contains_key(folder)
+            {
+                Some("unknown_folder_role")
+            } else if !in_scope {
+                Some("outside_scope")
+            } else if m.flags.iter().any(|f| f.eq_ignore_ascii_case("\\Deleted")) {
+                Some("deleted")
+            } else if plan.options.protect_flagged
+                && m.flags.iter().any(|f| f.eq_ignore_ascii_case("\\Flagged"))
+            {
+                Some("flagged")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                *plan.excluded.entry(reason.into()).or_default() += 1;
+                continue;
+            }
+            let Some(d) = decisions.get(id.as_str()) else {
+                *plan.excluded.entry("missing_decision".into()).or_default() += 1;
+                continue;
+            };
+            if d.review {
+                plan.review += 1;
+            }
+            if matches!(d.destination, proof::Destination::Inbox) {
+                plan.unmatched += 1;
+                continue;
+            }
+            let dest = d.destination.label();
+            if folder == dest && provider != Provider::Gmail {
+                *plan.excluded.entry("already_filed".into()).or_default() += 1;
+                continue;
+            }
+            if !plan.artifact.folders().contains(folder) && !inbox && !unfiled {
+                plan.stopped_folders.insert(folder.clone());
+            }
+            let Some(hash) = &m.headers.message_id_hash else {
+                *plan.excluded.entry("missing_identity".into()).or_default() += 1;
+                continue;
+            };
+            let operation = if provider == Provider::Gmail {
+                if m.gmail_message_id.is_none() {
+                    *plan.excluded.entry("missing_gmail_id".into()).or_default() += 1;
+                    continue;
+                }
+                let add = if labels.contains(dest) {
+                    BTreeSet::new()
+                } else {
+                    BTreeSet::from([dest.into()])
+                };
+                let remove = labels
+                    .iter()
+                    .filter(|l| l.eq_ignore_ascii_case("\\Inbox"))
+                    .cloned()
+                    .collect();
+                Operation::Gmail { add, remove }
+            } else {
+                Operation::Imap {
+                    method: if installed.is_some_and(|m| !m.capabilities.contains("MOVE")) {
+                        MoveMethod::CopyUidExpunge
+                    } else {
+                        MoveMethod::UidMove
+                    },
+                }
+            };
+            if matches!(&operation, Operation::Gmail { add, remove } if add.is_empty() && remove.is_empty())
+            {
+                *plan.excluded.entry("already_filed".into()).or_default() += 1;
+                continue;
+            }
+            let group = plan.groups.entry(dest.into()).or_default();
+            group.count += 1;
+            *senders
+                .entry(dest.into())
+                .or_default()
+                .entry(d.from.clone())
+                .or_default() += 1;
+            plan.changes.push(Change {
+                source: Identity {
+                    folder: folder.clone(),
+                    uidvalidity: f.uidvalidity,
+                    uid: m.uid,
+                    message_id_hash: hash.clone(),
+                    gmail_id: m.gmail_message_id.clone(),
+                },
+                flags: m.flags.clone(),
+                original_labels: labels.clone(),
+                destination: dest.into(),
+                sender: d.from.clone(),
+                operation,
+            });
+        }
+    }
+    if let Some(selected) = &plan.options.selected {
+        if selected.iter().any(|d| !plan.groups.contains_key(d)) {
+            return Err("Unknown selected destination".into());
+        }
+    }
+    for (destination, group) in &mut plan.groups {
+        group.selected = plan
+            .options
+            .selected
+            .as_ref()
+            .is_none_or(|s| s.contains(destination));
+        let mut top: Vec<_> = senders
+            .remove(destination)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        top.truncate(5);
+        group.top_senders = top;
+    }
+    plan.changes
+        .retain(|c| plan.groups[&c.destination].selected);
+    plan.stopped_folders.extend(
+        census
+            .folders
+            .keys()
+            .filter(|f| {
+                !f.eq_ignore_ascii_case("INBOX")
+                    && !plan.artifact.folders().contains(*f)
+                    && census.folder_roles.get(*f).is_some_and(BTreeSet::is_empty)
+            })
+            .cloned(),
+    );
+    Ok(())
+}

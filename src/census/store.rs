@@ -189,6 +189,8 @@ impl CensusKeys {
 #[serde(deny_unknown_fields)]
 pub struct AccountState {
     #[serde(default)]
+    pub protocol_backlog: crate::backlog::protocol::Journal,
+    #[serde(default)]
     pub folder_provisioning: super::folder_provisioning::FolderJournal,
     #[serde(default)]
     pub synthetic_folders: Option<super::folder_provisioning::FakeProvider>,
@@ -222,6 +224,7 @@ pub struct AccountState {
 impl AccountState {
     fn new(census: Census) -> Self {
         Self {
+            protocol_backlog: Default::default(),
             folder_provisioning: Default::default(),
             synthetic_folders: None,
             sieve: Default::default(),
@@ -416,6 +419,7 @@ impl EncryptedStore {
         state.sieve.validate(&state.census.account)?;
         state.sieve_transactions.validate(&state.census.account)?;
         state.folder_provisioning.validate(&state.census.account)?;
+        state.protocol_backlog.validate(&state.census.account)?;
         if state
             .synthetic_folders
             .as_ref()
@@ -445,7 +449,7 @@ impl EncryptedStore {
         state.census.acquisition.validate(&state.census.account)?;
         let snapshot =
             Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
-        self.stage_snapshot(14, &snapshot)
+        self.stage_snapshot(15, &snapshot)
     }
 
     fn stage_snapshot(
@@ -563,12 +567,38 @@ impl EncryptedStore {
         let snapshot = Zeroizing::new(snapshot);
         if !matches!(
             version,
-            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14
+            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15
         ) {
             return Err(CensusError::UnsupportedVersion);
         }
         if account != self.keys.account.as_str() {
             return Err(CensusError::AccountMismatch);
+        }
+        if version < 15 {
+            let raw: serde_json::Value =
+                serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?;
+            fn protocol_fields(v: &serde_json::Value) -> bool {
+                match v {
+                    serde_json::Value::Object(o) => o.iter().any(|(k, v)| {
+                        if k == "protocol_backlog" {
+                            v.as_object().is_none_or(|o| o.len() != 1)
+                                || v.get("runs")
+                                    .is_none_or(|r| r.as_array().is_none_or(|a| !a.is_empty()))
+                        } else {
+                            k == "execution_proof"
+                                || k == "move_evidence"
+                                || k == "semantics"
+                                    && v.as_str() == Some("imap-move-mapping-readback/v1")
+                                || protocol_fields(v)
+                        }
+                    }),
+                    serde_json::Value::Array(a) => a.iter().any(protocol_fields),
+                    _ => false,
+                }
+            }
+            if protocol_fields(&raw) {
+                return Err(CensusError::UnsupportedVersion);
+            }
         }
         if version < 14 {
             let raw: serde_json::Value =
@@ -631,6 +661,7 @@ impl EncryptedStore {
         state.sieve.validate(&state.census.account)?;
         state.sieve_transactions.validate(&state.census.account)?;
         state.folder_provisioning.validate(&state.census.account)?;
+        state.protocol_backlog.validate(&state.census.account)?;
         if state
             .synthetic_folders
             .as_ref()
@@ -661,6 +692,7 @@ impl EncryptedStore {
         state.sieve.interrupted();
         state.sieve_transactions.interrupted();
         state.folder_provisioning.interrupted();
+        state.protocol_backlog.interrupted();
         state.census.acquisition.interrupted();
         let census = &mut state.census;
         if census.account != self.keys.account {
@@ -706,6 +738,120 @@ impl EncryptedStore {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn old_schema_rejects_protocol_semantics_inside_a_valid_legacy_plan() {
+        let root = tempfile::tempdir().unwrap();
+        let input: crate::engine::PreviewInput =
+            serde_json::from_str(include_str!("../../examples/sample.json")).unwrap();
+        let census = crate::engine::synthetic_census(&input).unwrap();
+        let store = EncryptedStore::new(
+            root.path().into(),
+            CensusKeys::derive(&LocalSecret::random(), &census.account),
+        )
+        .unwrap();
+        let mut state = AccountState::new(census);
+        state.backlog.push(crate::backlog::Run {
+            id: "historical-legacy-run".into(),
+            plan: crate::backlog::Plan {
+                account: state.census.account.as_str().into(),
+                provider: crate::acquisition::Provider::MailboxOrg,
+                source: "synthetic".into(),
+                state_revision: state.revision,
+                ledger_version: String::new(),
+                mailbox_revision: None,
+                semantics: "imap-move-mapping-readback/v1".into(),
+                artifact: crate::engine::artifact(&input.documents, &input.context).unwrap(),
+                proof_gate: "pass".into(),
+                options: crate::backlog::Options::default(),
+                changes: vec![],
+                excluded: Default::default(),
+                unmatched: 0,
+                review: 0,
+                groups: Default::default(),
+                stopped_folders: Default::default(),
+                diagnostics: vec![],
+            },
+            status: crate::backlog::Status::Completed,
+            outcomes: vec![],
+            undo: vec![],
+            undo_requested: false,
+            batches: 0,
+            error: None,
+        });
+        let mut value = serde_json::to_value(state).unwrap();
+        value.as_object_mut().unwrap().remove("protocol_backlog");
+        let mut legacy = value.clone();
+        legacy["backlog"][0]["plan"]["semantics"] = "backlog-flags-preserved-no-copies-v1".into();
+        store
+            .stage_snapshot(14, &serde_json::to_string(&legacy).unwrap())
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(store.load_state().unwrap().backlog).unwrap(),
+            legacy["backlog"]
+        );
+        store
+            .stage_snapshot(14, &serde_json::to_string(&value).unwrap())
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        assert!(matches!(
+            store.load_state(),
+            Err(CensusError::UnsupportedVersion)
+        ));
+    }
+
+    #[test]
+    fn protocol_schema_fifteen_keeps_old_absence_and_rejects_nested_authority() {
+        for version in 1..=14 {
+            let root = tempfile::tempdir().unwrap();
+            let input: crate::engine::PreviewInput =
+                serde_json::from_str(include_str!("../../examples/sample.json")).unwrap();
+            let census = crate::engine::synthetic_census(&input).unwrap();
+            let store = EncryptedStore::new(
+                root.path().into(),
+                CensusKeys::derive(&LocalSecret::random(), &census.account),
+            )
+            .unwrap();
+            let mut value = if version == 1 {
+                serde_json::to_value(census).unwrap()
+            } else {
+                serde_json::to_value(AccountState::new(census)).unwrap()
+            };
+            value.as_object_mut().unwrap().remove("protocol_backlog");
+            store
+                .stage_snapshot(version, &serde_json::to_string(&value).unwrap())
+                .unwrap()
+                .persist(store.path())
+                .unwrap();
+            assert!(store.load_state().unwrap().protocol_backlog.runs.is_empty());
+            for injection in [
+                serde_json::json!({"protocol_backlog":{"runs":[{}]}}),
+                serde_json::json!({"protocol_backlog":{"runs":[],"source":"forged"}}),
+                serde_json::json!({"backlog":[{"plan":{"execution_proof":"forged"}}]}),
+                serde_json::json!({"exports":[{"artifact":{"move_evidence":{}}}]}),
+                serde_json::json!({"backlog":[{"plan":{"semantics":"imap-move-mapping-readback/v1"}}]}),
+                serde_json::json!({"exports":[{"artifact":{"semantics":"imap-move-mapping-readback/v1"}}]}),
+            ] {
+                let mut changed = value.clone();
+                changed
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(injection.as_object().unwrap().clone());
+                store
+                    .stage_snapshot(version, &serde_json::to_string(&changed).unwrap())
+                    .unwrap()
+                    .persist(store.path())
+                    .unwrap();
+                assert!(
+                    matches!(store.load_state(), Err(CensusError::UnsupportedVersion)),
+                    "schema {version}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn delivery_schema_fourteen_preserves_legacy_absence_and_rejects_nested_smuggling() {
@@ -778,7 +924,7 @@ mod tests {
                 .unwrap()
                 .persist(store.path())
                 .unwrap();
-            assert_eq!(store.schema_version().unwrap(), 14);
+            assert_eq!(store.schema_version().unwrap(), 15);
             assert_eq!(
                 serde_json::to_value(store.load_state().unwrap()).unwrap(),
                 serde_json::to_value(loaded).unwrap()
@@ -817,7 +963,7 @@ mod tests {
         loaded.workspace.as_mut().unwrap().input.baseline = crate::rules::proof::Baseline::Previous;
         assert!(crate::rules::workspace::preview(&loaded, &context, store.keys()).is_err());
         store.save_state(&mut loaded).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 14);
+        assert_eq!(store.schema_version().unwrap(), 15);
         assert_eq!(
             serde_json::to_value(store.load_state().unwrap().exports).unwrap(),
             expected
@@ -878,7 +1024,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 14);
+        assert_eq!(store.schema_version().unwrap(), 15);
         assert_eq!(
             serde_json::to_value(store.load_state().unwrap().exports).unwrap(),
             serde_json::to_value(&saved.exports).unwrap()
@@ -928,7 +1074,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 14);
+        assert_eq!(store.schema_version().unwrap(), 15);
         assert!(store.load_state().unwrap().folder_provisioning == saved.folder_provisioning);
         let mut bad = saved.clone();
         bad.folder_provisioning.history[0].plan.entries[0]
@@ -977,7 +1123,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 14);
+        assert_eq!(store.schema_version().unwrap(), 15);
         assert!(store.load_state().unwrap().sieve_transactions == state.sieve_transactions);
         let mut malformed = state.clone();
         malformed.sieve_transactions.history[0].after.bodies[1]
@@ -1025,7 +1171,7 @@ mod tests {
             assert!(state.exports.is_empty());
             assert!(state.proposals.history.is_empty());
             store.save_state(&mut state).unwrap();
-            assert_eq!(store.schema_version().unwrap(), 14);
+            assert_eq!(store.schema_version().unwrap(), 15);
             assert_eq!(store.load().unwrap().acquisition, Default::default());
         }
     }

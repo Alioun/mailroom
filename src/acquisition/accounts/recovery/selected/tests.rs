@@ -103,7 +103,7 @@ fn schema_ten_protocol_and_proposal_sieve_facts_round_trip_with_selected_recover
             .unwrap();
     }
     let (manifest, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
-    assert!(manifest.accounts.iter().all(|m| m.state_schema == 14));
+    assert!(manifest.accounts.iter().all(|m| m.state_schema == 15));
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();
@@ -598,7 +598,7 @@ fn selected_schema_fourteen_keeps_complete_delivery_state_and_restored_holds() {
         &ledger,
         root.path(),
     );
-    assert_eq!(manifest.accounts[0].state_schema, 14);
+    assert_eq!(manifest.accounts[0].state_schema, 15);
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();

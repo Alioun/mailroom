@@ -8,6 +8,7 @@ use crate::{
 };
 use std::collections::BTreeMap;
 
+#[derive(Clone)]
 pub(in crate::acquisition) struct InstalledSource {
     pub account: AccountId,
     pub login: String,
@@ -20,7 +21,23 @@ pub(in crate::acquisition) struct InstalledSource {
     pub operation_timeout: Duration,
 }
 
+pub(in crate::acquisition) struct RuntimeBinding {
+    pub account: AccountId,
+    pub provider: Provider,
+    pub login: String,
+    pub source: String,
+    pub credential_key_recovery: String,
+    pub workspace: String,
+    pub topology: String,
+}
+
 pub(in crate::acquisition) struct BacklogPermit<'a>(&'a InstalledSource);
+
+impl BacklogPermit<'_> {
+    pub(in crate::acquisition) fn source(&self) -> &InstalledSource {
+        self.0
+    }
+}
 
 impl InstalledSource {
     pub(in crate::acquisition) fn identity(&self) -> String {
@@ -39,6 +56,30 @@ impl InstalledSource {
         data_encoding::HEXLOWER.encode(&Sha256::digest(bytes))
     }
 
+    pub(in crate::acquisition) fn runtime_permit<'a>(
+        &'a self,
+        binding: &RuntimeBinding,
+    ) -> Result<BacklogPermit<'a>, Error> {
+        if binding.account != self.account
+            || binding.provider != Provider::MailboxOrg
+            || binding.login != self.login
+            || binding.source != self.identity()
+            || binding.credential_key_recovery.is_empty()
+            || binding.workspace.is_empty()
+            || binding.topology.is_empty()
+            || self.authority != "fixture-message-move/v1"
+            || self.epoch.is_empty()
+            || !self.address.ip().is_loopback()
+            || self.login.is_empty()
+            || self.root.is_empty()
+            || self.root.len() > 8192
+            || self.tls_name.is_empty()
+        {
+            return Err(Error::Unsupported);
+        }
+        Ok(BacklogPermit(self))
+    }
+    #[cfg(test)]
     pub(in crate::acquisition) fn permit(
         &self,
         account: &AccountId,
@@ -201,10 +242,13 @@ impl Connection {
                 if row.get(2).and_then(Token::atom) != Some("FETCH") {
                     return Ok(());
                 }
-                let (uid, metadata) = parse_metadata(row)?;
+                let Some(uid) = fetch_uid(row)? else {
+                    return Ok(());
+                };
                 if !chunk.contains(&uid) {
                     return Ok(());
                 }
+                let (uid, metadata) = parse_metadata(row)?;
                 if messages.insert(uid, metadata).is_some() {
                     return Err(Error::Unstable);
                 }
@@ -312,6 +356,36 @@ impl Connection {
     }
 }
 
+fn fetch_uid(row: &[Token]) -> Result<Option<Uid>, Error> {
+    if row.get(3) != Some(&Token::Open) || row.last() != Some(&Token::Close) {
+        return Err(Error::Protocol);
+    }
+    let mut depth = 0usize;
+    let mut uid = None;
+    for (at, token) in row.iter().enumerate().skip(3) {
+        match token {
+            Token::Open => depth += 1,
+            Token::Close => depth = depth.checked_sub(1).ok_or(Error::Protocol)?,
+            Token::Atom(key) if depth == 1 && key == "UID" => {
+                let value = row
+                    .get(at + 1)
+                    .and_then(Token::atom)
+                    .ok_or(Error::Protocol)?;
+                let value = Uid::new(value.parse().map_err(|_| Error::Protocol)?)
+                    .map_err(|_| Error::Protocol)?;
+                if uid.replace(value).is_some() {
+                    return Err(Error::Protocol);
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return Err(Error::Protocol);
+    }
+    Ok(uid)
+}
+
 fn parse_metadata(row: &[Token]) -> Result<(Uid, Metadata), Error> {
     if row.get(3) != Some(&Token::Open) || row.last() != Some(&Token::Close) {
         return Err(Error::Protocol);
@@ -416,4 +490,4 @@ fn parse_metadata(row: &[Token]) -> Result<(Uid, Metadata), Error> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

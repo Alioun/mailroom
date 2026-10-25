@@ -162,7 +162,7 @@ const backlogObservation = z.object({ destination: backlogIdentity, commands: z.
 const backlogOutcome = z.discriminatedUnion('state', [z.object({ state: z.literal('pending') }), z.object({ state: z.literal('intent') }), z.object({ state: z.literal('applied'), observation: backlogObservation }), z.object({ state: z.literal('conflict'), reason: z.string() })])
 const backlogUndo = z.discriminatedUnion('state', [z.object({ state: z.literal('not_requested') }), z.object({ state: z.literal('intent') }), z.object({ state: z.literal('restored'), observation: backlogObservation }), z.object({ state: z.literal('conflict'), reason: z.string() })])
 const backlogRun = z.object({ id: z.string(), plan: backlogPlan, status: z.enum(['prepared', 'running', 'stopped', 'completed', 'failed', 'uncertain']), outcomes: z.array(backlogOutcome), undo: z.array(backlogUndo), undo_requested: z.boolean(), batches: z.number(), error: z.string().nullable() })
-const backlogView = z.object({ runs: z.array(backlogRun), synthetic: z.boolean() })
+const backlogView = z.object({ protocol_installed: z.boolean().default(false), protocol_history: z.boolean().default(false), runs: z.array(backlogRun), synthetic: z.boolean() })
 const backlogPreview = z.object({ plan: backlogPlan, receipt: z.string(), execution_available: z.boolean() })
 const backlogUndoPreview = z.object({ receipt: z.string(), eligible: z.array(z.number()), conflicts: z.record(z.string(), z.string()), warning: z.string() })
 export type BacklogOptions = z.infer<typeof backlogOptions>
@@ -252,3 +252,23 @@ export type ProposalSelection = z.infer<typeof proposalSelection>
 export async function openProposals(account: string): Promise<ProposalGeneration> { return proposalGeneration.parse(await accountPost('proposals', { account, command: { action: 'open' } })) }
 export async function reviewProposals(account: string, selection: ProposalSelection, disposition: ProposalReview['disposition']): Promise<ProposalReview> { return proposalReview.parse(await accountPost('proposals', { account, command: { action: 'preview', selection, disposition } })) }
 export async function confirmProposals(account: string, review: ProposalReview): Promise<ProposalGeneration> { return proposalGeneration.parse(await accountPost('proposals', { account, command: { action: 'confirm', selection: review.selection, disposition: review.disposition, receipt: review.receipt, confirmed: true } })) }
+
+const moveMailbox = z.object({ name: z.object({ decoded: z.string(), wire: z.string() }), uidvalidity: z.number().int().positive() })
+const moveMetadata = z.object({ message_id_hash: z.string(), size: z.number(), internal_date: z.string(), flags: z.array(z.string()) })
+const moveIntent = z.object({ purpose: z.union([z.literal('conditional_undo'), z.object({ filing: z.object({ protect_flagged: z.boolean() }) })]), source: moveMailbox, destination: moveMailbox, messages: z.record(z.string(), moveMetadata) })
+const copyUid = z.object({ uidvalidity: z.number().int().positive(), pairs: z.record(z.string(), z.number().int().positive()) })
+const moveReadback = z.object({ identity: moveMailbox, messages: z.record(z.string(), moveMetadata) })
+const moveEvidence = z.object({ intent: moveIntent, attempted: z.boolean(), mapping: z.discriminatedUnion('kind', [z.object({ kind: z.literal('missing') }), z.object({ kind: z.literal('validated'), mapping: copyUid }), z.object({ kind: z.literal('rejected'), prior: copyUid.nullable() })]), completion: z.discriminatedUnion('kind', [z.object({ kind: z.literal('lost') }), z.object({ kind: z.literal('tagged'), status: z.enum(['ok', 'no', 'bad']), code: z.string().nullable() })]).nullable(), readback: z.tuple([moveReadback, moveReadback]).nullable() })
+const reverseMove = z.object({ forward: z.number().int().nonnegative(), evidence: moveEvidence })
+const protocolRun = z.object({ id: z.string(), receipt: z.string(), plan: z.object({ filing: backlogPlan, binding: z.object({ account: z.string(), source: z.string(), authority: z.string(), workspace: z.string(), material: z.string() }), saved_proof: z.string(), execution_proof: z.string() }), status: z.enum(['prepared', 'running', 'stopped', 'complete', 'uncertain', 'conflict', 'undo_running', 'undone']), stop_requested: z.boolean(), batches: z.array(moveEvidence), reverse: z.array(reverseMove), undo_receipt: z.string().nullable(), undo_conflicts: z.number().int().nonnegative().default(0) })
+const protocolView = z.object({ installed: z.boolean(), recovery_hold: z.boolean(), journal: z.object({ runs: z.array(protocolRun) }), limitations: z.string() })
+const protocolPreview = z.object({ operation: protocolRun, receipt: z.string(), saved: proofPreview, execution: preview, limitations: z.string() })
+const protocolUndo = z.object({ run: z.string(), reverse: z.array(reverseMove), conflicts: z.number(), receipt: z.string(), limitations: z.string() })
+export type ProtocolView = z.infer<typeof protocolView>
+export type ProtocolPreview = z.infer<typeof protocolPreview>
+export type ProtocolUndo = z.infer<typeof protocolUndo>
+type ProtocolAction = { action: 'status' | 'cancel' } | { action: 'preview'; options: BacklogOptions } | { action: 'confirm'; options: BacklogOptions; receipt: string; confirmed: boolean } | { action: 'reconcile' | 'resume' | 'undo_preview' | 'resume_undo'; run: string } | { action: 'undo'; run: string; receipt: string; confirmed: boolean }
+export async function protocolAction(account: string, command: ProtocolAction): Promise<void> { await accountPost('backlog/protocol', { account, command }) }
+export async function openProtocolBacklog(account: string): Promise<ProtocolView> { return protocolView.parse(await accountPost('backlog/protocol', { account, command: { action: 'status' } })) }
+export async function previewProtocolBacklog(account: string, options: BacklogOptions): Promise<ProtocolPreview> { return protocolPreview.parse(await accountPost('backlog/protocol', { account, command: { action: 'preview', options } })) }
+export async function previewProtocolUndo(account: string, run: string): Promise<ProtocolUndo> { return protocolUndo.parse(await accountPost('backlog/protocol', { account, command: { action: 'undo_preview', run } })) }

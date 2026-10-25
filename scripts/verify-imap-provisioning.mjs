@@ -169,7 +169,7 @@ try {
   await command('confirm', { receipt: p.receipt, confirmed: true }); await terminal()
   await command('confirm', { receipt: p.receipt, confirmed: true }); await terminal('failed')
   const after = await observe()
-  assert.equal(after.schema, 14); assert.equal(creates(after), 0); assert.equal(after.topology, initial.topology)
+  assert.equal(after.schema, 15); assert.equal(creates(after), 0); assert.equal(after.topology, initial.topology)
   assert.equal(after.unrelated, initial.unrelated); assert.equal(after.external_unrelated, initial.external_unrelated)
   checks.push('Protected HTTP, hostile extra fields, wrong account, receipt purpose/alteration/replay and exact empty saved-artifact plan pass with zero CREATE')
   await stop()

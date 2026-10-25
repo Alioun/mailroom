@@ -140,6 +140,8 @@ impl AccountPaths {
 }
 
 pub struct Accounts {
+    pub(super) backlog_source:
+        Option<Arc<super::folder_provisioning::transport::message_move::InstalledSource>>,
     pub(super) workspace_authority: Option<super::workspace_authority::SyntheticWorkspaceAuthority>,
     pub(super) folder_source: Option<Arc<super::folder_provisioning::transport::InstalledSource>>,
     pub(crate) paths: AccountPaths,
@@ -163,6 +165,7 @@ impl Accounts {
             paths,
             backend,
             folder_source: None,
+            backlog_source: None,
             workspace_authority: None,
             sieve_source: None,
             sieve_write: None,

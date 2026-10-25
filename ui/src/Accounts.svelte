@@ -51,6 +51,7 @@
   let active = true
   let polling = false
   let cacheEpoch = $state(0)
+  let workspaceRevision = $state(0)
   let revision = 0
   async function lifecycleChanged() {
     revision += 1; view = null; cacheEpoch += 1; status = await readAccountStatus(); accounts = await listAccounts(); if (!accounts.some(a => a.id === selected)) selected = ''
@@ -115,7 +116,7 @@
     <AcquisitionEvidence evidence={view.evidence} {lang} />
     <h3>{t.addresses}</h3><p class="help">{t.ownership}</p>
     <ul class="account-addresses">{#each view.addresses as address (address.address)}<li><label><input type="checkbox" checked={address.confirmed} disabled={busy || running} onchange={(event) => { const checked = event.currentTarget.checked; void act(async () => { view = await confirmAccount(selected, address.address, checked) }) }} />{t.confirm} {address.address}</label><p class="help">{address.evidence.join(', ')}</p></li>{/each}</ul>
-    {#key view}<Reports account={selected} {lang} /><Winddown account={selected} {lang} onBulkHandoff={async (senders, asOf) => { await unsubscribe?.prepareHandoff(selected, senders, asOf) }} /><Ledger account={selected} {lang} /><RulesProof account={selected} {lang} /><Backlog account={selected} {lang} /><Invoices account={selected} {lang} />{/key}
+    {#key view}<Reports account={selected} {lang} /><Winddown account={selected} {lang} onBulkHandoff={async (senders, asOf) => { await unsubscribe?.prepareHandoff(selected, senders, asOf) }} /><Ledger account={selected} {lang} /><RulesProof account={selected} {lang} onWorkspaceChange={() => workspaceRevision += 1} /><Backlog account={selected} {lang} {workspaceRevision} /><Invoices account={selected} {lang} />{/key}
     <details><summary>{t.details}</summary>{#each Object.entries(view.census.folders) as [name, folder] (name)}<h3>{name}</h3><p>{Object.keys(folder.messages).length} {t.saved} · UIDVALIDITY {folder.uidvalidity}</p>{#each Object.values(folder.messages) as message (message.uid)}<p>{message.headers.subject} · {message.headers.direction} · UID {message.uid}</p>{/each}{/each}</details>
   {/if}
   {#key cacheEpoch}<Unsubscribe {lang} bind:this={unsubscribe} />{/key}

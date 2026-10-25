@@ -3,7 +3,7 @@
   import { onMount } from 'svelte'
   import { ToggleGroup } from '@ark-ui/svelte/toggle-group'
   import { load, evaluate, openWorkspace, saveWorkspace, previewWorkspace, downloadSieve, type WorkspaceView, type ProofPreview, type Sample, type Preview, type Pin } from './api'
-  let { lang, account = null }: { lang: 'en' | 'de'; account?: string | null } = $props()
+  let { lang, account = null, onWorkspaceChange }: { lang: 'en' | 'de'; account?: string | null; onWorkspaceChange?: () => void } = $props()
   let sample = $state<Sample | null>(null)
   let preset = $state('')
   let overrides = $state('')
@@ -80,7 +80,7 @@
     await save()
     if (!dirty) await run()
   }
-  function reset() { proofState = { kind: 'initial' }; receipt = null; confirmed = false }
+  function reset() { proofState = { kind: 'initial' }; receipt = null; confirmed = false; onWorkspaceChange?.() }
   async function run() {
     if (!sample) return
     receipt = null; confirmed = false

@@ -197,7 +197,7 @@ fn saved_envelope_tags_share_proof_and_hold_unknown_without_header_authority() {
     workspace::confirm_export(&mut saved, &context, store.keys(), &proof.receipt).unwrap();
     store.save_state(&mut saved).unwrap();
     assert_eq!(preserved(&store.load_state().unwrap()), original);
-    assert_eq!(store.schema_version().unwrap(), 14);
+    assert_eq!(store.schema_version().unwrap(), 15);
     let known = saved.census.folders["INBOX"].messages[&1].delivery.clone();
     let DeliveryEvidence::Known {
         source, message, ..

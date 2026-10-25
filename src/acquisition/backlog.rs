@@ -1,0 +1,939 @@
+use super::{
+    Account, Accounts, AcquisitionError, Cancellation,
+    folder_provisioning::transport::message_move::{Connection, InstalledSource, RuntimeBinding},
+    imap::{self, MailRead, ReadOnlyImap},
+};
+use crate::{
+    backlog::{
+        Options,
+        imap_move::*,
+        protocol::{self as model, Binding, Preview, Reverse, Run, SavedPlan, Status, UndoPreview},
+    },
+    census::{
+        AccountId, AccountState, Census, EncryptedStore, FolderCensus, ScanState,
+        folder_provisioning::Inventory,
+    },
+    rules::{proof, workspace},
+};
+use std::collections::{BTreeMap, BTreeSet};
+use subtle::ConstantTimeEq;
+
+fn invalid() -> AcquisitionError {
+    AcquisitionError::InvalidInput
+}
+fn failure<T>(_: T) -> AcquisitionError {
+    AcquisitionError::Protocol
+}
+fn save(store: &EncryptedStore, state: &mut AccountState) -> Result<(), AcquisitionError> {
+    store.save_state(state).map_err(Into::into)
+}
+impl Accounts {
+    pub(crate) fn backlog_installed(&self, id: Option<&AccountId>) -> bool {
+        self.backlog_source.as_ref().is_some_and(|s| {
+            s.authority == "fixture-message-move/v1"
+                && s.address.ip().is_loopback()
+                && id.is_none_or(|id| *id == s.account)
+        })
+    }
+    fn backlog_source(&self, account: &Account) -> Result<&InstalledSource, AcquisitionError> {
+        let s = self.backlog_source.as_deref().ok_or_else(invalid)?;
+        if s.account != account.id
+            || s.login != account.login
+            || account.provider != super::Provider::MailboxOrg
+        {
+            return Err(invalid());
+        }
+        Ok(s)
+    }
+    fn backlog_binding(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &AccountState,
+    ) -> Result<Binding, AcquisitionError> {
+        let s = self.backlog_source(account)?;
+        if store.recovery_pending() {
+            return Err(AcquisitionError::LifecyclePending);
+        }
+        Ok(Binding {
+            account: account.id.clone(),
+            source: s.identity(),
+            authority: self.sieve_authority(account, store)?,
+            workspace: self.workspace_context(account, store)?.binding().into(),
+            material: model::material(saved, store.keys()).map_err(failure)?,
+        })
+    }
+    fn backlog_runtime(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &AccountState,
+    ) -> Result<RuntimeBinding, AcquisitionError> {
+        let b = self.backlog_binding(account, store, saved)?;
+        Ok(RuntimeBinding {
+            account: b.account,
+            provider: account.provider,
+            login: account.login.clone(),
+            source: b.source,
+            credential_key_recovery: b.authority,
+            workspace: b.workspace,
+            topology: store.keys().binding_for(
+                b"mailroom/imap-topology-profile/v1",
+                &serde_json::to_vec(&(
+                    crate::census::folder_provisioning::PROFILE,
+                    &saved.census.folder_roles,
+                ))
+                .map_err(failure)?,
+            ),
+        })
+    }
+    fn backlog_observe(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &AccountState,
+        cancel: Cancellation,
+    ) -> Result<(Inventory, Census), AcquisitionError> {
+        let runtime = self.backlog_runtime(account, store, saved)?;
+        let source = self.backlog_source(account)?;
+        let permit = source.runtime_permit(&runtime).map_err(failure)?;
+        let password = self.password(account)?;
+        let mut connection =
+            Connection::connect(&permit, &password, cancel.clone()).map_err(failure)?;
+        let before = connection.inventory().map_err(failure)?;
+        drop(connection);
+        let read = crate::policy::read_permit(account.provider)?;
+        let mut connection =
+            ReadOnlyImap::loopback(&permit, &read, &account.login, &password, cancel.clone())?;
+        let mut census = saved.census.clone();
+        census.folders.clear();
+        census.folder_roles.clear();
+        let folders = connection.folders()?;
+        for folder in folders {
+            if !folder.selectable {
+                return Err(invalid());
+            }
+            if before
+                .get(&folder.name)
+                .is_none_or(|m| m.name.wire != folder.wire)
+            {
+                return Err(invalid());
+            }
+            let (validity, uids) = connection.inventory(&folder)?;
+            let mut messages = BTreeMap::new();
+            for chunk in uids.iter().copied().collect::<Vec<_>>().chunks(imap::BATCH) {
+                let metadata = connection.metadata(chunk)?;
+                let headers = connection.headers(chunk)?;
+                for uid in chunk {
+                    messages.insert(*uid, imap::record(&metadata[uid], &folder, &headers[uid])?);
+                }
+            }
+            if connection.inventory(&folder)? != (validity, uids.clone()) {
+                return Err(invalid());
+            }
+            census
+                .folder_roles
+                .insert(folder.name.clone(), folder.roles.clone());
+            census.folders.insert(
+                folder.name,
+                FolderCensus {
+                    uidvalidity: validity,
+                    state: ScanState::Complete,
+                    live_uids: uids,
+                    messages,
+                },
+            );
+        }
+        if census.folders.len() != before.mailboxes.len() {
+            return Err(invalid());
+        }
+        census.acquisition_state = ScanState::Complete;
+        drop(connection);
+        let mut connection = Connection::connect(&permit, &password, cancel).map_err(failure)?;
+        if connection.inventory().map_err(failure)? != before {
+            return Err(invalid());
+        }
+        for (name, folder) in &census.folders {
+            connection
+                .readback(
+                    &MailboxIdentity {
+                        name: before.get(name).ok_or_else(invalid)?.name.clone(),
+                        uidvalidity: UidValidity::new(folder.uidvalidity).map_err(failure)?,
+                    },
+                    &BTreeSet::new(),
+                )
+                .map_err(failure)?;
+        }
+        Ok((before, census))
+    }
+    pub(crate) fn backlog_preview(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &AccountState,
+        options: Options,
+        cancel: Cancellation,
+    ) -> Result<Preview, AcquisitionError> {
+        self.backlog_binding(account, store, saved)?;
+        if saved.protocol_backlog.runs.len() >= model::HISTORY
+            || saved.protocol_backlog.runs.iter().any(|r| !r.finished())
+        {
+            return Err(invalid());
+        }
+        let context = self.workspace_context(account, store)?;
+        let saved_proof = workspace::preview(saved, &context, store.keys()).map_err(failure)?;
+        if !saved_proof.download_available {
+            return Err(invalid());
+        }
+        let (topology, observed) = self.backlog_observe(account, store, saved, cancel)?;
+        let input = &saved.workspace.as_ref().ok_or_else(invalid)?.input;
+        let baseline = if input.baseline == proof::Baseline::Previous {
+            Some(&saved.exports.last().ok_or_else(invalid)?.artifact)
+        } else {
+            None
+        };
+        let execution = proof::prove(
+            saved_proof.proof.artifact.clone(),
+            &observed,
+            input.as_of,
+            &input.pins,
+            input.baseline,
+            baseline,
+        )
+        .map_err(failure)?;
+        if execution.gate == "blocked" {
+            return Err(invalid());
+        }
+        let filing = model::project(saved, &observed, &execution, options).map_err(failure)?;
+        #[cfg(test)]
+        if let Some(root) = std::env::var_os("MAILROOM_MOVE_FIXTURE") {
+            std::fs::write(
+                std::path::Path::new(&root).join("move-preview-debug.json"),
+                serde_json::to_vec(
+                    &serde_json::json!({"topology":topology,"execution":execution,"filing":filing}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let mut grouped: BTreeMap<(String, String), BTreeMap<Uid, Metadata>> = BTreeMap::new();
+        for c in &filing.changes {
+            let m = &observed.folders[&c.source.folder].messages[&c.source.uid];
+            grouped
+                .entry((c.source.folder.clone(), c.destination.clone()))
+                .or_default()
+                .insert(
+                    Uid::new(m.uid).map_err(failure)?,
+                    Metadata {
+                        message_id_hash: c.source.message_id_hash.clone(),
+                        size: u32::try_from(m.size).map_err(failure)?,
+                        internal_date: m.internal_date.clone(),
+                        flags: m.flags.clone(),
+                    },
+                );
+        }
+        let mut batches = vec![];
+        for ((src, dst), messages) in grouped {
+            let identity = |name: &str| -> Result<MailboxIdentity, AcquisitionError> {
+                Ok(MailboxIdentity {
+                    name: topology
+                        .get(name)
+                        .filter(|m| m.selectable())
+                        .ok_or_else(invalid)?
+                        .name
+                        .clone(),
+                    uidvalidity: UidValidity::new(
+                        observed.folders.get(name).ok_or_else(invalid)?.uidvalidity,
+                    )
+                    .map_err(failure)?,
+                })
+            };
+            let entries: Vec<_> = messages.into_iter().collect();
+            for chunk in entries.chunks(crate::backlog::BATCH_LIMIT) {
+                batches.push(MoveEvidence::intent(
+                    MoveIntent::new(
+                        Purpose::Filing {
+                            protect_flagged: filing.options.protect_flagged,
+                        },
+                        identity(&src)?,
+                        identity(&dst)?,
+                        chunk.iter().cloned().collect(),
+                    )
+                    .map_err(failure)?,
+                ));
+            }
+        }
+        if batches.is_empty() || batches.len() > model::BATCHES {
+            return Err(invalid());
+        }
+        let plan = SavedPlan {
+            filing,
+            binding: self.backlog_binding(account, store, saved)?,
+            topology,
+            saved_proof: saved_proof.receipt.clone(),
+            execution_proof: store.keys().binding_for(
+                b"mailroom/imap-execution-proof/v1",
+                &serde_json::to_vec(&(&observed, &execution)).map_err(failure)?,
+            ),
+        };
+        let receipt = store.keys().binding_for(
+            b"mailroom/imap-backlog-start/v1",
+            &serde_json::to_vec(&(saved, &plan, &batches)).map_err(failure)?,
+        );
+        let id = store
+            .keys()
+            .binding_for(b"mailroom/imap-backlog-id/v1", receipt.as_bytes());
+        let operation = Run {
+            id,
+            receipt: receipt.clone(),
+            plan,
+            status: Status::Prepared,
+            stop_requested: false,
+            batches,
+            reverse: vec![],
+            undo_receipt: None,
+            undo_conflicts: 0,
+        };
+        Ok(Preview {
+            operation,
+            receipt,
+            saved: saved_proof,
+            execution,
+            limitations: model::LIMITATIONS,
+        })
+    }
+    pub(crate) fn backlog_confirm(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &mut AccountState,
+        options: Options,
+        receipt: &str,
+        cancel: Cancellation,
+        fresh: impl Fn(&AccountState) -> Result<(), String>,
+    ) -> Result<(), AcquisitionError> {
+        let p = self.backlog_preview(account, store, saved, options, cancel.clone())?;
+        if !bool::from(p.receipt.as_bytes().ct_eq(receipt.as_bytes()))
+            || saved
+                .protocol_backlog
+                .runs
+                .iter()
+                .any(|r| r.id == p.operation.id)
+        {
+            return Err(invalid());
+        }
+        fresh(saved).map_err(failure)?;
+        let id = p.operation.id.clone();
+        saved.protocol_backlog.runs.push(p.operation);
+        save(store, saved)?;
+        boundary("move_consumed");
+        self.backlog_run(account, store, saved, &id, false, cancel, fresh)
+    }
+    pub(crate) fn backlog_run(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &mut AccountState,
+        id: &str,
+        reverse: bool,
+        cancel: Cancellation,
+        fresh: impl Fn(&AccountState) -> Result<(), String>,
+    ) -> Result<(), AcquisitionError> {
+        let i = saved
+            .protocol_backlog
+            .runs
+            .iter()
+            .position(|r| r.id == id)
+            .ok_or_else(invalid)?;
+        if !model::same_binding(
+            &self.backlog_binding(account, store, saved)?,
+            &saved.protocol_backlog.runs[i].plan.binding,
+        ) {
+            saved.protocol_backlog.runs[i].status = Status::Conflict;
+            save(store, saved)?;
+            return Err(invalid());
+        }
+        if matches!(
+            saved.protocol_backlog.runs[i].status,
+            Status::Complete | Status::Undone | Status::Conflict
+        ) && !(reverse
+            && saved.protocol_backlog.runs[i].status == Status::Complete
+            && saved.protocol_backlog.runs[i].undo_receipt.is_some())
+            || (!reverse && saved.protocol_backlog.runs[i].undo_receipt.is_some())
+        {
+            return Err(invalid());
+        }
+        let entries: Vec<_> = if reverse {
+            saved.protocol_backlog.runs[i]
+                .reverse
+                .iter()
+                .map(|b| &b.evidence)
+                .collect()
+        } else {
+            saved.protocol_backlog.runs[i].batches.iter().collect()
+        };
+        if entries.iter().any(|b| b.attempted() && !model::verified(b))
+            || (reverse && saved.protocol_backlog.runs[i].undo_receipt.is_none())
+        {
+            return Err(invalid());
+        }
+        saved.protocol_backlog.runs[i].stop_requested = false;
+        saved.protocol_backlog.runs[i].status = if reverse {
+            Status::UndoRunning
+        } else {
+            Status::Running
+        };
+        save(store, saved)?;
+        let runtime = self.backlog_runtime(account, store, saved)?;
+        let source = self.backlog_source(account)?;
+        let permit = source.runtime_permit(&runtime).map_err(failure)?;
+        let password = self.password(account)?;
+        let result = (|| {
+            let mut connection =
+                Connection::connect(&permit, &password, cancel.clone()).map_err(failure)?;
+            if connection.inventory().map_err(failure)?
+                != saved.protocol_backlog.runs[i].plan.topology
+            {
+                return Err(invalid());
+            }
+            let count = if reverse {
+                saved.protocol_backlog.runs[i].reverse.len()
+            } else {
+                saved.protocol_backlog.runs[i].batches.len()
+            };
+            for n in 0..count {
+                let mut evidence = if reverse {
+                    saved.protocol_backlog.runs[i].reverse[n].evidence.clone()
+                } else {
+                    saved.protocol_backlog.runs[i].batches[n].clone()
+                };
+                if evidence.attempted() {
+                    continue;
+                }
+                if cancel.is_cancelled() {
+                    return Err(AcquisitionError::Cancelled);
+                }
+                fresh(saved).map_err(failure)?;
+                if !model::same_binding(
+                    &self.backlog_binding(account, store, saved)?,
+                    &saved.protocol_backlog.runs[i].plan.binding,
+                ) {
+                    return Err(invalid());
+                }
+                boundary("move_before_intent");
+                let result = connection.move_messages(&permit, &mut evidence, |e| {
+                    if e.mapping().is_some() && e.completion().is_none() {
+                        boundary("move_parsed_mapping");
+                    }
+                    if reverse {
+                        saved.protocol_backlog.runs[i].reverse[n].evidence = e.clone();
+                    } else {
+                        saved.protocol_backlog.runs[i].batches[n] = e.clone();
+                    }
+                    save(store, saved)
+                        .map_err(|_| crate::census::folder_provisioning::Failure::Limit)?;
+                    boundary(if e.mapping().is_some() && e.completion().is_none() {
+                        "move_saved_mapping"
+                    } else if e.completion().is_some() {
+                        "move_completion"
+                    } else {
+                        "move_attempted"
+                    });
+                    Ok(())
+                });
+                if result.is_ok() {
+                    observe(&mut connection, &mut evidence).map_err(failure)?;
+                    boundary("move_readback");
+                    if reverse {
+                        saved.protocol_backlog.runs[i].reverse[n].evidence = evidence.clone();
+                    } else {
+                        saved.protocol_backlog.runs[i].batches[n] = evidence.clone();
+                    }
+                    save(store, saved)?;
+                    fresh(saved).map_err(failure)?;
+                    boundary("move_saved_readback");
+                }
+                result.map_err(failure)?;
+                if !model::verified(&evidence) {
+                    return Err(invalid());
+                }
+                boundary("move_between_batches");
+            }
+            Ok(())
+        })();
+        let run = &mut saved.protocol_backlog.runs[i];
+        run.status = model::outcome(run, reverse);
+        run.stop_requested |= cancel.is_cancelled();
+        if result.is_err() && run.status == Status::Stopped && !cancel.is_cancelled() {
+            run.status = Status::Conflict;
+        }
+        save(store, saved)?;
+        result
+    }
+    pub(crate) fn backlog_reconcile(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &mut AccountState,
+        id: &str,
+        cancel: Cancellation,
+    ) -> Result<(), AcquisitionError> {
+        let binding = self.backlog_binding(account, store, saved)?;
+        let i = saved
+            .protocol_backlog
+            .runs
+            .iter()
+            .position(|r| r.id == id)
+            .ok_or_else(invalid)?;
+        if !model::same_binding(&binding, &saved.protocol_backlog.runs[i].plan.binding) {
+            if saved.protocol_backlog.runs[i].status != Status::Conflict {
+                saved.protocol_backlog.runs[i].status = Status::Conflict;
+                save(store, saved)?;
+            }
+            return Err(invalid());
+        }
+        let before = serde_json::to_vec(&saved.protocol_backlog).map_err(failure)?;
+        let runtime = self.backlog_runtime(account, store, saved)?;
+        let permit = self
+            .backlog_source(account)?
+            .runtime_permit(&runtime)
+            .map_err(failure)?;
+        let mut connection =
+            Connection::connect(&permit, &self.password(account)?, cancel).map_err(failure)?;
+        if connection.inventory().map_err(failure)? != saved.protocol_backlog.runs[i].plan.topology
+        {
+            if saved.protocol_backlog.runs[i].status != Status::Conflict {
+                saved.protocol_backlog.runs[i].status = Status::Conflict;
+                save(store, saved)?;
+            }
+            return Err(invalid());
+        }
+        let run = &mut saved.protocol_backlog.runs[i];
+        let entries: Vec<_> = if run.undo_receipt.is_some() {
+            run.reverse.iter_mut().map(|r| &mut r.evidence).collect()
+        } else {
+            run.batches.iter_mut().collect()
+        };
+        for e in entries {
+            if e.attempted() && !model::verified(e) {
+                if e.completion().is_none() {
+                    e.record_completion(Completion::Lost).map_err(failure)?;
+                }
+                if let Err(error) = observe(&mut connection, e) {
+                    if error == crate::census::folder_provisioning::Failure::Unstable
+                        && run.status != Status::Conflict
+                    {
+                        run.status = Status::Conflict;
+                        save(store, saved)?;
+                    }
+                    return Err(failure(error));
+                }
+            }
+        }
+        run.status = model::outcome(run, run.undo_receipt.is_some());
+        if serde_json::to_vec(&saved.protocol_backlog).map_err(failure)? != before {
+            save(store, saved)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn backlog_undo_preview(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &AccountState,
+        id: &str,
+        cancel: Cancellation,
+    ) -> Result<UndoPreview, AcquisitionError> {
+        let binding = self.backlog_binding(account, store, saved)?;
+        let run = saved
+            .protocol_backlog
+            .runs
+            .iter()
+            .find(|r| r.id == id)
+            .ok_or_else(invalid)?;
+        if !model::same_binding(&binding, &run.plan.binding)
+            || run.undo_receipt.is_some()
+            || run
+                .batches
+                .iter()
+                .any(|b| b.attempted() && !model::verified(b))
+        {
+            return Err(invalid());
+        }
+        let runtime = self.backlog_runtime(account, store, saved)?;
+        let permit = self
+            .backlog_source(account)?
+            .runtime_permit(&runtime)
+            .map_err(failure)?;
+        let mut connection =
+            Connection::connect(&permit, &self.password(account)?, cancel).map_err(failure)?;
+        let compatible_topology = connection.inventory().map_err(failure)? == run.plan.topology;
+        let mut reverse = vec![];
+        let mut conflicts = 0;
+        for (forward, e) in run.batches.iter().enumerate() {
+            if !model::verified(e) {
+                continue;
+            }
+            if !compatible_topology {
+                conflicts += e.command().messages().len();
+                continue;
+            }
+            let uids = e.mapping().unwrap().pairs().values().copied().collect();
+            let current = match connection.readback(e.command().destination(), &uids) {
+                Ok(value) => value,
+                Err(crate::census::folder_provisioning::Failure::Unstable) => {
+                    conflicts += e.command().messages().len();
+                    continue;
+                }
+                Err(error) => return Err(failure(error)),
+            };
+            let original = match connection.readback(e.command().source(), &BTreeSet::new()) {
+                Ok(value) => value,
+                Err(crate::census::folder_provisioning::Failure::Unstable) => {
+                    conflicts += e.command().messages().len();
+                    continue;
+                }
+                Err(error) => return Err(failure(error)),
+            };
+            if original.identity != *e.command().source() {
+                conflicts += e.command().messages().len();
+                continue;
+            }
+            let messages = e
+                .mapping()
+                .unwrap()
+                .pairs()
+                .iter()
+                .filter_map(|(a, b)| {
+                    current
+                        .messages
+                        .get(b)
+                        .filter(|m| {
+                            m.message_id_hash == e.command().messages()[a].message_id_hash
+                                && m.size == e.command().messages()[a].size
+                                && m.internal_date == e.command().messages()[a].internal_date
+                        })
+                        .map(|m| (*b, m.clone()))
+                })
+                .collect::<BTreeMap<_, _>>();
+            conflicts += e.command().messages().len() - messages.len();
+            if messages.is_empty() {
+                continue;
+            }
+            reverse.push(Reverse {
+                forward,
+                evidence: MoveEvidence::intent(
+                    MoveIntent::new(
+                        Purpose::ConditionalUndo,
+                        current.identity,
+                        original.identity,
+                        messages,
+                    )
+                    .map_err(failure)?,
+                ),
+            });
+        }
+        let receipt = store.keys().binding_for(
+            b"mailroom/imap-backlog-undo/v1",
+            &serde_json::to_vec(&(saved, &binding, &reverse, conflicts)).map_err(failure)?,
+        );
+        Ok(UndoPreview {
+            run: id.into(),
+            reverse,
+            conflicts,
+            receipt,
+            limitations: model::LIMITATIONS,
+        })
+    }
+    pub(crate) fn backlog_undo(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &mut AccountState,
+        id: &str,
+        receipt: &str,
+        cancel: Cancellation,
+        fresh: impl Fn(&AccountState) -> Result<(), String>,
+    ) -> Result<(), AcquisitionError> {
+        let p = self.backlog_undo_preview(account, store, saved, id, cancel.clone())?;
+        if !bool::from(p.receipt.as_bytes().ct_eq(receipt.as_bytes())) || p.reverse.is_empty() {
+            return Err(invalid());
+        }
+        let run = saved
+            .protocol_backlog
+            .runs
+            .iter_mut()
+            .find(|r| r.id == id)
+            .ok_or_else(invalid)?;
+        run.reverse = p.reverse;
+        run.undo_receipt = Some(p.receipt);
+        run.undo_conflicts = p.conflicts;
+        save(store, saved)?;
+        boundary("move_undo_consumed");
+        self.backlog_run(account, store, saved, id, true, cancel, fresh)
+    }
+}
+fn observe(
+    connection: &mut Connection,
+    e: &mut MoveEvidence,
+) -> Result<(), crate::census::folder_provisioning::Failure> {
+    let source = connection.readback(
+        e.command().source(),
+        &e.command().messages().keys().copied().collect(),
+    )?;
+    let mapped = e
+        .mapping()
+        .map(|m| m.pairs().values().copied().collect())
+        .unwrap_or_default();
+    let destination = connection.readback(e.command().destination(), &mapped)?;
+    e.observe(source, destination)
+        .map_err(|_| crate::census::folder_provisioning::Failure::Protocol)
+}
+pub(crate) fn boundary(name: &str) {
+    #[cfg(test)]
+    if let Some(root) = std::env::var_os("MAILROOM_MOVE_FIXTURE") {
+        let root = std::path::Path::new(&root);
+        if std::fs::read_to_string(root.join("move-boundary")).is_ok_and(|s| s == name) {
+            std::fs::write(root.join(format!("reached-{name}")), b"reached").unwrap();
+            for _ in 0..1500 {
+                if root.join(format!("continue-{name}")).exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+    let _ = name;
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_install(root: &std::path::Path) -> (Accounts, Account, impl Send) {
+    super::folder_provisioning::transport::message_move::tests::workflow_install(root)
+}
+
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+#[test]
+fn workflow_observer() {
+    let Some(root) = std::env::var_os("MAILROOM_MOVE_FIXTURE") else {
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let repo = super::persistent_test_accounts(root);
+    let account = if let Ok(id) = std::fs::read_to_string(root.join("move-account-id")) {
+        repo.load(&AccountId::new(&id).unwrap()).unwrap()
+    } else {
+        repo.list().unwrap().remove(0)
+    };
+    let action = std::env::var("MAILROOM_MOVE_ACTION").unwrap_or_default();
+    let external = repo.fixture_sieve_store(&account.id, root).unwrap();
+    let mut provider = external.load_state().unwrap();
+    if action == "later_flag" {
+        provider
+            .census
+            .folders
+            .get_mut("Personal/Studio")
+            .unwrap()
+            .messages
+            .values_mut()
+            .find(|m| m.uid != 40)
+            .unwrap()
+            .flags
+            .insert("$later-client".into());
+        external.save_state(&mut provider).unwrap();
+    }
+    if action == "epoch" {
+        provider
+            .synthetic_folders
+            .as_mut()
+            .unwrap()
+            .epoch
+            .push_str("-changed");
+        external.save_state(&mut provider).unwrap();
+    }
+    if action == "moved_away" {
+        let folder = provider.census.folders.get_mut("Personal/Studio").unwrap();
+        folder.live_uids.remove(&60);
+        folder.messages.remove(&60);
+        external.save_state(&mut provider).unwrap();
+    }
+    if action == "original_validity" {
+        provider
+            .census
+            .folders
+            .get_mut("INBOX")
+            .unwrap()
+            .uidvalidity += 1;
+        external.save_state(&mut provider).unwrap();
+    }
+    if action == "destination_validity" {
+        provider
+            .census
+            .folders
+            .get_mut("Personal/Studio")
+            .unwrap()
+            .uidvalidity += 1;
+        external.save_state(&mut provider).unwrap();
+    }
+    if matches!(action.as_str(), "no_move" | "no_uidplus") {
+        provider
+            .synthetic_folders
+            .as_mut()
+            .unwrap()
+            .inventory
+            .capabilities
+            .remove(if action == "no_move" {
+                "MOVE"
+            } else {
+                "UIDPLUS"
+            });
+        external.save_state(&mut provider).unwrap();
+    }
+    if action == "missing_destination" {
+        provider
+            .synthetic_folders
+            .as_mut()
+            .unwrap()
+            .inventory
+            .mailboxes
+            .retain(|m| m.name.decoded != "Personal/Studio");
+        provider.census.folders.remove("Personal/Studio");
+        external.save_state(&mut provider).unwrap();
+    }
+    if action == "special_destination" {
+        let name = "Personal/Ü & \"quotes\" \\backslash";
+        let folder = provider.census.folders.remove("Personal/Studio").unwrap();
+        provider.census.folders.insert(name.into(), folder);
+        let next = provider
+            .synthetic_uid_next
+            .remove("Personal/Studio")
+            .unwrap();
+        provider.synthetic_uid_next.insert(name.into(), next);
+        provider
+            .synthetic_folders
+            .as_mut()
+            .unwrap()
+            .inventory
+            .mailboxes
+            .iter_mut()
+            .find(|m| m.name.decoded == "Personal/Studio")
+            .unwrap()
+            .name = crate::census::folder_provisioning::ExactName::new(name).unwrap();
+        external.save_state(&mut provider).unwrap();
+    }
+    if action == "scope_mailboxes" {
+        let message = provider.census.folders["INBOX"].messages[&4].clone();
+        for (index, (name, roles)) in [
+            ("Archive evidenced", vec!["\\Archive"]),
+            ("Sent observed", vec!["\\Sent"]),
+            ("Drafts observed", vec!["\\Drafts"]),
+            ("Spam observed", vec!["\\Junk"]),
+            ("Trash observed", vec!["\\Trash"]),
+            ("Mixed observed", vec!["\\Archive", "\\Sent"]),
+            ("Other observed", vec![]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            provider.census.folders.insert(
+                name.into(),
+                FolderCensus {
+                    uidvalidity: 300 + index as u32,
+                    state: ScanState::Complete,
+                    live_uids: [4].into(),
+                    messages: [(4, message.clone())].into(),
+                },
+            );
+            provider.synthetic_uid_next.insert(name.into(), 1004);
+            provider
+                .synthetic_folders
+                .as_mut()
+                .unwrap()
+                .inventory
+                .mailboxes
+                .push(crate::census::folder_provisioning::Mailbox {
+                    name: crate::census::folder_provisioning::ExactName::new(name).unwrap(),
+                    delimiter: Some("/".into()),
+                    attributes: roles.into_iter().map(str::to_owned).collect(),
+                });
+        }
+        let inbox = provider.census.folders.get_mut("INBOX").unwrap();
+        inbox
+            .messages
+            .get_mut(&8)
+            .unwrap()
+            .flags
+            .insert("\\Flagged".into());
+        inbox
+            .messages
+            .get_mut(&19)
+            .unwrap()
+            .flags
+            .insert("\\Deleted".into());
+        provider
+            .synthetic_folders
+            .as_mut()
+            .unwrap()
+            .inventory
+            .mailboxes
+            .sort_by(|a, b| a.name.decoded.cmp(&b.name.decoded));
+        external.save_state(&mut provider).unwrap();
+    }
+    let digest =
+        |value: &serde_json::Value| crate::unsubscribe::digest(&serde_json::to_vec(value).unwrap());
+    let folders = provider.census.folders.iter().map(|(name,f)| (name.clone(), serde_json::json!({"uidvalidity":f.uidvalidity,"uids":f.live_uids,"messages":f.messages.iter().map(|(uid,m)| (uid.to_string(), serde_json::json!({"flags":m.flags,"date":m.internal_date,"size":m.size,"hash":m.headers.message_id_hash}))).collect::<BTreeMap<_,_>>()}))).collect::<BTreeMap<_,_>>();
+    let mut independent = serde_json::to_value(&provider).unwrap();
+    for f in [
+        "revision",
+        "census",
+        "synthetic_folders",
+        "synthetic_uid_next",
+    ] {
+        independent.as_object_mut().unwrap().remove(f);
+    }
+    let mut value = serde_json::json!({"account":account.id,"folders":folders,"independent":digest(&independent),"commands":provider.synthetic_folders.as_ref().unwrap().commands});
+    drop(external);
+    if action != "provider_only" {
+        let primary = std::env::var_os("MAILROOM_MOVE_INSTALLATION")
+            .map(|p| super::persistent_test_accounts(std::path::Path::new(&p)));
+        let primary = primary.as_ref().unwrap_or(&repo);
+        let restored_account = primary.load(&account.id).unwrap();
+        let store = primary.store(&restored_account).unwrap();
+        let saved = store.load_state().unwrap();
+        value["primary"] = digest(&serde_json::to_value(&saved).unwrap()).into();
+        value["ciphertext"] =
+            crate::unsubscribe::digest(&std::fs::read(store.path()).unwrap()).into();
+        let mut canonical = serde_json::to_value(&saved).unwrap();
+        for f in ["revision", "protocol_backlog"] {
+            canonical.as_object_mut().unwrap().remove(f);
+        }
+        value["unrelated"] = digest(&canonical).into();
+        canonical.as_object_mut().unwrap().remove("census");
+        value["non_census"] = digest(&canonical).into();
+        value["exports"] = serde_json::to_value(&saved.exports).unwrap();
+        value["recovery_hold"] = store.recovery_pending().into();
+        value["revision"] = saved.revision.into();
+        value["independent_effects"] = serde_json::to_value(
+            super::sieve_transaction::tests::independent_effects(root, &store),
+        )
+        .unwrap();
+        value["populated"] = serde_json::json!({"backlog":!saved.backlog.is_empty(),"exports":!saved.exports.is_empty(),"proposals":!saved.proposals.history.is_empty(),"ledger":saved.ledger.document.as_ref().is_some_and(|d| !d.entries.is_empty()),"winddown":!saved.winddown.history.is_empty(),"invoice":!saved.invoices.sends.is_empty(),"unsubscribe":!saved.unsubscribe.history.is_empty(),"sieve":!saved.sieve_transactions.history.is_empty(),"protocol":!saved.protocol_backlog.runs.is_empty()});
+        value["schema"] = store.schema_version().unwrap().into();
+        value["journal"] = serde_json::to_value(&saved.protocol_backlog).unwrap();
+        value["saved_census"] = serde_json::to_value(
+            &saved
+                .census
+                .folders
+                .iter()
+                .map(|(n, f)| (n, &f.live_uids))
+                .collect::<BTreeMap<_, _>>(),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        root.join("move-observations.json"),
+        serde_json::to_vec(&value).unwrap(),
+    )
+    .unwrap();
+}

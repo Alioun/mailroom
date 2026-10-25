@@ -1,4 +1,5 @@
 mod accounts;
+pub(crate) mod backlog;
 pub(crate) mod folder_provisioning;
 mod imap;
 mod managesieve;

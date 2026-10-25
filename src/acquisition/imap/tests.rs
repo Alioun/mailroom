@@ -1,4 +1,24 @@
 use super::*;
+
+#[test]
+fn list_quoted_escapes_and_literal_backslashes_have_the_same_exact_identity() {
+    for raw in [
+        b"* LIST () \"/\" \"Personal/&ANw- &- \\\"quotes\\\" \\\\backslash\"\r\n".as_slice(),
+        b"* LIST () \"/\" {37}\r\nPersonal/&ANw- &- \"quotes\" \\backslash\r\n".as_slice(),
+    ] {
+        let (_, Response::MailboxData(MailboxDatum::List { name, .. })) =
+            imap_proto::parser::parse_response(raw).unwrap()
+        else {
+            panic!("Expected LIST");
+        };
+        let wire = list_wire_name(raw, &name).unwrap();
+        assert_eq!(wire, "Personal/&ANw- &- \"quotes\" \\backslash");
+        assert_eq!(
+            decode_name(&wire).unwrap(),
+            "Personal/Ü & \"quotes\" \\backslash"
+        );
+    }
+}
 use rustls::{
     ServerConfig, ServerConnection, StreamOwned,
     pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
@@ -558,7 +578,7 @@ fn optional_tls_counts_distinguish_zero_absent_denied_malformed_and_ambiguous() 
             CensusKeys::derive(&secret, &account),
         )
         .unwrap();
-        assert_eq!(reopened.schema_version().unwrap(), 14);
+        assert_eq!(reopened.schema_version().unwrap(), 15);
         let census = reopened.load().unwrap();
         let observation = census.acquisition.view(i64::MAX).spam;
         match reason {

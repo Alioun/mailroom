@@ -552,7 +552,6 @@ impl Accounts {
             return Err(AcquisitionError::InvalidInput);
         }
         self.selected_validate_accounts(&captured)?;
-        let _installation = self.lock_installation()?;
         let _leases = self.selected_locks(&ids(&captured.manifest))?;
         let guard = ledger_lock(ledger)?;
         self.finish_selected(captured, &tx, guard.as_ref())

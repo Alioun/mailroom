@@ -57,6 +57,8 @@ async function prepare(gmail = false) {
 async function histories(account) {
   const workspace = await post('workspace/open', { account })
   const census = await post('open', { account })
+  assert.ok(census.evidence.age_seconds === null || (Number.isSafeInteger(census.evidence.age_seconds) && census.evidence.age_seconds >= 0))
+  delete census.evidence.age_seconds
   const invoices = await post('invoices', { account, command: { action: 'open' } })
   const subscriptions = await post('unsubscribe', { account, command: { action: 'open', as_of: workspace.workspace.input.as_of } })
   return { workspace: workspace.workspace, exports: workspace.exports, census, sends: invoices.sends, history: subscriptions.history, mutes: subscriptions.mutes }

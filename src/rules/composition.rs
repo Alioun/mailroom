@@ -1,17 +1,30 @@
 use super::{
     proof::{self, Destination, PinResult, Proof},
-    sieve::{MessageView, Test, Truth},
+    sieve::{self as mailroom, Action, MessageView, Statement, Test, Truth},
 };
 use crate::census::Census;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const SEMANTICS: &str = "mailroom-foreign-composition-v1";
+/// Accounting copies run in their own segment before existing rules; filing runs after them.
+pub const SEMANTICS: &str = "mailroom-foreign-composition-v2";
+/// Copies ran inside Mailroom's content after existing rules, so an existing stop suppressed
+/// them. Records with this semantics stay readable and compensable.
+pub const LEGACY_SEMANTICS: &str = "mailroom-foreign-composition-v1";
 const MARK: &str = "# mailroom:";
 const REQUIRE: Segment = Segment(
     "\n# mailroom:require-begin v1\n",
     "# mailroom:require-end v1\n",
 );
+const COPY: Segment = Segment("\n# mailroom:copy-begin v1\n", "# mailroom:copy-end v1\n");
+/// Extensions the copy segment's guards and actions can use.
+const COPY_REQUIRES: &[&str] = &[
+    "copy",
+    "duplicate",
+    "relational",
+    "comparator-i;ascii-numeric",
+    "envelope",
+];
 const BLOCK: Segment = Segment("\n# mailroom:block-begin v1\n", "# mailroom:block-end v1\n");
 const INCLUDE: Segment = Segment(
     "\n# mailroom:include-begin v1\n",
@@ -944,7 +957,26 @@ pub struct Taken {
     pub existing: Option<ForeignDest>,
     pub mailroom: Destination,
     pub conflicting: bool,
-    pub suppressed_copies: usize,
+    /// Accounting copies that still run for this message, because they run before this rule.
+    pub copies: usize,
+}
+/// One accounting copy predicted by evaluating the copy segment, whoever files the message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CopyOutcome {
+    pub id: String,
+    pub message_id_hash: Option<String>,
+    pub rule: String,
+    pub recipient: String,
+    pub status: &'static str,
+    pub filed_by: &'static str,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CopyCounts {
+    pub copied: usize,
+    pub beside_existing: usize,
+    pub undetermined: usize,
+    pub guard_violations: usize,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -953,7 +985,21 @@ pub struct Counts {
     pub existing_wins: usize,
     pub conflicting: usize,
     pub undetermined: usize,
-    pub suppressed_copies: usize,
+    /// Legacy semantics only: copies an existing stop would have suppressed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suppressed_copies: Option<usize>,
+    /// Current semantics: copies from the segment that runs before existing rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copies: Option<CopyCounts>,
+}
+impl Counts {
+    pub(crate) fn matches(&self, semantics: &str) -> bool {
+        match semantics {
+            SEMANTICS => self.suppressed_copies.is_none() && self.copies.is_some(),
+            LEGACY_SEMANTICS => self.suppressed_copies.is_some() && self.copies.is_none(),
+            _ => false,
+        }
+    }
 }
 #[derive(Serialize)]
 pub struct Precedence {
@@ -962,14 +1008,15 @@ pub struct Precedence {
     pub host: String,
     pub foreign_rules: Vec<ForeignRule>,
     pub decisions: Vec<Taken>,
+    pub copies: Vec<CopyOutcome>,
     pub counts: Counts,
     pub pins: Vec<PinResult>,
     pub gate: &'static str,
     pub warnings: Vec<String>,
 }
 
-/// Evaluates the composed order: existing rules first, Mailroom's proven decisions only where
-/// no existing rule stopped processing.
+/// Evaluates the composed order: Mailroom's accounting-copy segment, then the existing rules,
+/// then Mailroom's proven filing only where no existing rule stopped processing.
 pub(crate) fn precedence(
     proof: &Proof,
     census: &Census,
@@ -979,15 +1026,57 @@ pub(crate) fn precedence(
 ) -> Result<Precedence, Refusal> {
     let foreign_rules = foreign.analyze(host)?;
     let artifact = &proof.artifact;
+    let segment = split(artifact.executable())?;
+    foreign.refuse_reject_after_copies(host, &segment)?;
+    let statements = artifact
+        .statements()
+        .map_err(|_| Refusal::MailroomContentInvalid)?;
+    let held = &statements
+        .iter()
+        .find(|s| s.id == "system.role_safety")
+        .ok_or(Refusal::MailroomContentInvalid)?
+        .test;
     let input: std::collections::BTreeMap<_, _> = proof::messages(census, false)
         .into_iter()
         .map(|m| (m.id.clone(), m))
         .collect();
     let mut decisions = vec![];
+    let mut copies = vec![];
     let mut counts = Counts::default();
+    let mut copy_counts = CopyCounts::default();
+    let mut duplicates = BTreeSet::new();
     for d in &proof.decisions {
         let m = input.get(&d.id).ok_or(Refusal::ProofBlocked)?;
         let view = proof::view(artifact, m);
+        let mut made: Vec<(&str, &str, Truth)> = vec![];
+        for s in &segment.copies {
+            let truth = s.test.evaluate(&view, &duplicates);
+            if truth != Truth::NoMatch {
+                for a in &s.actions {
+                    if let Action::Copy(target) = a {
+                        made.push((&s.id, target, truth));
+                    }
+                }
+            }
+        }
+        let copied: Vec<&str> = made
+            .iter()
+            .filter(|(_, _, t)| *t == Truth::Match)
+            .map(|(_, target, _)| *target)
+            .collect();
+        let distinct: BTreeSet<String> = copied.iter().map(|t| t.to_ascii_lowercase()).collect();
+        if (!copied.is_empty() && held.evaluate(&view, &BTreeSet::new()) != Truth::NoMatch)
+            || distinct.len() != copied.len()
+        {
+            copy_counts.guard_violations += 1;
+        }
+        if let Some(hash) = &m.record.headers.message_id_hash {
+            duplicates.extend(
+                distinct
+                    .iter()
+                    .map(|t| format!("{}/{hash}", super::program::copy_handle(t))),
+            );
+        }
         let mut outcome = None;
         for rule in &foreign.rules {
             let mut dest = None;
@@ -997,6 +1086,25 @@ pub(crate) fn precedence(
                 Run::Unknown => outcome = Some((rule.name.clone(), None)),
             }
             break;
+        }
+        let filed_by = match &outcome {
+            None => "mailroom",
+            Some((_, Some(_))) => "existing_rule",
+            Some((_, None)) => "undetermined",
+        };
+        for (rule, recipient, truth) in &made {
+            let copied = *truth == Truth::Match;
+            copy_counts.copied += usize::from(copied);
+            copy_counts.undetermined += usize::from(!copied);
+            copy_counts.beside_existing += usize::from(copied && filed_by == "existing_rule");
+            copies.push(CopyOutcome {
+                id: d.id.clone(),
+                message_id_hash: d.message_id_hash.clone(),
+                rule: (*rule).into(),
+                recipient: (*recipient).into(),
+                status: if copied { "copied" } else { "undetermined" },
+                filed_by,
+            });
         }
         let Some((rule, existing)) = outcome else {
             counts.mailroom += 1;
@@ -1016,7 +1124,6 @@ pub(crate) fn precedence(
             counts.undetermined += 1;
         }
         counts.conflicting += usize::from(conflicting);
-        counts.suppressed_copies += d.copies.len();
         decisions.push(Taken {
             id: d.id.clone(),
             message_id_hash: d.message_id_hash.clone(),
@@ -1029,7 +1136,7 @@ pub(crate) fn precedence(
             existing,
             mailroom: d.destination.clone(),
             conflicting,
-            suppressed_copies: d.copies.len(),
+            copies: copied.len(),
         });
     }
     let pins: Vec<PinResult> = proof
@@ -1074,7 +1181,7 @@ pub(crate) fn precedence(
         })
         .collect();
     let mut warnings = vec![
-        "Existing rules run first. Mailroom content runs only when no existing rule stopped processing. Existing tests outside the modeled header, address, envelope and exists subset are undetermined.".to_owned(),
+        "Accounting copies run first in their own segment, which files nothing and never stops. Existing rules then run and win filing. Mailroom filing runs only when no existing rule stopped processing. Existing tests outside the modeled header, address, envelope and exists subset are undetermined.".to_owned(),
         "Foreign syntax is parsed locally. Provider acceptance, OX editor behavior and delivery are unverified.".to_owned(),
     ];
     if counts.existing_wins > 0 {
@@ -1089,26 +1196,34 @@ pub(crate) fn precedence(
             counts.undetermined
         ));
     }
-    if counts.suppressed_copies > 0 {
+    if copy_counts.undetermined > 0 {
         warnings.push(format!(
-            "Existing rules would stop {} Mailroom accounting copies; accounting copies must stay unaffected",
-            counts.suppressed_copies
+            "{} accounting copies are undetermined because their guards depend on unavailable evidence",
+            copy_counts.undetermined
+        ));
+    }
+    if copy_counts.guard_violations > 0 {
+        warnings.push(format!(
+            "The copy segment would copy {} census messages that its guards exclude",
+            copy_counts.guard_violations
         ));
     }
     let gate = if proof.gate == "blocked"
-        || counts.suppressed_copies > 0
+        || copy_counts.guard_violations > 0
         || pins.iter().any(|p| matches!(p.status, "fail" | "unknown"))
     {
         "blocked"
     } else {
         "warnings"
     };
+    counts.copies = Some(copy_counts);
     Ok(Precedence {
         semantics: SEMANTICS,
         placement: placement.clone(),
         host: host.into(),
         foreign_rules,
         decisions,
+        copies,
         counts,
         pins,
         gate,
@@ -1120,6 +1235,7 @@ pub(crate) fn precedence(
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Found {
     pub require: bool,
+    pub copy: bool,
     pub block: bool,
     pub include: Option<String>,
 }
@@ -1129,7 +1245,7 @@ fn located(text: &str) -> Result<(Vec<(usize, usize)>, Found), &'static str> {
     let mut from = 0;
     while let Some(n) = text[from..].find(MARK) {
         let at = from + n;
-        let segment = [&REQUIRE, &BLOCK, &INCLUDE]
+        let segment = [&REQUIRE, &COPY, &BLOCK, &INCLUDE]
             .into_iter()
             .find(|s| at >= 1 && text[at - 1..].starts_with(s.0))
             .ok_or("unexpected Mailroom marker")?;
@@ -1145,6 +1261,7 @@ fn located(text: &str) -> Result<(Vec<(usize, usize)>, Found), &'static str> {
         let content = &text[body..next];
         match segment.0 {
             s if s == REQUIRE.0 && !found.require => found.require = true,
+            s if s == COPY.0 && !found.copy => found.copy = true,
             s if s == BLOCK.0 && !found.block && found.include.is_none() => found.block = true,
             s if s == INCLUDE.0 && !found.block && found.include.is_none() => {
                 let name = content
@@ -1209,8 +1326,120 @@ pub(crate) struct Composed {
     pub owned: Option<(String, Vec<u8>)>,
 }
 
-/// Inserts Mailroom's missing requirements after the leading foreign `require` commands and
-/// appends Mailroom content after every foreign rule. Foreign bytes are never rewritten.
+/// Mailroom's executable divided by where each part runs in the composed order.
+struct Split<'a> {
+    head: &'a str,
+    requires: BTreeSet<String>,
+    /// Accounting copies, each guarded by the negated tests of every Mailroom rule that could
+    /// stop processing before it, so a copy runs exactly when it ran in Mailroom's own order.
+    copies: Vec<Statement>,
+    /// Every other rule, verbatim and in order. They run after the existing rules.
+    filing: Vec<&'a str>,
+}
+
+fn negate(test: Test) -> Test {
+    match test {
+        Test::Not(inner) => *inner,
+        other => Test::Not(Box::new(other)),
+    }
+}
+
+fn split(executable: &str) -> Result<Split<'_>, Refusal> {
+    let invalid = |_| Refusal::MailroomContentInvalid;
+    let own = parse(executable).map_err(|_| Refusal::MailroomContentInvalid)?;
+    let body_start = executable[own.require_end..]
+        .find("\n#@ ")
+        .map_or(executable.len(), |n| own.require_end + n);
+    let mut starts: Vec<usize> = executable[body_start..]
+        .match_indices("\n#@ ")
+        .map(|(i, _)| body_start + i)
+        .collect();
+    if mailroom::parse(executable).map_err(invalid)?.len() != starts.len() {
+        return Err(Refusal::MailroomContentInvalid);
+    }
+    starts.push(executable.len());
+    let mut out = Split {
+        head: &executable[..body_start],
+        requires: own.requires,
+        copies: vec![],
+        filing: vec![],
+    };
+    let mut guard = vec![];
+    for w in starts.windows(2) {
+        let section = &executable[w[0]..w[1]];
+        let Ok([statement]) =
+            <[Statement; 1]>::try_from(mailroom::parse(section).map_err(invalid)?)
+        else {
+            return Err(Refusal::MailroomContentInvalid);
+        };
+        let copies = statement
+            .actions
+            .iter()
+            .filter(|a| matches!(a, Action::Copy(_)))
+            .count();
+        if copies > 0 && copies == statement.actions.len() {
+            let test = if guard.is_empty() {
+                statement.test
+            } else {
+                Test::All(guard.iter().cloned().chain([statement.test]).collect())
+            };
+            out.copies.push(Statement { test, ..statement });
+        } else if copies > 0 {
+            return Err(Refusal::MailroomContentInvalid);
+        } else {
+            if statement.actions.iter().any(|a| matches!(a, Action::Stop)) {
+                guard.push(negate(statement.test));
+            }
+            out.filing.push(section);
+        }
+    }
+    Ok(out)
+}
+
+fn rejects(commands: &[Command]) -> bool {
+    commands.iter().any(|c| {
+        matches!(c.name.as_str(), "reject" | "ereject") || c.block.as_deref().is_some_and(rejects)
+    })
+}
+impl Script {
+    /// Pigeonhole's action-conflict rules forbid reject beside an earlier redirect, and a
+    /// failed script falls back to keep, so a copy that ran first could change where a rejected
+    /// message lands. Inferred from Pigeonhole's documented behavior; unverified at mailbox.org.
+    fn refuse_reject_after_copies(&self, script: &str, split: &Split<'_>) -> Result<(), Refusal> {
+        match self.rules.iter().find(|r| rejects(&r.commands)) {
+            Some(rule) if !split.copies.is_empty() => Err(Refusal::UnsafeRule {
+                script: script.into(),
+                rule: rule.name.clone(),
+                line: rule.line,
+                detail: "rejects, which conflicts with an accounting copy that already ran",
+            }),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Adds OX's rule comment before each Mailroom rule so the OX editor can list it.
+fn annotate(body: &str, next: &mut u64) -> String {
+    let mut out = String::with_capacity(body.len() + 64);
+    for row in body.split_inclusive('\n') {
+        if let Some(id) = row.strip_prefix("#@ ") {
+            out.push_str(&format!(
+                "## Flag: |UniqueId:{next}|Rulename: Mailroom {}\n",
+                id.trim_end()
+            ));
+            *next += 1;
+        }
+        out.push_str(row);
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Inserts Mailroom's missing requirements after the leading foreign `require` commands, then
+/// the accounting-copy segment before the first foreign rule, and appends Mailroom's filing
+/// after every foreign rule. Foreign bytes are never rewritten.
 pub(crate) fn compose(
     foreign: &str,
     script: &Script,
@@ -1221,38 +1450,37 @@ pub(crate) fn compose(
     if executable.contains(MARK) {
         return Err(Refusal::MailroomContentInvalid);
     }
-    let own = parse(executable).map_err(|_| Refusal::MailroomContentInvalid)?;
-    let body_start = executable[own.require_end..]
-        .find("\n#@ ")
-        .map_or(executable.len(), |n| own.require_end + n);
+    let split = split(executable)?;
+    script.refuse_reject_after_copies(host_name, &split)?;
+    let mut next = script.unique_ids.iter().max().map_or(0, |m| m + 1);
+    let copies = if split.copies.is_empty() {
+        String::new()
+    } else {
+        let body: String = split.copies.iter().map(Statement::render).collect();
+        format!("{}{}{}", COPY.0, annotate(&body, &mut next), COPY.1)
+    };
+    let filing = split.filing.concat();
     let (needed, tail): (BTreeSet<String>, String) = match placement {
-        Placement::Block {} => {
-            let mut next = script.unique_ids.iter().max().map_or(0, |m| m + 1);
-            let mut body = String::new();
-            for row in executable[body_start..].split_inclusive('\n') {
-                if let Some(id) = row.strip_prefix("#@ ") {
-                    body.push_str(&format!(
-                        "## Flag: |UniqueId:{next}|Rulename: Mailroom {}\n",
-                        id.trim_end()
-                    ));
-                    next += 1;
-                }
-                body.push_str(row);
-            }
-            if !body.ends_with('\n') {
-                body.push('\n');
-            }
-            (
-                own.requires.clone(),
-                format!("{}{}{}", BLOCK.0, body, BLOCK.1),
-            )
-        }
+        Placement::Block {} => (
+            split.requires.clone(),
+            format!("{}{}{}", BLOCK.0, annotate(&filing, &mut next), BLOCK.1),
+        ),
         Placement::Include { script: name } => {
             if name.contains(['"', '\\']) {
                 return Err(Refusal::InvalidPlacement);
             }
+            let mut needed = BTreeSet::from(["include".into()]);
+            if !split.copies.is_empty() {
+                needed.extend(
+                    split
+                        .requires
+                        .iter()
+                        .filter(|r| COPY_REQUIRES.contains(&r.as_str()))
+                        .cloned(),
+                );
+            }
             (
-                BTreeSet::from(["include".into()]),
+                needed,
                 format!("{}include :personal \"{name}\";\n{}", INCLUDE.0, INCLUDE.1),
             )
         }
@@ -1261,7 +1489,7 @@ pub(crate) fn compose(
         .difference(&script.requires)
         .map(|r| super::sieve::quote(r))
         .collect();
-    let mut host = String::with_capacity(foreign.len() + tail.len() + 128);
+    let mut host = String::with_capacity(foreign.len() + copies.len() + tail.len() + 128);
     host.push_str(&foreign[..script.require_end]);
     if !missing.is_empty() {
         host.push_str(&format!(
@@ -1271,6 +1499,7 @@ pub(crate) fn compose(
             REQUIRE.1
         ));
     }
+    host.push_str(&copies);
     host.push_str(&foreign[script.require_end..]);
     host.push_str(&tail);
     let (round_trip, _) = strip(host.as_bytes(), host_name)?;
@@ -1279,9 +1508,12 @@ pub(crate) fn compose(
     }
     Ok(Composed {
         host: host.into_bytes(),
-        owned: placement
-            .owned()
-            .map(|name| (name.to_owned(), format!("{OWNED}{executable}").into_bytes())),
+        owned: placement.owned().map(|name| {
+            (
+                name.to_owned(),
+                format!("{OWNED}{}{filing}", split.head).into_bytes(),
+            )
+        }),
     })
 }
 

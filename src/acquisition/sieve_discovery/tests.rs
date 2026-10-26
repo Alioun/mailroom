@@ -39,7 +39,7 @@ fn encrypted_actual_discovery_refresh_failures_reopen_and_exact_aggregate_preser
         .unwrap();
     let store = repo.store(&account).unwrap();
     let state = store.load_state().unwrap();
-    assert_eq!(store.schema_version().unwrap(), 16);
+    assert_eq!(store.schema_version().unwrap(), 17);
     let baseline = state.sieve.last_successful.clone().unwrap();
     assert!(baseline.bodies[0].bytes == PRIVATE_SCRIPT);
     assert!(

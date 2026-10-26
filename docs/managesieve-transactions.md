@@ -2,7 +2,19 @@
 
 The private production-compiled adapter implements CHECKSCRIPT, HAVESPACE, PUTSCRIPT and SETACTIVE over the existing verified STARTTLS session. There is no production installation. Ordinary synthetic mode and a discovery-only installation do not grant write authority. HTTP callers select an account and an action. They cannot select bytes, target names, endpoints, ownership, TLS roots or trust context.
 
-A separate construction-only fixture source owns one exact existing target and ownership epoch. Its non-deserializable write permit binds that account and installed source identity. Replacement supports an owned active target, or an owned inactive target with no other active script. A missing target or foreign active selection rejects. No ownership inference, foreign-rule composition, include placement, script creation, deletion, rename or standalone fallback exists.
+A separate construction-only fixture source owns one exact existing target and ownership epoch. Its non-deserializable write permit binds that account and installed source identity. Replacement supports an owned active target, or an owned inactive target with no other active script. A missing target or foreign active selection rejects. No ownership inference, script deletion, rename or standalone fallback exists. Composition with existing rules follows.
+
+## Composition with existing rules
+
+A composed deploy writes into the active `Open-Xchange` host script and never changes its existing bytes. Mailroom's content sits in marked segments, and removal deletes only those segments. The composed order follows owner decisions Q24 and Q26:
+
+1. A marked `copy` segment after the requires and before the first existing rule. It holds only Mailroom's approved accounting copies as `redirect :copy`, with no `fileinto`, `keep`, flag change or `stop`, so it cannot change where a message lands. Each copy keeps its business-address, trigger and duplicate guards. It also carries the negated test of every Mailroom rule that could stop before it, so held unknown or mixed-role mail gets no copy.
+2. The existing rules. They win any filing conflict.
+3. Mailroom's filing rules, either as a marked block or through one `include` line to Mailroom's own script.
+
+Both placements carry the same copy segment in the host script. The include placement does not put the copies in a second included script, for three reasons. The journal models one owned script, and a deploy has at most two steps. Without DELETE, removal would leave a second orphaned script. The include placement already writes a marked `require` segment into the host, so the OX editor questions about non-OX content in `Open-Xchange` apply to it either way. Keeping the copies in the host also means an accounting copy does not depend on whether Pigeonhole resolves a second include at delivery.
+
+An existing rule that rejects refuses composition while Mailroom has copies, because Pigeonhole forbids reject beside an earlier redirect. That conflict is inferred from Pigeonhole's documented behavior and is unverified at mailbox.org. The proof evaluates the copy segment first, then the existing rules, then Mailroom filing, and reports each copy beside whichever rule files the message. State schema 17 stores the new semantics, `mailroom-foreign-composition-v2`. Records from before this order carry `mailroom-foreign-composition-v1` and stay readable and compensable.
 
 ## Exact review and effects
 

@@ -86,7 +86,7 @@ try {
   assert.equal(view.census.winddown_evidence.complete_since, null)
   assert.deepEqual(view.census.winddown_evidence.deliveries, {})
   const independent = await reopen(account)
-  assert.equal(independent.schema, 16)
+  assert.equal(independent.schema, 17)
   assert.deepEqual(independent.evidence.last_successful, good)
   assert.equal(independent.history_unknown && independent.delivery_unknown, true)
   const bytes = await readFile(join(directory, 'data', `${account}.census.enc`))

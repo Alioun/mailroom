@@ -958,7 +958,12 @@ async fn managesieve_transactions_server_fixture() {
         return;
     };
     let root = std::path::Path::new(&root);
-    let (repo, _account, _fake) = acquisition::sieve_transaction::tests::install(root);
+    let (mut repo, account, _fake) = acquisition::sieve_transaction::tests::install(root);
+    if let Ok(epoch) = std::fs::read_to_string(root.join("workspace-authority")) {
+        if !epoch.is_empty() {
+            repo.install_synthetic_workspace(&account, &epoch);
+        }
+    }
     let mut state = AppState::new(true);
     state.accounts.source = AccountSource::Synthetic {
         accounts: Arc::new(repo),

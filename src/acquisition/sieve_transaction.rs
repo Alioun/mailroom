@@ -332,7 +332,7 @@ impl Accounts {
                 after,
                 artifact: sha256(&host.bytes),
                 proof_binding: sha256(foreign.as_bytes()),
-                proof: serde_json::json!({"removal": composition::SEMANTICS, "found": {"require": found.require, "block": found.block, "include": found.include}}),
+                proof: serde_json::json!({"removal": composition::SEMANTICS, "found": {"require": found.require, "copy": found.copy, "block": found.block, "include": found.include}}),
                 precedence: None,
                 composition: Some(Composition {
                     purpose: Purpose::Removal,

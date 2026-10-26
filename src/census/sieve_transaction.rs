@@ -189,7 +189,11 @@ impl Journal {
             };
             let composed = t.composition.as_ref().is_none_or(|c| {
                 let foreign_before = foreign(&t.before, &t.target);
-                c.semantics == composition::SEMANTICS
+                [composition::SEMANTICS, composition::LEGACY_SEMANTICS]
+                    .contains(&c.semantics.as_str())
+                    && c.precedence
+                        .as_ref()
+                        .is_none_or(|p| p.matches(&c.semantics))
                     && digest(&c.foreign_sha256)
                     && c.existing_rules.len() <= 256
                     && foreign_before.is_some()

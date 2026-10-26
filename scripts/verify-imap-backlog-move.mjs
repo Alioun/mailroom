@@ -27,7 +27,7 @@ try {
   assert.equal(run.batches[0].attempted, true)
   assert.equal(run.batches[0].mapping.kind, 'validated')
   const after = await f.observe()
-  assert.equal(after.schema, 16)
+  assert.equal(after.schema, 17)
   assert.deepEqual(after.folders.INBOX.uids, [99])
   assert.deepEqual(after.folders['Personal/Studio'].uids, [40,60,64,68])
   assert.ok(after.folders.INBOX.messages['99'].flags.includes('\\Deleted'))

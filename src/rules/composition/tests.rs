@@ -55,6 +55,7 @@ fn ox_rules_keep_names_order_and_exact_bytes_under_both_placements() {
         found,
         Found {
             require: true,
+            copy: false,
             block: true,
             include: None
         }
@@ -286,4 +287,309 @@ fn placement_choice_is_strict_and_has_no_default() {
     }
     assert!(!include().valid_for("mailroom"));
     assert!(include().valid_for("Open-Xchange"));
+}
+
+const SHOP: &str = "billing@shop.example.org";
+
+/// Mailroom compiled from the sample workspace: two overlapping forwards to one accounting
+/// target, unknown and mixed recipient roles, and a repeated Message-ID.
+fn sample() -> (Census, Proof) {
+    let mut input: crate::engine::PreviewInput =
+        serde_json::from_str(include_str!("../../../examples/sample.json")).unwrap();
+    input.messages.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "sample-overlap",
+            "headers": format!("From: Example Sender <{SHOP}>\nTo: invoices@work.example.test\nDelivered-To: invoices@work.example.test\nSubject: Invoice to the invoice address\nMessage-ID: <sample-overlap@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000"),
+            "current_folder": "INBOX"
+        }))
+        .unwrap(),
+    );
+    let artifact = crate::engine::artifact(&input.documents, &input.context).unwrap();
+    let census = crate::engine::synthetic_census(&input).unwrap();
+    let proof = proof::prove(
+        artifact,
+        &census,
+        input.as_of,
+        &[],
+        proof::Baseline::Current,
+        None,
+    )
+    .unwrap();
+    (census, proof)
+}
+fn shop_rule(action: &str) -> String {
+    format!(
+        "require [\"fileinto\"];\r\n## Flag: |UniqueId:0|Rulename: Shop\r\nif address :is \"from\" \"{SHOP}\"\r\n{{\r\n    {action}\r\n    stop;\r\n}}\r\n"
+    )
+}
+fn copy_segment(host: &str) -> &str {
+    let start = host.find("\n# mailroom:copy-begin v1\n").unwrap();
+    let end = host.find("# mailroom:copy-end v1\n").unwrap();
+    &host[start..end]
+}
+fn subject(census: &Census, id: &str) -> String {
+    proof::messages(census, false)
+        .into_iter()
+        .find(|m| m.id == id)
+        .unwrap()
+        .record
+        .headers
+        .subject
+        .clone()
+}
+
+#[test]
+fn copy_segment_sits_before_existing_rules_and_files_nothing_under_both_placements() {
+    let (_, proof) = sample();
+    let executable = proof.artifact.executable();
+    let foreign = shop_rule("fileinto \"Shop\";");
+    let script = parse_foreign(&foreign, "Open-Xchange").unwrap();
+    script.analyze("Open-Xchange").unwrap();
+    let mut segments = vec![];
+    for placement in [Placement::Block {}, include()] {
+        let composed = compose(&foreign, &script, &placement, executable, "Open-Xchange").unwrap();
+        let host = text(&composed.host);
+        let segment = copy_segment(host);
+        let copy_at = host.find("# mailroom:copy-begin").unwrap();
+        assert!(host[..copy_at].starts_with("require [\"fileinto\"];\r\n"));
+        assert!(
+            copy_at < host.find("Rulename: Shop").unwrap(),
+            "copies precede the first existing rule"
+        );
+        assert!(host.find("# mailroom:require-end").unwrap() < copy_at);
+        let statements =
+            mailroom::parse(segment.trim_start_matches("\n# mailroom:copy-begin v1\n")).unwrap();
+        assert_eq!(
+            statements.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["forward.approved", "forward.invoice_address"]
+        );
+        assert!(statements.iter().all(|s| {
+            !s.actions.is_empty()
+                && s.actions
+                    .iter()
+                    .all(|a| matches!(a, Action::Copy(t) if t == "archive@example.net"))
+        }));
+        for filing in [
+            "fileinto",
+            "keep",
+            "addflag",
+            "setflag",
+            "removeflag",
+            "stop",
+            "discard",
+            "reject",
+        ] {
+            assert!(!segment.contains(filing), "copy segment holds no {filing}");
+        }
+        assert!(segment.contains("## Flag: |UniqueId:1|Rulename: Mailroom forward.approved\n"));
+        let (stripped, found) = strip(&composed.host, "Open-Xchange").unwrap();
+        assert_eq!(stripped, foreign, "removal restores exact bytes");
+        assert!(found.copy);
+        let again = compose(&stripped, &script, &placement, executable, "Open-Xchange").unwrap();
+        assert_eq!(again.host, composed.host, "re-deploy converges");
+        match &placement {
+            Placement::Block {} => {
+                let block = &host[host.find("# mailroom:block-begin").unwrap()..];
+                assert!(!block.contains("redirect"), "filing block holds no copy");
+                assert!(block.contains("#@ system.role_safety"));
+            }
+            Placement::Include { .. } => {
+                assert!(host.contains("require [\"comparator-i;ascii-numeric\", \"copy\", \"duplicate\", \"include\", \"relational\"];"));
+                let (_, owned) = composed.owned.as_ref().unwrap();
+                let owned = text(owned);
+                assert!(owned.starts_with(OWNED));
+                assert!(
+                    !owned.contains("redirect"),
+                    "owned script holds filing only"
+                );
+                assert_eq!(
+                    mailroom::parse(&owned[OWNED.len()..]).unwrap().len() + statements.len(),
+                    mailroom::parse(executable).unwrap().len()
+                );
+            }
+        }
+        segments.push(segment.to_owned());
+    }
+    assert_eq!(
+        segments[0], segments[1],
+        "both placements carry the same copy segment"
+    );
+}
+
+#[test]
+fn existing_stop_redirect_and_discard_never_suppress_an_approved_copy() {
+    let (census, proof) = sample();
+    let proven: BTreeSet<(String, String)> = proof
+        .decisions
+        .iter()
+        .filter(|d| !d.review)
+        .flat_map(|d| d.copies.iter().map(|c| (d.id.clone(), c.rule.clone())))
+        .collect();
+    assert!(!proven.is_empty());
+    for action in [
+        "fileinto \"Shop\";",
+        "redirect \"elsewhere@example.test\";",
+        "discard;",
+    ] {
+        let foreign = shop_rule(action);
+        let script = parse_foreign(&foreign, "Open-Xchange").unwrap();
+        for placement in [Placement::Block {}, include()] {
+            let p = precedence(&proof, &census, &script, "Open-Xchange", &placement).unwrap();
+            let copied: BTreeSet<(String, String)> = p
+                .copies
+                .iter()
+                .filter(|c| c.status == "copied")
+                .map(|c| (c.id.clone(), c.rule.clone()))
+                .collect();
+            assert_eq!(
+                copied, proven,
+                "{action}: the segment copies what Mailroom proved"
+            );
+            let counts = p.counts.copies.as_ref().unwrap();
+            assert_eq!(counts.guard_violations, 0);
+            assert_eq!(counts.undetermined, 0);
+            assert_eq!(counts.copied, proven.len());
+            let shop: Vec<&CopyOutcome> = p
+                .copies
+                .iter()
+                .filter(|c| {
+                    subject(&census, &c.id).contains("208")
+                        || subject(&census, &c.id).contains("login")
+                })
+                .collect();
+            assert_eq!(shop.len(), 2, "{action}");
+            assert!(
+                shop.iter()
+                    .all(|c| c.filed_by == "existing_rule" && c.status == "copied")
+            );
+            assert_eq!(
+                counts.beside_existing, 3,
+                "{action}: two approved-sender copies and the overlap"
+            );
+            assert!(p.decisions.iter().any(|d| d.copies == 1));
+            assert!(
+                p.decisions.iter().all(|d| d.rule == "Shop"
+                    && d.copies == proven.iter().filter(|(id, _)| *id == d.id).count()),
+                "{action}: every message the existing rule stops keeps its proven copy"
+            );
+            assert!(
+                p.copies.iter().any(|c| c.filed_by == "mailroom"),
+                "invoice-address copy"
+            );
+            assert_eq!(p.counts.suppressed_copies, None);
+            assert_ne!(p.gate, "blocked", "{action}");
+            assert!(p.counts.matches(SEMANTICS));
+        }
+    }
+}
+
+#[test]
+fn overlapping_triggers_copy_once_and_held_mail_gets_no_copy() {
+    let (census, proof) = sample();
+    let script = parse_foreign(&shop_rule("fileinto \"Shop\";"), "Open-Xchange").unwrap();
+    let p = precedence(
+        &proof,
+        &census,
+        &script,
+        "Open-Xchange",
+        &Placement::Block {},
+    )
+    .unwrap();
+    let of = |needle: &str| -> Vec<&CopyOutcome> {
+        p.copies
+            .iter()
+            .filter(|c| subject(&census, &c.id).contains(needle))
+            .collect()
+    };
+    let overlap = of("Invoice to the invoice address");
+    assert_eq!(
+        overlap.len(),
+        1,
+        "both forwards match; one copy to the one target"
+    );
+    assert_eq!(overlap[0].rule, "forward.approved");
+    assert!(
+        of("Invoice unknown role").is_empty(),
+        "unknown role is held"
+    );
+    assert!(of("Invoice mixed roles").is_empty(), "mixed roles are held");
+    assert!(
+        of("208 duplicate").is_empty(),
+        "repeated Message-ID is not copied twice"
+    );
+    assert_eq!(of("Your invoice 208").len(), 1);
+    let segment = split(proof.artifact.executable()).unwrap();
+    let held = &proof
+        .artifact
+        .statements()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == "system.role_safety")
+        .unwrap()
+        .test;
+    for m in proof::messages(&census, false) {
+        let view = proof::view(&proof.artifact, &m);
+        if held.evaluate(&view, &BTreeSet::new()) != Truth::NoMatch {
+            assert!(
+                segment
+                    .copies
+                    .iter()
+                    .all(|s| s.test.evaluate(&view, &BTreeSet::new()) != Truth::Match),
+                "{}: the role-safety guard travels with every copy",
+                m.id
+            );
+        }
+    }
+}
+
+#[test]
+fn copy_guards_cannot_be_dropped_or_mixed_with_filing() {
+    let unguarded = "require [\"copy\"];\n\n#@ system.role_safety\nif true {\n  keep;\n  stop;\n}\n\n#@ forward.x\nif true {\n  redirect :copy \"a@example.test\";\n}\n";
+    let s = split(unguarded).unwrap();
+    assert_eq!(s.copies.len(), 1);
+    assert_eq!(
+        s.copies[0].test.render(),
+        "allof (not true, true)",
+        "a stop before the copy becomes its negated guard"
+    );
+    assert_eq!(s.filing.len(), 1);
+    let mixed = "require [\"copy\"];\n\n#@ forward.x\nif true {\n  redirect :copy \"a@example.test\";\n  stop;\n}\n";
+    assert!(matches!(split(mixed), Err(Refusal::MailroomContentInvalid)));
+    let script = parse_foreign(&shop_rule("reject \"no\";"), "Open-Xchange").unwrap();
+    let (census, proof) = sample();
+    assert!(matches!(
+        precedence(&proof, &census, &script, "Open-Xchange", &Placement::Block {}),
+        Err(Refusal::UnsafeRule { ref rule, .. }) if rule == "Shop"
+    ));
+    assert!(matches!(
+        compose(
+            &shop_rule("reject \"no\";"),
+            &script,
+            &include(),
+            proof.artifact.executable(),
+            "Open-Xchange"
+        ),
+        Err(Refusal::UnsafeRule { .. })
+    ));
+    assert!(
+        compose(
+            &shop_rule("reject \"no\";"),
+            &script,
+            &include(),
+            MAILROOM,
+            "Open-Xchange"
+        )
+        .is_ok(),
+        "without copies a reject keeps its existing behavior"
+    );
+    assert!(matches!(
+        precedence(
+            &proof,
+            &census,
+            &parse_foreign("stop;\n", "Open-Xchange").unwrap(),
+            "Open-Xchange",
+            &Placement::Block {}
+        ),
+        Err(Refusal::MailroomUnreachable { .. })
+    ));
 }

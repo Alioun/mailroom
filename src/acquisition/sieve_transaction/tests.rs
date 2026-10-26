@@ -547,6 +547,9 @@ fn transaction_fixture_worker() {
     let repo = persistent_test_accounts(root);
     let account = repo.list().unwrap().remove(0);
     let mode = std::env::var("MAILROOM_SIEVE_WORKER_ACTION").unwrap_or_default();
+    if mode == "business_copy" {
+        return add_business_travel_copy(&repo, &account);
+    }
     if [
         "foreign_edit",
         "foreign_unparseable",
@@ -1050,6 +1053,119 @@ fn both_placements_compose_after_existing_rules_redeploy_switch_remove_and_compe
     }
 }
 
+/// A business message the existing Travel rule files with `stop`, from a sender the
+/// workspace approves for accounting copies.
+/// The account also needs synthetic workspace authority so forwards compile.
+pub(crate) fn add_business_travel_copy(repo: &Accounts, account: &Account) {
+    let store = repo.store(account).unwrap();
+    let mut state = store.load_state().unwrap();
+    let workspace = state.workspace.as_mut().unwrap();
+    let documents = &mut workspace.input.documents;
+    let (_, mut overrides) =
+        crate::rules::config::documents(&documents.preset_yaml, &documents.override_yaml).unwrap();
+    for forward in &mut overrides.forwards {
+        if let crate::rules::config::ForwardTrigger::ApprovedSenders { addresses } =
+            &mut forward.trigger
+        {
+            addresses.insert("robot@travel.example".into());
+        }
+    }
+    documents.override_yaml = serde_yaml_ng::to_string(&overrides).unwrap();
+    let input = crate::engine::PreviewInput {
+        documents: documents.clone(),
+        context: crate::rules::EngineContext::local(
+            state.census.account.as_str().into(),
+            crate::rules::Engine::MailboxSieve,
+        ),
+        messages: vec![serde_json::from_value(serde_json::json!({
+            "id": "business-travel",
+            "headers": "From: robot@travel.example\r\nTo: team@work.example.test\r\nDelivered-To: team@work.example.test\r\nSubject: business booking invoice\r\nMessage-ID: <business-travel@example.test>\r\nDate: Sat, 24 Oct 2026 00:00:00 +0000\r\n\r\n",
+            "current_folder": "INBOX"
+        }))
+        .unwrap()],
+        as_of: workspace.input.as_of,
+        pins: vec![],
+        baseline: crate::rules::proof::Baseline::Current,
+        previous: None,
+    };
+    let mut census = crate::engine::synthetic_census(&input).unwrap();
+    census.account = state.census.account.clone();
+    let (folder, extra) = census.folders.pop_first().unwrap();
+    let target = state.census.folders.entry(folder).or_insert(extra.clone());
+    let uid = target.messages.values().map(|m| m.uid).max().unwrap_or(0) + 1;
+    let mut message = extra.messages.into_values().next().unwrap();
+    message.uid = uid;
+    target.messages.insert(uid, message);
+    store.save_state(&mut state).unwrap();
+}
+fn with_business_travel_copy(root: &Path, placement: Placement) -> (Accounts, Account, Fixture) {
+    let (mut repo, account, fixture) = placed(root, Some(placement));
+    repo.install_synthetic_workspace(&account, "explicit-copy-first");
+    add_business_travel_copy(&repo, &account);
+    (repo, account, fixture)
+}
+
+#[test]
+fn existing_filing_rule_with_stop_still_lets_the_copy_happen_under_both_placements() {
+    for placement in [Placement::Block {}, include()] {
+        let root = tempfile::tempdir().unwrap();
+        let (repo, account, _fixture) = with_business_travel_copy(root.path(), placement.clone());
+        let p = ready(review(&repo, &account, Request::Deploy));
+        let precedence = p.precedence.as_ref().unwrap();
+        let copied: Vec<_> = precedence
+            .copies
+            .iter()
+            .filter(|c| c.status == "copied")
+            .collect();
+        assert_eq!(copied.len(), 1, "{placement:?}");
+        assert_eq!(copied[0].rule, "forward.approved");
+        assert_eq!(copied[0].recipient, "archive@example.net");
+        assert_eq!(
+            copied[0].filed_by, "existing_rule",
+            "Travel files it with stop"
+        );
+        let taken = precedence
+            .decisions
+            .iter()
+            .find(|d| d.id == copied[0].id)
+            .unwrap();
+        assert_eq!(taken.rule, "Travel");
+        assert_eq!(taken.copies, 1);
+        assert_eq!(
+            taken.existing,
+            Some(composition::ForeignDest::Folder {
+                name: "Reisen".into()
+            })
+        );
+        let counts = precedence.counts.copies.as_ref().unwrap();
+        assert_eq!(
+            (
+                counts.copied,
+                counts.beside_existing,
+                counts.guard_violations
+            ),
+            (1, 1, 0)
+        );
+        let host = std::str::from_utf8(&p.transaction.after.body("Open-Xchange").unwrap().bytes)
+            .unwrap()
+            .to_owned();
+        let copy = host.find("# mailroom:copy-begin v1").unwrap();
+        assert!(copy < host.find("Rulename: Travel").unwrap());
+        let segment = &host[copy..host.find("# mailroom:copy-end v1").unwrap()];
+        assert!(segment.contains("redirect :copy \"archive@example.net\";"));
+        assert!(!segment.contains("fileinto") && !segment.contains("stop;"));
+        let composition = p.transaction.composition.as_ref().unwrap();
+        assert_eq!(composition.semantics, composition::SEMANTICS);
+        assert!(confirm(&repo, &account, Request::Deploy, &p.receipt));
+        let deployed = image(&repo, &account, root.path()).image;
+        assert!(deployed == p.transaction.after);
+        let removal = ready(review(&repo, &account, Request::Removal));
+        assert!(confirm(&repo, &account, Request::Removal, &removal.receipt));
+        let removed = image(&repo, &account, root.path()).image;
+        assert_eq!(removed.body("Open-Xchange").unwrap().bytes, OX_HOST);
+    }
+}
+
 #[test]
 fn compensation_restores_the_exact_composed_preimage() {
     for placement in [Placement::Block {}, include()] {
@@ -1298,9 +1414,18 @@ fn validation_space_and_upload_refusals_never_hide_later_failure() {
 
 #[test]
 fn lost_uploads_reconcile_without_repeating_and_resume_only_through_fresh_review() {
-    for placement in [Placement::Block {}, include()] {
+    for (placement, copies) in [
+        (Placement::Block {}, false),
+        (include(), false),
+        (Placement::Block {}, true),
+        (include(), true),
+    ] {
         let root = tempfile::tempdir().unwrap();
-        let (repo, account, _fixture) = placed(root.path(), Some(placement.clone()));
+        let (repo, account, _fixture) = if copies {
+            with_business_travel_copy(root.path(), placement.clone())
+        } else {
+            placed(root.path(), Some(placement.clone()))
+        };
         let p = ready(review(&repo, &account, Request::Deploy));
         std::fs::write(root.path().join("transaction-mode"), "put_lost").unwrap();
         assert!(!confirm(&repo, &account, Request::Deploy, &p.receipt));

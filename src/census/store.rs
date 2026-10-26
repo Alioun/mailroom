@@ -483,7 +483,7 @@ impl EncryptedStore {
         state.census.acquisition.validate(&state.census.account)?;
         let snapshot =
             Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
-        self.stage_snapshot(16, &snapshot)
+        self.stage_snapshot(17, &snapshot)
     }
 
     fn stage_snapshot(
@@ -599,7 +599,7 @@ impl EncryptedStore {
         let snapshot = Zeroizing::new(snapshot);
         if !matches!(
             version,
-            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16
+            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17
         ) {
             return Err(CensusError::UnsupportedVersion);
         }
@@ -662,6 +662,16 @@ impl EncryptedStore {
                             .iter()
                             .any(|s| s.effect == super::sieve_transaction::Effect::UploadOwned)
                 }))
+        {
+            return Err(CensusError::UnsupportedVersion);
+        }
+        if version < 17
+            && state.sieve_transactions.history.iter().any(|t| {
+                t.composition.as_ref().is_some_and(|c| {
+                    c.semantics != crate::rules::composition::LEGACY_SEMANTICS
+                        || c.precedence.as_ref().is_some_and(|p| p.copies.is_some())
+                })
+            })
         {
             return Err(CensusError::UnsupportedVersion);
         }
@@ -974,7 +984,7 @@ mod tests {
                 .unwrap()
                 .persist(store.path())
                 .unwrap();
-            assert_eq!(store.schema_version().unwrap(), 16);
+            assert_eq!(store.schema_version().unwrap(), 17);
             assert_eq!(
                 serde_json::to_value(store.load_state().unwrap()).unwrap(),
                 serde_json::to_value(loaded).unwrap()
@@ -1032,7 +1042,7 @@ mod tests {
                 crate::rules::proof::Baseline::Previous;
             assert!(crate::rules::workspace::preview(&loaded, &context, store.keys()).is_err());
             store.save_state(&mut loaded).unwrap();
-            assert_eq!(store.schema_version().unwrap(), 16);
+            assert_eq!(store.schema_version().unwrap(), 17);
             assert_eq!(
                 serde_json::to_value(store.load_state().unwrap().exports).unwrap(),
                 expected,
@@ -1096,7 +1106,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 16);
+        assert_eq!(store.schema_version().unwrap(), 17);
         assert_eq!(
             serde_json::to_value(store.load_state().unwrap().exports).unwrap(),
             serde_json::to_value(&saved.exports).unwrap()
@@ -1146,7 +1156,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 16);
+        assert_eq!(store.schema_version().unwrap(), 17);
         assert!(store.load_state().unwrap().folder_provisioning == saved.folder_provisioning);
         let mut bad = saved.clone();
         bad.folder_provisioning.history[0].plan.entries[0]
@@ -1195,7 +1205,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 16);
+        assert_eq!(store.schema_version().unwrap(), 17);
         assert!(store.load_state().unwrap().sieve_transactions == state.sieve_transactions);
         let mut malformed = state.clone();
         malformed.sieve_transactions.history[0].after.bodies[1]
@@ -1248,7 +1258,7 @@ mod tests {
         let mut reopened = store.load_state().unwrap();
         assert!(reopened.sieve_placement.is_none());
         store.save_state(&mut reopened).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 16);
+        assert_eq!(store.schema_version().unwrap(), 17);
         let mut tampered = state.clone();
         let t = &mut tampered.sieve_transactions.history[0];
         for image in std::iter::once(&mut t.after).chain(t.steps.iter_mut().map(|s| &mut s.after)) {
@@ -1264,6 +1274,81 @@ mod tests {
             *host = super::super::sieve::Body::new(host.name.clone(), bytes);
         }
         assert!(store.stage_state(&tampered).is_err());
+    }
+
+    #[test]
+    fn copy_first_composition_needs_schema_seventeen_and_legacy_records_stay_readable() {
+        use crate::rules::composition::{Counts, LEGACY_SEMANTICS, SEMANTICS};
+        let root = tempfile::tempdir().unwrap();
+        let (repo, account, _fake) =
+            crate::acquisition::sieve_transaction::tests::install(root.path());
+        crate::acquisition::sieve_transaction::tests::commit_fixture_transaction(&repo, &account);
+        let store = repo.store(&account).unwrap();
+        let current = store.load_state().unwrap();
+        let composition = current.sieve_transactions.history[0]
+            .composition
+            .as_ref()
+            .unwrap();
+        assert_eq!(composition.semantics, SEMANTICS);
+        assert!(composition.precedence.as_ref().unwrap().copies.is_some());
+        let mut legacy = current.clone();
+        let c = legacy.sieve_transactions.history[0]
+            .composition
+            .as_mut()
+            .unwrap();
+        c.semantics = LEGACY_SEMANTICS.into();
+        c.precedence = Some(Counts {
+            suppressed_copies: Some(0),
+            copies: None,
+            ..c.precedence.clone().unwrap()
+        });
+        let stage = |version, state: &AccountState| {
+            store
+                .stage_snapshot(version, &serde_json::to_string(state).unwrap())
+                .unwrap()
+                .persist(store.path())
+                .unwrap();
+        };
+        stage(16, &current);
+        assert!(matches!(
+            store.load_state(),
+            Err(CensusError::UnsupportedVersion)
+        ));
+        stage(16, &legacy);
+        let mut reopened = store.load_state().unwrap();
+        assert!(reopened.sieve_transactions == legacy.sieve_transactions);
+        store.save_state(&mut reopened).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 17);
+        assert!(store.load_state().unwrap().sieve_transactions == legacy.sieve_transactions);
+        for mixed in [
+            Counts {
+                suppressed_copies: Some(0),
+                ..Default::default()
+            },
+            Counts {
+                copies: None,
+                ..Default::default()
+            },
+        ] {
+            let mut bad = current.clone();
+            bad.sieve_transactions.history[0]
+                .composition
+                .as_mut()
+                .unwrap()
+                .precedence = Some(mixed);
+            assert!(store.stage_state(&bad).is_err());
+        }
+        let mut bad = legacy.clone();
+        bad.sieve_transactions.history[0]
+            .composition
+            .as_mut()
+            .unwrap()
+            .precedence = Some(Counts {
+            suppressed_copies: Some(0),
+            copies: Some(Default::default()),
+            ..Default::default()
+        });
+        assert!(store.stage_state(&bad).is_err());
     }
 
     #[test]
@@ -1304,7 +1389,7 @@ mod tests {
             assert!(state.exports.is_empty());
             assert!(state.proposals.history.is_empty());
             store.save_state(&mut state).unwrap();
-            assert_eq!(store.schema_version().unwrap(), 16);
+            assert_eq!(store.schema_version().unwrap(), 17);
             assert_eq!(store.load().unwrap().acquisition, Default::default());
         }
     }

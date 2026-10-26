@@ -239,8 +239,15 @@ pub fn render(statements: &[Statement], extensions: &BTreeSet<String>) -> String
         ));
     }
     for s in statements {
-        text.push_str(&format!("\n#@ {}\nif {} {{\n", s.id, s.test.render()));
-        for a in &s.actions {
+        text.push_str(&s.render());
+    }
+    text
+}
+impl Statement {
+    /// One marked rule as `render` emits it: `\n#@ id\nif test {\n  action;\n}\n`.
+    pub fn render(&self) -> String {
+        let mut text = format!("\n#@ {}\nif {} {{\n", self.id, self.test.render());
+        for a in &self.actions {
             let command = match a {
                 Action::Keep => "keep".into(),
                 Action::File(f) => format!("fileinto {}", quote(f)),
@@ -252,8 +259,8 @@ pub fn render(statements: &[Statement], extensions: &BTreeSet<String>) -> String
             text.push_str(&format!("  {command};\n"));
         }
         text.push_str("}\n");
+        text
     }
-    text
 }
 
 // This parser consumes executable Sieve, never the source rule matcher.

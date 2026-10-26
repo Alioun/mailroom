@@ -140,6 +140,8 @@ impl AccountPaths {
 }
 
 pub struct Accounts {
+    pub(super) label_source:
+        Option<Arc<super::folder_provisioning::transport::gmail_label::InstalledSource>>,
     pub(super) backlog_source:
         Option<Arc<super::folder_provisioning::transport::message_move::InstalledSource>>,
     pub(super) workspace_authority: Option<super::workspace_authority::SyntheticWorkspaceAuthority>,
@@ -168,6 +170,7 @@ impl Accounts {
             backend,
             folder_source: None,
             backlog_source: None,
+            label_source: None,
             workspace_authority: None,
             sieve_source: None,
             sieve_write: None,

@@ -1,3 +1,5 @@
+pub mod gmail_journal;
+pub mod gmail_label;
 pub mod imap_move;
 pub mod protocol;
 mod synthetic;

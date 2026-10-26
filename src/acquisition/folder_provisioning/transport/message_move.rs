@@ -356,7 +356,7 @@ impl Connection {
     }
 }
 
-fn fetch_uid(row: &[Token]) -> Result<Option<Uid>, Error> {
+pub(super) fn fetch_uid(row: &[Token]) -> Result<Option<Uid>, Error> {
     if row.get(3) != Some(&Token::Open) || row.last() != Some(&Token::Close) {
         return Err(Error::Protocol);
     }

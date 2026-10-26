@@ -16,6 +16,7 @@ const RESPONSE: usize = 512 * 1024;
 const TOTAL: usize = 16 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(5);
 
+pub(in crate::acquisition) mod gmail_label;
 pub(in crate::acquisition) mod message_move;
 
 struct Endpoint<'a> {

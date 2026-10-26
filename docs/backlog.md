@@ -1,4 +1,4 @@
-# Backlog sorting and protocol MOVE
+# Backlog sorting, protocol MOVE and Gmail labels
 
 The local interface previews filing changes against saved rules. Real-account writes remain denied. Legacy synthetic histories and the protocol MOVE journal are separate. Protocol execution requires an explicitly installed, account-bound loopback source and separately installed synthetic workspace evidence. HTTP requests and recovered data cannot install either authority.
 
@@ -28,7 +28,7 @@ IMAP MOVE cannot atomically prevent another client from changing flags after the
 
 ## Persistence, refresh and recovery
 
-Schemas 1 through 14 with absent protocol fields retain legacy history and install no authority. Old schema numbers reject new protocol semantics, including nested injection. Schema15 validates journal lengths, identities, batch membership, evidence phases and resource bounds at save and load. Run history caps at 32 and the protocol journal at 4 MiB. Overflow rejects the save without pruning unresolved evidence. Old export bytes and compiler/proof version strings remain exact.
+Schemas 1 through 14 with absent protocol fields retain legacy history and install no authority. Schema 18 adds the Gmail label journal; see [recovery format](recovery-format.md). Old schema numbers reject new protocol semantics, including nested injection. Schema15 validates journal lengths, identities, batch membership, evidence phases and resource bounds at save and load. Run history caps at 32 and the protocol journal at 4 MiB. Overflow rejects the save without pruning unresolved evidence. Old export bytes and compiler/proof version strings remain exact.
 
 The installed TLS fake persists actual messages, flags, UIDVALIDITY and monotonic UIDNEXT independently of the application journal. Its read-only acquisition adapter scans the same mutable state after moves. Refresh preserves workspace, exports, ledger and unrelated histories. The ordinary legacy synthetic scan still uses its separate header fixture.
 
@@ -57,6 +57,24 @@ The library tests in `src/acquisition/backlog/tests.rs` run the saved-workspace 
 
 `node scripts/verify-imap-move-core.mjs` covers the reusable domain and TLS transport directly. Those direct-intent tests do not substitute for the saved application workflows. Legacy scripts `verify-backlog.mjs`, `verify-backlog-restart.mjs` and `ui/scripts/verify-backlog-cancel.mjs` retain their separate synthetic adapter coverage.
 
+## Gmail labels
+
+Gmail backlog sorting runs over IMAP with X-GM-EXT-1 through `/api/accounts/backlog/gmail`. It uses the same saved-workspace approval, preview, journal, worker, Reconcile, Resume, Cancel, Undo and interface paths as MOVE. It needs an explicitly installed, account-bound loopback label source whose permit is distinct from the MOVE, read and CREATE permits. The source alone grants no recipient authority. Gmail rules never offer a Sieve download, so preview requires a saved proof that is not blocked instead.
+
+Preview reads LIST and requires exactly one selectable `\All` mailbox. It reads All Mail once with ReadOnlyImap, so X-GM-MSGID identifies each message and a duplicate ID fails the observation. X-GM-THRID is never identity. The default scope is Inbox plus mail with no user label. Sent, Drafts, Spam and Trash labels stay excluded, and flagged and Deleted messages stay put. A destination label missing from LIST excludes its changes as `missing_label` with a diagnostic. Labels are created only through approved folder provisioning, which is currently mailbox.org only, so such changes wait.
+
+Each batch holds at most 500 All Mail UIDs for one destination label, with the approved snapshot of each message: X-GM-MSGID, Message-ID hash, size, date, flags and labels. Its steps are fixed at approval. The first adds the destination label to members that lack it with `UID STORE <uids> +X-GM-LABELS ("<label>")`. The second removes only Inbox from members that have it with `UID STORE <uids> -X-GM-LABELS (\Inbox)`. Every store runs with All Mail selected, so removing Inbox keeps the UID. Before each store the members must still match the expected state exactly. The worker saves the attempt before transmission, the tagged completion or loss, then readback, each as separate evidence. It never replaces the label set, removes other labels, sets or clears flags, expunges or creates a label.
+
+Each member's step outcome is `verified` (tagged OK and readback exactly as expected), `changed` (tagged OK, delta present, other client edits seen), `unapplied` (NO or BAD and the delta absent), `uncertain` (lost completion, or NO with the delta present) or `conflict` (tagged OK without the delta, a changed X-GM-MSGID or UIDVALIDITY, or a missing message). Only verified steps let the run continue. A lost acknowledgment stays uncertain after Reconcile and is never retried.
+
+Reconcile observes only attempted steps without saved readback and never rewrites saved readback. Resume runs only never-attempted steps after every attempted step verified. Cancel stops before the next step and keeps completed effects. Undo has its own preview and initially unchecked confirmation. It reverses only applied deltas of messages without uncertain or conflicting steps: Inbox is restored where this run removed it and it is still absent, then the label is removed where this run added it and it is still present. Later labels and flags stay. Labels created or removed elsewhere do not invalidate a run. All Mail, the destination labels, capabilities and namespaces must still match. A refresh scan changes the material binding and blocks continuation and Undo of an earlier run, as for MOVE.
+
+Gmail offers no conditional label store. Another client can change labels or flags between the final read and the store, and the readback then reports `changed` or `conflict`. The Google behaviors the fixture models are unverified: removal with `-X-GM-LABELS`, idempotent additions, modified UTF-7 label encoding and exact case, system label spelling, stable All Mail UIDs after label changes, partial NO results, untagged FETCH rows during STORE, and concurrent edits. Each has a fake-server case.
+
+- `node scripts/verify-gmail-label-backlog.mjs [group ...]` runs the protected saved-workspace flow against the TLS Gmail fake: authority, forward labels, refresh and Undo, a stale preview after another client's flag, SIGKILL boundaries after intent, after the provider effect, after add before readback, after add before remove, after remove before readback and during Undo, live Cancel with 501 messages, missing label and extension, and populated single and selected recovery.
+- `node ui/scripts/verify-gmail-label-backlog.mjs` drives the built English and narrow German controls through save, proof, preview, forward, replacement, Reconcile, Undo, live Cancel and explicit Resume.
+- `src/acquisition/gmail_backlog/tests.rs` covers lost, partial and BAD responses, races before and after the final read, changed UIDs, label case, missing labels and the 500-UID batch.
+
 ## Remaining limits
 
-COPY fallback, Gmail protocol labels and the separate unchecked unmatched-mail archive offer remain unimplemented. Production source installation and actual provider acceptance remain unavailable. Native confirmation, protected Keychain access, independent Sieve execution and whole-personal-workflow readiness are separate gates. Controls support English and narrow German layouts. Backend diagnostic reason codes remain partly English. Local fixture results grant no real-account write authority.
+COPY fallback, Gmail label creation and the separate unchecked unmatched-mail archive offer remain unimplemented. Gmail label execution is fixture-only. Production source installation and actual provider acceptance remain unavailable. Native confirmation, protected Keychain access, independent Sieve execution and whole-personal-workflow readiness are separate gates. Controls support English and narrow German layouts. Backend diagnostic reason codes remain partly English. Local fixture results grant no real-account write authority.

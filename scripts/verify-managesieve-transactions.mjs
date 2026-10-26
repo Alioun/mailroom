@@ -136,7 +136,7 @@ try {
   assert.equal(effects(await observe()), '')
   await confirm(p)
   const deployed = await observe()
-  assert.equal(deployed.schema, 17); assert.equal(deployed.provider_target, p.transaction.after.bodies.find(b => b.name === p.transaction.target).sha256)
+  assert.equal(deployed.schema, 18); assert.equal(deployed.provider_target, p.transaction.after.bodies.find(b => b.name === p.transaction.target).sha256)
   assert.equal(deployed.provider_foreign, initial.provider_foreign); assert.equal(deployed.active, 'Open-Xchange')
   assert.deepEqual(deployed.placement, BLOCK)
   assert.deepEqual(deployed.external_unrelated, initial.external_unrelated)

@@ -1030,6 +1030,31 @@ async fn envelope_keyword_server_fixture() {
 
 #[cfg(test)]
 #[tokio::test]
+async fn gmail_backlog_server_fixture() {
+    let Some(root) = std::env::var_os("MAILROOM_GMAIL_FIXTURE") else {
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let (mut repo, _account, _fake) = acquisition::gmail_backlog::fixture_install(root);
+    if let Some(installation) = std::env::var_os("MAILROOM_GMAIL_INSTALLATION") {
+        repo = acquisition::persistent_test_accounts(std::path::Path::new(&installation));
+    }
+    let mut state = AppState::new(true);
+    state.accounts.source = AccountSource::Synthetic {
+        accounts: Arc::new(repo),
+        _directory: tempfile::tempdir().unwrap(),
+        mailboxes: root.join("mailboxes"),
+    };
+    state.accounts.ledger =
+        Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
+    let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
+    axum::serve(listener, super::router(Arc::new(state)))
+        .await
+        .unwrap();
+}
+
+#[cfg(test)]
+#[tokio::test]
 async fn backlog_protocol_server_fixture() {
     let Some(root) = std::env::var_os("MAILROOM_MOVE_FIXTURE") else {
         return;

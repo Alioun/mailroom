@@ -192,6 +192,11 @@ pub struct AccountState {
     pub sieve_placement: Option<crate::rules::composition::Placement>,
     #[serde(default)]
     pub protocol_backlog: crate::backlog::protocol::Journal,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::backlog::gmail_journal::Journal::is_empty"
+    )]
+    pub gmail_backlog: crate::backlog::gmail_journal::Journal,
     #[serde(default)]
     pub folder_provisioning: super::folder_provisioning::FolderJournal,
     #[serde(default)]
@@ -228,6 +233,7 @@ impl AccountState {
         Self {
             sieve_placement: None,
             protocol_backlog: Default::default(),
+            gmail_backlog: Default::default(),
             folder_provisioning: Default::default(),
             synthetic_folders: None,
             sieve: Default::default(),
@@ -454,6 +460,7 @@ impl EncryptedStore {
         }
         state.folder_provisioning.validate(&state.census.account)?;
         state.protocol_backlog.validate(&state.census.account)?;
+        state.gmail_backlog.validate(&state.census.account)?;
         if state
             .synthetic_folders
             .as_ref()
@@ -483,7 +490,7 @@ impl EncryptedStore {
         state.census.acquisition.validate(&state.census.account)?;
         let snapshot =
             Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
-        self.stage_snapshot(17, &snapshot)
+        self.stage_snapshot(18, &snapshot)
     }
 
     fn stage_snapshot(
@@ -599,7 +606,7 @@ impl EncryptedStore {
         let snapshot = Zeroizing::new(snapshot);
         if !matches!(
             version,
-            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17
+            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18
         ) {
             return Err(CensusError::UnsupportedVersion);
         }
@@ -629,6 +636,25 @@ impl EncryptedStore {
                 }
             }
             if protocol_fields(&raw) {
+                return Err(CensusError::UnsupportedVersion);
+            }
+        }
+        if version < 18 {
+            let raw: serde_json::Value =
+                serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?;
+            fn label_fields(v: &serde_json::Value) -> bool {
+                match v {
+                    serde_json::Value::Object(o) => o.iter().any(|(k, v)| {
+                        k == "gmail_backlog"
+                            || k == "semantics"
+                                && v.as_str() == Some(crate::backlog::gmail_journal::SEMANTICS)
+                            || label_fields(v)
+                    }),
+                    serde_json::Value::Array(a) => a.iter().any(label_fields),
+                    _ => false,
+                }
+            }
+            if label_fields(&raw) {
                 return Err(CensusError::UnsupportedVersion);
             }
         }
@@ -722,6 +748,7 @@ impl EncryptedStore {
         }
         state.folder_provisioning.validate(&state.census.account)?;
         state.protocol_backlog.validate(&state.census.account)?;
+        state.gmail_backlog.validate(&state.census.account)?;
         if state
             .synthetic_folders
             .as_ref()
@@ -753,6 +780,7 @@ impl EncryptedStore {
         state.sieve_transactions.interrupted();
         state.folder_provisioning.interrupted();
         state.protocol_backlog.interrupted();
+        state.gmail_backlog.interrupted();
         state.census.acquisition.interrupted();
         let census = &mut state.census;
         if census.account != self.keys.account {
@@ -914,6 +942,76 @@ mod tests {
     }
 
     #[test]
+    fn gmail_schema_eighteen_keeps_old_absence_and_rejects_label_semantics() {
+        for version in 1..=18 {
+            let root = tempfile::tempdir().unwrap();
+            let input: crate::engine::PreviewInput =
+                serde_json::from_str(include_str!("../../examples/sample.json")).unwrap();
+            let census = crate::engine::synthetic_census(&input).unwrap();
+            let store = EncryptedStore::new(
+                root.path().into(),
+                CensusKeys::derive(&LocalSecret::random(), &census.account),
+            )
+            .unwrap();
+            let value = if version == 1 {
+                serde_json::to_value(census).unwrap()
+            } else {
+                serde_json::to_value(AccountState::new(census)).unwrap()
+            };
+            assert!(
+                value.get("gmail_backlog").is_none(),
+                "Empty journal is omitted"
+            );
+            store
+                .stage_snapshot(version, &serde_json::to_string(&value).unwrap())
+                .unwrap()
+                .persist(store.path())
+                .unwrap();
+            let mut loaded = store.load_state().unwrap();
+            assert!(loaded.gmail_backlog.runs.is_empty());
+            if version > 1 {
+                store.save_state(&mut loaded).unwrap();
+                assert_eq!(store.schema_version().unwrap(), 18);
+                assert_eq!(
+                    serde_json::to_value(&store.load_state().unwrap().protocol_backlog).unwrap(),
+                    serde_json::to_value(&loaded.protocol_backlog).unwrap()
+                );
+            }
+            for injection in [
+                serde_json::json!({"gmail_backlog":{"runs":[]}}),
+                serde_json::json!({"gmail_backlog":{"runs":[{}]}}),
+                serde_json::json!({"backlog":[{"plan":{"semantics":"gmail-label-readback/v1"}}]}),
+                serde_json::json!({"exports":[{"artifact":{"semantics":"gmail-label-readback/v1"}}]}),
+            ] {
+                let mut changed = value.clone();
+                changed
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(injection.as_object().unwrap().clone());
+                store
+                    .stage_snapshot(version, &serde_json::to_string(&changed).unwrap())
+                    .unwrap()
+                    .persist(store.path())
+                    .unwrap();
+                let expected_storage = version == 18;
+                let result = store.load_state();
+                assert!(
+                    if expected_storage {
+                        injection
+                            .get("gmail_backlog")
+                            .is_some_and(|j| j["runs"].as_array().unwrap().is_empty())
+                            && result.is_ok()
+                            || matches!(result, Err(CensusError::Storage))
+                    } else {
+                        matches!(result, Err(CensusError::UnsupportedVersion))
+                    },
+                    "schema {version} {injection}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn delivery_schema_fourteen_preserves_legacy_absence_and_rejects_nested_smuggling() {
         for version in 1..=13 {
             let root = tempfile::tempdir().unwrap();
@@ -984,7 +1082,7 @@ mod tests {
                 .unwrap()
                 .persist(store.path())
                 .unwrap();
-            assert_eq!(store.schema_version().unwrap(), 17);
+            assert_eq!(store.schema_version().unwrap(), 18);
             assert_eq!(
                 serde_json::to_value(store.load_state().unwrap()).unwrap(),
                 serde_json::to_value(loaded).unwrap()
@@ -1042,7 +1140,7 @@ mod tests {
                 crate::rules::proof::Baseline::Previous;
             assert!(crate::rules::workspace::preview(&loaded, &context, store.keys()).is_err());
             store.save_state(&mut loaded).unwrap();
-            assert_eq!(store.schema_version().unwrap(), 17);
+            assert_eq!(store.schema_version().unwrap(), 18);
             assert_eq!(
                 serde_json::to_value(store.load_state().unwrap().exports).unwrap(),
                 expected,
@@ -1106,7 +1204,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 17);
+        assert_eq!(store.schema_version().unwrap(), 18);
         assert_eq!(
             serde_json::to_value(store.load_state().unwrap().exports).unwrap(),
             serde_json::to_value(&saved.exports).unwrap()
@@ -1156,7 +1254,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 17);
+        assert_eq!(store.schema_version().unwrap(), 18);
         assert!(store.load_state().unwrap().folder_provisioning == saved.folder_provisioning);
         let mut bad = saved.clone();
         bad.folder_provisioning.history[0].plan.entries[0]
@@ -1205,7 +1303,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 17);
+        assert_eq!(store.schema_version().unwrap(), 18);
         assert!(store.load_state().unwrap().sieve_transactions == state.sieve_transactions);
         let mut malformed = state.clone();
         malformed.sieve_transactions.history[0].after.bodies[1]
@@ -1258,7 +1356,7 @@ mod tests {
         let mut reopened = store.load_state().unwrap();
         assert!(reopened.sieve_placement.is_none());
         store.save_state(&mut reopened).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 17);
+        assert_eq!(store.schema_version().unwrap(), 18);
         let mut tampered = state.clone();
         let t = &mut tampered.sieve_transactions.history[0];
         for image in std::iter::once(&mut t.after).chain(t.steps.iter_mut().map(|s| &mut s.after)) {
@@ -1318,7 +1416,7 @@ mod tests {
         let mut reopened = store.load_state().unwrap();
         assert!(reopened.sieve_transactions == legacy.sieve_transactions);
         store.save_state(&mut reopened).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 17);
+        assert_eq!(store.schema_version().unwrap(), 18);
         assert!(store.load_state().unwrap().sieve_transactions == legacy.sieve_transactions);
         for mixed in [
             Counts {
@@ -1389,7 +1487,7 @@ mod tests {
             assert!(state.exports.is_empty());
             assert!(state.proposals.history.is_empty());
             store.save_state(&mut state).unwrap();
-            assert_eq!(store.schema_version().unwrap(), 17);
+            assert_eq!(store.schema_version().unwrap(), 18);
             assert_eq!(store.load().unwrap().acquisition, Default::default());
         }
     }

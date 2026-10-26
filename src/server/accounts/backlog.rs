@@ -101,7 +101,7 @@ pub(in crate::server) async fn handle(
                 backlog::undo(&store, &mut saved, mailbox.as_mut().ok_or("No installed synthetic mailbox")?, &run, None)?;
             },
         }
-        Ok::<_, String>(json!({"protocol_installed": repo.backlog_installed(Some(&account.id)), "protocol_history": !saved.protocol_backlog.runs.is_empty(), "runs": saved.backlog, "synthetic": mailbox.is_some(), "mailbox": mailbox.as_ref().map(|m| &m.snapshot().census)}))
+        Ok::<_, String>(json!({"protocol_installed": repo.backlog_installed(Some(&account.id)), "protocol_history": !saved.protocol_backlog.runs.is_empty(), "gmail_installed": repo.labels_installed(Some(&account.id)), "gmail_history": !saved.gmail_backlog.runs.is_empty(), "runs": saved.backlog, "synthetic": mailbox.is_some(), "mailbox": mailbox.as_ref().map(|m| &m.snapshot().census)}))
     }).await {
         Ok(Ok(v)) => Json(v).into_response(),
         Ok(Err(_)) | Err(_) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error":"Backlog action rejected. Refresh the preview or recover the saved run. Existing files are retained."}))).into_response(),

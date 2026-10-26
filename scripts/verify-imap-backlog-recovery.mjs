@@ -40,7 +40,7 @@ try {
     const accounts = selected ? [f.account, peer].sort() : [f.account]
     const offer = await recovery(selected ? { action: 'selected_capture_preview', accounts, include_ledger: true } : { action: 'capture_preview', account: f.account })
     const manifests = selected ? offer.preview.accounts : [offer.preview]
-    assert.ok(manifests.every(m => m.state_schema === 17))
+    assert.ok(manifests.every(m => m.state_schema === 18))
     assert.equal(manifests.find(m => m.account === f.account).resources.find(r => r.resource === 'local_encrypted_state').sha256, before.ciphertext)
     if (selected) assert.ok(offer.preview.excluded_accounts.includes(excluded))
     const captured = await recovery({ action: selected ? 'selected_capture' : 'capture', preview: offer.preview, receipt: offer.receipt })
@@ -82,7 +82,7 @@ try {
     await f.stop('SIGKILL'); await f.start()
     assert.deepEqual((await f.command('status')).journal, before.journal)
     assert.equal(await readFile(join(f.directory, 'move-wire-exact.jsonl'), 'utf8'), wire)
-    checks.push({ name: selected ? 'populated-selected-schema17-restoration' : 'populated-single-schema17-restoration', directory: f.directory, installation, accounts, journal_ids: before.journal.runs.map(r => r.id), ciphertext: after.ciphertext, complete_primary_equal: true, independent_effects_equal: true, held_without_source: true })
+    checks.push({ name: selected ? 'populated-selected-schema18-restoration' : 'populated-single-schema18-restoration', directory: f.directory, installation, accounts, journal_ids: before.journal.runs.map(r => r.id), ciphertext: after.ciphertext, complete_primary_equal: true, independent_effects_equal: true, held_without_source: true })
     await writeFile(join(root, '.audit/imap-backlog-workflow-recovery-results.json'), JSON.stringify({ checks }, null, 2))
     await f.close()
   }

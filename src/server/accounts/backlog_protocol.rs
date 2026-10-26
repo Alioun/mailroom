@@ -1,6 +1,6 @@
 use super::*;
 use crate::backlog::{
-    Options,
+    Options, gmail_journal,
     protocol::{self, Status},
 };
 
@@ -41,9 +41,45 @@ pub(in crate::server) struct Request {
     account: AccountId,
     command: Action,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Move,
+    Gmail,
+}
+impl Kind {
+    fn installed(self, accounts: &acquisition::Accounts, id: Option<&AccountId>) -> bool {
+        match self {
+            Self::Move => accounts.backlog_installed(id),
+            Self::Gmail => accounts.labels_installed(id),
+        }
+    }
+    fn denial(self) -> &'static str {
+        match self {
+            Self::Move => {
+                "Protocol MOVE requires a separately installed loopback message source. Production and ordinary read/create installations deny before repository or credential access."
+            }
+            Self::Gmail => {
+                "Gmail label sorting requires a separately installed loopback X-GM-EXT-1 source. Production and ordinary read/create installations deny before repository or credential access."
+            }
+        }
+    }
+}
 pub(in crate::server) async fn handle(
+    state: State<Arc<AppState>>,
+    body: Result<Json<Request>, JsonRejection>,
+) -> Response {
+    serve(state, body, Kind::Move).await
+}
+pub(in crate::server) async fn handle_gmail(
+    state: State<Arc<AppState>>,
+    body: Result<Json<Request>, JsonRejection>,
+) -> Response {
+    serve(state, body, Kind::Gmail).await
+}
+async fn serve(
     State(state): State<Arc<AppState>>,
     body: Result<Json<Request>, JsonRejection>,
+    kind: Kind,
 ) -> Response {
     let status_only = matches!(
         &body,
@@ -53,16 +89,16 @@ pub(in crate::server) async fn handle(
         }))
     );
     if !status_only
-        && !matches!(&state.accounts.source, AccountSource::Synthetic { accounts, .. } if accounts.backlog_installed(None))
+        && !matches!(&state.accounts.source, AccountSource::Synthetic { accounts, .. } if kind.installed(accounts, None))
     {
-        return (StatusCode::FORBIDDEN, Json(json!({"error":"Protocol MOVE requires a separately installed loopback message source. Production and ordinary read/create installations deny before repository or credential access."}))).into_response();
+        return (StatusCode::FORBIDDEN, Json(json!({"error":kind.denial()}))).into_response();
     }
     let request = match input(body) {
         Ok(v) => v,
         Err(e) => return e,
     };
     if !status_only
-        && !matches!(&state.accounts.source, AccountSource::Synthetic { accounts, .. } if accounts.backlog_installed(Some(&request.account)))
+        && !matches!(&state.accounts.source, AccountSource::Synthetic { accounts, .. } if kind.installed(accounts, Some(&request.account)))
     {
         return failure(AcquisitionError::InvalidInput);
     }
@@ -81,6 +117,9 @@ pub(in crate::server) async fn handle(
                     false
                 }
             };
+            if matching && kind == Kind::Gmail {
+                crate::acquisition::gmail_backlog::boundary("gmail_cancel_signalled");
+            }
             if matching {
                 if let Some(handle) = state.accounts.worker.lock().expect("worker").take() {
                     handle.join().map_err(|_| AcquisitionError::Storage)?;
@@ -88,7 +127,7 @@ pub(in crate::server) async fn handle(
             }
             let _operation = state.accounts.operation.lock().expect("operation");
             crate::acquisition::backlog::boundary("move_cancel_before_save");
-            execute(&state, &request, Cancellation::default())
+            execute(&state, &request, Cancellation::default(), kind)
         })
         .await
         {
@@ -128,7 +167,7 @@ pub(in crate::server) async fn handle(
         let worker = state.clone();
         let handle = std::thread::spawn(move || {
             let _operation = worker.accounts.operation.lock().expect("operation");
-            let result = execute(&worker, &request, cancel).map(|_| ());
+            let result = execute(&worker, &request, cancel, kind).map(|_| ());
             worker.accounts.finish(result);
         });
         *state.accounts.worker.lock().unwrap() = Some(handle);
@@ -156,7 +195,7 @@ pub(in crate::server) async fn handle(
                 .try_lock()
                 .map_err(|_| AcquisitionError::LifecyclePending)?
         };
-        execute(&state, &request, Cancellation::default())
+        execute(&state, &request, Cancellation::default(), kind)
     })
     .await
     {
@@ -165,34 +204,76 @@ pub(in crate::server) async fn handle(
         Err(_) => failure(AcquisitionError::Storage),
     }
 }
+/// Unresolved unsubscribe or invoice sends must finish before sorting starts.
+fn other_effects_pending(saved: &crate::census::AccountState) -> bool {
+    saved.unsubscribe.history.iter().any(|e| {
+        matches!(
+            e.status,
+            crate::unsubscribe::Status::Intent | crate::unsubscribe::Status::Uncertain
+        )
+    }) || saved
+        .invoices
+        .sends
+        .iter()
+        .any(|s| s.status != crate::invoice::Status::Completed)
+}
 fn execute(
     state: &Arc<AppState>,
     request: &Request,
     cancel: Cancellation,
+    kind: Kind,
 ) -> Result<serde_json::Value, AcquisitionError> {
     let repo = state.accounts.repository()?;
     let account = repo.load(&request.account)?;
     let store = repo.store(&account)?;
     let mut saved = store.load_state()?;
+    let journal = |saved: &crate::census::AccountState| match kind {
+        Kind::Move => json!(saved.protocol_backlog),
+        Kind::Gmail => json!(saved.gmail_backlog),
+    };
+    let report = |saved: &crate::census::AccountState, mut value: serde_json::Value| {
+        if kind == Kind::Gmail {
+            value["outcomes"] = gmail_journal::outcomes(&saved.gmail_backlog);
+        }
+        value
+    };
     if matches!(request.command, Action::Status {}) {
-        return Ok(
-            json!({"installed":repo.backlog_installed(Some(&account.id)),"recovery_hold":store.recovery_pending(),"journal":saved.protocol_backlog,"limitations":protocol::LIMITATIONS}),
-        );
+        return Ok(report(
+            &saved,
+            json!({"installed":kind.installed(&repo, Some(&account.id)),"recovery_hold":store.recovery_pending(),"journal":journal(&saved),"limitations":match kind { Kind::Move => protocol::LIMITATIONS, Kind::Gmail => gmail_journal::LIMITATIONS }}),
+        ));
     }
     if store.recovery_pending() {
         return Err(AcquisitionError::LifecyclePending);
     }
     if matches!(request.command, Action::Cancel {}) {
-        for r in &mut saved.protocol_backlog.runs {
-            if !matches!(r.status, Status::Complete | Status::Undone) {
-                r.stop_requested = true;
-                if r.status == Status::Prepared {
-                    r.status = Status::Stopped;
+        let runs: Vec<(&mut Status, &mut bool)> = match kind {
+            Kind::Move => saved
+                .protocol_backlog
+                .runs
+                .iter_mut()
+                .map(|r| (&mut r.status, &mut r.stop_requested))
+                .collect(),
+            Kind::Gmail => saved
+                .gmail_backlog
+                .runs
+                .iter_mut()
+                .map(|r| (&mut r.status, &mut r.stop_requested))
+                .collect(),
+        };
+        for (status, stop_requested) in runs {
+            if !matches!(status, Status::Complete | Status::Undone) {
+                *stop_requested = true;
+                if *status == Status::Prepared {
+                    *status = Status::Stopped;
                 }
             }
         }
         store.save_state(&mut saved)?;
-        return Ok(json!({"cancel_requested":true,"journal":saved.protocol_backlog}));
+        return Ok(report(
+            &saved,
+            json!({"cancel_requested":true,"journal":journal(&saved)}),
+        ));
     }
     let guard = state
         .accounts
@@ -219,7 +300,17 @@ fn execute(
             .as_mut()
             .filter(|j| j.backlog_account.as_ref() == Some(&request.account))
         {
-            if let Some(run) = s.protocol_backlog.runs.last() {
+            if kind == Kind::Gmail {
+                if let Some(run) = s.gmail_backlog.runs.last() {
+                    let entries = run.entries(run.undo_receipt.is_some());
+                    job.progress.saved = entries
+                        .iter()
+                        .filter(|b| b.verified())
+                        .map(|b| b.intent().messages().len())
+                        .sum();
+                    job.progress.folders = entries.len();
+                }
+            } else if let Some(run) = s.protocol_backlog.runs.last() {
                 let entries: Vec<_> = if run.undo_receipt.is_some() {
                     run.reverse.iter().map(|r| &r.evidence).collect()
                 } else {
@@ -235,6 +326,65 @@ fn execute(
         }
         Ok(())
     };
+    if kind == Kind::Gmail {
+        match &request.command {
+            Action::Preview { options } => {
+                return Ok(json!(repo.gmail_preview(
+                    &account,
+                    &store,
+                    &saved,
+                    options.clone(),
+                    cancel
+                )?));
+            }
+            Action::Confirm {
+                options,
+                receipt,
+                confirmed,
+            } => {
+                if !confirmed || other_effects_pending(&saved) {
+                    return Err(AcquisitionError::InvalidInput);
+                }
+                repo.gmail_confirm(
+                    &account,
+                    &store,
+                    &mut saved,
+                    options.clone(),
+                    receipt,
+                    cancel,
+                    fresh,
+                )?;
+            }
+            Action::Reconcile { run } => {
+                repo.gmail_reconcile(&account, &store, &mut saved, run, cancel)?
+            }
+            Action::Resume { run } => {
+                repo.gmail_run(&account, &store, &mut saved, run, false, cancel, fresh)?
+            }
+            Action::UndoPreview { run } => {
+                return Ok(json!(
+                    repo.gmail_undo_preview(&account, &store, &saved, run, cancel)?
+                ));
+            }
+            Action::Undo {
+                run,
+                receipt,
+                confirmed,
+            } => {
+                if !confirmed {
+                    return Err(AcquisitionError::InvalidInput);
+                }
+                repo.gmail_undo(&account, &store, &mut saved, run, receipt, cancel, fresh)?;
+            }
+            Action::ResumeUndo { run } => {
+                repo.gmail_run(&account, &store, &mut saved, run, true, cancel, fresh)?
+            }
+            Action::Status {} | Action::Cancel {} => unreachable!(),
+        }
+        return Ok(
+            json!({"journal":saved.gmail_backlog,"outcomes":gmail_journal::outcomes(&saved.gmail_backlog)}),
+        );
+    }
     match &request.command {
         Action::Preview { options } => {
             return Ok(json!(repo.backlog_preview(
@@ -250,19 +400,7 @@ fn execute(
             receipt,
             confirmed,
         } => {
-            if !confirmed
-                || saved.unsubscribe.history.iter().any(|e| {
-                    matches!(
-                        e.status,
-                        crate::unsubscribe::Status::Intent | crate::unsubscribe::Status::Uncertain
-                    )
-                })
-                || saved
-                    .invoices
-                    .sends
-                    .iter()
-                    .any(|s| s.status != crate::invoice::Status::Completed)
-            {
+            if !confirmed || other_effects_pending(&saved) {
                 return Err(AcquisitionError::InvalidInput);
             }
             repo.backlog_confirm(
@@ -394,6 +532,113 @@ async fn read_create_and_wrong_account_sources_deny_before_repository_or_credent
         );
         assert_eq!(state.accounts.confirmations.lock().unwrap().accesses, 0);
         assert_eq!(credentials.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn gmail_route_denies_every_uninstalled_or_wrong_source_before_repository_or_credentials() {
+    use tower::ServiceExt;
+    let post = |state: Arc<AppState>, uri: &'static str, body: String| async move {
+        super::super::router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("Host", super::super::ADDRESS)
+                    .header("Origin", super::super::ORIGIN)
+                    .header("Content-Type", "application/json")
+                    .header("X-Mailroom-Token", state.token.as_str())
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    };
+    let bodies = |id: &str| {
+        [
+            "{".to_string(),
+            json!({"account":id,"command":{"action":"cancel"}}).to_string(),
+            json!({"account":id,"command":{"action":"preview","options":crate::backlog::Options::default()}}).to_string(),
+            json!({"account":id,"command":{"action":"confirm","options":crate::backlog::Options::default(),"receipt":"a".repeat(64),"confirmed":true,"label":"Privat/Studio"}}).to_string(),
+        ]
+    };
+    for synthetic in [false, true] {
+        let state = Arc::new(AppState::new(synthetic));
+        for body in bodies("invented") {
+            assert_eq!(
+                post(state.clone(), "/api/accounts/backlog/gmail", body).await,
+                StatusCode::FORBIDDEN
+            );
+        }
+        assert_eq!(
+            state
+                .accounts
+                .repository_accesses
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+    for case in [
+        "move_only",
+        "gmail_absent",
+        "gmail_wrong_account",
+        "gmail_on_move_route",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let (mut repo, account, _move, _gmail) = if case == "move_only" {
+            let (repo, account, fake) = acquisition::backlog::fixture_install(root.path());
+            (repo, account, Some(fake), None)
+        } else {
+            if case == "gmail_absent" {
+                std::fs::write(root.path().join("gmail-source"), "absent").unwrap();
+            }
+            let (repo, account, fake) = acquisition::gmail_backlog::fixture_install(root.path());
+            (repo, account, None, Some(fake))
+        };
+        let credentials = repo.track_credential_accesses();
+        let mut app = AppState::new(true);
+        app.accounts.source = AccountSource::Synthetic {
+            accounts: Arc::new(repo),
+            _directory: tempfile::tempdir().unwrap(),
+            mailboxes: root.path().join("mailboxes"),
+        };
+        let state = Arc::new(app);
+        let id = if case == "gmail_wrong_account" {
+            "uninstalled-account"
+        } else {
+            account.id.as_str()
+        };
+        let uri = if case == "gmail_on_move_route" {
+            "/api/accounts/backlog/protocol"
+        } else {
+            "/api/accounts/backlog/gmail"
+        };
+        for body in bodies(id).into_iter().skip(1) {
+            assert_eq!(
+                post(state.clone(), uri, body).await,
+                if case == "gmail_wrong_account" {
+                    StatusCode::UNPROCESSABLE_ENTITY
+                } else {
+                    StatusCode::FORBIDDEN
+                },
+                "{case}"
+            );
+        }
+        assert_eq!(
+            state
+                .accounts
+                .repository_accesses
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "{case}"
+        );
+        assert_eq!(
+            credentials.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "{case}"
+        );
     }
 }
 

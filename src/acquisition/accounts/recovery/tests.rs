@@ -76,7 +76,7 @@ fn schema_ten_protocol_and_proposal_sieve_facts_round_trip_with_single_account_r
     let before = state(&repo, &account);
     assert!(before.census.acquisition.is_protocol());
     let (manifest, bundle) = capture(&repo, &account, root.path());
-    assert_eq!(manifest.state_schema, 17);
+    assert_eq!(manifest.state_schema, 18);
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let preview = fresh.restore_preview(&bundle, &secret()).unwrap();
@@ -527,7 +527,7 @@ fn folder_journal_restores_held_without_reverting_later_independent_topology() {
     );
     let before = state(&repo, &account);
     let (manifest, bundle) = capture(&repo, &account, root.path());
-    assert_eq!(manifest.state_schema, 17);
+    assert_eq!(manifest.state_schema, 18);
     let effects = crate::acquisition::sieve_transaction::tests::independent_effects(
         root.path(),
         &repo.store(&account).unwrap(),
@@ -588,7 +588,7 @@ fn schema_fourteen_delivery_round_trips_complete_state_without_recovering_author
         crate::acquisition::workspace_authority::envelope_tests::install(root.path());
     let before = state(&repo, &account);
     let (manifest, bundle) = capture(&repo, &account, root.path());
-    assert_eq!(manifest.state_schema, 17);
+    assert_eq!(manifest.state_schema, 18);
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let preview = fresh.restore_preview(&bundle, &secret()).unwrap();

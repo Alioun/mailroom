@@ -250,6 +250,10 @@ fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/accounts/backlog", post(accounts::backlog::handle))
         .route(
+            "/api/accounts/backlog/gmail",
+            post(accounts::backlog_protocol::handle_gmail),
+        )
+        .route(
             "/api/accounts/backlog/protocol",
             post(accounts::backlog_protocol::handle),
         )

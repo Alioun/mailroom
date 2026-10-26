@@ -3,6 +3,7 @@ pub(crate) mod backlog;
 #[cfg(test)]
 pub(crate) mod fixture_peer;
 pub(crate) mod folder_provisioning;
+pub(crate) mod gmail_backlog;
 mod imap;
 mod managesieve;
 mod scan;

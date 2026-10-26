@@ -156,24 +156,58 @@ impl ReadOnlyImap {
         if read.provider() != Provider::MailboxOrg || source.login != login {
             return Err(AcquisitionError::InvalidInput);
         }
-        let tcp = TcpStream::connect_timeout(&source.address, TIMEOUT)
-            .map_err(|_| AcquisitionError::Tls)?;
-        let root =
-            native_tls::Certificate::from_der(&source.root).map_err(|_| AcquisitionError::Tls)?;
-        let connector = native_tls::TlsConnector::builder()
-            .disable_built_in_roots(true)
-            .add_root_certificate(root)
-            .build()
-            .map_err(|_| AcquisitionError::Tls)?;
-        Self::open(
-            tcp,
+        Self::installed(
+            source.address,
             &source.tls_name,
-            connector,
+            &source.root,
             login,
             password,
             cancel,
             false,
         )
+    }
+    pub(super) fn loopback_gmail(
+        permit: &super::folder_provisioning::transport::gmail_label::LabelPermit<'_>,
+        read: &ReadPermit,
+        login: &str,
+        password: &SecretValue,
+        cancel: Cancellation,
+    ) -> Result<Self, AcquisitionError> {
+        let source = permit.source();
+        if read.provider() != Provider::Gmail || source.login != login {
+            return Err(AcquisitionError::InvalidInput);
+        }
+        Self::installed(
+            source.address,
+            &source.tls_name,
+            &source.root,
+            login,
+            password,
+            cancel,
+            true,
+        )
+    }
+    fn installed(
+        address: std::net::SocketAddr,
+        tls_name: &str,
+        root: &[u8],
+        login: &str,
+        password: &SecretValue,
+        cancel: Cancellation,
+        gmail: bool,
+    ) -> Result<Self, AcquisitionError> {
+        if !address.ip().is_loopback() {
+            return Err(AcquisitionError::InvalidInput);
+        }
+        let tcp =
+            TcpStream::connect_timeout(&address, TIMEOUT).map_err(|_| AcquisitionError::Tls)?;
+        let root = native_tls::Certificate::from_der(root).map_err(|_| AcquisitionError::Tls)?;
+        let connector = native_tls::TlsConnector::builder()
+            .disable_built_in_roots(true)
+            .add_root_certificate(root)
+            .build()
+            .map_err(|_| AcquisitionError::Tls)?;
+        Self::open(tcp, tls_name, connector, login, password, cancel, gmail)
     }
     fn open(
         tcp: TcpStream,

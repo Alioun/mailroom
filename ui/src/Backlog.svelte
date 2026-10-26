@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import ProtocolBacklog from './ProtocolBacklog.svelte'
+  import GmailBacklog from './GmailBacklog.svelte'
   import { openBacklog, previewBacklog, startBacklog, advanceBacklog, resumeBacklog, stopBacklog, previewBacklogUndo, undoBacklog, resumeBacklogUndo, type BacklogOptions, type BacklogPreview, type BacklogView, type BacklogUndoPreview } from './api'
   let { account, lang, workspaceRevision = 0 }: { account: string; lang: 'en' | 'de'; workspaceRevision?: number } = $props()
   const strings = {
@@ -69,7 +70,9 @@
   async function compensate() { if (!undoPreview || !undoConfirmation) return; view = await undoBacklog(account, undoRun, undoPreview.receipt); undoPreview = null; undoConfirmation = false }
   onMount(() => { active = true; void act(load); return () => { active = false } })
 </script>
-{#if view?.protocol_installed || view?.protocol_history}
+{#if view?.gmail_installed || view?.gmail_history}
+  <GmailBacklog {account} {lang} {workspaceRevision} />
+{:else if view?.protocol_installed || view?.protocol_history}
   <ProtocolBacklog {account} {lang} {workspaceRevision} />
 {:else}
 <section class="backlog" aria-label={t.title}>

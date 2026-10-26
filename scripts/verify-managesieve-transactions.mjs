@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
+import { openSync } from 'node:fs'
 import { once } from 'node:events'
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
@@ -21,7 +22,7 @@ const checks = [], crashes = []
 const pause = ms => new Promise(r => setTimeout(r, ms))
 async function start(fresh = false) {
   if (fresh) directory = await mkdtemp(join(root, '.audit/managesieve-transactions-fixture-'))
-  server = spawn(binary, ['--exact', test, '--nocapture'], { cwd: root, env: { ...process.env, MAILROOM_SIEVE_TRANSACTIONS_FIXTURE: directory }, stdio: 'ignore', detached: true })
+  server = spawn(binary, ['--exact', test, '--nocapture'], { cwd: root, env: { ...process.env, MAILROOM_SIEVE_TRANSACTIONS_FIXTURE: directory }, stdio: ['ignore', 'ignore', openSync(join(directory, 'fixture-stderr.log'), 'a')], detached: true })
   for (let i = 0; i < 400; i++) {
     assert.equal(server.exitCode, null, 'Fixture exited during startup')
     const response = await fetch(`${base}/api/session`).catch(() => null)
@@ -47,12 +48,13 @@ const command = (action, fields = {}, expected = 200) => post('sieve-transaction
 const place = placement => command('record_placement', { placement })
 async function ready(action = 'preview', fields = {}) { const p = await command(action, fields); assert.equal(p.outcome, 'ready', `${action} must be ready: ${p.refusal?.reason}`); return p }
 async function terminal(expected = 'complete') {
-  for (let i = 0; i < 1000; i++) {
+  const deadline = Date.now() + 70000
+  while (Date.now() < deadline) {
     const response = await fetch(`${base}/api/accounts/status`, { headers: { 'X-Mailroom-Token': token } }); const s = await response.json()
     if (s.job?.progress.state !== 'running') { assert.equal(s.job?.progress.state, expected, 'Unexpected transaction worker outcome'); return }
     await pause(10)
   }
-  throw Error('Transaction job did not finish')
+  throw Error('Transaction job did not finish within the 60-second attempt cap')
 }
 function confirmation(preview) {
   const comp = preview.transaction.compensates

@@ -21,7 +21,9 @@ use subtle::ConstantTimeEq;
 fn invalid() -> AcquisitionError {
     AcquisitionError::InvalidInput
 }
-fn failure<T>(_: T) -> AcquisitionError {
+fn failure<T: std::fmt::Debug>(_error: T) -> AcquisitionError {
+    #[cfg(test)]
+    eprintln!("backlog.failure={}", super::diagnostic_code(&_error));
     AcquisitionError::Protocol
 }
 fn save(store: &EncryptedStore, state: &mut AccountState) -> Result<(), AcquisitionError> {

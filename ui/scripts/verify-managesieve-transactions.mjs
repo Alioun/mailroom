@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
+import { openSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -22,7 +23,7 @@ async function replace() {
   process.kill(metadata.pid, 'SIGKILL')
   for (let i = 0; i < 300; i++) { try { process.kill(metadata.pid, 0) } catch { break } await pause(10) }
   await writeFile(join(metadata.directory, 'transaction-boundary'), '')
-  replacement = spawn(metadata.binary, ['--exact', metadata.test, '--nocapture'], { cwd: root, env: { ...process.env, MAILROOM_SIEVE_TRANSACTIONS_FIXTURE: metadata.directory }, stdio: 'ignore', detached: true })
+  replacement = spawn(metadata.binary, ['--exact', metadata.test, '--nocapture'], { cwd: root, env: { ...process.env, MAILROOM_SIEVE_TRANSACTIONS_FIXTURE: metadata.directory }, stdio: ['ignore', 'ignore', openSync(join(metadata.directory, 'fixture-stderr.log'), 'a')], detached: true })
   for (let i = 0; i < 300; i++) {
     assert.equal(replacement.exitCode, null)
     if (await fetch(`${metadata.base}/api/session`).then(r => r.ok, () => false)) break
@@ -118,7 +119,10 @@ try {
   await page.locator('.accounts > .census-actions select').selectOption(metadata.account)
   await panel.getByRole('button', { name: 'Open transaction history', exact: true }).click()
   await panel.locator('article').nth(2).getByRole('heading', { name: /Uncertain/ }).waitFor()
+  response = previewOf('reconcile')
   await panel.locator('article').nth(2).getByRole('button', { name: 'Reconcile without writes', exact: true }).click()
+  const reconciled = await response
+  assert.equal(reconciled.status(), 200, `Reconcile after replacement: HTTP ${reconciled.status()} ${await reconciled.text()}; fixture log ${join(metadata.directory, 'fixture-stderr.log')}`)
   await panel.locator('article').nth(2).getByRole('heading', { name: /Fresh exact review required/ }).waitFor()
   response = previewOf('preview')
   await panel.getByRole('button', { name: 'Preview composed deploy', exact: true }).click()

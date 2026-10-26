@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
+import { openSync } from 'node:fs'
 import { once } from 'node:events'
 import { request } from 'node:http'
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
@@ -37,7 +38,7 @@ async function observe() {
   return JSON.parse(await readFile(join(directory, 'envelope-observations.json'), 'utf8'))
 }
 async function start() {
-  server = spawn(binary, ['--exact', test, '--nocapture'], { cwd: root, env: { ...process.env, MAILROOM_ENVELOPE_FIXTURE: directory }, stdio: 'ignore', detached: true })
+  server = spawn(binary, ['--exact', test, '--nocapture'], { cwd: root, env: { ...process.env, MAILROOM_ENVELOPE_FIXTURE: directory }, stdio: ['ignore', 'ignore', openSync(join(directory, 'fixture-stderr.log'), 'a')], detached: true })
   for (let i = 0; i < 500; i++) {
     assert.equal(server.exitCode, null)
     const response = await fetch(`${base}/api/session`).catch(() => null)
@@ -52,12 +53,13 @@ async function post(path, body, expected = 200, headers = {}) {
   assert.equal(response.status, expected, path); assert.equal(response.headers.get('cache-control'), 'no-store'); return response.json()
 }
 async function terminal(expected = 'complete') {
-  for (let i = 0; i < 1200; i++) {
+  const deadline = Date.now() + 70000
+  while (Date.now() < deadline) {
     const value = await fetch(`${base}/api/accounts/status`, { headers: { 'X-Mailroom-Token': token } }).then(r => r.json())
     if (value.job?.progress.state !== 'running') { assert.equal(value.job?.progress.state, expected); return }
     await pause(10)
   }
-  throw Error('Fixture operation timeout')
+  throw Error('Fixture operation did not finish within the 60-second operation cap')
 }
 const command = (path, action, fields = {}) => post(path, { account, command: { action, ...fields } })
 try {

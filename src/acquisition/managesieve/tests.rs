@@ -338,7 +338,7 @@ impl Fake {
                 tls_name: "localhost".into(),
                 root,
                 epoch: "invented-installation-v1".into(),
-                command_timeout: Duration::from_secs(2),
+                command_timeout: crate::acquisition::fixture_peer::FIXTURE_COMMAND_TIMEOUT,
                 attempt_timeout: Duration::from_secs(10),
             },
             commands,
@@ -423,12 +423,14 @@ fn tls_identity_chain_expiry_and_starttls_fail_before_authentication() {
 fn absolute_drip_deadlines_and_cancellation_before_connect_tls_auth_read() {
     for mode in ["drip", "stall_tls", "stall_auth", "stall_read", "before"] {
         let mut fake = Fake::start(mode, None);
-        fake.source.command_timeout = Duration::from_millis(100);
+        if mode != "stall_read" {
+            fake.source.command_timeout = Duration::from_millis(100);
+        }
         let cancel = Cancellation::default();
         if mode == "before" {
             cancel.cancel();
         }
-        let start = Instant::now();
+        let mut start = Instant::now();
         let result = Session::connect(
             fake.source.permit().unwrap(),
             "invented@example.test",
@@ -438,6 +440,8 @@ fn absolute_drip_deadlines_and_cancellation_before_connect_tls_auth_read() {
         if mode == "stall_read" {
             let (mut s, _) = result.unwrap();
             assert!(s.list().is_ok());
+            s.set_command_timeout(Duration::from_millis(100));
+            start = Instant::now();
             assert_eq!(s.get("Open-Xchange"), Err(Error::Deadline));
         } else {
             assert!(result.is_err(), "{mode}");
@@ -460,8 +464,9 @@ fn actual_cancellation_interrupts_tls_authentication_and_script_read() {
         let log = fake.commands.clone();
         let tls_hello = fake.tls_hello.clone();
         let in_tls = mode == "stall_tls";
+        let window = fake.source.attempt_timeout;
         let worker = thread::spawn(move || {
-            let end = Instant::now() + Duration::from_secs(2);
+            let end = Instant::now() + window;
             while Instant::now() < end {
                 if if in_tls {
                     tls_hello.load(Ordering::Relaxed)

@@ -126,6 +126,47 @@ fn check(cancel: &Cancellation, end: Instant) -> Result<(), Error> {
     }
     Ok(())
 }
+/// Splits a client TLS handshake into time inside the TLS library (its own
+/// work and trust evaluation) and time between polls waiting for the peer.
+#[cfg(test)]
+struct HandshakeTiming {
+    started: Instant,
+    mark: Instant,
+    working: Duration,
+    waiting: Duration,
+    polls: usize,
+}
+#[cfg(test)]
+impl HandshakeTiming {
+    fn start() -> Self {
+        let now = Instant::now();
+        Self {
+            started: now,
+            mark: now,
+            working: Duration::ZERO,
+            waiting: Duration::ZERO,
+            polls: 0,
+        }
+    }
+    fn stepped(&mut self) {
+        self.working += self.mark.elapsed();
+        self.mark = Instant::now();
+    }
+    fn waited(&mut self) {
+        self.waiting += self.mark.elapsed();
+        self.polls += 1;
+        self.mark = Instant::now();
+    }
+    fn report(&self) -> String {
+        format!(
+            "total_ms={} tls_ms={} poll_wait_ms={} polls={}",
+            self.started.elapsed().as_millis(),
+            self.working.as_millis(),
+            self.waiting.as_millis(),
+            self.polls
+        )
+    }
+}
 fn pending(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
@@ -198,18 +239,40 @@ impl Session {
         let Stream::Plain(tcp) = session.stream else {
             unreachable!()
         };
+        #[cfg(test)]
+        let mut timing = HandshakeTiming::start();
         let mut handshake = connector.connect(&source.tls_name, tcp);
+        #[cfg(test)]
+        timing.stepped();
         let tls = loop {
-            check(&session.cancel, session.command_end.min(session.end))?;
+            check(&session.cancel, session.command_end.min(session.end)).inspect_err(|_error| {
+                #[cfg(test)]
+                eprintln!(
+                    "sieve.transport.handshake.failure={_error:?} {}",
+                    timing.report()
+                );
+            })?;
             match handshake {
                 Ok(tls) => break tls,
                 Err(HandshakeError::WouldBlock(mid)) => {
                     std::thread::sleep(POLL);
+                    #[cfg(test)]
+                    timing.waited();
                     handshake = mid.handshake();
+                    #[cfg(test)]
+                    timing.stepped();
                 }
-                Err(_) => return Err(Error::Tls),
+                Err(_) => {
+                    #[cfg(test)]
+                    eprintln!("sieve.transport.handshake.failure=Tls");
+                    return Err(Error::Tls);
+                }
             }
         };
+        #[cfg(test)]
+        if timing.started.elapsed() > Duration::from_millis(250) {
+            eprintln!("sieve.transport.handshake.slow {}", timing.report());
+        }
         session.stream = Stream::Secure(tls);
         session.buffer.clear();
         session.cursor = 0;
@@ -239,12 +302,31 @@ impl Session {
         let capabilities = session.capabilities()?;
         Ok((session, capabilities))
     }
+    /// Narrows the per-command budget of an established session, so a test can
+    /// bound one command without also bounding connection setup.
+    #[cfg(test)]
+    pub(super) fn set_command_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
     fn begin(&mut self, limit: usize) {
         self.command_end = (Instant::now() + self.timeout).min(self.end);
         self.remaining = limit;
     }
     fn guard(&self) -> Result<(), Error> {
-        check(&self.cancel, self.command_end.min(self.end))
+        let result = check(&self.cancel, self.command_end.min(self.end));
+        #[cfg(test)]
+        if result == Err(Error::Deadline) {
+            eprintln!(
+                "sieve.transport.deadline budget={} bytes={}",
+                if self.end <= self.command_end {
+                    "attempt"
+                } else {
+                    "command"
+                },
+                self.total
+            );
+        }
+        result
     }
     fn command(&mut self, bytes: &[u8], limit: usize) -> Result<(), Error> {
         if bytes.len() > ATTEMPT - self.written {

@@ -1,6 +1,10 @@
 use super::*;
 use crate::{
-    acquisition::{SecretValue, fixture_peer::Peer, persistent_test_accounts},
+    acquisition::{
+        SecretValue,
+        fixture_peer::{LastSaved, Peer},
+        persistent_test_accounts,
+    },
     census::{
         AccountId,
         folder_provisioning::{ExactName, FakeProvider, Inventory, Mailbox, Namespace, Namespaces},
@@ -30,6 +34,28 @@ pub(crate) struct Fixture {
     busy: Busy,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
+}
+thread_local! {
+    pub(super) static SAVE_TIME: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+}
+/// Splits a folder run's wall time into product journal saves and the rest
+/// (provider exchanges and scheduling).
+pub(super) struct RunTiming(std::time::Instant);
+impl RunTiming {
+    pub(super) fn start() -> Self {
+        SAVE_TIME.with(|t| t.set(Duration::ZERO));
+        Self(std::time::Instant::now())
+    }
+    pub(super) fn report(self, steps: usize) {
+        let elapsed = self.0.elapsed();
+        let saves = SAVE_TIME.with(|t| t.get());
+        eprintln!(
+            "folder.run.timing steps={steps} elapsed_ms={} journal_save_ms={} other_ms={}",
+            elapsed.as_millis(),
+            saves.as_millis(),
+            elapsed.saturating_sub(saves).as_millis()
+        );
+    }
 }
 pub(super) fn report_failure(failure: Failure) {
     eprintln!("folder.failure={}", failure_code(failure));
@@ -215,7 +241,7 @@ impl Fixture {
             tls_name: "localhost".into(),
             root: p.root.clone(),
             epoch: p.epoch.clone(),
-            command_timeout: Duration::from_secs(2),
+            command_timeout: crate::acquisition::fixture_peer::FIXTURE_COMMAND_TIMEOUT,
             operation_timeout: Duration::from_secs(60),
         };
         drop(store);
@@ -317,6 +343,7 @@ fn serve(
     send(io.get_mut(), b"* OK synthetic IMAP\r\n")?;
     let mut namespaces = 0;
     let mut authenticated = false;
+    let mut last = LastSaved::default();
     loop {
         let mut line = String::new();
         if io.read_line(&mut line)? == 0 {
@@ -342,16 +369,34 @@ fn serve(
         {
             return Err(std::io::ErrorKind::InvalidData.into());
         }
-        {
-            let (store, mut state) = served(repo, id, root);
-            let p = state.synthetic_folders.as_mut().unwrap();
-            if p.commands.len() >= 4096 {
-                return Ok(());
-            }
-            p.commands.push(kind.into());
-            store.save_state(&mut state).unwrap();
-        }
         let mode = std::fs::read_to_string(root.join("folder-mode")).unwrap_or_default();
+        let created = (kind == "CREATE").then(|| -> std::io::Result<ExactName> {
+            ExactName::from_wire(&unquote(args)?)
+                .map_err(|_| std::io::ErrorKind::InvalidData.into())
+        });
+        let creates = matches!(created, Some(Ok(_)))
+            && !matches!(
+                mode.as_str(),
+                "quota" | "no" | "bad" | "bye" | "eof" | "unknown"
+            );
+        // One store transaction per command: the record, and for CREATE the
+        // effect with it, so the fixture's cost does not multiply per command.
+        let store = repo
+            .fixture_sieve_store(id, root)
+            .unwrap_or_else(|error| panic!("folder.fixture.store_open={error:?}"));
+        let mut state = last.load(&store);
+        let p = state.synthetic_folders.as_mut().unwrap();
+        if p.commands.len() >= 4096 {
+            return Ok(());
+        }
+        p.commands.push(kind.into());
+        let mut effect_store = None;
+        if creates {
+            effect_store = Some(store);
+        } else {
+            last.save(&store, &mut state);
+            drop(store);
+        }
         let mut response = format!("{tag} OK done\r\n").into_bytes();
         match kind {
             "LOGIN" => {
@@ -390,7 +435,6 @@ fn serve(
                 if args != "\"\" \"*\"" {
                     return Err(std::io::ErrorKind::InvalidData.into());
                 }
-                let (_, state) = served(repo, id, root);
                 response.clear();
                 for m in &state
                     .synthetic_folders
@@ -433,9 +477,7 @@ fn serve(
                 }
             }
             "CREATE" => {
-                let wire = unquote(args)?;
-                let name =
-                    ExactName::from_wire(&wire).map_err(|_| std::io::ErrorKind::InvalidData)?;
+                let name: ExactName = created.unwrap()?;
                 if matches!(
                     mode.as_str(),
                     "quota" | "no" | "bad" | "bye" | "eof" | "unknown"
@@ -450,9 +492,10 @@ fn serve(
                     }
                     .into_bytes();
                 } else {
-                    let (store, mut state) = served(repo, id, root);
+                    let store = effect_store.take().unwrap();
                     let p = state.synthetic_folders.as_mut().unwrap();
                     if p.inventory.get(&name.decoded).is_some() {
+                        last.save(&store, &mut state);
                         response = format!("{tag} NO already exists\r\n").into_bytes();
                     } else {
                         let parts: Vec<_> = name.decoded.split('/').collect();
@@ -474,7 +517,7 @@ fn serve(
                         p.inventory
                             .mailboxes
                             .sort_by(|a, b| a.name.decoded.cmp(&b.name.decoded));
-                        store.save_state(&mut state).unwrap();
+                        last.save(&store, &mut state);
                         drop(store);
                         boundary("folder_provider_effect");
                         if mode == "lost" {
@@ -966,7 +1009,7 @@ fn synthetic_folder_crash_worker() {
         tls_name: "localhost".into(),
         root: p.root.clone(),
         epoch: p.epoch.clone(),
-        command_timeout: Duration::from_secs(2),
+        command_timeout: crate::acquisition::fixture_peer::FIXTURE_COMMAND_TIMEOUT,
         operation_timeout: Duration::from_secs(60),
     }));
     drop(external);

@@ -28,7 +28,11 @@ fn protocol(_failure: Failure) -> AcquisitionError {
     AcquisitionError::Protocol
 }
 fn save(store: &EncryptedStore, state: &mut AccountState) -> Result<(), AcquisitionError> {
+    #[cfg(test)]
+    let began = std::time::Instant::now();
     store.save_state(state)?;
+    #[cfg(test)]
+    tests::SAVE_TIME.with(|t| t.set(t.get() + began.elapsed()));
     #[cfg(test)]
     tests::progress_evidence(state);
     Ok(())
@@ -167,7 +171,11 @@ impl Accounts {
         save(store, saved)?;
         boundary("folder_consumed");
         let index = saved.folder_provisioning.history.len() - 1;
+        #[cfg(test)]
+        let timing = tests::RunTiming::start();
         let result = self.folder_run(account, store, saved, index, cancel, &fresh);
+        #[cfg(test)]
+        timing.report(saved.folder_provisioning.history[index].steps.len());
         if result.is_err() {
             let op = &mut saved.folder_provisioning.history[index];
             if op.status == Status::Running {

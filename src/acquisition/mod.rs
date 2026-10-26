@@ -62,3 +62,14 @@ pub(crate) use accounts::process_tests::persistent_accounts as persistent_test_a
 pub(crate) use imap::tests::install_provider_fixture;
 #[cfg(test)]
 pub(crate) use managesieve::tests::Fake as SieveFake;
+
+/// The variant name of an error, without any payload it carries, for test
+/// diagnostics at the point where a specific error collapses into `Protocol`.
+#[cfg(test)]
+pub(crate) fn diagnostic_code(error: &impl std::fmt::Debug) -> String {
+    let text = format!("{error:?}");
+    text.split(['(', ' ', '{'])
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}

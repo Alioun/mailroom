@@ -191,14 +191,21 @@ impl Session {
         let connector = builder.build().map_err(|_| Error::Tls)?;
         let mut handshake = connector.connect(source.tls_name, tcp);
         let stream = loop {
-            guard(&cancel, command_end)?;
+            guard(&cancel, command_end).inspect_err(|_error| {
+                #[cfg(test)]
+                eprintln!("folder.transport.handshake.failure={_error:?}");
+            })?;
             match handshake {
                 Ok(s) => break s,
                 Err(HandshakeError::WouldBlock(mid)) => {
                     std::thread::sleep(POLL);
                     handshake = mid.handshake();
                 }
-                Err(_) => return Err(Error::Tls),
+                Err(_) => {
+                    #[cfg(test)]
+                    eprintln!("folder.transport.handshake.failure=Tls");
+                    return Err(Error::Tls);
+                }
             }
         };
         let mut s = Self {

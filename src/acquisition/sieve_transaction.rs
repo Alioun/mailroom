@@ -57,6 +57,14 @@ pub(crate) enum Previewed {
 fn invalid() -> AcquisitionError {
     AcquisitionError::InvalidInput
 }
+fn protocol(step: &'static str) -> impl Fn(Error) -> AcquisitionError {
+    move |_error| {
+        #[cfg(test)]
+        eprintln!("sieve.transaction.{step}.failure={_error:?}");
+        let _ = step;
+        AcquisitionError::Protocol
+    }
+}
 fn sha256(bytes: &[u8]) -> String {
     data_encoding::HEXLOWER.encode(&Sha256::digest(bytes))
 }
@@ -175,7 +183,7 @@ impl Accounts {
             cancel,
         )
         .map(|s| s.0)
-        .map_err(|_| AcquisitionError::Protocol)
+        .map_err(protocol("connect"))
     }
     /// Records the owner's placement choice. There is no default; composed deploys refuse
     /// until one is recorded.
@@ -442,7 +450,7 @@ impl Accounts {
         let target = &permit.ownership.target;
         let context = self.sieve_context(account, store)?;
         let mut session = self.transaction_session(account, cancel)?;
-        let before = observe(&mut session).map_err(|_| AcquisitionError::Protocol)?;
+        let before = observe(&mut session).map_err(protocol("review_observe"))?;
         if !before.validate() {
             return Err(invalid());
         }
@@ -466,7 +474,7 @@ impl Accounts {
                 )? {
                     Plan::Ready(p) => *p,
                     Plan::Refused(refusal, precedence) => {
-                        session.logout().map_err(|_| AcquisitionError::Protocol)?;
+                        session.logout().map_err(protocol("refused_logout"))?;
                         return Ok(Previewed::Refused {
                             refusal,
                             precedence,
@@ -522,7 +530,7 @@ impl Accounts {
             .keys()
             .binding_for(b"mailroom/managesieve-operation/v1", receipt.as_bytes());
         transaction.receipt = receipt.clone();
-        session.logout().map_err(|_| AcquisitionError::Protocol)?;
+        session.logout().map_err(protocol("review_logout"))?;
         Ok(Previewed::Ready(Box::new(Preview {
             transaction,
             receipt,
@@ -626,7 +634,7 @@ impl Accounts {
             saved.sieve_transactions.history[index].status = refused(error);
         }
         save(store, saved)?;
-        check.map_err(|_| AcquisitionError::Protocol)?;
+        check.map_err(protocol("check"))?;
         let space = uploads
             .iter()
             .try_for_each(|(name, bytes)| session.have_space(&permit, name, bytes.len()));
@@ -635,7 +643,7 @@ impl Accounts {
             saved.sieve_transactions.history[index].status = refused(error);
         }
         save(store, saved)?;
-        space.map_err(|_| AcquisitionError::Protocol)?;
+        space.map_err(protocol("space"))?;
         let t = saved.sieve_transactions.history[index].clone();
         let mut expected = t.before.clone();
         let desired = t.after.clone();
@@ -651,7 +659,7 @@ impl Accounts {
                 save(store, saved)?;
                 return Err(invalid());
             }
-            let observed = observe(&mut session).map_err(|_| AcquisitionError::Protocol)?;
+            let observed = observe(&mut session).map_err(protocol("run_observe"))?;
             let t = &saved.sieve_transactions.history[index];
             if observed != expected
                 || self.sieve_context(account, store)? != t.context
@@ -726,7 +734,7 @@ impl Accounts {
                         Status::Uncertain
                     };
                 save(store, saved)?;
-                return Err(AcquisitionError::Protocol);
+                return Err(protocol("effect")(error));
             }
             step.acknowledgment = true;
             step.outcome = Outcome::Acknowledged;
@@ -738,7 +746,7 @@ impl Accounts {
                 (true, Effect::Upload) => "compensation_upload_acknowledged",
                 (true, _) => "compensation_activation_acknowledged",
             });
-            let observed = observe(&mut session).map_err(|_| AcquisitionError::Protocol)?;
+            let observed = observe(&mut session).map_err(protocol("run_readback"))?;
             let step = saved.sieve_transactions.history[index]
                 .steps
                 .last_mut()
@@ -804,7 +812,7 @@ impl Accounts {
             return Ok(());
         }
         let mut session = self.transaction_session(account, cancel)?;
-        let observed = observe(&mut session).map_err(|_| AcquisitionError::Protocol)?;
+        let observed = observe(&mut session).map_err(protocol("reconcile_observe"))?;
         let previous = t.clone();
         if let Some(s) = t.steps.last_mut() {
             if observed == s.after {

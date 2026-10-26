@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     acquisition::{
         Provider, SecretValue,
-        fixture_peer::Peer,
+        fixture_peer::{FIXTURE_COMMAND_TIMEOUT, LastSaved, Peer},
         managesieve::{FixtureOwnership, InstalledSource},
         persistent_test_accounts,
     },
@@ -117,7 +117,7 @@ impl Fixture {
             tls_name: "localhost".into(),
             root: p.root.clone(),
             epoch: p.epoch.clone(),
-            command_timeout: Duration::from_secs(2),
+            command_timeout: FIXTURE_COMMAND_TIMEOUT,
             attempt_timeout: Duration::from_secs(60),
         };
         drop(store);
@@ -218,6 +218,7 @@ fn serve(
         plain.into_inner(),
     ));
     send(io.get_mut(),b"\"IMPLEMENTATION\" \"fake\"\r\n\"SIEVE\" \"fileinto\"\r\n\"VERSION\" \"1.0\"\r\n\"SASL\" \"PLAIN\"\r\nOK\r\n")?;
+    let mut last = LastSaved::default();
     loop {
         let mut line = String::new();
         if io.read_line(&mut line)? == 0 {
@@ -240,16 +241,18 @@ fn serve(
         {
             return Err(std::io::ErrorKind::InvalidData.into());
         }
-        {
-            let (store, mut state) = provider(repo, id, root);
-            let p = state.synthetic_sieve.as_mut().unwrap();
-            if p.commands.len() >= 4096 {
-                send(io.get_mut(), b"BYE\r\n")?;
-                return Ok(());
-            }
-            p.commands.push(kind.into());
-            store.save_state(&mut state).unwrap();
+        // Read-only commands answer from the state saved with their record, so
+        // each costs one store transaction like the commands that write.
+        let store = repo.fixture_sieve_store(id, root).unwrap();
+        let mut state = last.load(&store);
+        let p = state.synthetic_sieve.as_mut().unwrap();
+        if p.commands.len() >= 4096 {
+            send(io.get_mut(), b"BYE\r\n")?;
+            return Ok(());
         }
+        p.commands.push(kind.into());
+        last.save(&store, &mut state);
+        drop(store);
         let mut response = b"OK (X-UNKNOWN (ONE TWO)) \"diagnostic\"\r\n".to_vec();
         match kind {
             "AUTHENTICATE" => {
@@ -258,7 +261,6 @@ fn serve(
                 }
             }
             "CAPABILITY" => {
-                let (_, state) = provider(repo, id, root);
                 response = vec![];
                 for (k, v) in &state.synthetic_sieve.as_ref().unwrap().image.capabilities {
                     response
@@ -267,7 +269,6 @@ fn serve(
                 response.extend_from_slice(b"OK\r\n");
             }
             "LISTSCRIPTS" => {
-                let (_, state) = provider(repo, id, root);
                 response = vec![];
                 for n in &state.synthetic_sieve.as_ref().unwrap().image.names {
                     response.extend_from_slice(
@@ -286,7 +287,6 @@ fn serve(
                 if tail != "\r\n" {
                     return Err(std::io::ErrorKind::InvalidData.into());
                 }
-                let (_, state) = provider(repo, id, root);
                 let p = state.synthetic_sieve.as_ref().unwrap();
                 if let Some(body) = p.image.bodies.iter().find(|b| b.name.as_bytes() == name) {
                     response = [
@@ -349,7 +349,8 @@ fn serve(
                 if mode == "put_quota" {
                     response = b"NO (QUOTA/MAXSIZE)\r\n".to_vec();
                 } else {
-                    let (store, mut state) = provider(repo, id, root);
+                    let store = repo.fixture_sieve_store(id, root).unwrap();
+                    let mut state = last.load(&store);
                     let p = state.synthetic_sieve.as_mut().unwrap();
                     let name =
                         String::from_utf8(name).map_err(|_| std::io::ErrorKind::InvalidData)?;
@@ -363,7 +364,7 @@ fn serve(
                     }
                     p.image.names.sort_by(|a, b| a.name.cmp(&b.name));
                     p.image.bodies.sort_by(|a, b| a.name.cmp(&b.name));
-                    store.save_state(&mut state).unwrap();
+                    last.save(&store, &mut state);
                     drop(store);
                     boundary("provider_upload_effect");
                     if mode == "put_lost" {
@@ -376,7 +377,8 @@ fn serve(
                 if tail != "\r\n" {
                     return Err(std::io::ErrorKind::InvalidData.into());
                 }
-                let (store, mut state) = provider(repo, id, root);
+                let store = repo.fixture_sieve_store(id, root).unwrap();
+                let mut state = last.load(&store);
                 let p = state.synthetic_sieve.as_mut().unwrap();
                 if !name.is_empty() && !p.image.names.iter().any(|n| n.name.as_bytes() == name) {
                     response = b"NO (NONEXISTENT)\r\n".to_vec();
@@ -384,7 +386,7 @@ fn serve(
                     for n in &mut p.image.names {
                         n.active = n.name.as_bytes() == name;
                     }
-                    store.save_state(&mut state).unwrap();
+                    last.save(&store, &mut state);
                     drop(store);
                     boundary("provider_activation_effect");
                     if mode == "activation_lost" {
@@ -1541,11 +1543,10 @@ fn legacy_whole_replacement_records_stay_readable_and_compensable() {
 fn absolute_slow_drip_and_cancellation_bound_write_validation() {
     for mode in ["check_stall", "check_drip"] {
         let root = tempfile::tempdir().unwrap();
-        let (mut repo, account, mut fixture) = setup(root.path(), false);
-        fixture.source.command_timeout = Duration::from_millis(500);
-        fixture.install(&mut repo, &account.id);
+        let (repo, account, _fixture) = setup(root.path(), false);
         let cancel = Cancellation::default();
         let mut session = repo.transaction_session(&account, cancel.clone()).unwrap();
+        session.set_command_timeout(Duration::from_millis(500));
         let permit = repo.write_permit(&account).unwrap();
         std::fs::write(root.path().join("transaction-mode"), mode).unwrap();
         if mode == "check_stall" {

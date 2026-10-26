@@ -21,6 +21,14 @@ use std::{
 pub(super) const BATCH: usize = 25;
 const RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(15);
+fn protocol(step: &'static str) -> impl Fn(imap::Error) -> AcquisitionError {
+    move |_error| {
+        #[cfg(test)]
+        eprintln!("imap.{step}.failure={}", super::diagnostic_code(&_error));
+        let _ = step;
+        AcquisitionError::Protocol
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct Folder {
@@ -233,9 +241,7 @@ impl ReadOnlyImap {
             budget: budget.clone(),
             cancel: cancel.clone(),
         });
-        client
-            .read_greeting()
-            .map_err(|_| AcquisitionError::Protocol)?;
+        client.read_greeting().map_err(protocol("greeting"))?;
         let session = client
             .login(login, password.text()?)
             .map_err(|_| AcquisitionError::Authentication)?;
@@ -251,7 +257,7 @@ impl ReadOnlyImap {
         let raw = result
             .session
             .run_command_and_read_response("CAPABILITY")
-            .map_err(|_| AcquisitionError::Protocol)?;
+            .map_err(protocol("capability"))?;
         let mut rest = raw.as_slice();
         while !rest.is_empty() {
             let (remaining, response) =
@@ -309,7 +315,7 @@ impl ReadOnlyImap {
         };
         self.session
             .run_command_and_read_response(format!("UID FETCH {sequence} (UID {fields})"))
-            .map_err(|_| AcquisitionError::Protocol)
+            .map_err(protocol("fetch"))
     }
 }
 impl MailRead for ReadOnlyImap {
@@ -359,7 +365,7 @@ impl MailRead for ReadOnlyImap {
         let raw = self
             .session
             .run_command_and_read_response(command)
-            .map_err(|_| AcquisitionError::Protocol)?;
+            .map_err(protocol("list"))?;
         let mut rest = raw.as_slice();
         let mut folders = Vec::new();
         while !rest.is_empty() {
@@ -438,7 +444,7 @@ impl MailRead for ReadOnlyImap {
         let mailbox = self
             .session
             .examine(&folder.wire)
-            .map_err(|_| AcquisitionError::Protocol)?;
+            .map_err(protocol("examine"))?;
         if !mailbox.is_read_only {
             return Err(AcquisitionError::Protocol);
         }
@@ -450,7 +456,7 @@ impl MailRead for ReadOnlyImap {
         let uids: BTreeSet<_> = self
             .session
             .uid_search("ALL")
-            .map_err(|_| AcquisitionError::Protocol)?
+            .map_err(protocol("search"))?
             .into_iter()
             .collect();
         if uids.len() != mailbox.exists as usize || uids.len() > 250_000 || uids.contains(&0) {

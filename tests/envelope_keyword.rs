@@ -240,8 +240,8 @@ fn complete_tag_omissions_scope_and_roles_do_not_promote_headers_or_route_member
     });
     let p = engine::preview(&i).unwrap();
     assert!(p.decisions[0].review);
-    assert_eq!(p.decisions[0].delivery_tags[0].status, "held_unresolved");
-    assert!(p.decisions[0].keyword_additions.is_empty());
+    assert_eq!(p.decisions[0].delivery_tags[0].status, "held_tagged");
+    assert_eq!(p.decisions[0].keyword_additions, ["$route"]);
     assert!(p.decisions[0].copies.is_empty());
     edit(&mut i, |o| {
         o.roles
@@ -328,4 +328,177 @@ fn independent_mark_read_guards_bulk_unmatched_and_plus_addresses() {
     assert_eq!(p.decisions[1].keyword_additions, ["$route"]);
     assert!(!p.decisions[0].mark_read);
     assert!(rules::config::mailbox("invoices+tag@work.example.test"));
+}
+
+fn evidence_matrix(held: bool) -> proof::Proof {
+    let mut i = input();
+    i.messages = vec![
+        fixture(
+            "match",
+            Some("invoices@work.example.test"),
+            "known",
+            "Invoice",
+            "match",
+            Some(vec!["unrelated"]),
+        ),
+        fixture(
+            "different",
+            Some("team@work.example.test"),
+            "known",
+            "Invoice",
+            "different",
+            None,
+        ),
+        fixture(
+            "unavailable",
+            None,
+            "unavailable",
+            "Invoice",
+            "unavailable",
+            None,
+        ),
+        fixture("ambiguous", None, "ambiguous", "Invoice", "ambiguous", None),
+        fixture(
+            "unsupported",
+            None,
+            "unsupported",
+            "Invoice",
+            "unsupported",
+            None,
+        ),
+        fixture(
+            "incompatible",
+            Some("invoices@work.example.test"),
+            "known",
+            "Invoice",
+            "incompatible",
+            None,
+        ),
+    ];
+    edit(&mut i, |o| {
+        o.additions.insert(0, serde_json::from_value(json!({"id":"user.read","category":"money","stage":"from","when":[{"kind":"from_address","value":"billing@shop.example.org"}],"mark_read":true})).unwrap());
+        if held {
+            o.roles
+                .addresses
+                .insert("invoices@work.example.test".into(), config::Role::Unknown);
+            o.roles
+                .addresses
+                .insert("team@work.example.test".into(), config::Role::Unfiltered);
+        }
+    });
+    let mut census = engine::synthetic_census(&i).unwrap();
+    let record = census
+        .folders
+        .get_mut("INBOX")
+        .unwrap()
+        .messages
+        .get_mut(&6)
+        .unwrap();
+    let DeliveryEvidence::Known { source, .. } = &mut record.delivery else {
+        panic!()
+    };
+    source.epoch.push('2');
+    let p = proof::prove(
+        engine::artifact(&i.documents, &i.context).unwrap(),
+        &census,
+        i.as_of,
+        &[],
+        Baseline::Current,
+        None,
+    )
+    .unwrap();
+    let executable = p.artifact.executable();
+    assert!(
+        executable.find("addflag \"$route\"").unwrap()
+            < executable.find("#@ system.role_safety").unwrap()
+    );
+    p
+}
+#[test]
+fn verified_route_tags_held_mail_without_changing_placement_read_status_or_copies() {
+    let statuses = [
+        "known",
+        "known",
+        "unavailable",
+        "ambiguous",
+        "unsupported",
+        "incompatible",
+    ];
+    let held = evidence_matrix(true);
+    let tags = [
+        "held_tagged",
+        "no_match",
+        "unknown",
+        "unknown",
+        "unknown",
+        "unknown",
+    ];
+    for (n, d) in held.decisions.iter().enumerate() {
+        assert_eq!(d.delivery_status, statuses[n], "{n}");
+        assert_eq!(d.delivery_tags[0].status, tags[n], "{n}");
+        assert!(d.review, "{n}");
+        assert_eq!(d.destination, Destination::Inbox, "{n}");
+        assert_eq!(d.current_folders, ["INBOX".to_owned()].into(), "{n}");
+        assert_eq!(d.matched_rule.as_deref(), Some("system.role_safety"), "{n}");
+        assert!(!d.mark_read, "{n}");
+        assert!(d.copies.is_empty(), "{n}");
+        assert!(
+            d.copy_eligibility.iter().all(|c| c.status == "unknown"),
+            "{n}"
+        );
+        let expected: &[&str] = if n == 0 { &["$route"] } else { &[] };
+        assert_eq!(d.keyword_additions, expected, "{n}");
+    }
+    assert_eq!(
+        held.decisions[0].observed_flags,
+        Some(["unrelated".to_owned()].into())
+    );
+    assert_eq!(held.counts.copies, 0);
+    assert_eq!(held.counts.filed, 0);
+    let eligible = evidence_matrix(false);
+    let tags = [
+        "match", "no_match", "unknown", "unknown", "unknown", "unknown",
+    ];
+    for (n, d) in eligible.decisions.iter().enumerate() {
+        assert_eq!(d.delivery_status, statuses[n], "{n}");
+        assert_eq!(d.delivery_tags[0].status, tags[n], "{n}");
+        assert_eq!(d.review, n >= 2, "{n}");
+        if n >= 2 {
+            assert_eq!(d.destination, Destination::Inbox);
+            assert!(!d.mark_read && d.copies.is_empty() && d.keyword_additions.is_empty());
+        }
+    }
+    assert_eq!(eligible.decisions[0].keyword_additions, ["$route"]);
+    assert!(eligible.decisions[0].mark_read);
+    assert_eq!(eligible.decisions[0].copies.len(), 1);
+    assert!(eligible.decisions[1].mark_read);
+    assert!(eligible.decisions[1].keyword_additions.is_empty());
+    assert_ne!(eligible.decisions[0].destination, Destination::Inbox);
+    for header_only in [
+        EvidenceSource::SyntheticDeliveredTo,
+        EvidenceSource::SyntheticOriginalTo,
+    ] {
+        let mut i = input();
+        i.context.recipient_evidence = header_only;
+        i.messages = vec![fixture(
+            "header",
+            None,
+            "unavailable",
+            "Invoice",
+            "header",
+            None,
+        )];
+        edit(&mut i, |o| {
+            o.roles
+                .addresses
+                .insert("invoices@work.example.test".into(), config::Role::Unknown);
+        });
+        let p = engine::preview(&i).unwrap();
+        assert!(!p.artifact.executable().contains("addflag \"$route\""));
+        for d in &p.decisions {
+            assert_eq!(d.delivery_tags[0].status, "omitted");
+            assert!(d.review && !d.mark_read && d.copies.is_empty());
+            assert!(d.keyword_additions.is_empty());
+        }
+    }
 }

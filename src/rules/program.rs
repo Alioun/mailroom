@@ -78,7 +78,7 @@ pub struct CompiledArtifact {
     omissions: Vec<Omission>,
     folders: BTreeSet<String>,
 }
-pub const SEMANTICS: &str = "mailroom-sieve-subset-v4";
+pub const SEMANTICS: &str = "mailroom-sieve-subset-v5";
 
 impl CompiledArtifact {
     pub fn identity(&self) -> &str {
@@ -437,13 +437,6 @@ pub fn compile(
         omissions.push(Omission { rule: "system.role_safety".into(), reason: "Recipient provenance or required capabilities are unknown. All messages retain Inbox for review; no copies.".into() });
         Test::False
     };
-    append_filing(
-        &mut statements,
-        "system.role_safety",
-        not(safe),
-        None,
-        false,
-    );
     if overrides.delivery_tags.len() > 32 {
         return Err("At most 32 delivery tags".into());
     }
@@ -495,6 +488,13 @@ pub fn compile(
             });
         }
     }
+    append_filing(
+        &mut statements,
+        "system.role_safety",
+        not(safe),
+        None,
+        false,
+    );
     let mut ledger_addresses = BTreeSet::new();
     for entry in &overrides.ledger {
         if !mailbox(&entry.address) || !ledger_addresses.insert(entry.address.clone()) {
@@ -693,7 +693,7 @@ pub fn compile(
         extensions.insert("imap4flags".into());
     }
     if !safety_capable || context.recipient_field().is_none() {
-        statements.truncate(1);
+        statements.retain(|s| s.id == "system.role_safety");
         extensions.clear();
         for rule in effective
             .iter()

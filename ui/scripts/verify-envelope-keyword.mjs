@@ -44,7 +44,7 @@ async function restart(epoch) {
   throw Error('Browser fixture replacement timeout')
 }
 async function observe() {
-  execFileSync(m.binary, ['--exact', 'acquisition::workspace_authority::envelope_tests::envelope_fixture_observer'], { cwd: root, env: { ...process.env, MAILROOM_ENVELOPE_FIXTURE: m.directory }, stdio: 'ignore' })
+  execFileSync(m.binary, ['--exact', 'acquisition::workspace_authority::envelope_tests::envelope_fixture_observer'], { cwd: root, env: { ...process.env, MAILROOM_ENVELOPE_FIXTURE: m.directory }, stdio: 'pipe', encoding: 'utf8' })
   return JSON.parse(await readFile(join(m.directory, 'envelope-observations.json'), 'utf8'))
 }
 const browser = await chromium.launch({ headless: true })
@@ -64,11 +64,18 @@ try {
     if (german) await page.getByRole('radio', { name: 'Deutsch', exact: true }).click()
   }
   async function saveKeyword(keyword, german = false) {
+    await saveOverrides(yaml => yaml.replace(/add_keyword:.*$/m, `add_keyword: ${keyword}`), german)
+  }
+  async function saveOverrides(transform, german = false) {
     const details = rules.getByText(german ? 'Regeldokumente' : 'Rule documents', { exact: true })
     const overrides = rules.getByLabel(german ? 'Anpassung als YAML' : 'Override YAML', { exact: true })
     if (!await overrides.isVisible()) await details.click()
-    await overrides.fill((await overrides.inputValue()).replace(/add_keyword:.*$/m, `add_keyword: ${keyword}`))
+    const current = await overrides.inputValue(), next = transform(current)
+    assert.notEqual(next, current)
+    await overrides.fill(next)
+    const saved = page.waitForResponse(r => r.url().endsWith('/api/accounts/workspace/save'))
     await rules.getByRole('button', { name: german ? 'Regeln und Fixierungen verschlüsselt speichern' : 'Save rules and pins encrypted', exact: true }).click()
+    assert.equal((await saved).status(), 200)
     await rules.getByText(german ? 'Regeln und Fixierungen verschlüsselt gespeichert.' : 'Rules and pins saved encrypted.', { exact: true }).waitFor()
   }
   async function prove(german = false) {
@@ -100,6 +107,25 @@ try {
   await decisions.nth(0).screenshot({ path: join(artifacts, 'english-route-match.png') })
   await decisions.nth(2).screenshot({ path: join(artifacts, 'english-unknown-hold.png') })
   await download(english)
+  async function held(keyword, german = false) {
+    await saveOverrides(yaml => yaml.replace('business.test: business', 'business.test: unknown').replace(/add_keyword:.*$/m, `add_keyword: ${keyword}`), german)
+    const proof = await prove(german)
+    const [first, ...rest] = proof.proof.decisions
+    assert.equal(first.delivery_status, 'known'); assert.equal(first.delivery_tags[0].status, 'held_tagged'); assert.deepEqual(first.keyword_additions, [keyword])
+    assert.equal(first.review, true); assert.equal(first.mark_read, false); assert.deepEqual(first.copies, []); assert.equal(first.destination.kind, 'inbox'); assert.equal(first.matched_rule, 'system.role_safety')
+    for (const d of rest) { assert.equal(d.review, true); assert.deepEqual(d.keyword_additions, []); assert.deepEqual(d.copies, []); assert.equal(d.mark_read, false); assert.notEqual(d.delivery_tags[0].status, 'held_tagged') }
+    assert.equal(rest[0].delivery_tags[0].status, 'no_match')
+    const executable = proof.proof.artifact.executable
+    assert.ok(executable.indexOf(`addflag "${keyword}"`) < executable.indexOf('#@ system.role_safety'))
+    await decisions.nth(0).getByText(german ? 'user.route · Routen-Schlagwort ergänzt; zur Prüfung zurückgehalten' : 'user.route · Route keyword added; held for review', { exact: false }).waitFor()
+    await decisions.nth(0).getByText(german ? 'Empfängerprüfung. Posteingang und Lesestatus bleiben unverändert. Keine Kopien. Nur ein geprüftes Routen-Schlagwort kann ergänzt werden.' : 'Recipient review. Inbox and read status stay unchanged. No copies. Only a verified route keyword may be added.', { exact: true }).waitFor()
+    await decisions.nth(0).getByText(`${german ? 'Geplante zusätzliche Schlagwörter' : 'Planned keyword additions'} · ${keyword}`, { exact: true }).waitFor()
+    await decisions.nth(0).screenshot({ path: join(artifacts, `${german ? 'german' : 'english'}-held-tagged.png`) })
+    await download(proof, german)
+    await saveOverrides(yaml => yaml.replace('business.test: unknown', 'business.test: business'), german)
+  }
+  await held('$held-route')
+  checks.push('Built English held proof: verified envelope match shows tagged-and-held with the keyword, Inbox, unchanged read status and no copies; other evidence stays untagged; exact held download')
   checks.push('Built English saved YAML, parsed route match/nonmatch/unknown/unsupported, observed flags separate from keyword additions, unchecked fresh approval and exact downloaded bytes')
   await page.getByRole('radio', { name: 'Deutsch', exact: true }).click(); await page.setViewportSize({ width: 390, height: 844 })
   await saveKeyword('$de-route', true)
@@ -118,6 +144,10 @@ try {
   await decisions.nth(0).screenshot({ path: join(artifacts, 'german-route-match.png') })
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
   await download(german, true)
+  await held('$de-held-route', true)
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
+  checks.push('Built narrow German held proof shows translated tagged-and-held status, unchanged hold text and exact held download without overflow')
+  await saveKeyword('$de-route', true)
   checks.push('Built narrow German save/prove/download shows translated delivery and route status with independent planned additions and no overflow')
   const stable = await observe()
   await restart('changed-browser-epoch')
@@ -146,6 +176,6 @@ try {
   assert.deepEqual(errors, []); assert.deepEqual(remote, [])
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
   checks.push('Empty local/session/IndexedDB storage, no page errors, external requests or CSP violations, no narrow layout overflow')
-  await writeFile(join(root, '.audit/envelope-keyword-browser.json'), JSON.stringify({ checks, replacements, screenshots: artifacts, time: new Date().toISOString(), artifact: restored.proof.artifact.identity, independent_sieve: 'blocked', held_tagging: 'unresolved' }, null, 2) + '\n')
+  await writeFile(join(root, '.audit/envelope-keyword-browser.json'), JSON.stringify({ checks, replacements, screenshots: artifacts, time: new Date().toISOString(), artifact: restored.proof.artifact.identity, independent_sieve: 'blocked', held_tagging: 'tagged_and_held' }, null, 2) + '\n')
   console.log(JSON.stringify({ checks, replacements, screenshots: artifacts }, null, 2))
 } finally { await browser.close() }

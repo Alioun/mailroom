@@ -955,41 +955,61 @@ mod tests {
     }
 
     #[test]
-    fn obsolete_export_bytes_and_versions_survive_schema_fourteen_without_recompilation() {
-        let root = tempfile::tempdir().unwrap();
-        let (repo, account, _fake) =
-            crate::acquisition::folder_provisioning::tests::install(root.path());
-        let store = repo.store(&account).unwrap();
-        let mut historical = serde_json::to_value(store.load_state().unwrap()).unwrap();
-        for export in historical["exports"].as_array_mut().unwrap() {
-            export["semantics"] = serde_json::json!("mailroom-sieve-subset-v3");
-            export["proof_semantics"] = serde_json::json!("parsed-emitted-sieve-subset-v3");
-            export["artifact"]["executable"] = serde_json::json!(
-                "# Historical export retains its original line endings.\r\nkeep;\r\n"
+    fn obsolete_export_bytes_and_versions_survive_without_recompilation() {
+        for (schema, version, executable) in [
+            (
+                13,
+                "v3",
+                "# Historical export retains its original line endings.\r\nkeep;\r\n",
+            ),
+            (
+                14,
+                "v4",
+                "require [\"envelope\", \"imap4flags\"];\n\n#@ system.role_safety\nif true {\n  keep;\n  stop;\n}\n\n#@ user.route\nif envelope :all :is \"to\" \"route@business.test\" {\n  addflag \"$route\";\n}\n",
+            ),
+            (
+                15,
+                "v4",
+                "require [\"envelope\", \"imap4flags\"];\r\n#@ system.role_safety\r\nif true {\r\n  keep;\r\n  stop;\r\n}\r\n",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let (repo, account, _fake) =
+                crate::acquisition::folder_provisioning::tests::install(root.path());
+            let store = repo.store(&account).unwrap();
+            let mut historical = serde_json::to_value(store.load_state().unwrap()).unwrap();
+            for export in historical["exports"].as_array_mut().unwrap() {
+                export["semantics"] = serde_json::json!(format!("mailroom-sieve-subset-{version}"));
+                export["proof_semantics"] =
+                    serde_json::json!(format!("parsed-emitted-sieve-subset-{version}"));
+                export["artifact"]["executable"] = serde_json::json!(executable);
+            }
+            let expected = historical["exports"].clone();
+            store
+                .stage_snapshot(schema, &serde_json::to_string(&historical).unwrap())
+                .unwrap()
+                .persist(store.path())
+                .unwrap();
+            let mut loaded = store.load_state().unwrap();
+            let context = repo.workspace_context(&account, &store).unwrap();
+            assert!(
+                crate::rules::workspace::view(&loaded, &context)
+                    .exports
+                    .iter()
+                    .all(|e| !e.usable),
+                "{schema} {version}"
+            );
+            loaded.workspace.as_mut().unwrap().input.baseline =
+                crate::rules::proof::Baseline::Previous;
+            assert!(crate::rules::workspace::preview(&loaded, &context, store.keys()).is_err());
+            store.save_state(&mut loaded).unwrap();
+            assert_eq!(store.schema_version().unwrap(), 15);
+            assert_eq!(
+                serde_json::to_value(store.load_state().unwrap().exports).unwrap(),
+                expected,
+                "{schema} {version}"
             );
         }
-        let expected = historical["exports"].clone();
-        store
-            .stage_snapshot(13, &serde_json::to_string(&historical).unwrap())
-            .unwrap()
-            .persist(store.path())
-            .unwrap();
-        let mut loaded = store.load_state().unwrap();
-        let context = repo.workspace_context(&account, &store).unwrap();
-        assert!(
-            crate::rules::workspace::view(&loaded, &context)
-                .exports
-                .iter()
-                .all(|e| !e.usable)
-        );
-        loaded.workspace.as_mut().unwrap().input.baseline = crate::rules::proof::Baseline::Previous;
-        assert!(crate::rules::workspace::preview(&loaded, &context, store.keys()).is_err());
-        store.save_state(&mut loaded).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 15);
-        assert_eq!(
-            serde_json::to_value(store.load_state().unwrap().exports).unwrap(),
-            expected
-        );
     }
 
     #[test]

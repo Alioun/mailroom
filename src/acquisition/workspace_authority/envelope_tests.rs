@@ -183,9 +183,20 @@ fn saved_envelope_tags_share_proof_and_hold_unknown_without_header_authority() {
     let held = workspace::preview(&held, &context, store.keys()).unwrap();
     assert_eq!(
         held.proof.decisions[0].delivery_tags[0].status,
-        "held_unresolved"
+        "held_tagged"
     );
-    assert!(held.proof.decisions[0].keyword_additions.is_empty());
+    assert_eq!(held.proof.decisions[0].keyword_additions, ["$route"]);
+    assert!(held.proof.decisions[0].review);
+    assert!(!held.proof.decisions[0].mark_read);
+    assert!(held.proof.decisions[0].copies.is_empty());
+    assert_eq!(
+        held.proof.decisions[0].destination,
+        crate::rules::proof::Destination::Inbox
+    );
+    assert_eq!(
+        held.proof.artifact.folders(),
+        proof.proof.artifact.folders()
+    );
     assert!(
         proof
             .proof

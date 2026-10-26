@@ -45,10 +45,11 @@ fn main() {
                 source["context"]["recipient_evidence"] = json!({"synthetic_envelope":{"source":{"account":source["context"]["account"],"provider":"mailbox_org","identity":"independent-envelope-fixture","profile":"synthetic-envelope/v1","epoch":"one","authority":"explicit-preview-only"}}});
                 source["context"]["capabilities"].as_array_mut().unwrap().push(json!("envelope"));
                 let account=source["context"]["account"].as_str().unwrap();
-                source["documents"]["override_yaml"]=format!("{}\ndelivery_tags:\n  - id: user.route\n    accounts: [{account}]\n    envelope_to: invoices@work.example.test\n    add_keyword: $route\n",source["documents"]["override_yaml"].as_str().unwrap()).into();
+                source["documents"]["override_yaml"]=format!("{}\ndelivery_tags:\n  - id: user.route\n    accounts: [{account}]\n    envelope_to: invoices@work.example.test\n    add_keyword: $route\n  - id: user.held-route\n    accounts: [{account}]\n    envelope_to: unknown@work.example.test\n    add_keyword: $held-route\n",source["documents"]["override_yaml"].as_str().unwrap()).into();
                 source["messages"]=json!([
                     {"id":"envelope-match","headers":"From: shop@example.test\nDelivered-To: forged@unknown.example.test\nSubject: Invoice\nMessage-ID: <independent-match@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000", "current_folder":"INBOX", "delivery":{"status":"known","recipient":"invoices@work.example.test"}},
-                    {"id":"envelope-no-match","headers":"From: shop@example.test\nDelivered-To: invoices@work.example.test\nSubject: Invoice\nMessage-ID: <independent-other@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000", "current_folder":"INBOX", "delivery":{"status":"known","recipient":"team@work.example.test"}}
+                    {"id":"envelope-no-match","headers":"From: shop@example.test\nDelivered-To: invoices@work.example.test\nSubject: Invoice\nMessage-ID: <independent-other@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000", "current_folder":"INBOX", "delivery":{"status":"known","recipient":"team@work.example.test"}},
+                    {"id":"envelope-held-match","headers":"From: shop@example.test\nDelivered-To: invoices@work.example.test\nSubject: Invoice\nMessage-ID: <independent-held@example.test>\nDate: Sat, 24 Oct 2026 00:00:00 +0000", "current_folder":"INBOX", "delivery":{"status":"known","recipient":"unknown@work.example.test"}}
                 ]);
             }
 

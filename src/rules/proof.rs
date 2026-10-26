@@ -7,7 +7,7 @@ use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const SEMANTICS: &str = "parsed-emitted-sieve-subset-v4";
+pub const SEMANTICS: &str = "parsed-emitted-sieve-subset-v5";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -291,56 +291,13 @@ fn execute(
                 reason,
             });
         }
-        for tag in artifact
-            .effective()
-            .iter()
-            .filter(|r| r.origin == "override delivery tag")
-        {
-            let omitted = artifact.omissions().iter().find(|o| o.rule == tag.id);
-            let result = statements
-                .iter()
-                .find(|s| s.id == tag.id)
-                .map(|s| s.test.evaluate(&view, &duplicates));
-            let (status, reason) = if omitted.is_some() {
-                (
-                    "omitted",
-                    "Complete tag omitted by engine, scope, evidence or capabilities",
-                )
-            } else if result == Some(Truth::Unknown) {
-                (
-                    "unknown",
-                    "Current delivery evidence is unavailable or incompatible",
-                )
-            } else if review && result == Some(Truth::Match) {
-                (
-                    "held_unresolved",
-                    "Held-message tagging awaits an explicit owner decision; existing no-flag hold preserved",
-                )
-            } else if result == Some(Truth::Match) {
-                (
-                    "match",
-                    "Parsed envelope predicate matches; additive keyword planned",
-                )
-            } else {
-                (
-                    "no_match",
-                    "Parsed current delivery recipient does not match",
-                )
-            };
-            d.delivery_tags.push(TagDecision {
-                rule: tag.id.clone(),
-                status,
-                reason,
-            });
-        }
         let mut pending = Vec::new();
         'script: for s in &statements {
-            if review {
-                d.matched_rule = Some("system.role_safety".into());
-                break;
-            }
             let truth = s.test.evaluate(&view, &duplicates);
             if truth == Truth::Unknown {
+                if review {
+                    d.matched_rule = Some("system.role_safety".into());
+                }
                 d.review = true;
                 d.destination = Destination::Inbox;
                 d.copies.clear();
@@ -384,6 +341,60 @@ fn execute(
                     Action::Stop => break 'script,
                 }
             }
+        }
+        for tag in artifact
+            .effective()
+            .iter()
+            .filter(|r| r.origin == "override delivery tag")
+        {
+            let omitted = artifact.omissions().iter().any(|o| o.rule == tag.id);
+            let result = statements
+                .iter()
+                .find(|s| s.id == tag.id)
+                .map(|s| s.test.evaluate(&view, &duplicates));
+            let added = match &tag.definition {
+                super::program::EffectiveDefinition::DeliveryTag { rule } => d
+                    .keyword_additions
+                    .iter()
+                    .any(|k| k.eq_ignore_ascii_case(rule.add_keyword.as_str())),
+                _ => false,
+            };
+            let (status, reason) = if omitted {
+                (
+                    "omitted",
+                    "Complete tag omitted by engine, scope, evidence or capabilities",
+                )
+            } else if result == Some(Truth::Unknown) {
+                (
+                    "unknown",
+                    "Current delivery evidence is unavailable or incompatible",
+                )
+            } else if result == Some(Truth::Match) && !added {
+                (
+                    "unknown",
+                    "Later recipient evidence is unknown; no keyword addition is predicted",
+                )
+            } else if result == Some(Truth::Match) && d.review {
+                (
+                    "held_tagged",
+                    "Verified envelope matches; keyword added while recipient review keeps Inbox and read status. Ingress only: no role, filing or accounting eligibility",
+                )
+            } else if result == Some(Truth::Match) {
+                (
+                    "match",
+                    "Parsed envelope predicate matches; additive keyword planned",
+                )
+            } else {
+                (
+                    "no_match",
+                    "Parsed current delivery recipient does not match",
+                )
+            };
+            d.delivery_tags.push(TagDecision {
+                rule: tag.id.clone(),
+                status,
+                reason,
+            });
         }
         duplicates.extend(pending);
         decisions.push(d);

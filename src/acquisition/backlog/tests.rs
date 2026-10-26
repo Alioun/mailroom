@@ -107,16 +107,19 @@ struct Workflow {
 
 impl Workflow {
     fn start(large: bool) -> Self {
+        Self::sized(large.then_some(501))
+    }
+    fn sized(eligible: Option<u32>) -> Self {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(
             root.path().join("workspace-authority"),
             "completion-fixture-v1",
         )
         .unwrap();
-        if large {
+        if let Some(eligible) = eligible {
             std::fs::write(
                 root.path().join("move-large"),
-                "501 exact eligible messages",
+                format!("{eligible} exact eligible messages"),
             )
             .unwrap();
         }
@@ -333,6 +336,13 @@ fn saturated_saved_workspace_move_at_batch_and_response_limits_never_retries() {
             result.unwrap();
             assert_eq!(wires.len(), 2);
             assert_eq!(run.status, Status::Complete);
+            let store = w.store();
+            assert_eq!(
+                model::material(&store.load_state().unwrap(), store.keys()).unwrap(),
+                run.plan.binding.material,
+                "a run reuses its material only while it changes nothing but its journal"
+            );
+            drop(store);
             assert_eq!(
                 count(&run, 0, |r| matches!(r, Resolution::Verified { .. })),
                 500
@@ -794,4 +804,43 @@ fn eligible_subset_of_partially_mapped_unresolved_batch_reverses_alone() {
     let reopened: model::Journal =
         serde_json::from_slice(&serde_json::to_vec(&saved.protocol_backlog).unwrap()).unwrap();
     reopened.validate(&w.account.id).unwrap();
+}
+
+#[test]
+#[ignore = "personal-scale measurement; run explicitly"]
+fn scale_move_backlog() {
+    use crate::census::scale;
+    let w = Workflow::sized(Some(scale::run_from_env()));
+    let setup = scale::inflate_store(&w.store(), false);
+    scale::report("move.setup", setup, Default::default());
+    let preview = scale::measure("move.preview", serde_json::json!({}), || w.preview()).unwrap();
+    let batches = preview.operation.batches.len();
+    let result = scale::measure(
+        "move.confirm_run",
+        serde_json::json!({"batches": batches, "messages": preview.operation.plan.filing.changes.len()}),
+        || w.confirm(&preview),
+    );
+    let run = w.run();
+    let journal = serde_json::to_vec(&w.store().load_state().unwrap().protocol_backlog)
+        .unwrap()
+        .len();
+    scale::report(
+        "move.result",
+        serde_json::json!({"result": format!("{result:?}"), "status": run.status, "journal_bytes": journal}),
+        Default::default(),
+    );
+    let undo = scale::measure("move.undo_preview", serde_json::json!({}), || {
+        w.undo_preview()
+    })
+    .unwrap();
+    let result = scale::measure(
+        "move.undo",
+        serde_json::json!({"batches": undo.reverse.len()}),
+        || w.undo(&undo),
+    );
+    scale::report(
+        "move.undo_result",
+        serde_json::json!({"result": format!("{result:?}"), "status": w.run().status}),
+        Default::default(),
+    );
 }

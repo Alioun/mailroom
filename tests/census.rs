@@ -194,7 +194,7 @@ fn wrong_keys_tampering_versions_and_account_mixups_cannot_overwrite_data() {
     fs::write(store.path(), &original[..10]).unwrap();
     assert_eq!(store.load(), Err(CensusError::Authentication));
     let mut future = original;
-    future[b"MAILROOM-CENSUS".len()] = 2;
+    future[b"MAILROOM-CENSUS".len()] = 3;
     fs::write(store.path(), &future).unwrap();
     assert_eq!(store.load(), Err(CensusError::UnsupportedVersion));
     assert!(AccountId::new("../unsafe").is_err());

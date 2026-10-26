@@ -4,6 +4,8 @@ pub mod demo;
 pub mod folder_provisioning;
 mod headers;
 pub mod report;
+#[cfg(test)]
+pub(crate) mod scale;
 pub mod sieve;
 pub mod sieve_transaction;
 mod store;
@@ -11,6 +13,9 @@ mod store;
 pub use headers::{HEADER_FIELDS, parse_headers};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+pub(crate) use store::MAX_FILE;
+#[cfg(test)]
+pub(crate) use store::io;
 pub use store::{AccountState, CensusKeys, EncryptedStore, LocalSecret};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +213,55 @@ pub struct Census {
     pub acquisition_state: ScanState,
     #[serde(default)]
     pub last_completed_at: Option<i64>,
+}
+
+/// A census shared between a loaded `AccountState` and the store's record of
+/// what it last persisted. Cloning shares it, so an untouched census compares
+/// equal by pointer in constant time. The first mutable access copies it.
+#[derive(Clone, Debug)]
+pub struct SharedCensus(std::sync::Arc<Census>);
+
+impl SharedCensus {
+    pub fn into_inner(self) -> Census {
+        std::sync::Arc::unwrap_or_clone(self.0)
+    }
+}
+impl From<Census> for SharedCensus {
+    fn from(census: Census) -> Self {
+        Self(std::sync::Arc::new(census))
+    }
+}
+impl std::ops::Deref for SharedCensus {
+    type Target = Census;
+    fn deref(&self) -> &Census {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for SharedCensus {
+    fn deref_mut(&mut self) -> &mut Census {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
+}
+impl PartialEq for SharedCensus {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0) || self.0 == other.0
+    }
+}
+impl Eq for SharedCensus {}
+impl PartialEq<Census> for SharedCensus {
+    fn eq(&self, other: &Census) -> bool {
+        *self.0 == *other
+    }
+}
+impl Serialize for SharedCensus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for SharedCensus {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Census::deserialize(deserializer).map(Self::from)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

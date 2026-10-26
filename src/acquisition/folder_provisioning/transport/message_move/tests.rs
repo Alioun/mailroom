@@ -153,13 +153,21 @@ impl Fake {
                 .insert("\\Deleted".into());
             state.synthetic_uid_next.insert("Filed/Receipts".into(), 60);
             state.synthetic_uid_next.insert("INBOX".into(), 104);
-            if root.join("move-large").exists() {
+            if let Ok(large) = std::fs::read_to_string(root.join("move-large")) {
+                let eligible: u32 = large
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(501);
                 let inbox = state.census.folders.get_mut("INBOX").unwrap();
-                for uid in (200..=1194).step_by(2) {
+                let last = 200 + 2 * (eligible - 4);
+                for uid in (200..=last).step_by(2) {
                     inbox.live_uids.insert(uid);
                     inbox.messages.insert(uid, record(uid));
                 }
-                state.synthetic_uid_next.insert("INBOX".into(), 2000);
+                state
+                    .synthetic_uid_next
+                    .insert("INBOX".into(), (last + 2).max(2000));
             }
         }
         if root.join("move-workflow").exists() {
@@ -1095,7 +1103,7 @@ impl Fake {
     pub(crate) fn install(&self, repo: &mut Accounts) {
         let mut source = self.source.clone();
         source.authority = "fixture-message-move/v1".into();
-        source.command_timeout = Duration::from_secs(3);
+        source.command_timeout = crate::acquisition::fixture_peer::FIXTURE_COMMAND_TIMEOUT;
         source.operation_timeout = Duration::from_secs(120);
         repo.backlog_source = Some(Arc::new(source));
         let source = repo.backlog_source.as_ref().unwrap().clone();

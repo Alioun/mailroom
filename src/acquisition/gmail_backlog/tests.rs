@@ -185,6 +185,14 @@ fn saved_workspace_adds_labels_removes_only_inbox_and_undo_reverses_only_the_del
     let before: BTreeMap<_, _> = ids.iter().map(|id| (*id, f.labels(id))).collect();
     f.confirm(Options::default(), |_| Ok(())).unwrap();
     assert_eq!(f.run().status, Status::Complete);
+    let bound = f.run().plan.binding.material;
+    let store = f.store();
+    assert_eq!(
+        model::material(&store.load_state().unwrap(), store.keys()).unwrap(),
+        bound,
+        "a run reuses its material only while it changes nothing but its journal"
+    );
+    drop(store);
     assert_eq!(
         f.wires(),
         [
@@ -481,4 +489,66 @@ fn cancel_between_batches_keeps_effects_and_resume_runs_only_the_remainder() {
     assert_eq!(f.run().status, Status::Complete);
     assert_eq!(f.wires()[..2], wires[..]);
     assert_eq!(f.wires().len(), 4);
+}
+
+#[test]
+#[ignore = "personal-scale measurement; run explicitly"]
+fn scale_gmail_label_backlog() {
+    use crate::census::scale;
+    let f = setup(|root| {
+        std::fs::write(root.join("gmail-large"), scale::run_from_env().to_string()).unwrap()
+    });
+    let setup = scale::inflate_store(&f.store(), true);
+    scale::report("gmail.setup", setup, Default::default());
+    let p = scale::measure("gmail.preview", serde_json::json!({}), || {
+        f.preview(personal_only())
+    })
+    .unwrap();
+    let store = f.store();
+    let mut saved = store.load_state().unwrap();
+    let result = scale::measure(
+        "gmail.confirm_run",
+        serde_json::json!({"batches": p.operation.batches.len()}),
+        || {
+            f.repo.gmail_confirm(
+                &f.account,
+                &store,
+                &mut saved,
+                personal_only(),
+                &p.receipt,
+                Cancellation::default(),
+                |_| Ok(()),
+            )
+        },
+    );
+    drop(store);
+    let journal = serde_json::to_vec(&f.saved().gmail_backlog).unwrap().len();
+    scale::report(
+        "gmail.result",
+        serde_json::json!({"result": format!("{result:?}"), "status": f.run().status, "journal_bytes": journal}),
+        Default::default(),
+    );
+    let undo = scale::measure("gmail.undo_preview", serde_json::json!({}), || {
+        f.undo_preview()
+    })
+    .unwrap();
+    let store = f.store();
+    let mut saved = store.load_state().unwrap();
+    let result = scale::measure("gmail.undo", serde_json::json!({}), || {
+        f.repo.gmail_undo(
+            &f.account,
+            &store,
+            &mut saved,
+            &undo.run,
+            &undo.receipt,
+            Cancellation::default(),
+            |_| Ok(()),
+        )
+    });
+    drop(store);
+    scale::report(
+        "gmail.undo_result",
+        serde_json::json!({"result": format!("{result:?}"), "status": f.run().status}),
+        Default::default(),
+    );
 }

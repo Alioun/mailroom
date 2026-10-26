@@ -70,7 +70,7 @@ pub(crate) fn install(
         sample.documents.override_yaml = serde_yaml_ng::to_string(&overrides)
             .unwrap()
             .replace("delivery_tags: []\n", "");
-        saved.census = crate::engine::synthetic_census(&sample).unwrap();
+        saved.census = crate::engine::synthetic_census(&sample).unwrap().into();
         saved.workspace.as_mut().unwrap().input.documents = sample.documents;
         saved.workspace.as_mut().unwrap().input.pins.clear();
         saved.workspace.as_mut().unwrap().input.baseline = Baseline::Current;

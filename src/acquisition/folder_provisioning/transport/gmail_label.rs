@@ -167,6 +167,9 @@ impl Connection {
             if !tagged && first != "*" {
                 return Err(Error::Protocol);
             }
+            if tagged {
+                self.io.completed();
+            }
             if response.get(1).and_then(Token::atom) == Some("BYE") {
                 return Err(Error::Bye);
             }

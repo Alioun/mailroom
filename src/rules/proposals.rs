@@ -221,7 +221,7 @@ fn normalized_observations(state: &AccountState) -> crate::census::Census {
             }
         }
     }
-    let mut census = state.census.clone();
+    let mut census = (*state.census).clone();
     census.last_completed_at = census.last_completed_at.map(|_| 0);
     if let Some(attempt) = &mut census.acquisition.latest {
         attempt.id = "0".repeat(32);

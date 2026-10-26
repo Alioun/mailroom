@@ -621,3 +621,34 @@ fn schema_fourteen_delivery_round_trips_complete_state_without_recovering_author
             .all(|d| d.review && d.keyword_additions.is_empty() && d.copies.is_empty())
     );
 }
+
+#[test]
+#[ignore = "personal-scale measurement; run explicitly"]
+fn scale_recovery_capture() {
+    use crate::census::scale;
+    let root = tempfile::tempdir().unwrap();
+    let (repo, account, _fake) = crate::acquisition::sieve_transaction::tests::install(root.path());
+    crate::acquisition::sieve_transaction::tests::commit_fixture_transaction(&repo, &account);
+    let setup = scale::inflate_store(&repo.store(&account).unwrap(), false);
+    scale::report("recovery.setup", setup, Default::default());
+    let preview = scale::measure("recovery.capture_preview", serde_json::json!({}), || {
+        repo.capture_preview(&account.id, 1792915200)
+    });
+    let result = match preview {
+        Ok((preview, _)) => scale::measure("recovery.capture", serde_json::json!({}), || {
+            repo.capture(
+                &preview,
+                &secret(),
+                &root.path().join("bundles"),
+                |_| Ok(()),
+            )
+        })
+        .map(|_| ()),
+        Err(e) => Err(e),
+    };
+    scale::report(
+        "recovery.result",
+        serde_json::json!({"result": format!("{result:?}")}),
+        Default::default(),
+    );
+}

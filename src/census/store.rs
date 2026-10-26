@@ -10,15 +10,30 @@ use rand::{RngCore, rngs::OsRng};
 use rusqlite::Connection;
 use sha2::Sha256;
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     fs,
-    io::{Read, Write},
+    io::{Read, Seek, Write},
     path::PathBuf,
 };
 use zeroize::Zeroizing;
 
+mod log;
+mod patch;
+
+/// Version-1 files hold one snapshot and stay readable. New saves write
+/// version 2 (`log::MAGIC_V2`), which can append journal frames.
 const MAGIC: &[u8] = b"MAILROOM-CENSUS\x01";
-const MAX_SNAPSHOT: u64 = 128 * 1024 * 1024;
+/// Bound on one decrypted SQLite snapshot. A personal-scale census of 100,000
+/// messages with full header evidence serializes to about 254 MB.
+pub(crate) const MAX_SNAPSHOT: u64 = 512 * 1024 * 1024;
+/// Bound on the whole account file: the base snapshot plus frames, which are
+/// compacted before they outgrow the base.
+pub(crate) const MAX_FILE: u64 = 2 * MAX_SNAPSHOT + 4096;
+/// Frames may grow to a quarter of the base, and at least to this, before a
+/// save compacts them into a new base. A framed file then stays within 1.25
+/// times its base, recovery's resource limits see nearly the same size, and
+/// compaction stays amortized over the frames it replaces.
+const MIN_FRAME_BUDGET: u64 = 64 * 1024;
 
 pub struct LocalSecret(Zeroizing<Vec<u8>>);
 
@@ -224,7 +239,7 @@ pub struct AccountState {
     #[serde(default)]
     pub synthetic_effects: std::collections::BTreeMap<String, crate::backlog::Observation>,
     pub revision: u64,
-    pub census: Census,
+    pub census: super::SharedCensus,
     pub workspace: Option<crate::rules::workspace::Workspace>,
     pub exports: Vec<crate::rules::workspace::ExportRecord>,
 }
@@ -248,11 +263,122 @@ impl AccountState {
             backlog: Vec::new(),
             synthetic_effects: Default::default(),
             synthetic_uid_next: Default::default(),
-            census,
+            census: census.into(),
             workspace: None,
             exports: Vec::new(),
         }
     }
+}
+
+/// Every persisted field of `AccountState` except the census and the
+/// revision. A journal frame carries a structural patch for each one that
+/// changed. The exhaustive pattern makes a new field a compile error until it
+/// is listed here.
+macro_rules! frame_fields {
+    ($($field:ident),* $(,)?) => {
+        const FRAME_FIELDS: &[&str] = &[$(stringify!($field)),*];
+        fn frame_field_bytes(state: &AccountState) -> Result<Vec<Vec<u8>>, CensusError> {
+            let AccountState { census: _, revision: _, $($field),* } = state;
+            Ok(vec![$(serde_json::to_vec($field).map_err(|_| CensusError::Storage)?),*])
+        }
+        fn frame_field_value(state: &AccountState, name: &str) -> Result<serde_json::Value, CensusError> {
+            match name {
+                $(stringify!($field) => serde_json::to_value(&state.$field).map_err(|_| CensusError::Storage),)*
+                _ => Err(CensusError::UnsupportedVersion),
+            }
+        }
+        fn apply_frame_field(
+            state: &mut AccountState,
+            name: &str,
+            value: serde_json::Value,
+        ) -> Result<(), CensusError> {
+            match name {
+                $(stringify!($field) => {
+                    state.$field = serde_json::from_value(value).map_err(|_| CensusError::Storage)?
+                })*
+                _ => return Err(CensusError::UnsupportedVersion),
+            }
+            Ok(())
+        }
+    };
+}
+frame_fields!(
+    sieve_placement,
+    protocol_backlog,
+    gmail_backlog,
+    folder_provisioning,
+    synthetic_folders,
+    sieve_transactions,
+    synthetic_sieve,
+    sieve,
+    proposals,
+    winddown,
+    ledger,
+    invoices,
+    unsubscribe,
+    synthetic_uid_next,
+    backlog,
+    synthetic_effects,
+    workspace,
+    exports,
+);
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Frame {
+    revision: u64,
+    fields: std::collections::BTreeMap<String, patch::Patch>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+    len: u64,
+}
+impl FileIdentity {
+    fn of(metadata: &fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                len: metadata.len(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {
+                device: 0,
+                inode: metadata
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos() as u64),
+                len: metadata.len(),
+            }
+        }
+    }
+}
+
+/// Where new frames go in a version-2 file.
+struct Tail {
+    base_tag: [u8; 16],
+    base_len: u64,
+    valid_end: u64,
+    next_sequence: u64,
+}
+
+/// What this store last read or wrote. A save trusts it only while the file
+/// keeps the identity recorded here, so the revision check costs one `stat`.
+struct Persisted {
+    revision: u64,
+    file: FileIdentity,
+    tail: Option<Tail>,
+    census: super::SharedCensus,
+    /// Serialized frame fields as persisted, in `FRAME_FIELDS` order.
+    fields: Vec<Vec<u8>>,
 }
 
 pub struct EncryptedStore {
@@ -260,6 +386,7 @@ pub struct EncryptedStore {
     keys: CensusKeys,
     _lock: ExclusiveFileLock,
     loaded: Cell<bool>,
+    persisted: RefCell<Option<Persisted>>,
     account_lease: Option<ExclusiveFileLock>,
     #[cfg(test)]
     simulated_provider: bool,
@@ -294,6 +421,7 @@ impl EncryptedStore {
             keys,
             _lock: lock,
             loaded: Cell::new(false),
+            persisted: RefCell::new(None),
             account_lease: None,
             #[cfg(test)]
             simulated_provider: false,
@@ -313,6 +441,8 @@ impl EncryptedStore {
         if self.simulated_provider {
             return Ok(());
         }
+        #[cfg(test)]
+        io::record(|s| s.fsyncs += 1);
         file.sync_all()
     }
 
@@ -350,6 +480,7 @@ impl EncryptedStore {
     pub(crate) fn replace_keys(&mut self, keys: CensusKeys) {
         self.keys = keys;
         self.loaded.set(false);
+        self.persisted.replace(None);
     }
     pub fn keys(&self) -> &CensusKeys {
         &self.keys
@@ -385,7 +516,7 @@ impl EncryptedStore {
         } else {
             AccountState::new(census.clone())
         };
-        state.census = census.clone();
+        state.census = census.clone().into();
         self.save_state(&mut state)
     }
 
@@ -410,40 +541,194 @@ impl EncryptedStore {
         if state.exports.len() > crate::rules::workspace::HISTORY_LIMIT {
             return Err(CensusError::Storage);
         }
-        let current = if self.path().try_exists().map_err(|_| CensusError::Storage)? {
-            self.read_state()?.revision
-        } else {
-            0
-        };
+        let current = self.current_revision()?;
         if state.revision != current {
             return Err(CensusError::Storage);
         }
-        let mut next = state.clone();
-        next.revision = current.checked_add(1).ok_or(CensusError::Storage)?;
-        self.stage_state(&next)?
-            .persist(self.path())
+        let next = current.checked_add(1).ok_or(CensusError::Storage)?;
+        #[cfg(test)]
+        let began = std::time::Instant::now();
+        if !self.append_frame(state, next)? {
+            state.revision = next;
+            if let Err(e) = self.rewrite(state, false) {
+                state.revision = current;
+                return Err(e);
+            }
+        }
+        state.revision = next;
+        self.loaded.set(true);
+        #[cfg(test)]
+        if !self.simulated_provider {
+            io::record(|s| {
+                s.saves += 1;
+                s.save_us += began.elapsed().as_micros() as u64;
+            });
+            if std::env::var_os("MAILROOM_SCALE_TRACE").is_some() {
+                eprintln!(
+                    "scale.save revision={} us={}",
+                    state.revision,
+                    began.elapsed().as_micros()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The revision on disk. Uses the recorded state while the file is the
+    /// one this store last read or wrote, and reads the file otherwise.
+    fn current_revision(&self) -> Result<u64, CensusError> {
+        let metadata = match fs::symlink_metadata(self.path()) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.persisted.replace(None);
+                return Ok(0);
+            }
+            Err(_) => return Err(CensusError::Storage),
+        };
+        if let Some(p) = self.persisted.borrow().as_ref() {
+            if metadata.is_file() && p.file == FileIdentity::of(&metadata) {
+                return Ok(p.revision);
+            }
+        }
+        Ok(self.read_state()?.revision)
+    }
+
+    /// Appends the changed fields as one synced frame when the census is
+    /// unchanged and the frames still fit their budget. Returns false when the
+    /// save needs a new base instead.
+    fn append_frame(&self, state: &AccountState, next: u64) -> Result<bool, CensusError> {
+        let mut persisted = self.persisted.borrow_mut();
+        let Some(p) = persisted.as_mut() else {
+            return Ok(false);
+        };
+        let Some(tail) = p.tail.as_mut() else {
+            return Ok(false);
+        };
+        if state.census != p.census {
+            return Ok(false);
+        }
+        self.validate(state, false)?;
+        let fields = frame_field_bytes(state)?;
+        let mut changes = std::collections::BTreeMap::new();
+        for ((name, now), before) in FRAME_FIELDS.iter().zip(&fields).zip(&p.fields) {
+            if now == before {
+                continue;
+            }
+            let parse = |bytes: &[u8]| {
+                serde_json::from_slice::<serde_json::Value>(bytes).map_err(|_| CensusError::Storage)
+            };
+            let (old, new) = (parse(before)?, parse(now)?);
+            let Some(change) = patch::diff(&old, &new) else {
+                continue;
+            };
+            let mut check = old;
+            patch::apply(&mut check, change.clone())?;
+            if check != new {
+                return Err(CensusError::Storage);
+            }
+            changes.insert(*name, change);
+        }
+        let plaintext = Zeroizing::new(
+            serde_json::to_vec(&serde_json::json!({"revision": next, "fields": changes}))
+                .map_err(|_| CensusError::Storage)?,
+        );
+        let cipher = Aes256Gcm::new_from_slice(self.keys.encryption.as_ref()).expect("AES-256 key");
+        let frame = log::encode_frame(
+            &cipher,
+            self.keys.account.as_str(),
+            &tail.base_tag,
+            tail.next_sequence,
+            &plaintext,
+        )?;
+        let frames = tail.valid_end - tail.base_len + frame.len() as u64;
+        if frames > (tail.base_len / 4).max(MIN_FRAME_BUDGET)
+            || tail.valid_end + frame.len() as u64 > MAX_FILE
+        {
+            return Ok(false);
+        }
+        let mut options = fs::OpenOptions::new();
+        options.write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options
+            .open(self.path())
             .map_err(|_| CensusError::Storage)?;
+        let metadata = file.metadata().map_err(|_| CensusError::Storage)?;
+        if !metadata.is_file() || FileIdentity::of(&metadata) != p.file {
+            return Err(CensusError::Storage);
+        }
+        file.set_len(tail.valid_end)
+            .and_then(|_| file.seek(std::io::SeekFrom::Start(tail.valid_end)))
+            .and_then(|_| file.write_all(&frame))
+            .map_err(|_| CensusError::Storage)?;
+        self.sync(&file).map_err(|_| CensusError::Storage)?;
+        #[cfg(test)]
+        if !self.simulated_provider {
+            io::record(|s| s.bytes_written += frame.len() as u64);
+        }
+        tail.valid_end += frame.len() as u64;
+        tail.next_sequence += 1;
+        p.file = FileIdentity::of(&file.metadata().map_err(|_| CensusError::Storage)?);
+        p.revision = next;
+        p.fields = fields;
+        Ok(true)
+    }
+
+    /// Writes the whole state as a new base and atomically replaces the file.
+    fn rewrite(&self, state: &AccountState, noclobber: bool) -> Result<(), CensusError> {
+        let revision = state.revision;
+        let (staged, tag) = self.stage_base(state)?;
+        let path = self.path();
+        if noclobber {
+            staged
+                .persist_noclobber(&path)
+                .map_err(|_| CensusError::Storage)?;
+        } else {
+            staged.persist(&path).map_err(|_| CensusError::Storage)?;
+        }
         fs::File::open(&self.directory)
             .and_then(|f| self.sync(&f))
             .map_err(|_| CensusError::Storage)?;
-        *state = next;
-        self.loaded.set(true);
+        let metadata = fs::symlink_metadata(&path).map_err(|_| CensusError::Storage)?;
+        let file = FileIdentity::of(&metadata);
+        self.persisted.replace(Some(Persisted {
+            revision,
+            file,
+            tail: Some(Tail {
+                base_tag: tag,
+                base_len: file.len,
+                valid_end: file.len,
+                next_sequence: 0,
+            }),
+            census: state.census.clone(),
+            fields: frame_field_bytes(state)?,
+        }));
         Ok(())
     }
 
     #[cfg(test)]
     fn stage(&self, census: &Census) -> Result<tempfile::NamedTempFile, CensusError> {
         let mut state = self.load_state()?;
-        state.census = census.clone();
+        state.census = census.clone().into();
         self.stage_state(&state)
     }
 
-    pub(crate) fn stage_state(
-        &self,
-        state: &AccountState,
-    ) -> Result<tempfile::NamedTempFile, CensusError> {
+    /// Checks the bounded journals and, when `census` is set, every census
+    /// record. A frame skips the census because it never changes it.
+    fn validate(&self, state: &AccountState, census: bool) -> Result<(), CensusError> {
         if state.census.account != self.keys.account {
             return Err(CensusError::AccountMismatch);
+        }
+        if state
+            .exports
+            .iter()
+            .any(|e| e.context_binding.as_ref().is_some_and(|b| b.len() > 128))
+            || state.exports.len() > crate::rules::workspace::HISTORY_LIMIT
+        {
+            return Err(CensusError::Storage);
         }
         state
             .proposals
@@ -478,26 +763,54 @@ impl EncryptedStore {
         }) {
             return Err(CensusError::Storage);
         }
-        if state
-            .census
-            .folders
-            .values()
-            .flat_map(|f| f.messages.values())
-            .any(|m| !m.delivery.validate())
-        {
-            return Err(CensusError::Storage);
+        if census {
+            if state
+                .census
+                .folders
+                .values()
+                .flat_map(|f| f.messages.values())
+                .any(|m| !m.delivery.validate())
+            {
+                return Err(CensusError::Storage);
+            }
+            state.census.acquisition.validate(&state.census.account)?;
         }
-        state.census.acquisition.validate(&state.census.account)?;
-        let snapshot =
-            Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
-        self.stage_snapshot(18, &snapshot)
+        Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn stage_state(
+        &self,
+        state: &AccountState,
+    ) -> Result<tempfile::NamedTempFile, CensusError> {
+        self.stage_base(state).map(|(staged, _)| staged)
+    }
+
+    fn stage_base(
+        &self,
+        state: &AccountState,
+    ) -> Result<(tempfile::NamedTempFile, [u8; 16]), CensusError> {
+        self.validate(state, true)?;
+        let snapshot =
+            Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
+        self.stage_versioned(18, &snapshot)
+    }
+
+    #[cfg(test)]
     fn stage_snapshot(
         &self,
         version: u32,
         snapshot: &str,
     ) -> Result<tempfile::NamedTempFile, CensusError> {
+        self.stage_versioned(version, snapshot)
+            .map(|(staged, _)| staged)
+    }
+
+    fn sqlite_image(
+        &self,
+        version: u32,
+        snapshot: &str,
+    ) -> Result<Zeroizing<Vec<u8>>, CensusError> {
         let db = memory_database()?;
         db.execute_batch("CREATE TABLE census (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL, account TEXT NOT NULL, snapshot TEXT NOT NULL)").map_err(|_| CensusError::Storage)?;
         db.execute(
@@ -509,6 +822,45 @@ impl EncryptedStore {
         if sqlite.len() as u64 > MAX_SNAPSHOT {
             return Err(CensusError::Storage);
         }
+        Ok(Zeroizing::new(sqlite.to_vec()))
+    }
+
+    fn stage_bytes(&self, bytes: &[u8]) -> Result<tempfile::NamedTempFile, CensusError> {
+        let mut temporary = tempfile::Builder::new()
+            .prefix(&format!(".{}.stage-", self.keys.account.as_str()))
+            .tempfile_in(&self.directory)
+            .map_err(|_| CensusError::Storage)?;
+        temporary
+            .write_all(bytes)
+            .map_err(|_| CensusError::Storage)?;
+        #[cfg(test)]
+        if !self.simulated_provider {
+            io::record(|s| s.bytes_written += bytes.len() as u64);
+        }
+        self.sync(temporary.as_file())
+            .map_err(|_| CensusError::Storage)?;
+        Ok(temporary)
+    }
+
+    fn stage_versioned(
+        &self,
+        version: u32,
+        snapshot: &str,
+    ) -> Result<(tempfile::NamedTempFile, [u8; 16]), CensusError> {
+        let sqlite = self.sqlite_image(version, snapshot)?;
+        let cipher = Aes256Gcm::new_from_slice(self.keys.encryption.as_ref()).expect("AES-256 key");
+        let (bytes, tag) = log::encode_base(&cipher, self.keys.account.as_str(), &sqlite)?;
+        Ok((self.stage_bytes(&bytes)?, tag))
+    }
+
+    /// Writes a version-1 file, the format older builds saved.
+    #[cfg(test)]
+    fn stage_v1(
+        &self,
+        version: u32,
+        snapshot: &str,
+    ) -> Result<tempfile::NamedTempFile, CensusError> {
+        let sqlite = self.sqlite_image(version, snapshot)?;
         let cipher = Aes256Gcm::new_from_slice(self.keys.encryption.as_ref()).expect("AES-256 key");
         let mut nonce = [0; 12];
         OsRng.fill_bytes(&mut nonce);
@@ -521,31 +873,14 @@ impl EncryptedStore {
                 },
             )
             .map_err(|_| CensusError::Storage)?;
-        let mut temporary = tempfile::Builder::new()
-            .prefix(&format!(".{}.stage-", self.keys.account.as_str()))
-            .tempfile_in(&self.directory)
-            .map_err(|_| CensusError::Storage)?;
-        temporary
-            .write_all(MAGIC)
-            .and_then(|_| temporary.write_all(&nonce))
-            .and_then(|_| temporary.write_all(&encrypted))
-            .map_err(|_| CensusError::Storage)?;
-        self.sync(temporary.as_file())
-            .map_err(|_| CensusError::Storage)?;
-        Ok(temporary)
+        self.stage_bytes(&[MAGIC, &nonce, &encrypted].concat())
     }
 
     pub(crate) fn install_snapshot(&self, state: &AccountState) -> Result<(), CensusError> {
-        self.stage_state(state)?
-            .persist_noclobber(self.path())
-            .map_err(|_| CensusError::Storage)?;
-        fs::File::open(&self.directory)
-            .and_then(|f| self.sync(&f))
-            .map_err(|_| CensusError::Storage)?;
-        Ok(())
+        self.rewrite(state, true)
     }
     pub fn load(&self) -> Result<Census, CensusError> {
-        Ok(self.load_state()?.census)
+        Ok(self.load_state()?.census.into_inner())
     }
 
     pub fn load_state(&self) -> Result<AccountState, CensusError> {
@@ -563,36 +898,75 @@ impl EncryptedStore {
     }
 
     fn read_state_versioned(&self) -> Result<(u32, AccountState), CensusError> {
+        #[cfg(test)]
+        let began = std::time::Instant::now();
+        let result = self.read_raw().map(|(version, mut state)| {
+            normalize_interrupted(&mut state);
+            (version, state)
+        });
+        #[cfg(test)]
+        if !self.simulated_provider {
+            let bytes = fs::metadata(self.path()).map(|m| m.len()).unwrap_or(0);
+            io::record(|s| {
+                s.reads += 1;
+                s.bytes_read += bytes;
+                s.read_us += began.elapsed().as_micros() as u64;
+            });
+        }
+        result
+    }
+
+    /// Reads the persisted state exactly, without the reopening adjustments,
+    /// and records it as the state this store last saw.
+    fn read_raw(&self) -> Result<(u32, AccountState), CensusError> {
         let path = self.path();
+        let mut file = fs::File::open(&path).map_err(|_| CensusError::Storage)?;
         let metadata = fs::symlink_metadata(&path).map_err(|_| CensusError::Storage)?;
+        let opened = file.metadata().map_err(|_| CensusError::Storage)?;
         if !metadata.is_file()
             || metadata.file_type().is_symlink()
-            || metadata.len() > MAX_SNAPSHOT + 128
+            || FileIdentity::of(&metadata) != FileIdentity::of(&opened)
+            || metadata.len() > MAX_FILE
         {
             return Err(CensusError::Storage);
         }
-        let mut bytes = Vec::new();
-        fs::File::open(path)
-            .and_then(|f| f.take(MAX_SNAPSHOT + 129).read_to_end(&mut bytes))
+        let mut bytes = Zeroizing::new(Vec::new());
+        (&mut file)
+            .take(MAX_FILE + 1)
+            .read_to_end(&mut bytes)
             .map_err(|_| CensusError::Storage)?;
-        if bytes.len() < MAGIC.len() + 12 + 16 {
-            return Err(CensusError::Authentication);
-        }
-        if !bytes.starts_with(MAGIC) {
-            return Err(CensusError::UnsupportedVersion);
+        if bytes.len() as u64 != metadata.len() {
+            return Err(CensusError::Storage);
         }
         let cipher = Aes256Gcm::new_from_slice(self.keys.encryption.as_ref()).expect("AES-256 key");
-        let plaintext = Zeroizing::new(
-            cipher
-                .decrypt(
-                    Nonce::from_slice(&bytes[MAGIC.len()..MAGIC.len() + 12]),
-                    Payload {
-                        msg: &bytes[MAGIC.len() + 12..],
-                        aad: &self.context(),
-                    },
-                )
-                .map_err(|_| CensusError::Authentication)?,
-        );
+        let (plaintext, decoded) = if bytes.starts_with(log::MAGIC_V2) {
+            let mut decoded = log::decode(&cipher, self.keys.account.as_str(), &bytes)?;
+            (std::mem::take(&mut decoded.sqlite), Some(decoded))
+        } else if bytes.starts_with(MAGIC) {
+            if bytes.len() as u64 > MAX_SNAPSHOT + 128 {
+                return Err(CensusError::Storage);
+            }
+            if bytes.len() < MAGIC.len() + 12 + 16 {
+                return Err(CensusError::Authentication);
+            }
+            let plaintext = Zeroizing::new(
+                cipher
+                    .decrypt(
+                        Nonce::from_slice(&bytes[MAGIC.len()..MAGIC.len() + 12]),
+                        Payload {
+                            msg: &bytes[MAGIC.len() + 12..],
+                            aad: &self.context(),
+                        },
+                    )
+                    .map_err(|_| CensusError::Authentication)?,
+            );
+            (plaintext, None)
+        } else if bytes.len() < MAGIC.len() + 12 + 16 {
+            return Err(CensusError::Authentication);
+        } else {
+            return Err(CensusError::UnsupportedVersion);
+        };
+        drop(bytes);
         let mut db = memory_database()?;
         db.deserialize_read_exact("main", plaintext.as_slice(), plaintext.len(), true)
             .map_err(|_| CensusError::Storage)?;
@@ -723,70 +1097,68 @@ impl EncryptedStore {
         if version < 9 && !state.proposals.history.is_empty() {
             return Err(CensusError::UnsupportedVersion);
         }
-        if state
-            .exports
-            .iter()
-            .any(|e| e.context_binding.as_ref().is_some_and(|b| b.len() > 128))
-        {
-            return Err(CensusError::Storage);
+        let frames = decoded.as_ref().map_or(&[][..], |d| &d.frames[..]);
+        if !frames.is_empty() && version != 18 {
+            return Err(CensusError::UnsupportedVersion);
         }
-        if state.exports.len() > crate::rules::workspace::HISTORY_LIMIT {
-            return Err(CensusError::Storage);
+        let mut patched = std::collections::BTreeMap::new();
+        for frame in frames {
+            let frame: Frame = serde_json::from_slice(frame).map_err(|_| CensusError::Storage)?;
+            if Some(frame.revision) != state.revision.checked_add(1) {
+                return Err(CensusError::Storage);
+            }
+            state.revision = frame.revision;
+            for (name, change) in frame.fields {
+                let value = match patched.entry(name) {
+                    std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(e) => {
+                        let value = frame_field_value(&state, e.key())?;
+                        e.insert(value)
+                    }
+                };
+                patch::apply(value, change)?;
+            }
         }
-        state
-            .proposals
-            .validate()
-            .map_err(|_| CensusError::Storage)?;
-        state.sieve.validate(&state.census.account)?;
-        state.sieve_transactions.validate(&state.census.account)?;
-        if state
-            .sieve_placement
-            .as_ref()
-            .is_some_and(|p| !p.valid_for(""))
-        {
-            return Err(CensusError::Storage);
+        for (name, value) in patched {
+            apply_frame_field(&mut state, &name, value)?;
         }
-        state.folder_provisioning.validate(&state.census.account)?;
-        state.protocol_backlog.validate(&state.census.account)?;
-        state.gmail_backlog.validate(&state.census.account)?;
-        if state
-            .synthetic_folders
-            .as_ref()
-            .is_some_and(|f| !f.validate())
-        {
-            return Err(CensusError::Storage);
-        }
-        if state.synthetic_sieve.as_ref().is_some_and(|f| {
-            !f.address.ip().is_loopback()
-                || f.epoch.is_empty()
-                || f.root.len() > 8192
-                || f.key.len() > 8192
-                || f.commands.len() > 4096
-                || !f.image.validate()
-        }) {
-            return Err(CensusError::Storage);
-        }
-        if state
-            .census
+        self.validate(&state, true)?;
+        self.persisted.replace(Some(Persisted {
+            revision: state.revision,
+            file: FileIdentity::of(&metadata),
+            tail: decoded.filter(|_| version == 18).map(|d| Tail {
+                base_tag: d.base_tag,
+                base_len: d.base_len,
+                valid_end: d.valid_end,
+                next_sequence: d.frames.len() as u64,
+            }),
+            census: state.census.clone(),
+            fields: frame_field_bytes(&state)?,
+        }));
+        Ok((version, state))
+    }
+}
+
+/// Reopening a store never implies a running worker or an unanswered intent.
+fn normalize_interrupted(state: &mut AccountState) {
+    state.sieve.interrupted();
+    state.sieve_transactions.interrupted();
+    state.folder_provisioning.interrupted();
+    state.protocol_backlog.interrupted();
+    state.gmail_backlog.interrupted();
+    // An interrupted scan can resume, but reopening cannot imply a running worker.
+    // Only a running census is touched, so an idle one stays shared with
+    // the store's record and compares in constant time.
+    let census = &state.census;
+    if census.acquisition.running()
+        || census.acquisition_state == super::ScanState::Running
+        || census
             .folders
             .values()
-            .flat_map(|f| f.messages.values())
-            .any(|m| !m.delivery.validate())
-        {
-            return Err(CensusError::Storage);
-        }
-        state.census.acquisition.validate(&state.census.account)?;
-        state.sieve.interrupted();
-        state.sieve_transactions.interrupted();
-        state.folder_provisioning.interrupted();
-        state.protocol_backlog.interrupted();
-        state.gmail_backlog.interrupted();
-        state.census.acquisition.interrupted();
-        let census = &mut state.census;
-        if census.account != self.keys.account {
-            return Err(CensusError::AccountMismatch);
-        }
-        // An interrupted scan can resume, but reopening cannot imply a running worker.
+            .any(|f| f.state == super::ScanState::Running)
+    {
+        let census = &mut *state.census;
+        census.acquisition.interrupted();
         if census.acquisition_state == super::ScanState::Running {
             census.acquisition_state = super::ScanState::Cancelled;
         }
@@ -795,30 +1167,29 @@ impl EncryptedStore {
                 folder.state = super::ScanState::Cancelled;
             }
         }
-        for run in &mut state.backlog {
-            if run.status == crate::backlog::Status::Running {
-                run.status = if run
-                    .outcomes
-                    .iter()
-                    .any(|o| matches!(o, crate::backlog::Outcome::Intent))
-                {
-                    crate::backlog::Status::Uncertain
-                } else {
-                    crate::backlog::Status::Prepared
-                };
-            }
+    }
+    for run in &mut state.backlog {
+        if run.status == crate::backlog::Status::Running {
+            run.status = if run
+                .outcomes
+                .iter()
+                .any(|o| matches!(o, crate::backlog::Outcome::Intent))
+            {
+                crate::backlog::Status::Uncertain
+            } else {
+                crate::backlog::Status::Prepared
+            };
         }
-        for send in &mut state.invoices.sends {
-            if send.status == crate::invoice::Status::Intent {
-                send.status = crate::invoice::Status::Uncertain;
-            }
+    }
+    for send in &mut state.invoices.sends {
+        if send.status == crate::invoice::Status::Intent {
+            send.status = crate::invoice::Status::Uncertain;
         }
-        for entry in &mut state.unsubscribe.history {
-            if entry.status == crate::unsubscribe::Status::Intent {
-                entry.status = crate::unsubscribe::Status::Uncertain;
-            }
+    }
+    for entry in &mut state.unsubscribe.history {
+        if entry.status == crate::unsubscribe::Status::Intent {
+            entry.status = crate::unsubscribe::Status::Uncertain;
         }
-        Ok((version, state))
     }
 }
 
@@ -1623,6 +1994,40 @@ fn memory_database() -> Result<Connection, CensusError> {
     Ok(db)
 }
 
+/// Per-thread counters of the product store's own I/O, for measurements.
+/// Simulated provider stores are not counted.
+#[cfg(test)]
+pub(crate) mod io {
+    use std::cell::Cell;
+    #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+    pub(crate) struct Stats {
+        pub saves: u64,
+        pub bytes_written: u64,
+        pub fsyncs: u64,
+        pub save_us: u64,
+        pub reads: u64,
+        pub bytes_read: u64,
+        pub read_us: u64,
+    }
+    thread_local! {
+        static STATS: Cell<Stats> = Cell::new(Stats::default());
+    }
+    pub(crate) fn record(change: impl FnOnce(&mut Stats)) {
+        STATS.with(|s| {
+            let mut v = s.get();
+            change(&mut v);
+            s.set(v);
+        });
+    }
+    pub(crate) fn take() -> Stats {
+        STATS.with(|s| s.take())
+    }
+}
+
 #[cfg(test)]
 #[path = "store/tests.rs"]
 mod durable_tests;
+
+#[cfg(test)]
+#[path = "store/journal_tests.rs"]
+mod journal_tests;

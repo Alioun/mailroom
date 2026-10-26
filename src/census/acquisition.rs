@@ -215,6 +215,11 @@ impl AcquisitionFacts {
             a.finished_at = Some(now());
         }
     }
+    pub(crate) fn running(&self) -> bool {
+        self.latest
+            .as_ref()
+            .is_some_and(|a| a.state == ScanState::Running)
+    }
     pub(crate) fn interrupted(&mut self) {
         if let Some(a) = &mut self.latest {
             if a.state == ScanState::Running {

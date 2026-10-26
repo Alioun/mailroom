@@ -1566,3 +1566,46 @@ fn absolute_slow_drip_and_cancellation_bound_write_validation() {
         );
     }
 }
+
+#[test]
+#[ignore = "personal-scale measurement; run explicitly"]
+fn scale_sieve_transaction() {
+    use crate::census::scale;
+    let root = tempfile::tempdir().unwrap();
+    let (repo, account, _fake) = install(root.path());
+    let setup = scale::inflate_store(&repo.store(&account).unwrap(), false);
+    scale::report("sieve.setup", setup, Default::default());
+    let store = repo.store(&account).unwrap();
+    let mut saved = store.load_state().unwrap();
+    scale::measure("sieve.record_placement", serde_json::json!({}), || {
+        repo.record_placement(&account, &store, &mut saved, Some(Placement::Block {}))
+    })
+    .unwrap();
+    let preview = scale::measure("sieve.preview", serde_json::json!({}), || {
+        repo.transaction_preview(
+            &account,
+            &store,
+            &saved,
+            Request::Deploy,
+            Cancellation::default(),
+        )
+    })
+    .unwrap();
+    let result = scale::measure("sieve.confirm", serde_json::json!({}), || {
+        repo.transaction_confirm(
+            &account,
+            &store,
+            &mut saved,
+            Request::Deploy,
+            &preview.receipt,
+            Cancellation::default(),
+            |_| Ok(()),
+        )
+    });
+    let t = saved.sieve_transactions.history.last().unwrap();
+    scale::report(
+        "sieve.result",
+        serde_json::json!({"result": format!("{result:?}"), "status": t.status, "steps": t.steps.len()}),
+        Default::default(),
+    );
+}

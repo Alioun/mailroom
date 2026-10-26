@@ -289,11 +289,18 @@ fn valid_run(r: &Run, account: &AccountId) -> bool {
         {
             return false;
         }
-        let forward_applied = |kind: StepKind, uid| {
+        let applied = |kind: StepKind| -> BTreeSet<_> {
             f.steps()
                 .iter()
                 .position(|s| s.kind == kind)
-                .is_some_and(|at| f.outcomes(at).get(uid).is_some_and(|o| o.applied()))
+                .map(|at| {
+                    f.outcomes(at)
+                        .into_iter()
+                        .filter(|(_, o)| o.applied())
+                        .map(|(uid, _)| uid)
+                        .collect()
+                })
+                .unwrap_or_default()
         };
         for (uid, m) in i.messages() {
             if f.intent()
@@ -310,7 +317,8 @@ fn valid_run(r: &Run, account: &AccountId) -> bool {
                 StepKind::RemoveLabel => StepKind::AddLabel,
                 _ => return false,
             };
-            if step.uids.iter().any(|u| !forward_applied(forward, u)) {
+            let applied = applied(forward);
+            if step.uids.iter().any(|u| !applied.contains(u)) {
                 return false;
             }
         }

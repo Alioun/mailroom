@@ -174,8 +174,8 @@ fn trusted_direct_fact_moves_only_distinct_messages_and_selected_exact_address()
     };
     let r = run(&state, &other);
     assert_eq!(row(&r, "alex@people.example").status, Status::Moved);
-    let m = other
-        .census
+    let census = &mut *other.census;
+    let m = census
         .folders
         .get_mut("INBOX")
         .unwrap()
@@ -183,7 +183,7 @@ fn trusted_direct_fact_moves_only_distinct_messages_and_selected_exact_address()
         .get_mut(&101)
         .unwrap();
     m.headers.message_id_hash = Some("source-distinct".into());
-    other.census.winddown_evidence.deliveries.insert(
+    census.winddown_evidence.deliveries.insert(
         message_identity(m),
         Delivery::Direct {
             address: "new@destination.example.test".into(),

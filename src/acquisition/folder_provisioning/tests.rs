@@ -1388,3 +1388,38 @@ pub(super) fn progress_evidence(state: &AccountState) {
         .unwrap();
     }
 }
+#[test]
+#[ignore = "personal-scale measurement; run explicitly"]
+fn scale_folder_provisioning() {
+    use crate::census::scale;
+    let root = tempfile::tempdir().unwrap();
+    let (repo, account, _fake) = install(root.path());
+    let setup = scale::inflate_store(&repo.store(&account).unwrap(), false);
+    let store = repo.store(&account).unwrap();
+    let mut saved = scale::measure("folder.load_state", setup, || store.load_state().unwrap());
+    scale::measure("folder.record_operation", serde_json::json!({}), || {
+        synthetic_operation(&repo, &account, &store, &mut saved)
+    });
+    let result = scale::measure("folder.run", serde_json::json!({}), || {
+        repo.folder_run(
+            &account,
+            &store,
+            &mut saved,
+            0,
+            Cancellation::default(),
+            &|_| Ok(()),
+        )
+    });
+    let op = &saved.folder_provisioning.history[0];
+    let planned = op
+        .plan
+        .entries
+        .iter()
+        .filter(|e| e.existing.is_none())
+        .count();
+    scale::report(
+        "folder.result",
+        serde_json::json!({"result": format!("{result:?}"), "status": op.status, "steps": op.steps.len(), "planned_creates": planned}),
+        Default::default(),
+    );
+}

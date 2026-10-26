@@ -53,6 +53,18 @@ impl Accounts {
         store: &EncryptedStore,
         saved: &AccountState,
     ) -> Result<Binding, AcquisitionError> {
+        let material = model::material(saved, store.keys()).map_err(failure)?;
+        self.backlog_binding_with(account, store, material)
+    }
+    /// The binding with an already computed material digest. The digest covers
+    /// the whole account state, census included, so a run computes it once and
+    /// reuses it while it changes only its own journal.
+    fn backlog_binding_with(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        material: String,
+    ) -> Result<Binding, AcquisitionError> {
         let s = self.backlog_source(account)?;
         if store.recovery_pending() {
             return Err(AcquisitionError::LifecyclePending);
@@ -62,7 +74,7 @@ impl Accounts {
             source: s.identity(),
             authority: self.sieve_authority(account, store)?,
             workspace: self.workspace_context(account, store)?.binding().into(),
-            material: model::material(saved, store.keys()).map_err(failure)?,
+            material,
         })
     }
     fn backlog_runtime(
@@ -70,15 +82,15 @@ impl Accounts {
         account: &Account,
         store: &EncryptedStore,
         saved: &AccountState,
+        b: &Binding,
     ) -> Result<RuntimeBinding, AcquisitionError> {
-        let b = self.backlog_binding(account, store, saved)?;
         Ok(RuntimeBinding {
-            account: b.account,
+            account: b.account.clone(),
             provider: account.provider,
             login: account.login.clone(),
-            source: b.source,
-            credential_key_recovery: b.authority,
-            workspace: b.workspace,
+            source: b.source.clone(),
+            credential_key_recovery: b.authority.clone(),
+            workspace: b.workspace.clone(),
             topology: store.keys().binding_for(
                 b"mailroom/imap-topology-profile/v1",
                 &serde_json::to_vec(&(
@@ -94,9 +106,10 @@ impl Accounts {
         account: &Account,
         store: &EncryptedStore,
         saved: &AccountState,
+        binding: &Binding,
         cancel: Cancellation,
     ) -> Result<(Inventory, Census), AcquisitionError> {
-        let runtime = self.backlog_runtime(account, store, saved)?;
+        let runtime = self.backlog_runtime(account, store, saved, binding)?;
         let source = self.backlog_source(account)?;
         let permit = source.runtime_permit(&runtime).map_err(failure)?;
         let password = self.password(account)?;
@@ -166,7 +179,7 @@ impl Accounts {
                 )
                 .map_err(failure)?;
         }
-        Ok((before, census))
+        Ok((before, census.into_inner()))
     }
     pub(crate) fn backlog_preview(
         &self,
@@ -176,7 +189,7 @@ impl Accounts {
         options: Options,
         cancel: Cancellation,
     ) -> Result<Preview, AcquisitionError> {
-        self.backlog_binding(account, store, saved)?;
+        let binding = self.backlog_binding(account, store, saved)?;
         if saved.protocol_backlog.runs.len() >= model::HISTORY
             || saved.protocol_backlog.runs.iter().any(|r| !r.finished())
         {
@@ -187,7 +200,7 @@ impl Accounts {
         if !saved_proof.download_available {
             return Err(invalid());
         }
-        let (topology, observed) = self.backlog_observe(account, store, saved, cancel)?;
+        let (topology, observed) = self.backlog_observe(account, store, saved, &binding, cancel)?;
         let input = &saved.workspace.as_ref().ok_or_else(invalid)?.input;
         let baseline = if input.baseline == proof::Baseline::Previous {
             Some(&saved.exports.last().ok_or_else(invalid)?.artifact)
@@ -270,7 +283,7 @@ impl Accounts {
         }
         let plan = SavedPlan {
             filing,
-            binding: self.backlog_binding(account, store, saved)?,
+            binding,
             topology,
             saved_proof: saved_proof.receipt.clone(),
             execution_proof: store.keys().binding_for(
@@ -347,10 +360,8 @@ impl Accounts {
             .iter()
             .position(|r| r.id == id)
             .ok_or_else(invalid)?;
-        if !model::same_binding(
-            &self.backlog_binding(account, store, saved)?,
-            &saved.protocol_backlog.runs[i].plan.binding,
-        ) {
+        let binding = self.backlog_binding(account, store, saved)?;
+        if !model::same_binding(&binding, &saved.protocol_backlog.runs[i].plan.binding) {
             saved.protocol_backlog.runs[i].status = Status::Conflict;
             save(store, saved)?;
             return Err(invalid());
@@ -386,7 +397,7 @@ impl Accounts {
             Status::Running
         };
         save(store, saved)?;
-        let runtime = self.backlog_runtime(account, store, saved)?;
+        let runtime = self.backlog_runtime(account, store, saved, &binding)?;
         let source = self.backlog_source(account)?;
         let permit = source.runtime_permit(&runtime).map_err(failure)?;
         let password = self.password(account)?;
@@ -417,7 +428,7 @@ impl Accounts {
                 }
                 fresh(saved).map_err(failure)?;
                 if !model::same_binding(
-                    &self.backlog_binding(account, store, saved)?,
+                    &self.backlog_binding_with(account, store, binding.material.clone())?,
                     &saved.protocol_backlog.runs[i].plan.binding,
                 ) {
                     return Err(invalid());
@@ -495,7 +506,7 @@ impl Accounts {
             return Err(invalid());
         }
         let before = serde_json::to_vec(&saved.protocol_backlog).map_err(failure)?;
-        let runtime = self.backlog_runtime(account, store, saved)?;
+        let runtime = self.backlog_runtime(account, store, saved, &binding)?;
         let permit = self
             .backlog_source(account)?
             .runtime_permit(&runtime)
@@ -559,7 +570,7 @@ impl Accounts {
         {
             return Err(invalid());
         }
-        let runtime = self.backlog_runtime(account, store, saved)?;
+        let runtime = self.backlog_runtime(account, store, saved, &binding)?;
         let permit = self
             .backlog_source(account)?
             .runtime_permit(&runtime)

@@ -57,7 +57,7 @@ This is a local web confirmation and browser download. It does not implement the
 - Credential update, explicit confirmed account forgetting, key rotation, lost-key recovery, interrupted-creation orphan cleanup and lifecycle UI. A missing key must continue to stop without replacement or deletion.
 - Full Gmail label topology and excluded-folder counts, including Spam counts needed by the later wind-down workflow.
 - Trusted authentication provenance and correlated passing DKIM signatures, including coverage of both unsubscribe headers. All such coverage stays unknown.
-- Scale verification and possible persistence changes beyond whole-snapshot rewrites, the 128 MiB snapshot cap and existing acquisition bounds. Report derivation currently holds the snapshot and derived data in memory.
+- Scale verification and possible persistence changes beyond whole-snapshot census rewrites, the 512 MiB snapshot cap and existing acquisition bounds. Report derivation currently holds the snapshot and derived data in memory.
 - Takeout import, further provider and credential adapters, and broader platform work remain separate units.
 - Wider agent integration and its native confirmation boundary. Clear exports currently support organisational domains only. Other values intentionally remain placeholders.
 - Unsubscribe logs remain absent. The [synthetic backlog workflow](backlog.md) now persists its own journal. Rules, invoice forwarding, address ledger, unsubscribe execution and full wind-down statuses remain later personal features.

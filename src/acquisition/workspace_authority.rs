@@ -313,7 +313,7 @@ mod tests {
         let mut sample: crate::engine::PreviewInput =
             serde_json::from_str(include_str!("../../examples/sample.json")).unwrap();
         sample.context.account = account.id.as_str().into();
-        state.census = crate::engine::synthetic_census(&sample).unwrap();
+        state.census = crate::engine::synthetic_census(&sample).unwrap().into();
         state.workspace = Some(workspace::Workspace {
             revision: 1,
             input: workspace::WorkspaceInput {

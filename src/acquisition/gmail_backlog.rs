@@ -107,6 +107,18 @@ impl Accounts {
         store: &EncryptedStore,
         saved: &AccountState,
     ) -> Result<Binding, AcquisitionError> {
+        let material = model::material(saved, store.keys()).map_err(failure)?;
+        self.gmail_binding_with(account, store, material)
+    }
+    /// The binding with an already computed material digest. The digest covers
+    /// the whole account state, census included, so a request computes it once
+    /// and a run reuses it while it changes only its own journal.
+    fn gmail_binding_with(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        material: String,
+    ) -> Result<Binding, AcquisitionError> {
         let s = self.label_source(account)?;
         if store.recovery_pending() {
             return Err(AcquisitionError::LifecyclePending);
@@ -116,7 +128,7 @@ impl Accounts {
             source: s.identity(),
             authority: self.sieve_authority(account, store)?,
             workspace: self.workspace_context(account, store)?.binding().into(),
-            material: model::material(saved, store.keys()).map_err(failure)?,
+            material,
         })
     }
     fn gmail_runtime(
@@ -124,15 +136,15 @@ impl Accounts {
         account: &Account,
         store: &EncryptedStore,
         saved: &AccountState,
+        b: &Binding,
     ) -> Result<RuntimeBinding, AcquisitionError> {
-        let b = self.gmail_binding(account, store, saved)?;
         Ok(RuntimeBinding {
-            account: b.account,
+            account: b.account.clone(),
             provider: account.provider,
             login: account.login.clone(),
-            source: b.source,
-            credential_key_recovery: b.authority,
-            workspace: b.workspace,
+            source: b.source.clone(),
+            credential_key_recovery: b.authority.clone(),
+            workspace: b.workspace.clone(),
             topology: store.keys().binding_for(
                 b"mailroom/gmail-topology-profile/v1",
                 &serde_json::to_vec(&(PROFILE, &saved.census.folder_roles)).map_err(failure)?,
@@ -142,14 +154,12 @@ impl Accounts {
     fn gmail_connect(
         &self,
         account: &Account,
-        store: &EncryptedStore,
-        saved: &AccountState,
+        runtime: &RuntimeBinding,
         cancel: Cancellation,
     ) -> Result<Connection, AcquisitionError> {
-        let runtime = self.gmail_runtime(account, store, saved)?;
         let permit = self
             .label_source(account)?
-            .runtime_permit(&runtime)
+            .runtime_permit(runtime)
             .map_err(failure)?;
         Connection::connect(&permit, &self.password(account)?, cancel).map_err(failure)
     }
@@ -158,19 +168,18 @@ impl Accounts {
     fn gmail_observe(
         &self,
         account: &Account,
-        store: &EncryptedStore,
         saved: &AccountState,
+        runtime: &RuntimeBinding,
         cancel: Cancellation,
     ) -> Result<(Inventory, Census), AcquisitionError> {
-        let mut connection = self.gmail_connect(account, store, saved, cancel.clone())?;
+        let mut connection = self.gmail_connect(account, runtime, cancel.clone())?;
         let before = connection.inventory().map_err(failure)?;
         let all = all_mail(&before).map_err(failure)?.name.clone();
         drop(connection);
         let read = crate::policy::read_permit(account.provider)?;
-        let runtime = self.gmail_runtime(account, store, saved)?;
         let permit = self
             .label_source(account)?
-            .runtime_permit(&runtime)
+            .runtime_permit(runtime)
             .map_err(failure)?;
         let mut reader = ReadOnlyImap::loopback_gmail(
             &permit,
@@ -231,11 +240,11 @@ impl Accounts {
         }
         census.acquisition_state = ScanState::Complete;
         drop(reader);
-        let mut connection = self.gmail_connect(account, store, saved, cancel)?;
+        let mut connection = self.gmail_connect(account, runtime, cancel)?;
         if connection.inventory().map_err(failure)? != before {
             return Err(invalid());
         }
-        Ok((before, census))
+        Ok((before, census.into_inner()))
     }
 
     pub(crate) fn gmail_preview(
@@ -246,7 +255,7 @@ impl Accounts {
         options: Options,
         cancel: Cancellation,
     ) -> Result<Preview, AcquisitionError> {
-        self.gmail_binding(account, store, saved)?;
+        let binding = self.gmail_binding(account, store, saved)?;
         if saved.gmail_backlog.runs.len() >= model::HISTORY
             || saved.gmail_backlog.runs.iter().any(|r| !r.finished())
         {
@@ -257,7 +266,8 @@ impl Accounts {
         if saved_proof.proof.gate == "blocked" {
             return Err(invalid());
         }
-        let (topology, observed) = self.gmail_observe(account, store, saved, cancel)?;
+        let runtime = self.gmail_runtime(account, store, saved, &binding)?;
+        let (topology, observed) = self.gmail_observe(account, saved, &runtime, cancel)?;
         let input = &saved.workspace.as_ref().ok_or_else(invalid)?.input;
         let baseline = if input.baseline == proof::Baseline::Previous {
             Some(&saved.exports.last().ok_or_else(invalid)?.artifact)
@@ -331,7 +341,7 @@ impl Accounts {
         }
         let plan = SavedPlan {
             filing,
-            binding: self.gmail_binding(account, store, saved)?,
+            binding,
             topology,
             saved_proof: saved_proof.receipt.clone(),
             execution_proof: store.keys().binding_for(
@@ -409,10 +419,8 @@ impl Accounts {
             .iter()
             .position(|r| r.id == id)
             .ok_or_else(invalid)?;
-        if !same_binding(
-            &self.gmail_binding(account, store, saved)?,
-            &saved.gmail_backlog.runs[i].plan.binding,
-        ) {
+        let binding = self.gmail_binding(account, store, saved)?;
+        if !same_binding(&binding, &saved.gmail_backlog.runs[i].plan.binding) {
             saved.gmail_backlog.runs[i].status = Status::Conflict;
             save(store, saved)?;
             return Err(invalid());
@@ -434,7 +442,7 @@ impl Accounts {
             Status::Running
         };
         save(store, saved)?;
-        let runtime = self.gmail_runtime(account, store, saved)?;
+        let runtime = self.gmail_runtime(account, store, saved, &binding)?;
         let source = self.label_source(account)?;
         let permit = source.runtime_permit(&runtime).map_err(failure)?;
         let password = self.password(account)?;
@@ -462,7 +470,7 @@ impl Accounts {
                     }
                     fresh(saved).map_err(failure)?;
                     if !same_binding(
-                        &self.gmail_binding(account, store, saved)?,
+                        &self.gmail_binding_with(account, store, binding.material.clone())?,
                         &saved.gmail_backlog.runs[i].plan.binding,
                     ) {
                         return Err(invalid());
@@ -545,7 +553,8 @@ impl Accounts {
             return Err(invalid());
         }
         let before = serde_json::to_vec(&saved.gmail_backlog).map_err(failure)?;
-        let mut connection = self.gmail_connect(account, store, saved, cancel)?;
+        let runtime = self.gmail_runtime(account, store, saved, &binding)?;
+        let mut connection = self.gmail_connect(account, &runtime, cancel)?;
         if !compatible(
             &saved.gmail_backlog.runs[i],
             &connection.inventory().map_err(failure)?,
@@ -604,7 +613,8 @@ impl Accounts {
         {
             return Err(invalid());
         }
-        let mut connection = self.gmail_connect(account, store, saved, cancel)?;
+        let runtime = self.gmail_runtime(account, store, saved, &binding)?;
+        let mut connection = self.gmail_connect(account, &runtime, cancel)?;
         let compatible = compatible(run, &connection.inventory().map_err(failure)?);
         let mut reverse = vec![];
         let mut conflicts = 0;

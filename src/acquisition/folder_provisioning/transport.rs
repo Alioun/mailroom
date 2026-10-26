@@ -15,6 +15,14 @@ use zeroize::Zeroizing;
 const RESPONSE: usize = 512 * 1024;
 const TOTAL: usize = 16 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(5);
+/// Each completed command extends the session's overall deadline by this much,
+/// on top of the initial operation budget. A plan of any size can finish while
+/// the server averages under 5 s per command; one that averages more is cut off
+/// after the initial budget runs out. Every single command still has its own
+/// deadline, and Cancel is checked while waiting on every byte. Basis: about
+/// 230 ms per command on the loopback fixture at low load, and cold TLS
+/// handshakes of up to 2 s under heavy load.
+const PROGRESS_CREDIT: Duration = Duration::from_secs(5);
 
 pub(in crate::acquisition) mod gmail_label;
 pub(in crate::acquisition) mod message_move;
@@ -96,6 +104,7 @@ pub(super) struct Session {
     end: Instant,
     command_end: Instant,
     timeout: Duration,
+    credit: Duration,
     received: usize,
     written: usize,
     remaining: usize,
@@ -217,6 +226,7 @@ impl Session {
             end,
             command_end,
             timeout,
+            credit: PROGRESS_CREDIT,
             received: 0,
             written: 0,
             remaining: RESPONSE,
@@ -241,6 +251,10 @@ impl Session {
         })?;
         s.capabilities()?;
         Ok(s)
+    }
+    /// Records a command's tagged completion, which earns the session more time.
+    fn completed(&mut self) {
+        self.end += self.credit;
     }
     fn check(&self) -> Result<(), Error> {
         let result = guard(&self.cancel, self.end.min(self.command_end));
@@ -519,6 +533,7 @@ impl Session {
             let row = self.row()?;
             let first = row.first().and_then(Token::atom).ok_or(Error::Protocol)?;
             if first == tag {
+                self.completed();
                 Self::status(&row, 1)?;
                 return Ok(rows);
             }
@@ -786,6 +801,50 @@ mod write_tests {
             }
             std::fs::write(root.path().join("release-write"), b"release").unwrap();
             drop(session);
+        }
+    }
+
+    /// The initial budget alone would end both sessions after 4 s. Completed
+    /// commands extend it, so a progressing session outlives it, and without
+    /// that credit the same session stops at the overall deadline.
+    #[test]
+    fn completed_commands_extend_the_overall_deadline_and_without_progress_credit_it_still_ends() {
+        let root = tempfile::tempdir().unwrap();
+        let (_repo, account, fake) =
+            crate::acquisition::folder_provisioning::tests::install(root.path());
+        let source = InstalledSource {
+            account: fake.source.account.clone(),
+            address: fake.source.address,
+            tls_name: fake.source.tls_name.clone(),
+            root: fake.source.root.clone(),
+            epoch: fake.source.epoch.clone(),
+            command_timeout: fake.source.command_timeout,
+            operation_timeout: Duration::from_secs(4),
+        };
+        let password = SecretValue::new(b"invented".to_vec());
+        for credited in [true, false] {
+            let started = Instant::now();
+            let mut session = Session::connect(
+                &source.permit(&account.id).unwrap(),
+                &account.login,
+                &password,
+                Cancellation::default(),
+            )
+            .unwrap();
+            if !credited {
+                session.credit = Duration::ZERO;
+                session.end = started + source.operation_timeout;
+            }
+            let mut result = Ok(());
+            while result.is_ok() && started.elapsed() < Duration::from_secs(9) {
+                result = session.observe().map(|_| ());
+            }
+            if credited {
+                result.unwrap();
+            } else {
+                assert_eq!(result.unwrap_err(), Error::Deadline);
+                assert!(started.elapsed() < Duration::from_secs(9));
+            }
         }
     }
 }

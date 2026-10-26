@@ -385,7 +385,7 @@ impl Accounts {
         let mut resources = Vec::new();
         for path in paths {
             if path.try_exists().map_err(|_| AcquisitionError::Storage)? {
-                let bytes = read_bounded(&path, 128 * 1024 * 1024 + 128)?;
+                let bytes = read_bounded(&path, crate::census::MAX_FILE)?;
                 use sha2::{Digest, Sha256};
                 resources.push(Resource {
                     path,

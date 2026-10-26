@@ -254,12 +254,13 @@ fn initialize(root: &Path, state: &mut AccountState, listener: &TcpListener) {
         .map(|(uid, id, labels, flags)| (*uid, record(*uid, *id, labels, flags)))
         .collect();
     let mut next = 100;
-    if root.join("gmail-large").exists() {
-        for n in 0..501u32 {
+    if let Ok(large) = std::fs::read_to_string(root.join("gmail-large")) {
+        let count: u32 = large.trim().parse().unwrap_or(501);
+        for n in 0..count {
             let uid = 1000 + 2 * n;
             all.insert(uid, record(uid, 5000 + u64::from(n), &["\\Inbox"], &[]));
         }
-        next = 3000;
+        next = (1000 + 2 * count + 1).max(3000);
     }
     state.census.folders.clear();
     state.census.folders.insert(
@@ -329,7 +330,7 @@ impl Fake {
             root: p.root.clone(),
             epoch: p.epoch.clone(),
             authority: AUTHORITY.into(),
-            command_timeout: Duration::from_secs(3),
+            command_timeout: crate::acquisition::fixture_peer::FIXTURE_COMMAND_TIMEOUT,
             operation_timeout: Duration::from_secs(120),
         };
         drop(store);

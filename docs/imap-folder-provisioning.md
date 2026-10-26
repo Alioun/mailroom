@@ -12,6 +12,8 @@ A purpose-separated receipt binds complete primary state, source, account, crede
 
 The primary journal uses internal schema 13. Schema 12 introduced folder journals and fake topology. Schema 13 binds export usability to the installed workspace context. Older exports load without a binding and are unusable. Older schemas reject injected bindings. Single and selected recovery accept schemas through 13 and retain read-only holds. The independent fake TLS identity, topology and safe command names live in the existing encrypted mailbox resource. Primary restoration cannot roll back later fake folder effects.
 
+Every command has its own deadline, at most 10 s. The session's overall deadline starts at the installed operation budget, at most 60 s, and each completed command extends it by 5 s. A plan of any size can finish while the server averages under 5 s per command, and Cancel is checked while waiting on every byte. The same session policy applies to the synthetic MOVE and Gmail label transports. Journal saves inside the session append small frames instead of rewriting the census.
+
 CREATE has no compare-and-swap. A server may recreate a parent removed after the last LIST, or subscribe a new mailbox itself. Complete observations reduce stale plans without excluding that race. The application sends no SUBSCRIBE, DELETE, RENAME, compensation, message mutation or Sieve deployment.
 
 Actual provider namespaces, permissions, quotas, name equivalence, implicit parent and subscription behavior, Sieve mapping and delivery remain unverified. Native confirmation and personal readiness remain outside this unit.

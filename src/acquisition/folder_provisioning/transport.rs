@@ -172,7 +172,11 @@ impl Session {
             &source.address,
             Duration::from_millis(250).min(end.saturating_duration_since(Instant::now())),
         )
-        .map_err(|_| Error::Connect)?;
+        .map_err(|_error| {
+            #[cfg(test)]
+            eprintln!("folder.transport.connect.io_kind={:?}", _error.kind());
+            Error::Connect
+        })?;
         tcp.set_nonblocking(true).map_err(|_| Error::Connect)?;
         tcp.set_nodelay(true).map_err(|_| Error::Connect)?;
         let timeout = source.command_timeout.min(Duration::from_secs(10));
@@ -231,7 +235,20 @@ impl Session {
         Ok(s)
     }
     fn check(&self) -> Result<(), Error> {
-        guard(&self.cancel, self.end.min(self.command_end))
+        let result = guard(&self.cancel, self.end.min(self.command_end));
+        #[cfg(test)]
+        if result == Err(Error::Deadline) {
+            eprintln!(
+                "folder.transport.deadline budget={} commands={}",
+                if self.end <= self.command_end {
+                    "operation"
+                } else {
+                    "command"
+                },
+                self.tag
+            );
+        }
+        result
     }
     fn byte(&mut self) -> Result<u8, Error> {
         self.check()?;
@@ -242,14 +259,22 @@ impl Session {
             self.check()?;
             let mut b = [0];
             match self.stream.read(&mut b) {
-                Ok(0) => return Err(Error::Eof),
+                Ok(0) => {
+                    #[cfg(test)]
+                    eprintln!("folder.transport.read.peer_closed");
+                    return Err(Error::Eof);
+                }
                 Ok(_) => {
                     self.remaining -= 1;
                     self.received += 1;
                     return Ok(b[0]);
                 }
                 Err(e) if pending(&e) => std::thread::sleep(POLL),
-                Err(_) => return Err(Error::Eof),
+                Err(_error) => {
+                    #[cfg(test)]
+                    eprintln!("folder.transport.read.io_kind={:?}", _error.kind());
+                    return Err(Error::Eof);
+                }
             }
         }
     }
@@ -453,7 +478,11 @@ impl Session {
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     std::thread::sleep(POLL);
                 }
-                Err(_) => return Err(Error::Eof),
+                Err(_error) => {
+                    #[cfg(test)]
+                    eprintln!("folder.transport.write.io_kind={:?}", _error.kind());
+                    return Err(Error::Eof);
+                }
             }
         }
         loop {
@@ -466,7 +495,11 @@ impl Session {
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     std::thread::sleep(POLL);
                 }
-                Err(_) => return Err(Error::Eof),
+                Err(_error) => {
+                    #[cfg(test)]
+                    eprintln!("folder.transport.flush.io_kind={:?}", _error.kind());
+                    return Err(Error::Eof);
+                }
             }
         }
         Ok(tag)

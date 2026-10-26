@@ -252,6 +252,8 @@ pub struct EncryptedStore {
     _lock: ExclusiveFileLock,
     loaded: Cell<bool>,
     account_lease: Option<ExclusiveFileLock>,
+    #[cfg(test)]
+    simulated_provider: bool,
 }
 
 impl EncryptedStore {
@@ -284,7 +286,25 @@ impl EncryptedStore {
             _lock: lock,
             loaded: Cell::new(false),
             account_lease: None,
+            #[cfg(test)]
+            simulated_provider: false,
         })
+    }
+    /// Marks a store that stands in for a remote server's own storage. Its
+    /// writes stay atomic against process death but skip device flushes, which
+    /// only guard against power loss, so a fake server answers at server speed
+    /// instead of flushing the disk twice per protocol command.
+    #[cfg(test)]
+    pub(crate) fn simulated_provider(mut self) -> Self {
+        self.simulated_provider = true;
+        self
+    }
+    fn sync(&self, file: &fs::File) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self.simulated_provider {
+            return Ok(());
+        }
+        file.sync_all()
     }
 
     pub(crate) fn lock_directory(
@@ -309,7 +329,11 @@ impl EncryptedStore {
         if !lock.metadata().map_err(|_| CensusError::Storage)?.is_file() {
             return Err(CensusError::Storage);
         }
-        ExclusiveFileLock::try_lock(lock).map_err(|_| CensusError::Storage)
+        ExclusiveFileLock::try_lock(lock).map_err(|_error| {
+            #[cfg(test)]
+            eprintln!("census.lock.error={_error:?}");
+            CensusError::Storage
+        })
     }
     pub(crate) fn retain_account_lease(&mut self, lease: ExclusiveFileLock) {
         self.account_lease = Some(lease);
@@ -391,7 +415,7 @@ impl EncryptedStore {
             .persist(self.path())
             .map_err(|_| CensusError::Storage)?;
         fs::File::open(&self.directory)
-            .and_then(|f| f.sync_all())
+            .and_then(|f| self.sync(&f))
             .map_err(|_| CensusError::Storage)?;
         *state = next;
         self.loaded.set(true);
@@ -489,9 +513,7 @@ impl EncryptedStore {
             .and_then(|_| temporary.write_all(&nonce))
             .and_then(|_| temporary.write_all(&encrypted))
             .map_err(|_| CensusError::Storage)?;
-        temporary
-            .as_file()
-            .sync_all()
+        self.sync(temporary.as_file())
             .map_err(|_| CensusError::Storage)?;
         Ok(temporary)
     }
@@ -501,7 +523,7 @@ impl EncryptedStore {
             .persist_noclobber(self.path())
             .map_err(|_| CensusError::Storage)?;
         fs::File::open(&self.directory)
-            .and_then(|f| f.sync_all())
+            .and_then(|f| self.sync(&f))
             .map_err(|_| CensusError::Storage)?;
         Ok(())
     }

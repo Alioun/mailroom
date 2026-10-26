@@ -135,6 +135,8 @@ impl Accounts {
         }
         store.save_state(&mut saved)?;
         result.map_err(|e| {
+            #[cfg(test)]
+            tests::report_failure(e);
             if e == Error::Cancelled {
                 AcquisitionError::Cancelled
             } else {

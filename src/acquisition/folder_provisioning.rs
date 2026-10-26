@@ -22,7 +22,9 @@ pub(crate) struct Preview {
 fn invalid() -> AcquisitionError {
     AcquisitionError::InvalidInput
 }
-fn protocol(_: Failure) -> AcquisitionError {
+fn protocol(_failure: Failure) -> AcquisitionError {
+    #[cfg(test)]
+    tests::report_failure(_failure);
     AcquisitionError::Protocol
 }
 fn save(store: &EncryptedStore, state: &mut AccountState) -> Result<(), AcquisitionError> {

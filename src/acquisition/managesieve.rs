@@ -158,7 +158,11 @@ impl Session {
             &source.address,
             Duration::from_millis(250).min(end.saturating_duration_since(Instant::now())),
         )
-        .map_err(|_| Error::Connect)?;
+        .map_err(|_error| {
+            #[cfg(test)]
+            eprintln!("sieve.transport.connect.io_kind={:?}", _error.kind());
+            Error::Connect
+        })?;
         tcp.set_nonblocking(true).map_err(|_| Error::Connect)?;
         let mut session = Self {
             source_identity: source.identity(),
@@ -255,7 +259,11 @@ impl Session {
                 Ok(0) => return Err(Error::Eof),
                 Ok(n) => offset += n,
                 Err(e) if pending(&e) => std::thread::sleep(POLL),
-                Err(_) => return Err(Error::Eof),
+                Err(_error) => {
+                    #[cfg(test)]
+                    eprintln!("sieve.transport.write.io_kind={:?}", _error.kind());
+                    return Err(Error::Eof);
+                }
             }
         }
         loop {
@@ -263,7 +271,11 @@ impl Session {
             match self.stream.flush() {
                 Ok(()) => return Ok(()),
                 Err(e) if pending(&e) => std::thread::sleep(POLL),
-                Err(_) => return Err(Error::Eof),
+                Err(_error) => {
+                    #[cfg(test)]
+                    eprintln!("sieve.transport.flush.io_kind={:?}", _error.kind());
+                    return Err(Error::Eof);
+                }
             }
         }
     }
@@ -277,14 +289,22 @@ impl Session {
             loop {
                 self.guard()?;
                 match self.stream.read(&mut self.buffer) {
-                    Ok(0) => return Err(Error::Eof),
+                    Ok(0) => {
+                        #[cfg(test)]
+                        eprintln!("sieve.transport.read.peer_closed");
+                        return Err(Error::Eof);
+                    }
                     Ok(n) => {
                         self.buffer.truncate(n);
                         self.cursor = 0;
                         break;
                     }
                     Err(e) if pending(&e) => std::thread::sleep(POLL),
-                    Err(_) => return Err(Error::Eof),
+                    Err(_error) => {
+                        #[cfg(test)]
+                        eprintln!("sieve.transport.read.io_kind={:?}", _error.kind());
+                        return Err(Error::Eof);
+                    }
                 }
             }
         }

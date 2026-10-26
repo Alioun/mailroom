@@ -13,6 +13,7 @@ use std::{
     thread,
 };
 
+const STOP_CHECK: Duration = Duration::from_millis(50);
 pub(crate) const PRIVATE_SCRIPT: &[u8] =
     b"# invented private bytes\r\n# OK\r\n# {17} \\\" \xc3\xa4\r\nkeep;\r\n\xff";
 pub(crate) struct Fake {
@@ -30,10 +31,51 @@ impl Drop for Fake {
         }
     }
 }
+/// Fixture side of one connection. Like a real server, it waits for the client
+/// to act or hang up instead of imposing its own idle deadline, so a slow but
+/// valid client is never cut off. Socket timeouts only let it notice `stop`.
+struct Peer {
+    tcp: std::net::TcpStream,
+    stop: Arc<AtomicBool>,
+}
+impl Peer {
+    fn wait<T>(
+        &mut self,
+        mut io: impl FnMut(&mut std::net::TcpStream) -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
+        loop {
+            match io(&mut self.tcp) {
+                Err(e) if pending(&e) && !self.stop.load(Ordering::Relaxed) => {}
+                result => return result,
+            }
+        }
+    }
+    /// Holds a stalled exchange open until the client gives up and closes.
+    fn until_closed(io: &mut impl Read) {
+        let _ = std::io::copy(io, &mut std::io::sink());
+    }
+}
+impl Read for Peer {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.wait(|tcp| tcp.read(buf))
+    }
+}
+impl Write for Peer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.wait(|tcp| tcp.write(buf))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.wait(|tcp| tcp.flush())
+    }
+}
 fn send(io: &mut impl Write, bytes: &[u8]) -> std::io::Result<()> {
     for fragment in bytes.chunks(if bytes.len() > 65536 { 4096 } else { 3 }) {
-        io.write_all(fragment)?;
-        io.flush()?;
+        io.write_all(fragment).inspect_err(|error| {
+            eprintln!("sieve.fixture.write.io_kind={:?}", error.kind());
+        })?;
+        io.flush().inspect_err(|error| {
+            eprintln!("sieve.fixture.flush.io_kind={:?}", error.kind());
+        })?;
     }
     Ok(())
 }
@@ -68,7 +110,7 @@ impl Fake {
         let observed_tls_hello = tls_hello.clone();
         let worker = thread::spawn(move || {
             while !stopping.load(Ordering::Relaxed) {
-                let (mut tcp, _) = match listener.accept() {
+                let (tcp, _) = match listener.accept() {
                     Ok(s) => s,
                     Err(e) if pending(&e) => {
                         thread::sleep(POLL);
@@ -81,10 +123,12 @@ impl Fake {
                     .and_then(|p| std::fs::read_to_string(p).ok())
                     .unwrap_or_else(|| mode.clone());
                 tcp.set_nonblocking(false).unwrap();
-                tcp.set_read_timeout(Some(Duration::from_millis(400)))
-                    .unwrap();
-                tcp.set_write_timeout(Some(Duration::from_millis(400)))
-                    .unwrap();
+                tcp.set_read_timeout(Some(STOP_CHECK)).unwrap();
+                tcp.set_write_timeout(Some(STOP_CHECK)).unwrap();
+                let mut tcp = Peer {
+                    tcp,
+                    stop: stopping.clone(),
+                };
                 let greeting = if mode == "no_starttls" {
                     b"\"IMPLEMENTATION\" \"fake\"\r\n\"SIEVE\" \"fileinto\"\r\n\"VERSION\" \"1.0\"\r\nOK\r\n".as_slice()
                 } else {
@@ -122,7 +166,7 @@ impl Fake {
                     if tcp.read_exact(&mut header).is_ok() && header[0] == 22 {
                         observed_tls_hello.store(true, Ordering::Relaxed);
                     }
-                    thread::sleep(Duration::from_millis(350));
+                    Peer::until_closed(&mut tcp);
                     continue;
                 }
                 let mut io = BufReader::new(StreamOwned::new(
@@ -148,8 +192,13 @@ impl Fake {
                 let mut cap_reads = 0;
                 loop {
                     let mut line = String::new();
-                    if !matches!(io.read_line(&mut line), Ok(n) if n > 0) {
-                        break;
+                    match io.read_line(&mut line) {
+                        Ok(n) if n > 0 => {}
+                        Ok(_) => break,
+                        Err(error) => {
+                            eprintln!("sieve.fixture.read.io_kind={:?}", error.kind());
+                            break;
+                        }
                     }
                     let kind = line.split_ascii_whitespace().next().unwrap().to_owned();
                     assert!(matches!(
@@ -184,7 +233,7 @@ impl Fake {
                             if mode == "auth_denied" {
                                 b"NO \"invented-secret-reflected-but-never-retained\"\r\n".to_vec()
                             } else if mode == "stall_auth" {
-                                thread::sleep(Duration::from_millis(350));
+                                Peer::until_closed(&mut io);
                                 break;
                             } else {
                                 b"OK\r\n".to_vec()
@@ -296,7 +345,7 @@ impl Fake {
                                     break;
                                 }
                                 "stall_read" => {
-                                    thread::sleep(Duration::from_millis(350));
+                                    Peer::until_closed(&mut io);
                                     break;
                                 }
                                 _ => {
@@ -436,7 +485,8 @@ fn absolute_drip_deadlines_and_cancellation_before_connect_tls_auth_read() {
         } else {
             assert!(result.is_err(), "{mode}");
         }
-        assert!(start.elapsed() < Duration::from_secs(1), "{mode}");
+        let elapsed = start.elapsed();
+        assert!(elapsed < Duration::from_secs(1), "{mode} {elapsed:?}");
     }
 }
 

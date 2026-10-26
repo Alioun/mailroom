@@ -640,3 +640,23 @@ fn successful_large_baseline_never_prunes_to_fit_recovery_resource_limit() {
     assert!(std::fs::read(store.path()).unwrap() == before);
     assert_eq!(store.load_state().unwrap().sieve, saved.sieve);
 }
+pub(super) fn report_failure(failure: Error) {
+    let code = match failure {
+        Error::Cancelled => "cancelled",
+        Error::Deadline => "deadline",
+        Error::Connect => "connect",
+        Error::Tls => "tls",
+        Error::Unsupported => "unsupported",
+        Error::Protocol => "protocol",
+        Error::Refused => "refused",
+        Error::CredentialUnavailable => "credential_unavailable",
+        Error::Quota => "quota",
+        Error::Missing => "missing",
+        Error::Referral => "referral",
+        Error::Bye => "bye",
+        Error::Eof => "eof",
+        Error::Limit => "limit",
+        Error::Unstable => "unstable",
+    };
+    eprintln!("sieve.discovery.failure={code}");
+}

@@ -11,12 +11,12 @@ use rustls::{
     pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
 };
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
@@ -26,8 +26,61 @@ use std::{
 pub(crate) struct Fixture {
     pub(crate) connections: Arc<AtomicUsize>,
     pub(in crate::acquisition) source: InstalledSource,
+    root: PathBuf,
+    busy: Busy,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
+}
+pub(super) fn report_failure(failure: Failure) {
+    eprintln!("folder.failure={}", failure_code(failure));
+}
+fn failure_code(failure: Failure) -> &'static str {
+    match failure {
+        Failure::Cancelled => "cancelled",
+        Failure::Deadline => "deadline",
+        Failure::Connect => "connect",
+        Failure::Tls => "tls",
+        Failure::Authentication => "authentication",
+        Failure::Unsupported => "unsupported",
+        Failure::UnsupportedName => "unsupported_name",
+        Failure::Protocol => "protocol",
+        Failure::No => "no",
+        Failure::Bad => "bad",
+        Failure::Bye => "bye",
+        Failure::Eof => "eof",
+        Failure::Quota => "quota",
+        Failure::UnknownCode => "unknown_code",
+        Failure::Limit => "limit",
+        Failure::Unstable => "unstable",
+    }
+}
+#[test]
+fn offline_diagnostics_preserve_folder_failure_contract() {
+    for failure in [
+        Failure::Cancelled,
+        Failure::Deadline,
+        Failure::Connect,
+        Failure::Tls,
+        Failure::Authentication,
+        Failure::Unsupported,
+        Failure::UnsupportedName,
+        Failure::Protocol,
+        Failure::No,
+        Failure::Bad,
+        Failure::Bye,
+        Failure::Eof,
+        Failure::Quota,
+        Failure::UnknownCode,
+        Failure::Limit,
+        Failure::Unstable,
+    ] {
+        assert_eq!(protocol(failure), AcquisitionError::Protocol);
+        assert!(
+            failure_code(failure)
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b == b'_')
+        );
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -35,11 +88,57 @@ impl Drop for Fixture {
         if let Some(w) = self.worker.take() {
             let _ = w.join();
         }
+        let mut busy = BUSY.lock().unwrap();
+        if busy
+            .get(&self.root)
+            .is_some_and(|b| Arc::ptr_eq(b, &self.busy))
+            && Arc::strong_count(&self.busy) == 2
+        {
+            busy.remove(&self.root);
+        }
     }
 }
+/// Connections each in-process fixture has accepted and not finished, by root.
+type Busy = Arc<(Mutex<usize>, Condvar)>;
+static BUSY: Mutex<BTreeMap<PathBuf, Busy>> = Mutex::new(BTreeMap::new());
+/// Marks one accepted connection as in progress until it is dropped, panics included.
+struct Serving<'a>(&'a Busy);
+impl<'a> Serving<'a> {
+    fn start(busy: &'a Busy) -> Self {
+        *busy.0.lock().unwrap() += 1;
+        Self(busy)
+    }
+}
+impl Drop for Serving<'_> {
+    fn drop(&mut self) {
+        *self.0.0.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        self.0.1.notify_all();
+    }
+}
+/// Provider state as a test observes it: after the fake server has finished
+/// every connection it accepted. A client that gave up at a deadline or a
+/// cancellation returns while the server may still be handling its last
+/// command, and that command belongs to what the test observes.
 fn provider(repo: &Accounts, id: &AccountId, root: &Path) -> (EncryptedStore, AccountState) {
-    let store = repo.fixture_sieve_store(id, root).unwrap();
-    let state = store.load_state().unwrap();
+    let busy = BUSY.lock().unwrap().get(root).cloned();
+    if let Some(busy) = busy {
+        let (count, idle) = &*busy;
+        let (count, wait) = idle
+            .wait_timeout_while(count.lock().unwrap(), Duration::from_secs(60), |n| *n > 0)
+            .unwrap();
+        assert!(!wait.timed_out(), "folder.fixture.settle_timeout");
+        drop(count);
+    }
+    served(repo, id, root)
+}
+/// Provider state as the fake server reads and writes it.
+fn served(repo: &Accounts, id: &AccountId, root: &Path) -> (EncryptedStore, AccountState) {
+    let store = repo
+        .fixture_sieve_store(id, root)
+        .unwrap_or_else(|error| panic!("folder.fixture.store_open={error:?}"));
+    let state = store
+        .load_state()
+        .unwrap_or_else(|error| panic!("folder.fixture.store_load={error:?}"));
     (store, state)
 }
 fn mailbox(name: &str) -> Mailbox {
@@ -125,13 +224,24 @@ impl Fixture {
         let connections = Arc::new(AtomicUsize::new(0));
         let accepted = connections.clone();
         let root = root.to_owned();
+        let busy = BUSY
+            .lock()
+            .unwrap()
+            .entry(root.clone())
+            .or_default()
+            .clone();
+        let serving = busy.clone();
+        let fixture_root = root.clone();
         let id = id.clone();
         let worker = thread::spawn(move || {
             while !stopping.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((tcp, _)) => {
+                        let _serving = Serving::start(&serving);
                         accepted.fetch_add(1, Ordering::SeqCst);
-                        let _ = serve(tcp, config.clone(), &repo, &id, &root);
+                        if let Err(error) = serve(tcp, config.clone(), &repo, &id, &root) {
+                            eprintln!("folder.fixture.serve.io_kind={:?}", error.kind());
+                        }
                     }
                     Err(_) => thread::sleep(Duration::from_millis(5)),
                 }
@@ -140,6 +250,8 @@ impl Fixture {
         Self {
             connections,
             source,
+            root: fixture_root,
+            busy,
             stop,
             worker: Some(worker),
         }
@@ -232,7 +344,7 @@ fn serve(
             return Err(std::io::ErrorKind::InvalidData.into());
         }
         {
-            let (store, mut state) = provider(repo, id, root);
+            let (store, mut state) = served(repo, id, root);
             let p = state.synthetic_folders.as_mut().unwrap();
             if p.commands.len() >= 4096 {
                 return Ok(());
@@ -279,7 +391,7 @@ fn serve(
                 if args != "\"\" \"*\"" {
                     return Err(std::io::ErrorKind::InvalidData.into());
                 }
-                let (_, state) = provider(repo, id, root);
+                let (_, state) = served(repo, id, root);
                 response.clear();
                 for m in &state
                     .synthetic_folders
@@ -339,7 +451,7 @@ fn serve(
                     }
                     .into_bytes();
                 } else {
-                    let (store, mut state) = provider(repo, id, root);
+                    let (store, mut state) = served(repo, id, root);
                     let p = state.synthetic_folders.as_mut().unwrap();
                     if p.inventory.get(&name.decoded).is_some() {
                         response = format!("{tag} NO already exists\r\n").into_bytes();
@@ -1121,6 +1233,9 @@ fn expired_certificate_and_stalled_tls_obey_verification_cancellation_and_deadli
         &SecretValue::new(b"invented".to_vec()),
         Cancellation::default(),
     );
+    if let Err(failure) = &result {
+        report_failure(*failure);
+    }
     assert!(matches!(result, Err(Failure::Tls)));
     let (_, state) = provider(&repo, &account.id, root.path());
     assert!(state.synthetic_folders.unwrap().commands.is_empty());

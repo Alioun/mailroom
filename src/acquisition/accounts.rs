@@ -158,7 +158,9 @@ impl Accounts {
         id: &AccountId,
         root: &std::path::Path,
     ) -> Result<EncryptedStore, AcquisitionError> {
-        self.open_store(&self.load(id)?, &root.join("mailboxes"), 1)
+        Ok(self
+            .open_store(&self.load(id)?, &root.join("mailboxes"), 1)?
+            .simulated_provider())
     }
     pub fn new(paths: AccountPaths, backend: Arc<dyn CredentialBackend>) -> Self {
         Self {

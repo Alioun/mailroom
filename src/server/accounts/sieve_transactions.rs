@@ -21,6 +21,14 @@ enum Action {
         receipt: String,
         confirmed: bool,
     },
+    RecordPlacement {
+        placement: Option<crate::rules::composition::Placement>,
+    },
+    RemovalPreview {},
+    RemovalConfirm {
+        receipt: String,
+        confirmed: bool,
+    },
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,7 +69,7 @@ pub(in crate::server) async fn handle(
     }
     if matches!(
         request.command,
-        Action::Confirm { .. } | Action::CompensationConfirm { .. }
+        Action::Confirm { .. } | Action::CompensationConfirm { .. } | Action::RemovalConfirm { .. }
     ) {
         let admission = match state.accounts.admission.try_lock() {
             Ok(g) => g,
@@ -121,7 +129,7 @@ fn execute(
     let mut saved = store.load_state()?;
     if matches!(request.command, Action::Status {}) {
         return Ok(
-            json!({"installed":true,"recovery_hold":store.recovery_pending(),"journal":saved.sieve_transactions,"limitations":acquisition::sieve_transaction::LIMITATIONS}),
+            json!({"installed":true,"recovery_hold":store.recovery_pending(),"placement":saved.sieve_placement,"journal":saved.sieve_transactions,"limitations":acquisition::sieve_transaction::LIMITATIONS}),
         );
     }
     if store.recovery_pending() {
@@ -142,44 +150,57 @@ fn execute(
     )
     .map_err(|_| AcquisitionError::InvalidInput)?;
     ledger_fresh(&saved, guard.as_ref()).map_err(|_| AcquisitionError::InvalidInput)?;
+    use acquisition::sieve_transaction::Request as R;
     match &request.command {
-        Action::Preview {} => Ok(json!(
-            repo.transaction_preview(&account, &store, &saved, None, cancel)?
-        )),
-        Action::CompensationPreview { operation } => Ok(json!(repo.transaction_preview(
+        Action::Preview {} => Ok(json!(repo.transaction_review(
             &account,
             &store,
             &saved,
-            Some(operation),
+            R::Deploy,
+            cancel
+        )?)),
+        Action::RemovalPreview {} => Ok(json!(repo.transaction_review(
+            &account,
+            &store,
+            &saved,
+            R::Removal,
+            cancel
+        )?)),
+        Action::CompensationPreview { operation } => Ok(json!(repo.transaction_review(
+            &account,
+            &store,
+            &saved,
+            R::Compensation(operation),
             cancel
         )?)),
         Action::Confirm { receipt, confirmed }
+        | Action::RemovalConfirm { receipt, confirmed }
         | Action::CompensationConfirm {
             receipt, confirmed, ..
         } => {
             if !confirmed {
                 return Err(AcquisitionError::InvalidInput);
             }
-            let original = if let Action::CompensationConfirm { operation, .. } = &request.command {
-                Some(operation.as_str())
-            } else {
-                None
+            let kind = match &request.command {
+                Action::CompensationConfirm { operation, .. } => R::Compensation(operation),
+                Action::RemovalConfirm { .. } => R::Removal,
+                _ => R::Deploy,
             };
-            repo.transaction_confirm(
-                &account,
-                &store,
-                &mut saved,
-                original,
-                receipt,
-                cancel,
-                |s| ledger_fresh(s, guard.as_ref()),
-            )?;
+            repo.transaction_confirm(&account, &store, &mut saved, kind, receipt, cancel, |s| {
+                ledger_fresh(s, guard.as_ref())
+            })?;
             Ok(json!({"journal":saved.sieve_transactions}))
+        }
+        Action::RecordPlacement { placement } => {
+            repo.record_placement(&account, &store, &mut saved, placement.clone())?;
+            Ok(
+                json!({"installed":true,"recovery_hold":false,"placement":saved.sieve_placement,"journal":saved.sieve_transactions,"limitations":acquisition::sieve_transaction::LIMITATIONS}),
+            )
         }
         Action::Reconcile { operation } => {
             repo.transaction_reconcile(&account, &store, &mut saved, operation, cancel)?;
             Ok(
-                json!({"installed":true,"recovery_hold":false,"journal":saved.sieve_transactions,"limitations":acquisition::sieve_transaction::LIMITATIONS}),
+                json!({"installed":true,"recovery_hold":false,"placement":saved.sieve_placement,"journal":saved.sieve_transactions,"limitations":acquisition::sieve_transaction::LIMITATIONS}),
             )
         }
         Action::Status {} | Action::Cancel {} => unreachable!(),
@@ -207,6 +228,9 @@ async fn absent_write_installation_denies_every_action_without_repository_access
             "reconcile",
             "compensation_preview",
             "compensation_confirm",
+            "record_placement",
+            "removal_preview",
+            "removal_confirm",
         ] {
             let response = super::super::router(state.clone())
                 .oneshot(

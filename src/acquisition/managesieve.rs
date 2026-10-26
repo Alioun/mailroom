@@ -640,13 +640,13 @@ impl Session {
     pub(super) fn have_space(
         &mut self,
         permit: &SieveWritePermit<'_>,
+        name: &str,
         bytes: usize,
     ) -> Result<(), Error> {
         self.write_authorized(permit)?;
-        if bytes > SCRIPT {
+        if bytes > SCRIPT || !crate::census::sieve::valid_script_name(name) {
             return Err(Error::Limit);
         }
-        let name = &permit.ownership.target;
         let command = format!("HAVESPACE {{{}+}}\r\n{} {}\r\n", name.len(), name, bytes);
         self.command(command.as_bytes(), RESPONSE)?;
         self.status_only()
@@ -654,13 +654,13 @@ impl Session {
     pub(super) fn put_script(
         &mut self,
         permit: &SieveWritePermit<'_>,
+        name: &str,
         bytes: &[u8],
     ) -> Result<(), Error> {
         self.write_authorized(permit)?;
-        if bytes.len() > SCRIPT {
+        if bytes.len() > SCRIPT || !crate::census::sieve::valid_script_name(name) {
             return Err(Error::Limit);
         }
-        let name = &permit.ownership.target;
         let command = Zeroizing::new(
             [
                 format!(

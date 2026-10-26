@@ -74,7 +74,9 @@ fn selected_recovery_preserves_transaction_journal_and_cannot_resume_effects() {
                 &restored,
                 &store,
                 &saved,
-                Some(&original.sieve_transactions.history[0].id),
+                crate::acquisition::sieve_transaction::Request::Compensation(
+                    &original.sieve_transactions.history[0].id
+                ),
                 crate::acquisition::Cancellation::default()
             )
             .is_err()
@@ -103,7 +105,7 @@ fn schema_ten_protocol_and_proposal_sieve_facts_round_trip_with_selected_recover
             .unwrap();
     }
     let (manifest, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
-    assert!(manifest.accounts.iter().all(|m| m.state_schema == 15));
+    assert!(manifest.accounts.iter().all(|m| m.state_schema == 16));
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();
@@ -598,7 +600,7 @@ fn selected_schema_fourteen_keeps_complete_delivery_state_and_restored_holds() {
         &ledger,
         root.path(),
     );
-    assert_eq!(manifest.accounts[0].state_schema, 15);
+    assert_eq!(manifest.accounts[0].state_schema, 16);
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();

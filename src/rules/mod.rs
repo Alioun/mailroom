@@ -1,3 +1,4 @@
+pub mod composition;
 pub mod config;
 pub(crate) mod program;
 pub mod proof;

@@ -186,6 +186,21 @@ fn months(as_of: i64) -> Result<Vec<String>, String> {
         .map(|m| format!("{:04}-{:02}", m.div_euclid(12), m.rem_euclid(12) + 1))
         .collect())
 }
+pub(super) fn view<'a>(artifact: &CompiledArtifact, m: &InputMessage<'a>) -> MessageView<'a> {
+    let installed = match &artifact.context().recipient_evidence {
+        super::EvidenceSource::SyntheticEnvelope { source } => Some(source),
+        _ => None,
+    };
+    let binding = crate::census::delivery::DeliveryEvidence::message_binding(
+        &m.id,
+        m.record.headers.message_id_hash.as_deref(),
+    );
+    MessageView {
+        headers: &m.record.headers,
+        envelope: m.record.delivery.resolve(installed, &binding).0,
+    }
+}
+
 fn execute(
     artifact: &CompiledArtifact,
     input: &[InputMessage<'_>],

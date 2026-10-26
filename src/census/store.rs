@@ -188,6 +188,8 @@ impl CensusKeys {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sieve_placement: Option<crate::rules::composition::Placement>,
     #[serde(default)]
     pub protocol_backlog: crate::backlog::protocol::Journal,
     #[serde(default)]
@@ -224,6 +226,7 @@ pub struct AccountState {
 impl AccountState {
     fn new(census: Census) -> Self {
         Self {
+            sieve_placement: None,
             protocol_backlog: Default::default(),
             folder_provisioning: Default::default(),
             synthetic_folders: None,
@@ -442,6 +445,13 @@ impl EncryptedStore {
             .map_err(|_| CensusError::Storage)?;
         state.sieve.validate(&state.census.account)?;
         state.sieve_transactions.validate(&state.census.account)?;
+        if state
+            .sieve_placement
+            .as_ref()
+            .is_some_and(|p| !p.valid_for(""))
+        {
+            return Err(CensusError::Storage);
+        }
         state.folder_provisioning.validate(&state.census.account)?;
         state.protocol_backlog.validate(&state.census.account)?;
         if state
@@ -473,7 +483,7 @@ impl EncryptedStore {
         state.census.acquisition.validate(&state.census.account)?;
         let snapshot =
             Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
-        self.stage_snapshot(15, &snapshot)
+        self.stage_snapshot(16, &snapshot)
     }
 
     fn stage_snapshot(
@@ -589,7 +599,7 @@ impl EncryptedStore {
         let snapshot = Zeroizing::new(snapshot);
         if !matches!(
             version,
-            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15
+            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16
         ) {
             return Err(CensusError::UnsupportedVersion);
         }
@@ -644,6 +654,17 @@ impl EncryptedStore {
         } else {
             serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?
         };
+        if version < 16
+            && (state.sieve_placement.is_some()
+                || state.sieve_transactions.history.iter().any(|t| {
+                    t.composition.is_some()
+                        || t.steps
+                            .iter()
+                            .any(|s| s.effect == super::sieve_transaction::Effect::UploadOwned)
+                }))
+        {
+            return Err(CensusError::UnsupportedVersion);
+        }
         if version < 13 && state.exports.iter().any(|e| e.context_binding.is_some()) {
             return Err(CensusError::UnsupportedVersion);
         }
@@ -682,6 +703,13 @@ impl EncryptedStore {
             .map_err(|_| CensusError::Storage)?;
         state.sieve.validate(&state.census.account)?;
         state.sieve_transactions.validate(&state.census.account)?;
+        if state
+            .sieve_placement
+            .as_ref()
+            .is_some_and(|p| !p.valid_for(""))
+        {
+            return Err(CensusError::Storage);
+        }
         state.folder_provisioning.validate(&state.census.account)?;
         state.protocol_backlog.validate(&state.census.account)?;
         if state
@@ -946,7 +974,7 @@ mod tests {
                 .unwrap()
                 .persist(store.path())
                 .unwrap();
-            assert_eq!(store.schema_version().unwrap(), 15);
+            assert_eq!(store.schema_version().unwrap(), 16);
             assert_eq!(
                 serde_json::to_value(store.load_state().unwrap()).unwrap(),
                 serde_json::to_value(loaded).unwrap()
@@ -978,6 +1006,7 @@ mod tests {
                 crate::acquisition::folder_provisioning::tests::install(root.path());
             let store = repo.store(&account).unwrap();
             let mut historical = serde_json::to_value(store.load_state().unwrap()).unwrap();
+            before_composition(&mut historical);
             for export in historical["exports"].as_array_mut().unwrap() {
                 export["semantics"] = serde_json::json!(format!("mailroom-sieve-subset-{version}"));
                 export["proof_semantics"] =
@@ -1003,7 +1032,7 @@ mod tests {
                 crate::rules::proof::Baseline::Previous;
             assert!(crate::rules::workspace::preview(&loaded, &context, store.keys()).is_err());
             store.save_state(&mut loaded).unwrap();
-            assert_eq!(store.schema_version().unwrap(), 15);
+            assert_eq!(store.schema_version().unwrap(), 16);
             assert_eq!(
                 serde_json::to_value(store.load_state().unwrap().exports).unwrap(),
                 expected,
@@ -1021,6 +1050,7 @@ mod tests {
         let saved = store.load_state().unwrap();
         assert!(!saved.exports.is_empty());
         let mut legacy = serde_json::to_value(&saved).unwrap();
+        before_composition(&mut legacy);
         for export in legacy["exports"].as_array_mut().unwrap() {
             export.as_object_mut().unwrap().remove("context_binding");
         }
@@ -1066,7 +1096,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 15);
+        assert_eq!(store.schema_version().unwrap(), 16);
         assert_eq!(
             serde_json::to_value(store.load_state().unwrap().exports).unwrap(),
             serde_json::to_value(&saved.exports).unwrap()
@@ -1116,7 +1146,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 15);
+        assert_eq!(store.schema_version().unwrap(), 16);
         assert!(store.load_state().unwrap().folder_provisioning == saved.folder_provisioning);
         let mut bad = saved.clone();
         bad.folder_provisioning.history[0].plan.entries[0]
@@ -1165,7 +1195,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 15);
+        assert_eq!(store.schema_version().unwrap(), 16);
         assert!(store.load_state().unwrap().sieve_transactions == state.sieve_transactions);
         let mut malformed = state.clone();
         malformed.sieve_transactions.history[0].after.bodies[1]
@@ -1173,6 +1203,67 @@ mod tests {
             .push(1);
         assert!(store.stage_state(&malformed).is_err());
         assert!(store.load_state().unwrap().sieve_transactions == state.sieve_transactions);
+    }
+
+    /// Schemas before 16 cannot carry a placement choice or composed transactions.
+    fn before_composition(state: &mut serde_json::Value) {
+        state.as_object_mut().unwrap().remove("sieve_placement");
+        state["sieve_transactions"] = serde_json::json!({"history": []});
+    }
+
+    #[test]
+    fn composition_needs_schema_sixteen_and_tampered_foreign_bytes_never_load() {
+        let root = tempfile::tempdir().unwrap();
+        let (repo, account, _fake) =
+            crate::acquisition::sieve_transaction::tests::install(root.path());
+        crate::acquisition::sieve_transaction::tests::commit_fixture_transaction(&repo, &account);
+        let store = repo.store(&account).unwrap();
+        let state = store.load_state().unwrap();
+        assert!(state.sieve_transactions.history[0].composition.is_some());
+        let mut placement_only = state.clone();
+        placement_only.sieve_transactions = Default::default();
+        let mut composition_only = state.clone();
+        composition_only.sieve_placement = None;
+        for version in [11, 15] {
+            for candidate in [&state, &placement_only, &composition_only] {
+                store
+                    .stage_snapshot(version, &serde_json::to_string(candidate).unwrap())
+                    .unwrap()
+                    .persist(store.path())
+                    .unwrap();
+                assert!(matches!(
+                    store.load_state(),
+                    Err(CensusError::UnsupportedVersion)
+                ));
+            }
+        }
+        let mut legacy = placement_only.clone();
+        legacy.sieve_placement = None;
+        store
+            .stage_snapshot(15, &serde_json::to_string(&legacy).unwrap())
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        assert_eq!(store.schema_version().unwrap(), 15);
+        let mut reopened = store.load_state().unwrap();
+        assert!(reopened.sieve_placement.is_none());
+        store.save_state(&mut reopened).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 16);
+        let mut tampered = state.clone();
+        let t = &mut tampered.sieve_transactions.history[0];
+        for image in std::iter::once(&mut t.after).chain(t.steps.iter_mut().map(|s| &mut s.after)) {
+            let host = image
+                .bodies
+                .iter_mut()
+                .find(|b| b.name == "Open-Xchange")
+                .unwrap();
+            let bytes = String::from_utf8(host.bytes.clone())
+                .unwrap()
+                .replace("Reisen", "Moved")
+                .into_bytes();
+            *host = super::super::sieve::Body::new(host.name.clone(), bytes);
+        }
+        assert!(store.stage_state(&tampered).is_err());
     }
 
     #[test]
@@ -1213,7 +1304,7 @@ mod tests {
             assert!(state.exports.is_empty());
             assert!(state.proposals.history.is_empty());
             store.save_state(&mut state).unwrap();
-            assert_eq!(store.schema_version().unwrap(), 15);
+            assert_eq!(store.schema_version().unwrap(), 16);
             assert_eq!(store.load().unwrap().acquisition, Default::default());
         }
     }

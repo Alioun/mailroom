@@ -12,6 +12,7 @@ use rustls::{
     ServerConfig, ServerConnection, StreamOwned,
     pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
 };
+use sha2::{Digest, Sha256};
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
@@ -23,6 +24,8 @@ use std::{
     thread,
     time::Duration,
 };
+
+pub(crate) const OX_HOST: &[u8] = b"require [\"fileinto\"];\r\n# OK\r\n# \xc3\xa4 {9} <img src='https://remote.invalid/x'>\r\n## Flag: |UniqueId:0|Rulename: Travel\r\nif address :is \"from\" \"robot@travel.example\"\r\n{\r\n    fileinto \"Reisen\";\r\n    stop;\r\n}\r\n";
 
 pub(crate) struct Fixture {
     pub(in crate::acquisition) source: InstalledSource,
@@ -74,8 +77,28 @@ impl Fixture {
                 caps.insert(k.into(), v.into());
             }
             state.synthetic_sieve = Some(FakeProvider {
-                address: listener.local_addr().unwrap(), root: cert.der().to_vec(), key: key.serialize_der(), epoch: format!("fixture-owned-{:032x}", rand::random::<u128>()),
-                image: Image { capabilities: caps, names: vec![crate::census::sieve::ScriptName { name:"Open-Xchange".into(), active },crate::census::sieve::ScriptName { name:"foreign\"\\ä".into(),active:false }], bodies: vec![Body::new("Open-Xchange".into(), b"keep;\r\n# OK\r\n# \xc3\xa4 {9} <img src='https://remote.invalid/x'>\r\n".to_vec()), Body::new("foreign\"\\ä".into(), b"keep;\r\n# untouched\r\n".to_vec())] }, commands: vec![],
+                address: listener.local_addr().unwrap(),
+                root: cert.der().to_vec(),
+                key: key.serialize_der(),
+                epoch: format!("fixture-owned-{:032x}", rand::random::<u128>()),
+                image: Image {
+                    capabilities: caps,
+                    names: vec![
+                        crate::census::sieve::ScriptName {
+                            name: "Open-Xchange".into(),
+                            active,
+                        },
+                        crate::census::sieve::ScriptName {
+                            name: "foreign\"\\ä".into(),
+                            active: false,
+                        },
+                    ],
+                    bodies: vec![
+                        Body::new("Open-Xchange".into(), OX_HOST.to_vec()),
+                        Body::new("foreign\"\\ä".into(), b"keep;\r\n# untouched\r\n".to_vec()),
+                    ],
+                },
+                commands: vec![],
             });
             store.save_state(&mut state).unwrap();
         }
@@ -328,13 +351,18 @@ fn serve(
                 } else {
                     let (store, mut state) = provider(repo, id, root);
                     let p = state.synthetic_sieve.as_mut().unwrap();
-                    let body = p
-                        .image
-                        .bodies
-                        .iter_mut()
-                        .find(|b| b.name.as_bytes() == name)
-                        .ok_or(std::io::ErrorKind::InvalidData)?;
-                    *body = Body::new(body.name.clone(), bytes);
+                    let name =
+                        String::from_utf8(name).map_err(|_| std::io::ErrorKind::InvalidData)?;
+                    p.image.bodies.retain(|b| b.name != name);
+                    p.image.bodies.push(Body::new(name.clone(), bytes));
+                    if !p.image.names.iter().any(|n| n.name == name) {
+                        p.image.names.push(crate::census::sieve::ScriptName {
+                            name,
+                            active: false,
+                        });
+                    }
+                    p.image.names.sort_by(|a, b| a.name.cmp(&b.name));
+                    p.image.bodies.sort_by(|a, b| a.name.cmp(&b.name));
                     store.save_state(&mut state).unwrap();
                     drop(store);
                     boundary("provider_upload_effect");
@@ -391,7 +419,7 @@ fn setup(root: &Path, active: bool) -> (Accounts, Account, Fixture) {
 pub(crate) fn install(root: &Path) -> (Accounts, Account, Fixture) {
     let mut repo = persistent_test_accounts(root);
     if repo.list().unwrap().is_empty() {
-        let (repo, account, fake) = setup(root, false);
+        let (repo, account, fake) = setup(root, true);
         let store = repo.store(&account).unwrap();
         let mut state = store.load_state().unwrap();
         super::super::sieve_discovery::tests::seed(&mut state, store.keys());
@@ -401,7 +429,7 @@ pub(crate) fn install(root: &Path) -> (Accounts, Account, Fixture) {
         (repo, account, fake)
     } else {
         let account = repo.list().unwrap().remove(0);
-        let fake = Fixture::start(root, &account.id, false);
+        let fake = Fixture::start(root, &account.id, true);
         fake.install(&mut repo, &account.id);
         (repo, account, fake)
     }
@@ -474,7 +502,11 @@ pub(crate) fn later_provider_change(repo: &Accounts, account: &Account) {
         .transaction_session(account, Cancellation::default())
         .unwrap();
     session
-        .put_script(&permit, b"keep;\r\n# independent post-capture editor\r\n")
+        .put_script(
+            &permit,
+            "Open-Xchange",
+            b"keep;\r\n# independent post-capture editor\r\n",
+        )
         .unwrap();
     session.logout().unwrap();
 }
@@ -515,6 +547,19 @@ fn transaction_fixture_worker() {
     let repo = persistent_test_accounts(root);
     let account = repo.list().unwrap().remove(0);
     let mode = std::env::var("MAILROOM_SIEVE_WORKER_ACTION").unwrap_or_default();
+    if [
+        "foreign_edit",
+        "foreign_unparseable",
+        "foreign_unsafe",
+        "foreign_stop",
+        "marker_damaged",
+        "inactive_host",
+        "owned_collision",
+    ]
+    .contains(&mode.as_str())
+    {
+        return worker(root, &mode);
+    }
     let (external, mut provider_state) = provider(&repo, &account.id, root);
     let p = provider_state.synthetic_sieve.as_mut().unwrap();
     match mode.as_str() {
@@ -557,7 +602,7 @@ fn transaction_fixture_worker() {
     for field in ["revision", "sieve_transactions", "sieve"] {
         unrelated.as_object_mut().unwrap().remove(field);
     }
-    let value = serde_json::json!({"account":account.id,"schema":store.schema_version().unwrap(),"revision":saved.revision,"unrelated":image_digest(&unrelated),"external_unrelated":independent_effects(root, &store),"provider_image":image_digest(&p.image),"provider_target":p.image.body("Open-Xchange").map(|b|&b.sha256),"active":p.image.active(),"commands":p.commands,"transactions":saved.sieve_transactions.history.iter().map(|t|serde_json::json!({"id":t.id,"status":t.status,"steps":t.steps.iter().map(|s|serde_json::json!({"effect":s.effect,"outcome":s.outcome,"acknowledgment":s.acknowledgment})).collect::<Vec<_>>()})).collect::<Vec<_>>()});
+    let value = serde_json::json!({"account":account.id,"schema":store.schema_version().unwrap(),"revision":saved.revision,"unrelated":image_digest(&unrelated),"external_unrelated":independent_effects(root, &store),"provider_image":image_digest(&p.image),"provider_target":p.image.body("Open-Xchange").map(|b|&b.sha256),"provider_foreign":crate::census::sieve_transaction::foreign(&p.image, "Open-Xchange").map(|f| image_digest(&f)),"provider_owned":p.image.body("mailroom").map(|b|&b.sha256),"names":p.image.names.iter().map(|n|&n.name).collect::<Vec<_>>(),"active":p.image.active(),"commands":p.commands,"placement":saved.sieve_placement,"transactions":saved.sieve_transactions.history.iter().map(|t|serde_json::json!({"id":t.id,"status":t.status,"purpose":t.composition.as_ref().map(|c|c.purpose),"steps":t.steps.iter().map(|s|serde_json::json!({"effect":s.effect,"outcome":s.outcome,"acknowledgment":s.acknowledgment})).collect::<Vec<_>>()})).collect::<Vec<_>>()});
     std::fs::write(
         root.join("transaction-observations.json"),
         serde_json::to_vec(&value).unwrap(),
@@ -568,14 +613,22 @@ fn transaction_fixture_worker() {
 pub(crate) fn commit_fixture_transaction(repo: &Accounts, account: &Account) {
     let store = repo.store(account).unwrap();
     let mut saved = store.load_state().unwrap();
+    repo.record_placement(account, &store, &mut saved, Some(Placement::Block {}))
+        .unwrap();
     let preview = repo
-        .transaction_preview(account, &store, &saved, None, Cancellation::default())
+        .transaction_preview(
+            account,
+            &store,
+            &saved,
+            Request::Deploy,
+            Cancellation::default(),
+        )
         .unwrap();
     repo.transaction_confirm(
         account,
         &store,
         &mut saved,
-        None,
+        Request::Deploy,
         &preview.receipt,
         Cancellation::default(),
         |_| Ok(()),
@@ -583,15 +636,124 @@ pub(crate) fn commit_fixture_transaction(repo: &Accounts, account: &Account) {
     .unwrap();
 }
 
+fn placed(root: &Path, placement: Option<Placement>) -> (Accounts, Account, Fixture) {
+    let (repo, account, fixture) = setup(root, true);
+    let store = repo.store(&account).unwrap();
+    let mut state = store.load_state().unwrap();
+    super::super::sieve_discovery::tests::seed(&mut state, store.keys());
+    store.save_state(&mut state).unwrap();
+    repo.record_placement(&account, &store, &mut state, placement)
+        .unwrap();
+    (repo, account, fixture)
+}
+fn review(repo: &Accounts, account: &Account, request: Request<'_>) -> Previewed {
+    let store = repo.store(account).unwrap();
+    let state = store.load_state().unwrap();
+    repo.transaction_review(account, &store, &state, request, Cancellation::default())
+        .unwrap()
+}
+fn confirm(repo: &Accounts, account: &Account, request: Request<'_>, receipt: &str) -> bool {
+    let store = repo.store(account).unwrap();
+    let mut state = store.load_state().unwrap();
+    repo.transaction_confirm(
+        account,
+        &store,
+        &mut state,
+        request,
+        receipt,
+        Cancellation::default(),
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+fn ready(previewed: Previewed) -> Preview {
+    match previewed {
+        Previewed::Ready(p) => *p,
+        Previewed::Refused { refusal, .. } => panic!("refused: {refusal:?}"),
+    }
+}
+fn refusal(previewed: Previewed) -> Refusal {
+    match previewed {
+        Previewed::Refused { refusal, .. } => refusal,
+        Previewed::Ready(_) => panic!("composition must refuse"),
+    }
+}
+fn image(repo: &Accounts, account: &Account, root: &Path) -> FakeProvider {
+    provider(repo, &account.id, root).1.synthetic_sieve.unwrap()
+}
+fn writes(p: &FakeProvider) -> usize {
+    p.commands
+        .iter()
+        .filter(|c| *c == "PUTSCRIPT" || *c == "SETACTIVE")
+        .count()
+}
+fn worker(root: &Path, mode: &str) {
+    let repo = persistent_test_accounts(root);
+    let account = repo.list().unwrap().remove(0);
+    let (store, mut state) = provider(&repo, &account.id, root);
+    let p = state.synthetic_sieve.as_mut().unwrap();
+    let host = p
+        .image
+        .bodies
+        .iter_mut()
+        .find(|b| b.name == "Open-Xchange")
+        .unwrap();
+    let mut bytes = host.bytes.clone();
+    match mode {
+        "foreign_edit" => bytes.extend_from_slice(b"## Flag: |UniqueId:7|Rulename: Later owner rule\r\nif header :is \"subject\" \"invented later\"\r\n{\r\n    fileinto \"Later\";\r\n    stop;\r\n}\r\n"),
+        "foreign_unparseable" => bytes.extend_from_slice(b"if header :is \"subject\" {\r\n"),
+        "foreign_unsafe" => bytes.extend_from_slice(b"## Flag: |UniqueId:8|Rulename: Keep going\r\nif exists \"list-id\"\r\n{\r\n    fileinto \"Lists\";\r\n}\r\n"),
+        "foreign_stop" => bytes.extend_from_slice(b"stop;\r\n"),
+        "marker_damaged" => bytes.extend_from_slice(b"# mailroom:block-begin v2\r\n"),
+        "inactive_host" => {
+            for n in &mut p.image.names {
+                n.active = false;
+            }
+        }
+        "owned_collision" => {
+            p.image.names.push(crate::census::sieve::ScriptName {
+                name: "mailroom".into(),
+                active: false,
+            });
+            p.image
+                .bodies
+                .push(Body::new("mailroom".into(), b"keep;\r\n".to_vec()));
+            p.image.names.sort_by(|a, b| a.name.cmp(&b.name));
+            p.image.bodies.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        "missing_host" => {
+            p.image.names.retain(|n| n.name != "Open-Xchange");
+            p.image.bodies.retain(|b| b.name != "Open-Xchange");
+        }
+        _ => unreachable!(),
+    }
+    if let Some(host) = p.image.bodies.iter_mut().find(|b| b.name == "Open-Xchange") {
+        *host = Body::new(host.name.clone(), bytes);
+    }
+    store.save_state(&mut state).unwrap();
+}
+fn include() -> Placement {
+    Placement::Include {
+        script: "mailroom".into(),
+    }
+}
+
 #[test]
-fn state_proof_source_password_and_key_changes_invalidate_exact_approval_without_effects() {
-    for change in ["state", "pin", "source", "password", "key"] {
+fn state_proof_placement_source_password_and_key_changes_invalidate_exact_approval_without_effects()
+{
+    for change in ["state", "pin", "placement", "source", "password", "key"] {
         let root = tempfile::tempdir().unwrap();
-        let (mut repo, mut account, mut fake) = install(root.path());
+        let (mut repo, mut account, mut fake) = placed(root.path(), Some(Placement::Block {}));
         let store = repo.store(&account).unwrap();
         let mut state = store.load_state().unwrap();
         let preview = repo
-            .transaction_preview(&account, &store, &state, None, Cancellation::default())
+            .transaction_preview(
+                &account,
+                &store,
+                &state,
+                Request::Deploy,
+                Cancellation::default(),
+            )
             .unwrap();
         match change {
             "state" => {
@@ -605,6 +767,9 @@ fn state_proof_source_password_and_key_changes_invalidate_exact_approval_without
                     };
                 store.save_state(&mut state).unwrap();
             }
+            "placement" => repo
+                .record_placement(&account, &store, &mut state, Some(include()))
+                .unwrap(),
             "source" => {
                 fake.source.epoch.push_str("-changed");
                 fake.install(&mut repo, &account.id);
@@ -622,31 +787,20 @@ fn state_proof_source_password_and_key_changes_invalidate_exact_approval_without
                 .unwrap();
             account = repo.load(&account.id).unwrap();
         }
-        let store = repo.store(&account).unwrap();
-        let mut state = store.load_state().unwrap();
         assert!(
-            repo.transaction_confirm(
-                &account,
-                &store,
-                &mut state,
-                None,
-                &preview.receipt,
-                Cancellation::default(),
-                |_| Ok(())
-            )
-            .is_err(),
+            !confirm(&repo, &account, Request::Deploy, &preview.receipt),
             "{change}"
         );
-        assert!(state.sieve_transactions.history.is_empty());
-        let (_, external) = provider(&repo, &account.id, root.path());
+        let store = repo.store(&account).unwrap();
         assert!(
-            !external
-                .synthetic_sieve
+            store
+                .load_state()
                 .unwrap()
-                .commands
-                .iter()
-                .any(|c| c == "PUTSCRIPT" || c == "SETACTIVE")
+                .sieve_transactions
+                .history
+                .is_empty()
         );
+        assert_eq!(writes(&image(&repo, &account, root.path())), 0);
     }
 }
 
@@ -661,7 +815,9 @@ fn census_save_and_rotation_preserve_transaction_and_independent_provider_histor
     let (_, external) = provider(&repo, &account.id, root.path());
     let external_before = serde_json::to_vec(&external).unwrap();
     store.save(&before.census).unwrap();
-    assert!(store.load_state().unwrap().sieve_transactions == before.sieve_transactions);
+    let saved = store.load_state().unwrap();
+    assert!(saved.sieve_transactions == before.sieve_transactions);
+    assert!(saved.sieve_placement == Some(Placement::Block {}));
     drop(store);
     repo.rotate(&account.id, &root.path().join("mailboxes"))
         .unwrap();
@@ -674,8 +830,14 @@ fn census_save_and_rotation_preserve_transaction_and_independent_provider_histor
     assert!(serde_json::to_vec(&external).unwrap() == external_before);
     let id = after.sieve_transactions.history[0].id.clone();
     assert!(
-        repo.transaction_preview(&account, &store, &after, Some(&id), Cancellation::default())
-            .is_err()
+        repo.transaction_preview(
+            &account,
+            &store,
+            &after,
+            Request::Compensation(&id),
+            Cancellation::default()
+        )
+        .is_err()
     );
 }
 
@@ -687,39 +849,21 @@ fn validation_failure_preserves_discovery_and_effect_intent_makes_it_historical(
         .unwrap();
     let store = repo.store(&account).unwrap();
     let mut saved = store.load_state().unwrap();
-    let baseline = saved.sieve.last_successful.clone();
-    let preview = repo
-        .transaction_preview(&account, &store, &saved, None, Cancellation::default())
+    repo.record_placement(&account, &store, &mut saved, Some(Placement::Block {}))
         .unwrap();
+    let baseline = saved.sieve.last_successful.clone();
+    drop(store);
+    let preview = ready(review(&repo, &account, Request::Deploy));
     std::fs::write(root.path().join("transaction-mode"), "check_refused").unwrap();
-    assert!(
-        repo.transaction_confirm(
-            &account,
-            &store,
-            &mut saved,
-            None,
-            &preview.receipt,
-            Cancellation::default(),
-            |_| Ok(())
-        )
-        .is_err()
-    );
+    assert!(!confirm(&repo, &account, Request::Deploy, &preview.receipt));
+    let saved = repo.store(&account).unwrap().load_state().unwrap();
     assert!(saved.sieve.last_successful == baseline);
     assert!(saved.sieve.invalidated_by_write.is_none());
     std::fs::write(root.path().join("transaction-mode"), "").unwrap();
-    let fresh = repo
-        .transaction_preview(&account, &store, &saved, None, Cancellation::default())
-        .unwrap();
-    repo.transaction_confirm(
-        &account,
-        &store,
-        &mut saved,
-        None,
-        &fresh.receipt,
-        Cancellation::default(),
-        |_| Ok(()),
-    )
-    .unwrap();
+    let fresh = ready(review(&repo, &account, Request::Deploy));
+    assert!(confirm(&repo, &account, Request::Deploy, &fresh.receipt));
+    let store = repo.store(&account).unwrap();
+    let saved = store.load_state().unwrap();
     assert!(saved.sieve.last_successful == baseline);
     assert!(
         !saved
@@ -738,56 +882,316 @@ fn validation_failure_preserves_discovery_and_effect_intent_makes_it_historical(
             .current(Some(&repo.sieve_context(&account, &store).unwrap()), false)
     );
 }
+
 #[test]
-fn actual_tls_persisted_active_and_inactive_replacement_and_separate_compensation() {
-    for active in [true, false] {
-        let root = tempfile::tempdir().unwrap();
-        let (repo, account, _fixture) = setup(root.path(), active);
-        let store = repo.store(&account).unwrap();
-        let mut saved = store.load_state().unwrap();
-        super::super::sieve_discovery::tests::seed(&mut saved, store.keys());
-        store.save_state(&mut saved).unwrap();
-        let p = repo
-            .transaction_preview(&account, &store, &saved, None, Cancellation::default())
-            .unwrap();
-        repo.transaction_confirm(
-            &account,
-            &store,
-            &mut saved,
-            None,
-            &p.receipt,
-            Cancellation::default(),
-            |_| Ok(()),
-        )
-        .unwrap();
-        let transaction = saved.sieve_transactions.history.last().unwrap();
-        assert_eq!(transaction.status, Status::Complete);
+fn deploy_refuses_until_an_explicit_valid_placement_is_recorded() {
+    let root = tempfile::tempdir().unwrap();
+    let (repo, account, _fixture) = placed(root.path(), None);
+    assert_eq!(
+        refusal(review(&repo, &account, Request::Deploy)),
+        Refusal::PlacementUnchosen
+    );
+    let store = repo.store(&account).unwrap();
+    let mut state = store.load_state().unwrap();
+    for invalid in ["Open-Xchange", "quote\"name", ""] {
         assert!(
-            transaction
+            repo.record_placement(
+                &account,
+                &store,
+                &mut state,
+                Some(Placement::Include {
+                    script: invalid.into()
+                })
+            )
+            .is_err()
+        );
+    }
+    assert!(state.sieve_placement.is_none());
+    assert_eq!(writes(&image(&repo, &account, root.path())), 0);
+    assert!(
+        store
+            .load_state()
+            .unwrap()
+            .sieve_transactions
+            .history
+            .is_empty()
+    );
+}
+
+#[test]
+fn both_placements_compose_after_existing_rules_redeploy_switch_remove_and_compensate() {
+    for placement in [Placement::Block {}, include()] {
+        let root = tempfile::tempdir().unwrap();
+        let (repo, account, _fixture) = placed(root.path(), Some(placement.clone()));
+        let original = image(&repo, &account, root.path()).image;
+        let foreign = std::str::from_utf8(OX_HOST).unwrap();
+        let p = ready(review(&repo, &account, Request::Deploy));
+        let precedence = p.precedence.as_ref().unwrap();
+        assert_eq!(precedence.foreign_rules[0].name, "Travel");
+        assert_eq!(precedence.counts.existing_wins, 1);
+        assert_eq!(precedence.counts.conflicting, 1);
+        assert_eq!(precedence.counts.mailroom, 2);
+        assert!(precedence.decisions.iter().all(|d| d.rule == "Travel"
+            && d.mailroom == crate::rules::proof::Destination::Inbox
+            && d.existing
+                == Some(composition::ForeignDest::Folder {
+                    name: "Reisen".into()
+                })));
+        let host = &p.transaction.after.body("Open-Xchange").unwrap().bytes;
+        assert!(host.starts_with(b"require [\"fileinto\"];\r\n"));
+        assert_eq!(
+            crate::census::sieve_transaction::foreign(&p.transaction.after, "Open-Xchange")
+                .unwrap(),
+            foreign
+        );
+        let rules_end = host.windows(3).rposition(|w| w == b"}\r\n").unwrap();
+        assert!(
+            std::str::from_utf8(&host[rules_end..])
+                .unwrap()
+                .contains("# mailroom:"),
+            "Mailroom content follows every existing rule"
+        );
+        assert_eq!(
+            p.effects,
+            if placement == (Placement::Block {}) {
+                vec![Effect::Upload]
+            } else {
+                vec![Effect::UploadOwned, Effect::Upload]
+            }
+        );
+        assert!(confirm(&repo, &account, Request::Deploy, &p.receipt));
+        let deployed = image(&repo, &account, root.path());
+        assert!(deployed.image == p.transaction.after);
+        assert_eq!(deployed.image.active(), Some("Open-Xchange"));
+        assert_eq!(
+            deployed.image.body("foreign\"\\ä"),
+            original.body("foreign\"\\ä")
+        );
+        let journal = repo
+            .store(&account)
+            .unwrap()
+            .load_state()
+            .unwrap()
+            .sieve_transactions;
+        let deploy = journal.history.last().unwrap();
+        assert_eq!(deploy.status, Status::Complete);
+        assert!(
+            deploy
                 .steps
                 .iter()
                 .all(|s| s.acknowledgment && s.outcome == Outcome::Observed)
         );
-        let id = transaction.id.clone();
-        let (_, external) = provider(&repo, &account.id, root.path());
-        assert!(external.synthetic_sieve.as_ref().unwrap().image == p.transaction.after);
-        let c = repo
-            .transaction_preview(&account, &store, &saved, Some(&id), Cancellation::default())
+        {
+            let store = repo.store(&account).unwrap();
+            assert!(
+                repo.transaction_preview(
+                    &account,
+                    &store,
+                    &store.load_state().unwrap(),
+                    Request::Deploy,
+                    Cancellation::default()
+                )
+                .is_err(),
+                "re-deploy of identical content has no effect to approve"
+            );
+        }
+        let other = if placement == (Placement::Block {}) {
+            include()
+        } else {
+            Placement::Block {}
+        };
+        let store = repo.store(&account).unwrap();
+        let mut state = store.load_state().unwrap();
+        repo.record_placement(&account, &store, &mut state, Some(other.clone()))
             .unwrap();
-        assert_eq!(c.effects.contains(&Effect::Disable), !active);
-        repo.transaction_confirm(
-            &account,
-            &store,
-            &mut saved,
-            Some(&id),
-            &c.receipt,
-            Cancellation::default(),
-            |_| Ok(()),
+        drop(store);
+        let switched = ready(review(&repo, &account, Request::Deploy));
+        assert!(confirm(&repo, &account, Request::Deploy, &switched.receipt));
+        let after_switch = image(&repo, &account, root.path()).image;
+        assert_eq!(
+            crate::census::sieve_transaction::foreign(&after_switch, "Open-Xchange").unwrap(),
+            foreign
+        );
+        let (_, found) = composition::strip(
+            &after_switch.body("Open-Xchange").unwrap().bytes,
+            "Open-Xchange",
         )
         .unwrap();
-        let (_, external) = provider(&repo, &account.id, root.path());
-        assert!(external.synthetic_sieve.unwrap().image == p.transaction.before);
+        assert_eq!(found.block, other == Placement::Block {});
+        assert_eq!(found.include.is_some(), other != Placement::Block {});
+        let removal = ready(review(&repo, &account, Request::Removal));
+        assert_eq!(removal.effects, vec![Effect::Upload]);
+        assert!(confirm(&repo, &account, Request::Removal, &removal.receipt));
+        let removed = image(&repo, &account, root.path()).image;
+        assert_eq!(removed.body("Open-Xchange").unwrap().bytes, OX_HOST);
+        assert_eq!(removed.active(), Some("Open-Xchange"));
+        assert_eq!(
+            removed.body("mailroom").is_some(),
+            true,
+            "the owned script stays without DELETE"
+        );
+        assert_eq!(
+            refusal(review(&repo, &account, Request::Removal)),
+            Refusal::NothingToRemove
+        );
+        let first = deploy.id.clone();
+        let store = repo.store(&account).unwrap();
+        assert!(
+            repo.transaction_preview(
+                &account,
+                &store,
+                &store.load_state().unwrap(),
+                Request::Compensation(&first),
+                Cancellation::default()
+            )
+            .is_err(),
+            "compensation refuses once later changes replaced the recorded postimage"
+        );
     }
+}
+
+#[test]
+fn compensation_restores_the_exact_composed_preimage() {
+    for placement in [Placement::Block {}, include()] {
+        let root = tempfile::tempdir().unwrap();
+        let (repo, account, _fixture) = placed(root.path(), Some(placement.clone()));
+        let before = image(&repo, &account, root.path()).image;
+        let p = ready(review(&repo, &account, Request::Deploy));
+        assert!(confirm(&repo, &account, Request::Deploy, &p.receipt));
+        let id = p.transaction.id.clone();
+        let c = ready(review(&repo, &account, Request::Compensation(&id)));
+        assert_eq!(c.effects, vec![Effect::Upload]);
+        assert!(confirm(
+            &repo,
+            &account,
+            Request::Compensation(&id),
+            &c.receipt
+        ));
+        let after = image(&repo, &account, root.path()).image;
+        assert_eq!(after.body("Open-Xchange"), before.body("Open-Xchange"));
+        assert_eq!(after.active(), before.active());
+        if placement == (Placement::Block {}) {
+            assert!(after == before);
+        } else {
+            assert!(after.body("mailroom").is_some());
+        }
+    }
+}
+
+#[test]
+fn foreign_edit_between_preview_and_write_is_refused_without_effects() {
+    for placement in [Placement::Block {}, include()] {
+        let root = tempfile::tempdir().unwrap();
+        let (repo, account, _fixture) = placed(root.path(), Some(placement));
+        let p = ready(review(&repo, &account, Request::Deploy));
+        worker(root.path(), "foreign_edit");
+        let edited = image(&repo, &account, root.path());
+        assert!(!confirm(&repo, &account, Request::Deploy, &p.receipt));
+        let after = image(&repo, &account, root.path());
+        assert_eq!(writes(&after), 0);
+        assert!(after.image == edited.image);
+        let fresh = ready(review(&repo, &account, Request::Deploy));
+        assert_eq!(fresh.precedence.as_ref().unwrap().foreign_rules.len(), 2);
+        assert!(confirm(&repo, &account, Request::Deploy, &fresh.receipt));
+        let deployed = image(&repo, &account, root.path()).image;
+        assert_eq!(
+            crate::census::sieve_transaction::foreign(&deployed, "Open-Xchange")
+                .unwrap()
+                .as_bytes(),
+            edited.image.body("Open-Xchange").unwrap().bytes.as_slice()
+        );
+    }
+}
+
+#[test]
+fn unsafe_unparseable_damaged_inactive_missing_and_colliding_hosts_block_with_reports() {
+    for (mode, expected) in [
+        ("foreign_unparseable", "unparseable"),
+        ("foreign_unsafe", "unsafe_rule"),
+        ("foreign_stop", "mailroom_unreachable"),
+        ("marker_damaged", "marker_damaged"),
+        ("inactive_host", "host_inactive"),
+        ("owned_collision", "owned_name_foreign"),
+        ("missing_host", "host_missing"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let (repo, account, _fixture) = placed(root.path(), Some(include()));
+        worker(root.path(), mode);
+        let before = image(&repo, &account, root.path());
+        let previewed = review(&repo, &account, Request::Deploy);
+        let json = serde_json::to_value(&previewed).unwrap();
+        assert_eq!(json["outcome"], "refused", "{mode}");
+        assert_eq!(json["refusal"]["reason"], expected, "{mode}");
+        if expected == "unsafe_rule" {
+            assert_eq!(json["refusal"]["rule"], "Keep going");
+        }
+        if mode != "inactive_host" && mode != "missing_host" {
+            assert!(
+                matches!(
+                    review(&repo, &account, Request::Removal),
+                    Previewed::Refused { .. }
+                ),
+                "{mode}"
+            );
+        }
+        let after = image(&repo, &account, root.path());
+        assert_eq!(writes(&after), 0, "{mode}");
+        assert!(after.image == before.image, "{mode}");
+    }
+}
+
+#[test]
+fn existing_rule_precedence_reaches_pins_and_blocks_conflicting_deploys() {
+    let root = tempfile::tempdir().unwrap();
+    let (repo, account, _fixture) = placed(root.path(), Some(Placement::Block {}));
+    let store = repo.store(&account).unwrap();
+    let state = store.load_state().unwrap();
+    let pin = &state.workspace.as_ref().unwrap().input.pins[0];
+    let from = state
+        .census
+        .folders
+        .values()
+        .flat_map(|f| f.messages.values())
+        .find(|m| m.headers.message_id_hash.as_ref() == Some(&pin.message_id_hash))
+        .unwrap()
+        .headers
+        .from[0]
+        .address
+        .clone();
+    drop(store);
+    let (external, mut provider_state) = provider(&repo, &account.id, root.path());
+    let p = provider_state.synthetic_sieve.as_mut().unwrap();
+    let host = p
+        .image
+        .bodies
+        .iter_mut()
+        .find(|b| b.name == "Open-Xchange")
+        .unwrap();
+    let mut bytes = format!("## Flag: |UniqueId:3|Rulename: Pinned sender\r\nif address :is \"from\" \"{from}\"\r\n{{\r\n    fileinto \"Elsewhere\";\r\n    stop;\r\n}}\r\n").into_bytes();
+    bytes.splice(0..0, host.bytes.clone());
+    *host = Body::new(host.name.clone(), bytes);
+    external.save_state(&mut provider_state).unwrap();
+    drop(external);
+    let Previewed::Refused {
+        refusal,
+        precedence: Some(precedence),
+        ..
+    } = review(&repo, &account, Request::Deploy)
+    else {
+        panic!("conflicting pinned precedence must block");
+    };
+    assert_eq!(refusal, Refusal::ProofBlocked);
+    assert_eq!(precedence.gate, "blocked");
+    assert_eq!(precedence.pins[0].status, "fail");
+    assert!(
+        precedence
+            .decisions
+            .iter()
+            .any(|d| d.rule == "Pinned sender"
+                && d.message_id_hash.as_ref() == Some(&pin.message_id_hash)
+                && d.conflicting)
+    );
+    assert_eq!(writes(&image(&repo, &account, root.path())), 0);
 }
 
 #[test]
@@ -800,21 +1204,32 @@ fn exact_utf8_octets_crlf_terminal_text_limits_and_write_permit_separation() {
         .transaction_session(&account, Cancellation::default())
         .unwrap();
     session.check_script(&permit, bytes).unwrap();
-    session.have_space(&permit, bytes.len()).unwrap();
-    session.put_script(&permit, bytes).unwrap();
+    session
+        .have_space(&permit, "Open-Xchange", bytes.len())
+        .unwrap();
+    session.put_script(&permit, "Open-Xchange", bytes).unwrap();
     assert!(session.get("Open-Xchange").unwrap() == bytes);
+    session
+        .put_script(&permit, "mailroom ä", b"keep;\r\n")
+        .unwrap();
+    assert!(session.get("mailroom ä").unwrap() == b"keep;\r\n");
     assert_eq!(
         session
             .list()
             .unwrap()
             .iter()
-            .find(|n| n.name == "Open-Xchange")
-            .unwrap()
-            .active,
-        true
+            .map(|n| (n.name.as_str(), n.active))
+            .filter(|(_, active)| *active)
+            .collect::<Vec<_>>(),
+        [("Open-Xchange", true)],
+        "a new owned script is never implicitly activated"
     );
     assert_eq!(
-        session.put_script(&permit, &vec![b'x'; 1024 * 1024 + 1]),
+        session.put_script(&permit, "Open-Xchange", &vec![b'x'; 1024 * 1024 + 1]),
+        Err(Error::Limit)
+    );
+    assert_eq!(
+        session.put_script(&permit, "bad\nname", b"keep;"),
         Err(Error::Limit)
     );
     session.logout().unwrap();
@@ -843,113 +1258,158 @@ fn validation_space_and_upload_refusals_never_hide_later_failure() {
         "space_quota",
         "put_quota",
     ] {
-        let root = tempfile::tempdir().unwrap();
-        let (repo, account, _fixture) = setup(root.path(), true);
-        let store = repo.store(&account).unwrap();
-        let mut state = store.load_state().unwrap();
-        super::super::sieve_discovery::tests::seed(&mut state, store.keys());
-        store.save_state(&mut state).unwrap();
-        let p = repo
-            .transaction_preview(&account, &store, &state, None, Cancellation::default())
-            .unwrap();
-        std::fs::write(root.path().join("transaction-mode"), mode).unwrap();
-        assert!(
-            repo.transaction_confirm(
-                &account,
-                &store,
-                &mut state,
-                None,
-                &p.receipt,
-                Cancellation::default(),
-                |_| Ok(())
-            )
-            .is_err()
-        );
-        let (_, external) = provider(&repo, &account.id, root.path());
-        let external = external.synthetic_sieve.as_ref().unwrap();
-        assert!(external.image == p.transaction.before);
-        assert_eq!(
-            external
-                .commands
-                .iter()
-                .filter(|c| *c == "PUTSCRIPT")
-                .count(),
-            usize::from(mode == "put_quota")
-        );
-        assert!(!external.commands.iter().any(|c| c == "SETACTIVE"));
-        assert!(state.sieve.last_successful.is_none());
+        for placement in [Placement::Block {}, include()] {
+            let root = tempfile::tempdir().unwrap();
+            let (repo, account, _fixture) = placed(root.path(), Some(placement.clone()));
+            let p = ready(review(&repo, &account, Request::Deploy));
+            std::fs::write(root.path().join("transaction-mode"), mode).unwrap();
+            assert!(!confirm(&repo, &account, Request::Deploy, &p.receipt));
+            let external = image(&repo, &account, root.path());
+            assert!(external.image == p.transaction.before);
+            assert_eq!(
+                external
+                    .commands
+                    .iter()
+                    .filter(|c| *c == "PUTSCRIPT")
+                    .count(),
+                usize::from(mode == "put_quota")
+            );
+            assert_eq!(
+                external
+                    .commands
+                    .iter()
+                    .filter(|c| *c == "CHECKSCRIPT")
+                    .count(),
+                if mode.starts_with("check") {
+                    1
+                } else if placement == (Placement::Block {}) {
+                    1
+                } else {
+                    2
+                },
+                "{mode} validates every uploaded script before any write"
+            );
+            assert!(!external.commands.iter().any(|c| c == "SETACTIVE"));
+            let state = repo.store(&account).unwrap().load_state().unwrap();
+            assert!(state.sieve.last_successful.is_none());
+        }
     }
 }
 
 #[test]
-fn lost_upload_or_activation_reconciles_without_repeating_and_compensates_conditionally() {
-    for mode in ["put_lost", "activation_lost"] {
+fn lost_uploads_reconcile_without_repeating_and_resume_only_through_fresh_review() {
+    for placement in [Placement::Block {}, include()] {
         let root = tempfile::tempdir().unwrap();
-        let (repo, account, _fixture) = setup(root.path(), false);
+        let (repo, account, _fixture) = placed(root.path(), Some(placement.clone()));
+        let p = ready(review(&repo, &account, Request::Deploy));
+        std::fs::write(root.path().join("transaction-mode"), "put_lost").unwrap();
+        assert!(!confirm(&repo, &account, Request::Deploy, &p.receipt));
         let store = repo.store(&account).unwrap();
         let mut state = store.load_state().unwrap();
-        super::super::sieve_discovery::tests::seed(&mut state, store.keys());
-        store.save_state(&mut state).unwrap();
-        let p = repo
-            .transaction_preview(&account, &store, &state, None, Cancellation::default())
-            .unwrap();
-        std::fs::write(root.path().join("transaction-mode"), mode).unwrap();
-        assert!(
-            repo.transaction_confirm(
-                &account,
-                &store,
-                &mut state,
-                None,
-                &p.receipt,
-                Cancellation::default(),
-                |_| Ok(())
-            )
-            .is_err()
-        );
         let id = state.sieve_transactions.history[0].id.clone();
         assert_eq!(
             state.sieve_transactions.history[0].status,
             Status::Uncertain
         );
-        let (_, external) = provider(&repo, &account.id, root.path());
-        let commands = external.synthetic_sieve.unwrap().commands;
+        let commands = image(&repo, &account, root.path()).commands;
         for _ in 0..2 {
             repo.transaction_reconcile(&account, &store, &mut state, &id, Cancellation::default())
                 .unwrap();
         }
+        drop(store);
+        let after = image(&repo, &account, root.path()).commands;
         assert_eq!(
-            state.sieve_transactions.history[0].status,
-            if mode == "put_lost" {
-                Status::FreshReview
-            } else {
-                Status::Complete
-            }
+            commands.iter().filter(|c| *c == "PUTSCRIPT").count(),
+            after.iter().filter(|c| *c == "PUTSCRIPT").count()
         );
-        let (_, external) = provider(&repo, &account.id, root.path());
-        let after = external.synthetic_sieve.unwrap().commands;
-        for command in ["PUTSCRIPT", "SETACTIVE"] {
-            assert_eq!(
-                commands.iter().filter(|c| c.as_str() == command).count(),
-                after.iter().filter(|c| c.as_str() == command).count()
-            );
-        }
         std::fs::write(root.path().join("transaction-mode"), "").unwrap();
-        let c = repo
-            .transaction_preview(&account, &store, &state, Some(&id), Cancellation::default())
-            .unwrap();
-        repo.transaction_confirm(
-            &account,
-            &store,
-            &mut state,
-            Some(&id),
-            &c.receipt,
-            Cancellation::default(),
-            |_| Ok(()),
-        )
-        .unwrap();
-        let (_, external) = provider(&repo, &account.id, root.path());
-        assert!(external.synthetic_sieve.unwrap().image == p.transaction.before);
+        if placement == (Placement::Block {}) {
+            assert_eq!(state.sieve_transactions.history[0].status, Status::Complete);
+            let c = ready(review(&repo, &account, Request::Compensation(&id)));
+            assert!(confirm(
+                &repo,
+                &account,
+                Request::Compensation(&id),
+                &c.receipt
+            ));
+            assert!(image(&repo, &account, root.path()).image == p.transaction.before);
+        } else {
+            assert_eq!(
+                state.sieve_transactions.history[0].status,
+                Status::FreshReview,
+                "only the owned script arrived; the host still lacks the include"
+            );
+            let fresh = ready(review(&repo, &account, Request::Deploy));
+            assert_eq!(fresh.effects, vec![Effect::Upload]);
+            assert!(confirm(&repo, &account, Request::Deploy, &fresh.receipt));
+            assert!(image(&repo, &account, root.path()).image == p.transaction.after);
+        }
     }
+}
+
+#[test]
+fn legacy_whole_replacement_records_stay_readable_and_compensable() {
+    let root = tempfile::tempdir().unwrap();
+    let (repo, account, _fixture) = setup(root.path(), false);
+    let store = repo.store(&account).unwrap();
+    let mut state = store.load_state().unwrap();
+    super::super::sieve_discovery::tests::seed(&mut state, store.keys());
+    let before = image(&repo, &account, root.path()).image;
+    let mut uploaded = before.clone();
+    uploaded.bodies[0] = Body::new(
+        "Open-Xchange".into(),
+        b"keep;\r\n# legacy whole replacement\r\n".to_vec(),
+    );
+    let mut activated = uploaded.clone();
+    activated.names[0].active = true;
+    let digest = |v: &str| data_encoding::HEXLOWER.encode(&Sha256::digest(v.as_bytes()));
+    let step = |effect, before: &Image, after: &Image| Step {
+        effect,
+        before: before.clone(),
+        after: after.clone(),
+        outcome: Outcome::Observed,
+        acknowledgment: true,
+        failure: None,
+    };
+    state.sieve_transactions.history.push(Transaction {
+        id: digest("id"),
+        compensates: None,
+        context: repo.sieve_context(&account, &store).unwrap(),
+        target: "Open-Xchange".into(),
+        ownership_epoch: repo.write_permit(&account).unwrap().ownership.epoch.clone(),
+        artifact: digest("artifact"),
+        proof_binding: digest("proof"),
+        receipt: digest("receipt"),
+        before: before.clone(),
+        after: activated.clone(),
+        status: Status::Complete,
+        validation: Some(Ok(())),
+        space: Some(Ok(())),
+        steps: vec![
+            step(Effect::Upload, &before, &uploaded),
+            step(Effect::Activate, &uploaded, &activated),
+        ],
+        composition: None,
+    });
+    store.save_state(&mut state).unwrap();
+    let serialized = serde_json::to_value(&store.load_state().unwrap().sieve_transactions).unwrap();
+    assert!(serialized["history"][0].get("composition").is_none());
+    drop(store);
+    let (external, mut provider_state) = provider(&repo, &account.id, root.path());
+    provider_state.synthetic_sieve.as_mut().unwrap().image = activated;
+    external.save_state(&mut provider_state).unwrap();
+    drop(external);
+    let id = digest("id");
+    let c = ready(review(&repo, &account, Request::Compensation(&id)));
+    assert_eq!(c.effects, vec![Effect::Upload, Effect::Disable]);
+    assert!(c.transaction.composition.is_none());
+    assert!(confirm(
+        &repo,
+        &account,
+        Request::Compensation(&id),
+        &c.receipt
+    ));
+    assert!(image(&repo, &account, root.path()).image == before);
 }
 
 #[test]

@@ -96,6 +96,7 @@ fn preserved(saved: &AccountState) -> String {
         "revision",
         "sieve",
         "sieve_transactions",
+        "sieve_placement",
         "folder_provisioning",
     ] {
         value.as_object_mut().unwrap().remove(key);
@@ -129,7 +130,7 @@ fn envelope_fixture_observer() {
         .synthetic_sieve
         .as_ref()
         .and_then(|p| p.image.body("Open-Xchange"));
-    let value = serde_json::json!({"account":account.id,"schema":store.schema_version().unwrap(),"revision":saved.revision,"preserved":preserved(&saved),"save_preserved":save_preserved(&saved),"complete":digest(&saved),"exports":saved.exports.iter().map(|e|serde_json::json!({"identity":e.artifact.identity(),"semantics":e.semantics,"proof_semantics":e.proof_semantics,"bytes":digest(&e.artifact.executable())})).collect::<Vec<_>>(),"provider_target":target.map(|b| &b.sha256),"provider_bytes":target.map(|b| String::from_utf8_lossy(&b.bytes)),"commands":external.synthetic_sieve.as_ref().map(|p|&p.commands),"folder_commands":external.synthetic_folders.as_ref().map(|p|&p.commands),"independent_effects":crate::acquisition::sieve_transaction::tests::independent_effects(root,&store)});
+    let value = serde_json::json!({"account":account.id,"schema":store.schema_version().unwrap(),"revision":saved.revision,"preserved":preserved(&saved),"save_preserved":save_preserved(&saved),"complete":digest(&saved),"exports":saved.exports.iter().map(|e|serde_json::json!({"identity":e.artifact.identity(),"semantics":e.semantics,"proof_semantics":e.proof_semantics,"bytes":digest(&e.artifact.executable())})).collect::<Vec<_>>(),"provider_target":target.map(|b| &b.sha256),"provider_bytes":target.map(|b| String::from_utf8_lossy(&b.bytes)),"provider_owned":external.synthetic_sieve.as_ref().and_then(|p| p.image.body("mailroom")).map(|b| String::from_utf8_lossy(&b.bytes)),"provider_foreign":external.synthetic_sieve.as_ref().and_then(|p| crate::census::sieve_transaction::foreign(&p.image, "Open-Xchange")).map(|f| digest(&f)),"commands":external.synthetic_sieve.as_ref().map(|p|&p.commands),"folder_commands":external.synthetic_folders.as_ref().map(|p|&p.commands),"independent_effects":crate::acquisition::sieve_transaction::tests::independent_effects(root,&store)});
     std::fs::write(
         root.join("envelope-observations.json"),
         serde_json::to_vec(&value).unwrap(),
@@ -208,7 +209,7 @@ fn saved_envelope_tags_share_proof_and_hold_unknown_without_header_authority() {
     workspace::confirm_export(&mut saved, &context, store.keys(), &proof.receipt).unwrap();
     store.save_state(&mut saved).unwrap();
     assert_eq!(preserved(&store.load_state().unwrap()), original);
-    assert_eq!(store.schema_version().unwrap(), 15);
+    assert_eq!(store.schema_version().unwrap(), 16);
     let known = saved.census.folders["INBOX"].messages[&1].delivery.clone();
     let DeliveryEvidence::Known {
         source, message, ..

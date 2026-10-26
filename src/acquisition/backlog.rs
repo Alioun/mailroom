@@ -515,7 +515,7 @@ impl Accounts {
             run.batches.iter_mut().collect()
         };
         for e in entries {
-            if e.attempted() && !model::verified(e) {
+            if e.attempted() && !e.observed() {
                 if e.completion().is_none() {
                     e.record_completion(Completion::Lost).map_err(failure)?;
                 }
@@ -553,10 +553,7 @@ impl Accounts {
             .ok_or_else(invalid)?;
         if !model::same_binding(&binding, &run.plan.binding)
             || run.undo_receipt.is_some()
-            || run
-                .batches
-                .iter()
-                .any(|b| b.attempted() && !model::verified(b))
+            || run.batches.iter().any(|b| b.attempted() && !b.observed())
         {
             return Err(invalid());
         }
@@ -571,14 +568,22 @@ impl Accounts {
         let mut reverse = vec![];
         let mut conflicts = 0;
         for (forward, e) in run.batches.iter().enumerate() {
-            if !model::verified(e) {
+            if !e.attempted() {
                 continue;
             }
-            if !compatible_topology {
+            let verified: BTreeMap<Uid, Uid> = e
+                .resolutions()
+                .into_iter()
+                .filter_map(|(uid, r)| match r {
+                    Resolution::Verified { destination } => Some((uid, destination)),
+                    _ => None,
+                })
+                .collect();
+            if !compatible_topology || verified.is_empty() {
                 conflicts += e.command().messages().len();
                 continue;
             }
-            let uids = e.mapping().unwrap().pairs().values().copied().collect();
+            let uids = verified.values().copied().collect();
             let current = match connection.readback(e.command().destination(), &uids) {
                 Ok(value) => value,
                 Err(crate::census::folder_provisioning::Failure::Unstable) => {
@@ -599,10 +604,7 @@ impl Accounts {
                 conflicts += e.command().messages().len();
                 continue;
             }
-            let messages = e
-                .mapping()
-                .unwrap()
-                .pairs()
+            let messages = verified
                 .iter()
                 .filter_map(|(a, b)| {
                     current
@@ -668,6 +670,9 @@ impl Accounts {
         run.reverse = p.reverse;
         run.undo_receipt = Some(p.receipt);
         run.undo_conflicts = p.conflicts;
+        if run.status != Status::Complete {
+            run.status = model::outcome(run, true);
+        }
         save(store, saved)?;
         boundary("move_undo_consumed");
         self.backlog_run(account, store, saved, id, true, cancel, fresh)
@@ -707,8 +712,54 @@ pub(crate) fn boundary(name: &str) {
 }
 
 #[cfg(test)]
-pub(crate) fn fixture_install(root: &std::path::Path) -> (Accounts, Account, impl Send) {
+pub(crate) fn fixture_install(
+    root: &std::path::Path,
+) -> (
+    Accounts,
+    Account,
+    super::folder_provisioning::transport::message_move::tests::Fake,
+) {
     super::folder_provisioning::transport::message_move::tests::workflow_install(root)
+}
+
+/// A second repository over the same fixture installation whose installed
+/// authority differs from the original in exactly one leaf.
+#[cfg(test)]
+pub(crate) fn fixture_mutated(root: &std::path::Path, original: &Accounts, leaf: &str) -> Accounts {
+    let mut repo = super::persistent_test_accounts(root);
+    let mut source = (**original.backlog_source.as_ref().unwrap()).clone();
+    let account = original.load(&source.account).unwrap();
+    let mut epoch = std::fs::read_to_string(root.join("workspace-authority")).unwrap();
+    match leaf {
+        "none" => {}
+        "account" => source.account = AccountId::new("mutated-account").unwrap(),
+        "login" => source.login.push_str(".mutated"),
+        "address_remote" => source.address = "192.0.2.10:993".parse().unwrap(),
+        "address_port" => {
+            let unused = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            source.address = unused.local_addr().unwrap();
+        }
+        "tls_name" => source.tls_name = "mutated.example.test".into(),
+        "root" => {
+            let key = rcgen::KeyPair::generate().unwrap();
+            source.root = rcgen::CertificateParams::new(vec!["localhost".into()])
+                .unwrap()
+                .self_signed(&key)
+                .unwrap()
+                .der()
+                .to_vec();
+        }
+        "epoch" => source.epoch.push_str("-mutated"),
+        "authority" => source.authority = "fixture-message-move/v2".into(),
+        "workspace_epoch" => epoch.push_str("-mutated"),
+        "workspace_absent" => epoch.clear(),
+        _ => unreachable!("{leaf}"),
+    }
+    repo.backlog_source = Some(std::sync::Arc::new(source));
+    if !epoch.is_empty() {
+        repo.install_synthetic_workspace(&account, &epoch);
+    }
+    repo
 }
 
 #[cfg(test)]
@@ -884,15 +935,14 @@ fn workflow_observer() {
         |value: &serde_json::Value| crate::unsubscribe::digest(&serde_json::to_vec(value).unwrap());
     let folders = provider.census.folders.iter().map(|(name,f)| (name.clone(), serde_json::json!({"uidvalidity":f.uidvalidity,"uids":f.live_uids,"messages":f.messages.iter().map(|(uid,m)| (uid.to_string(), serde_json::json!({"flags":m.flags,"date":m.internal_date,"size":m.size,"hash":m.headers.message_id_hash}))).collect::<BTreeMap<_,_>>()}))).collect::<BTreeMap<_,_>>();
     let mut independent = serde_json::to_value(&provider).unwrap();
-    for f in [
-        "revision",
-        "census",
-        "synthetic_folders",
-        "synthetic_uid_next",
-    ] {
+    for f in ["revision", "census", "synthetic_uid_next"] {
         independent.as_object_mut().unwrap().remove(f);
     }
-    let mut value = serde_json::json!({"account":account.id,"folders":folders,"independent":digest(&independent),"commands":provider.synthetic_folders.as_ref().unwrap().commands});
+    independent["synthetic_folders"]
+        .as_object_mut()
+        .unwrap()
+        .remove("commands");
+    let mut value = serde_json::json!({"account":account.id,"folders":folders,"independent":digest(&independent),"uid_next":provider.synthetic_uid_next,"commands":provider.synthetic_folders.as_ref().unwrap().commands});
     drop(external);
     if action != "provider_only" {
         let primary = std::env::var_os("MAILROOM_MOVE_INSTALLATION")

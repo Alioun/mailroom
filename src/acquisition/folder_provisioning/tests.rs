@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    acquisition::{SecretValue, persistent_test_accounts},
+    acquisition::{SecretValue, fixture_peer::Peer, persistent_test_accounts},
     census::{
         AccountId,
         folder_provisioning::{ExactName, FakeProvider, Inventory, Mailbox, Namespace, Namespaces},
@@ -13,7 +13,7 @@ use rustls::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{BufRead, BufReader, Write},
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex,
@@ -239,7 +239,9 @@ impl Fixture {
                     Ok((tcp, _)) => {
                         let _serving = Serving::start(&serving);
                         accepted.fetch_add(1, Ordering::SeqCst);
-                        if let Err(error) = serve(tcp, config.clone(), &repo, &id, &root) {
+                        let served = Peer::new(tcp, stopping.clone())
+                            .and_then(|tcp| serve(tcp, config.clone(), &repo, &id, &root));
+                        if let Err(error) = served {
                             eprintln!("folder.fixture.serve.io_kind={:?}", error.kind());
                         }
                     }
@@ -297,18 +299,15 @@ fn unquote(value: &str) -> std::io::Result<String> {
     Ok(result)
 }
 fn serve(
-    tcp: TcpStream,
+    mut tcp: Peer,
     config: Arc<ServerConfig>,
     repo: &Accounts,
     id: &AccountId,
     root: &Path,
 ) -> std::io::Result<()> {
-    tcp.set_nonblocking(false)?;
-    tcp.set_read_timeout(Some(Duration::from_secs(3)))?;
-    tcp.set_write_timeout(Some(Duration::from_secs(3)))?;
-    tcp.set_nodelay(true)?;
+    tcp.tcp.set_nodelay(true)?;
     if std::fs::read_to_string(root.join("folder-mode")).is_ok_and(|s| s == "stall_tls") {
-        thread::sleep(Duration::from_secs(3));
+        Peer::until_closed(&mut tcp);
         return Ok(());
     }
     let mut io = BufReader::new(StreamOwned::new(
@@ -497,7 +496,7 @@ fn serve(
             assert_eq!(
                 unsafe {
                     libc::setsockopt(
-                        io.get_ref().sock.as_raw_fd(),
+                        io.get_ref().sock.tcp.as_raw_fd(),
                         libc::SOL_SOCKET,
                         libc::SO_RCVBUF,
                         (&size as *const libc::c_int).cast(),
@@ -507,8 +506,7 @@ fn serve(
                 0
             );
             std::fs::write(root.join("write-stalled"), b"ready")?;
-            let end = std::time::Instant::now() + Duration::from_secs(3);
-            while !root.join("release-write").exists() && std::time::Instant::now() < end {
+            while !root.join("release-write").exists() && !io.get_ref().sock.stopped() {
                 thread::sleep(Duration::from_millis(5));
             }
             return Ok(());

@@ -67,8 +67,9 @@ pub struct Run {
 }
 impl Run {
     pub fn finished(&self) -> bool {
-        self.status == Status::Undone
-            || self.status == Status::Complete && self.undo_receipt.is_none()
+        (self.status == Status::Undone
+            || self.status == Status::Complete && self.undo_receipt.is_none())
+            && self.batches.iter().all(|b| !b.attempted() || verified(b))
     }
 }
 #[derive(Serialize)]
@@ -231,8 +232,8 @@ impl Journal {
             let mut reversed = BTreeSet::new();
             for b in &r.reverse {
                 let f = r.batches.get(b.forward).ok_or_else(invalid)?;
+                let resolutions = f.resolutions();
                 if !reversed.insert(b.forward)
-                    || !verified(f)
                     || b.evidence.command().purpose() != Purpose::ConditionalUndo
                     || b.evidence.command().source() != f.command().destination()
                     || b.evidence.command().destination() != f.command().source()
@@ -245,9 +246,11 @@ impl Journal {
                                 m.pairs()
                                     .iter()
                                     .find(|(_, mapped)| *mapped == uid)
-                                    .is_none_or(|(original, _)| {
-                                        let original = &f.command().messages()[original];
-                                        original.message_id_hash != current.message_id_hash
+                                    .is_none_or(|(uid_before, _)| {
+                                        let original = &f.command().messages()[uid_before];
+                                        resolutions[uid_before]
+                                            != (Resolution::Verified { destination: *uid })
+                                            || original.message_id_hash != current.message_id_hash
                                             || original.size != current.size
                                             || original.internal_date != current.internal_date
                                     })
@@ -264,8 +267,8 @@ impl Journal {
                     Status::Prepared | Status::Running | Status::UndoRunning
                 ) && r.stop_requested
                 || r.status == Status::Running && r.undo_receipt.is_some()
-                || r.status == Status::UndoRunning
-                    && r.batches.iter().any(|b| b.attempted() && !verified(b))
+                || r.undo_receipt.is_some()
+                    && r.batches.iter().any(|b| b.attempted() && !b.observed())
                 || r.status == Status::Complete && !r.batches.iter().all(verified)
                 || r.status == Status::Undone
                     && (r.reverse.is_empty() || !r.reverse.iter().all(|b| verified(&b.evidence)))

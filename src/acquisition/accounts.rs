@@ -177,24 +177,45 @@ impl Accounts {
     }
     #[cfg(test)]
     pub(crate) fn track_credential_accesses(&mut self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.track_secret_accesses(None)
+    }
+    /// Counts only reads of the account's mailbox password, not its local key.
+    #[cfg(test)]
+    pub(crate) fn track_password_accesses(
+        &mut self,
+        account: &Account,
+    ) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.track_secret_accesses(Some(account.password_ref.clone()))
+    }
+    #[cfg(test)]
+    fn track_secret_accesses(
+        &mut self,
+        only: Option<String>,
+    ) -> Arc<std::sync::atomic::AtomicUsize> {
         struct Tracked {
             backend: Arc<dyn CredentialBackend>,
             accesses: Arc<std::sync::atomic::AtomicUsize>,
+            only: Option<String>,
+        }
+        impl Tracked {
+            fn count(&self, reference: &str) {
+                if self.only.as_deref().is_none_or(|only| only == reference) {
+                    self.accesses
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
         }
         impl CredentialBackend for Tracked {
             fn get(&self, reference: &str) -> Result<SecretValue, AcquisitionError> {
-                self.accesses
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.count(reference);
                 self.backend.get(reference)
             }
             fn put(&self, reference: &str, value: &SecretValue) -> Result<(), AcquisitionError> {
-                self.accesses
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.count(reference);
                 self.backend.put(reference, value)
             }
             fn delete(&self, reference: &str) -> Result<(), AcquisitionError> {
-                self.accesses
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.count(reference);
                 self.backend.delete(reference)
             }
         }
@@ -202,6 +223,7 @@ impl Accounts {
         self.backend = Arc::new(Tracked {
             backend: self.backend.clone(),
             accesses: accesses.clone(),
+            only,
         });
         accesses
     }

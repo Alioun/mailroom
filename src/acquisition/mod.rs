@@ -1,5 +1,7 @@
 mod accounts;
 pub(crate) mod backlog;
+#[cfg(test)]
+pub(crate) mod fixture_peer;
 pub(crate) mod folder_provisioning;
 mod imap;
 mod managesieve;

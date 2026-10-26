@@ -13,7 +13,7 @@ use std::{
     thread,
 };
 
-const STOP_CHECK: Duration = Duration::from_millis(50);
+use crate::acquisition::fixture_peer::Peer;
 pub(crate) const PRIVATE_SCRIPT: &[u8] =
     b"# invented private bytes\r\n# OK\r\n# {17} \\\" \xc3\xa4\r\nkeep;\r\n\xff";
 pub(crate) struct Fake {
@@ -29,43 +29,6 @@ impl Drop for Fake {
         if let Some(w) = self.worker.take() {
             let _ = w.join();
         }
-    }
-}
-/// Fixture side of one connection. Like a real server, it waits for the client
-/// to act or hang up instead of imposing its own idle deadline, so a slow but
-/// valid client is never cut off. Socket timeouts only let it notice `stop`.
-struct Peer {
-    tcp: std::net::TcpStream,
-    stop: Arc<AtomicBool>,
-}
-impl Peer {
-    fn wait<T>(
-        &mut self,
-        mut io: impl FnMut(&mut std::net::TcpStream) -> std::io::Result<T>,
-    ) -> std::io::Result<T> {
-        loop {
-            match io(&mut self.tcp) {
-                Err(e) if pending(&e) && !self.stop.load(Ordering::Relaxed) => {}
-                result => return result,
-            }
-        }
-    }
-    /// Holds a stalled exchange open until the client gives up and closes.
-    fn until_closed(io: &mut impl Read) {
-        let _ = std::io::copy(io, &mut std::io::sink());
-    }
-}
-impl Read for Peer {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.wait(|tcp| tcp.read(buf))
-    }
-}
-impl Write for Peer {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.wait(|tcp| tcp.write(buf))
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.wait(|tcp| tcp.flush())
     }
 }
 fn send(io: &mut impl Write, bytes: &[u8]) -> std::io::Result<()> {
@@ -122,13 +85,7 @@ impl Fake {
                     .as_ref()
                     .and_then(|p| std::fs::read_to_string(p).ok())
                     .unwrap_or_else(|| mode.clone());
-                tcp.set_nonblocking(false).unwrap();
-                tcp.set_read_timeout(Some(STOP_CHECK)).unwrap();
-                tcp.set_write_timeout(Some(STOP_CHECK)).unwrap();
-                let mut tcp = Peer {
-                    tcp,
-                    stop: stopping.clone(),
-                };
+                let mut tcp = Peer::new(tcp, stopping.clone()).unwrap();
                 let greeting = if mode == "no_starttls" {
                     b"\"IMPLEMENTATION\" \"fake\"\r\n\"SIEVE\" \"fileinto\"\r\n\"VERSION\" \"1.0\"\r\nOK\r\n".as_slice()
                 } else {

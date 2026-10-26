@@ -2,6 +2,7 @@ use super::*;
 use crate::{
     acquisition::{
         Provider, SecretValue,
+        fixture_peer::Peer,
         managesieve::{FixtureOwnership, InstalledSource},
         persistent_test_accounts,
     },
@@ -13,7 +14,7 @@ use rustls::{
 };
 use std::{
     io::{BufRead, BufReader, Read, Write},
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     path::Path,
     sync::{
         Arc,
@@ -110,7 +111,8 @@ impl Fixture {
                         continue;
                     }
                 };
-                let _ = serve(tcp, config.clone(), &repo, &id, &root);
+                let _ = Peer::new(tcp, stopping.clone())
+                    .and_then(|tcp| serve(tcp, config.clone(), &repo, &id, &root));
             }
         });
         Self {
@@ -173,16 +175,13 @@ fn quoted(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 fn serve(
-    mut tcp: TcpStream,
+    mut tcp: Peer,
     config: Arc<ServerConfig>,
     repo: &Accounts,
     id: &AccountId,
     root: &Path,
 ) -> std::io::Result<()> {
-    tcp.set_nonblocking(false)?;
-    tcp.set_nodelay(true)?;
-    tcp.set_read_timeout(Some(Duration::from_secs(3)))?;
-    tcp.set_write_timeout(Some(Duration::from_secs(3)))?;
+    tcp.tcp.set_nodelay(true)?;
     send(&mut tcp,b"\"IMPLEMENTATION\" \"fake\"\r\n\"SIEVE\" \"fileinto\"\r\n\"VERSION\" \"1.0\"\r\n\"STARTTLS\"\r\nOK\r\n")?;
     let mut plain = BufReader::new(tcp);
     let mut line = String::new();
@@ -293,7 +292,7 @@ fn serve(
                     return Ok(());
                 }
                 if mode == "check_stall" {
-                    thread::sleep(Duration::from_millis(350));
+                    Peer::until_closed(&mut io);
                     return Ok(());
                 }
                 if mode == "check_drip" {

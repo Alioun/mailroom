@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    acquisition::{Account, Accounts, persistent_test_accounts},
+    acquisition::{Account, Accounts, fixture_peer::Peer, persistent_test_accounts},
     backlog::imap_move::{MoveIntent, Purpose, Resolution},
     census::{
         AccountState, Direction, EncryptedStore, FolderCensus, MessageRecord, ScanState,
@@ -207,7 +207,8 @@ impl Fake {
             while !stopping.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((tcp, _)) => {
-                        let _ = serve(tcp, config.clone(), &repo, &id, &path);
+                        let _ = Peer::new(tcp, stopping.clone())
+                            .and_then(|tcp| serve(tcp, config.clone(), &repo, &id, &path));
                     }
                     Err(_) => thread::sleep(Duration::from_millis(5)),
                 }
@@ -254,16 +255,13 @@ fn unquote(s: &str) -> std::io::Result<String> {
 }
 
 fn serve(
-    tcp: TcpStream,
+    tcp: Peer,
     config: Arc<ServerConfig>,
     repo: &Accounts,
     id: &AccountId,
     root: &Path,
 ) -> std::io::Result<()> {
-    tcp.set_nonblocking(false)?;
-    tcp.set_read_timeout(Some(Duration::from_secs(2)))?;
-    tcp.set_write_timeout(Some(Duration::from_secs(2)))?;
-    tcp.set_nodelay(true)?;
+    tcp.tcp.set_nodelay(true)?;
     let mut io = BufReader::new(StreamOwned::new(
         ServerConnection::new(config).unwrap(),
         tcp,
@@ -420,11 +418,8 @@ fn serve(
                         if let Some(m) = f.messages.get(&uid) {
                             let body = if let Some((_, fields)) = command.split_once("BODY.PEEK[") {
                                 let fields = fields.split_once(']').unwrap().0;
-                                format!(
-                                    " BODY[{fields}] {{{}}}\r\n{}",
-                                    HEADER.len(),
-                                    std::str::from_utf8(HEADER).unwrap()
-                                )
+                                let header = header_for(root, m);
+                                format!(" BODY[{fields}] {{{}}}\r\n{header}", header.len())
                             } else {
                                 String::new()
                             };
@@ -446,11 +441,34 @@ fn serve(
                         assert_eq!(set, "4,8,19");
                         assert_eq!(target, "Filed/Receipts");
                     }
+                    let race = std::fs::read_to_string(root.join("move-race")).unwrap_or_default();
+                    let first = uids[0];
+                    let origin = state.census.folders.get_mut(source).unwrap();
+                    match race.as_str() {
+                        "source_flag" => {
+                            let m = origin.messages.get_mut(&first).unwrap();
+                            m.flags.insert("$race-client".into());
+                        }
+                        "deleted_flag" => {
+                            let m = origin.messages.get_mut(&first).unwrap();
+                            m.flags.insert("\\Deleted".into());
+                        }
+                        "source_expunged" => {
+                            origin.messages.remove(&first);
+                            origin.live_uids.remove(&first);
+                        }
+                        _ => {}
+                    }
+                    let present: Vec<u32> = uids
+                        .iter()
+                        .copied()
+                        .filter(|u| origin.live_uids.contains(u))
+                        .collect();
                     let mut mapped = vec![];
                     let effected = if mode == "partial" {
-                        &uids[..1]
+                        &present[..1]
                     } else {
-                        &uids[..]
+                        &present[..]
                     };
                     for uid in effected {
                         let mut m = state
@@ -476,6 +494,11 @@ fn serve(
                         dest.live_uids.insert(m.uid);
                         dest.messages.insert(m.uid, m);
                     }
+                    if race == "destination_flag" {
+                        let dest = state.census.folders.get_mut(&target).unwrap();
+                        let m = dest.messages.get_mut(&mapped[0]).unwrap();
+                        m.flags.insert("$race-client".into());
+                    }
                     store.save_state(&mut state).unwrap();
                     let mut log = std::fs::OpenOptions::new()
                         .create(true)
@@ -497,11 +520,16 @@ fn serve(
                     }
                     if mode == "slow" {
                         drop(store);
-                        thread::sleep(Duration::from_millis(1200));
+                        Peer::until_closed(&mut io);
                         return Ok(());
                     }
+                    let moved = effected
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",");
                     let code = format!(
-                        "[COPYUID {} {set} {}]",
+                        "[COPYUID {} {moved} {}]",
                         if mode == "wrong_validity" {
                             203
                         } else {
@@ -513,17 +541,28 @@ fn serve(
                             .collect::<Vec<_>>()
                             .join(",")
                     );
-                    if mode == "missing" {
+                    let expunged = (1..=effected.len())
+                        .rev()
+                        .map(|n| format!("* {n} EXPUNGE\r\n"))
+                        .collect::<String>();
+                    let flood = (0..2048)
+                        .map(|n| format!("* {} EXISTS\r\n", n + 1))
+                        .collect::<String>();
+                    if mode == "expunge_rows" {
+                        reply = format!("* OK {code} mapping\r\n{expunged}{tag} OK moved\r\n");
+                    } else if mode == "flood_after_mapping" {
+                        reply =
+                            format!("* OK {code} mapping\r\n{expunged}{flood}{tag} OK moved\r\n");
+                    } else if mode == "flood_before_mapping" {
+                        reply = format!("{flood}{tag} OK {code} moved\r\n");
+                    } else if mode == "missing" {
                         reply = format!("{tag} OK moved without mapping\r\n");
                     } else if mode == "untagged" {
                         reply = format!(
                             "* OK {code} mapping\r\n* 1 EXPUNGE\r\n* 4 EXISTS\r\n{tag} NO [OVERQUOTA] partial completion\r\n"
                         );
                     } else if mode == "partial" {
-                        reply = format!(
-                            "* OK [COPYUID {} {} {}] subset\r\n{tag} NO [OVERQUOTA] partial\r\n",
-                            state.census.folders[&target].uidvalidity, uids[0], mapped[0]
-                        );
+                        reply = format!("* OK {code} subset\r\n{tag} NO [OVERQUOTA] partial\r\n");
                     } else if mode == "conflicting" {
                         reply = format!(
                             "* OK {code} first\r\n{tag} OK [COPYUID {} {} {}] different mapping\r\n",
@@ -561,6 +600,41 @@ fn serve(
             io.get_mut().flush()?;
         }
     }
+}
+
+/// Raw header the fake serves for a message: the shared invented header unless
+/// a recipient profile assigns one by message size, which travels with a MOVE.
+fn header_for(root: &Path, m: &MessageRecord) -> String {
+    std::fs::read(root.join("move-headers.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<BTreeMap<String, String>>(&b).ok())
+        .and_then(|mut h| h.remove(&m.size.to_string()))
+        .unwrap_or_else(|| String::from_utf8(HEADER.to_vec()).unwrap())
+}
+
+/// Assigns the recipient profile to INBOX messages by UID, like mail delivered
+/// with those headers, and records the matching parsed census headers.
+pub(crate) fn recipient_profile(
+    repo: &Accounts,
+    id: &AccountId,
+    root: &Path,
+    headers: &[(u32, &str)],
+) {
+    let (store, mut state) = external(repo, id, root);
+    let mut raw = BTreeMap::new();
+    let inbox = state.census.folders.get_mut("INBOX").unwrap();
+    for (uid, header) in headers {
+        let m = inbox.messages.get_mut(uid).unwrap();
+        m.size = 2000 + u64::from(*uid);
+        m.headers = parse_headers(header.as_bytes(), Direction::Received).unwrap();
+        raw.insert(m.size.to_string(), (*header).to_owned());
+    }
+    store.save_state(&mut state).unwrap();
+    std::fs::write(
+        root.join("move-headers.json"),
+        serde_json::to_vec(&raw).unwrap(),
+    )
+    .unwrap();
 }
 
 fn setup(root: &Path) -> (Accounts, Account, Fake) {

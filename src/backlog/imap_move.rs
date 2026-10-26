@@ -502,6 +502,9 @@ impl MoveEvidence {
     pub fn completion(&self) -> Option<&Completion> {
         self.completion.as_ref()
     }
+    pub fn observed(&self) -> bool {
+        self.readback.is_some()
+    }
 
     pub fn record_mapping(&mut self, mapping: CopyUidMapping) -> Result<(), InvalidEvidence> {
         if !self.attempted || self.readback.is_some() || self.completion.is_some() {

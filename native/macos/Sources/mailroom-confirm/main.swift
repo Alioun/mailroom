@@ -30,11 +30,16 @@ func ask(_ request: ExactRequest) async -> Bool {
 }
 
 do {
+    try disableCoreDumps()
     try requirePrivatePipes()
-    let envelope = try JSONDecoder().decode(Envelope.self, from: try readRequest())
+    var input = try readRequest()
+    defer { input.resetBytes(in: 0..<input.count) }
+    let envelope = try JSONDecoder().decode(Envelope.self, from: input)
+    var challenge = envelope.challenge
+    defer { challenge.resetBytes(in: 0..<challenge.count) }
     let request = try validate(request: envelope.request)
     let approved = await ask(request)
-    write(try outcome(request: envelope.request, id: request.request_id, outcome: approved ? .approved : .cancelled, challenge: envelope.challenge))
+    write(try outcome(request: envelope.request, id: request.request_id, outcome: approved ? .approved : .cancelled, challenge: challenge))
 } catch {
     // No parser data, challenge or OS error text leaves the helper.
     exit(1)

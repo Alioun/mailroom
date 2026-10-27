@@ -1335,6 +1335,7 @@ dependencies = [
  "aes-gcm",
  "axum",
  "chrono",
+ "core-foundation",
  "data-encoding",
  "directories",
  "hkdf 0.12.4",

@@ -113,6 +113,15 @@ pub struct Account {
     restored: Option<recovery::Restored>,
 }
 
+impl Account {
+    /// Keychain references this account owns. Names only; never values.
+    pub(crate) fn credential_references(&self) -> Vec<&str> {
+        let mut references = vec![self.password_ref.as_str(), self.local_secret_ref.as_str()];
+        references.extend(self.identity_ref.as_deref());
+        references
+    }
+}
+
 #[derive(Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionState {

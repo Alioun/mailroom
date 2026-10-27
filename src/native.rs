@@ -27,12 +27,6 @@ pub(crate) struct Helper {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Kind {
-    Confirm,
-    Keychain,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LaunchError {
     NotPinned,
     UnsupportedPin,
@@ -90,20 +84,44 @@ fn pinned(
     Ok(Helper { path, pin })
 }
 
-/// The helper pinned into this build. Set by the owner wizard at `cargo build` time.
-pub(crate) fn installed(kind: Kind) -> Result<Helper, LaunchError> {
-    match kind {
-        Kind::Confirm => pinned(
-            option_env!("MAILROOM_CONFIRM_HELPER"),
-            option_env!("MAILROOM_CONFIRM_HELPER_CDHASH"),
-            option_env!("MAILROOM_CONFIRM_HELPER_REQUIREMENT"),
-        ),
-        Kind::Keychain => pinned(
-            option_env!("MAILROOM_KEYCHAIN_HELPER"),
-            option_env!("MAILROOM_KEYCHAIN_HELPER_CDHASH"),
-            option_env!("MAILROOM_KEYCHAIN_HELPER_REQUIREMENT"),
-        ),
-    }
+/// The confirmation helper pinned into this build. Set by the owner wizard at build time.
+pub(crate) fn installed() -> Result<Helper, LaunchError> {
+    pinned(
+        option_env!("MAILROOM_CONFIRM_HELPER"),
+        option_env!("MAILROOM_CONFIRM_HELPER_CDHASH"),
+        option_env!("MAILROOM_CONFIRM_HELPER_REQUIREMENT"),
+    )
+}
+
+/// Sets the core-file limit to zero, soft and hard, so no crash can write a secret to disk.
+pub(crate) fn disable_core_dumps() -> bool {
+    let zero = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    let set = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &zero) };
+    set == 0 && core_dumps_disabled()
+}
+pub(crate) fn core_dumps_disabled() -> bool {
+    let mut limit = libc::rlimit {
+        rlim_cur: 1,
+        rlim_max: 1,
+    };
+    let read = unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut limit) };
+    read == 0 && limit.rlim_cur == 0 && limit.rlim_max == 0
+}
+
+/// The kernel's cdhash for this process, in lowercase hex.
+#[cfg(target_os = "macos")]
+pub(crate) fn own_cdhash() -> Option<String> {
+    macos::cdhash(unsafe { libc::getpid() }).map(|h| data_encoding::HEXLOWER.encode(&h))
+}
+/// Hardened runtime blocks debugger attachment and injected libraries, which would
+/// otherwise let a same-user process read keys out of this binary.
+#[cfg(target_os = "macos")]
+pub(crate) fn own_process_hardened() -> bool {
+    macos::flags(unsafe { libc::getpid() })
+        .is_some_and(|f| f & macos::REQUIRED_FLAGS == macos::REQUIRED_FLAGS)
 }
 
 pub(crate) const REQUEST_LIMIT: usize = 65536;
@@ -196,7 +214,7 @@ mod macos {
     const CS_HARD: u32 = 0x0000_0100;
     const CS_KILL: u32 = 0x0000_0200;
     const CS_RUNTIME: u32 = 0x0001_0000;
-    const REQUIRED_FLAGS: u32 = CS_VALID | CS_HARD | CS_KILL | CS_RUNTIME;
+    pub(super) const REQUIRED_FLAGS: u32 = CS_VALID | CS_HARD | CS_KILL | CS_RUNTIME;
 
     unsafe extern "C" {
         fn csops(
@@ -205,6 +223,17 @@ mod macos {
             useraddr: *mut libc::c_void,
             usersize: libc::size_t,
         ) -> libc::c_int;
+    }
+
+    pub(super) fn flags(pid: libc::pid_t) -> Option<u32> {
+        let mut flags = 0u32;
+        (unsafe { csops(pid, CS_OPS_STATUS, (&mut flags as *mut u32).cast(), 4) } == 0)
+            .then_some(flags)
+    }
+    pub(super) fn cdhash(pid: libc::pid_t) -> Option<[u8; 20]> {
+        let mut cdhash = [0u8; 20];
+        (unsafe { csops(pid, CS_OPS_CDHASH, cdhash.as_mut_ptr().cast(), 20) } == 0)
+            .then_some(cdhash)
     }
 
     fn pipe() -> Result<(OwnedFd, OwnedFd), LaunchError> {
@@ -283,19 +312,15 @@ mod macos {
 
         /// Reads the identity the kernel attached to the started image, before it has run.
         pub(super) fn require_identity(&self, expected: &[u8; 20]) -> Result<(), LaunchError> {
-            let mut flags = 0u32;
-            let mut cdhash = [0u8; 20];
-            let read = unsafe {
-                csops(self.pid, CS_OPS_STATUS, (&mut flags as *mut u32).cast(), 4) == 0
-                    && csops(self.pid, CS_OPS_CDHASH, cdhash.as_mut_ptr().cast(), 20) == 0
-            };
-            if !read
-                || flags & REQUIRED_FLAGS != REQUIRED_FLAGS
-                || !bool::from(cdhash.ct_eq(expected))
-            {
-                return Err(LaunchError::IdentityMismatch);
+            match (flags(self.pid), cdhash(self.pid)) {
+                (Some(flags), Some(cdhash))
+                    if flags & REQUIRED_FLAGS == REQUIRED_FLAGS
+                        && bool::from(cdhash.ct_eq(expected)) =>
+                {
+                    Ok(())
+                }
+                _ => Err(LaunchError::IdentityMismatch),
             }
-            Ok(())
         }
 
         pub(super) fn run(

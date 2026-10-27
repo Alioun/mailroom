@@ -10,6 +10,7 @@ use std::{
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
+pub(crate) const CANCELLED: &str = "Confirmation cancelled";
 const LIFETIME: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -134,7 +135,7 @@ impl Boundary {
     /// The production boundary. It issues no request unless a helper was pinned into this build.
     pub fn native() -> Self {
         Self::with_backend(Box::new(NativeBackend {
-            helper: crate::native::installed(crate::native::Kind::Confirm),
+            helper: crate::native::installed(),
         }))
     }
     pub(crate) fn with_backend(backend: Box<dyn Backend>) -> Self {
@@ -203,7 +204,7 @@ impl Boundary {
         let answer = self.backend.exchange(&request, &challenge)?;
         let outcome = authenticate(&pending.request.request_id, &request, &challenge, &answer)?;
         if outcome != Outcome::Approved {
-            return Err("Confirmation cancelled".into());
+            return Err(CANCELLED.into());
         }
         if pending.created.elapsed() >= LIFETIME || revalidate()? != pending.plan {
             return Err("Plan changed after confirmation".into());
@@ -316,7 +317,7 @@ impl Backend for NativeBackend {
 
 /// Why production confirmation is or is not available in this build.
 pub(crate) fn native_status() -> String {
-    match crate::native::installed(crate::native::Kind::Confirm) {
+    match crate::native::installed() {
         Ok(_) => "Native confirmation helper pinned into this build".into(),
         Err(e) => e.to_string(),
     }

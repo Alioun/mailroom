@@ -12,6 +12,8 @@ pub(crate) mod sieve_transaction;
 pub(crate) mod synthetic;
 pub(crate) mod workspace_authority;
 use crate::census::CensusError;
+#[cfg(target_os = "macos")]
+pub(crate) use accounts::keychain;
 pub use accounts::lifecycle;
 pub(crate) use accounts::recovery;
 pub use accounts::{

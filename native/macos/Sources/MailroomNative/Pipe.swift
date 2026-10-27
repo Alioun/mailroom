@@ -1,6 +1,13 @@
 import Darwin
 import Foundation
 
+/// A zero core-file limit, soft and hard, before anything sensitive is read.
+public func disableCoreDumps() throws {
+    var limit = rlimit(rlim_cur: 0, rlim_max: 0)
+    guard setrlimit(RLIMIT_CORE, &limit) == 0, getrlimit(RLIMIT_CORE, &limit) == 0,
+          limit.rlim_cur == 0, limit.rlim_max == 0 else { throw Denied() }
+}
+
 /// The parent hands over anonymous pipes and no arguments. Terminals, files and sockets deny.
 public func requirePrivatePipes() throws {
     guard CommandLine.arguments.count == 1 else { throw Denied() }

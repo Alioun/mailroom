@@ -1,21 +1,12 @@
 use super::*;
 use crate::acquisition::{AccountPaths, Accounts, Provider};
-use crate::native::{
-    Pin,
-    tests::{Fixture, cdhash},
-};
-use std::{
-    ffi::{CString, c_void},
-    fs,
-    path::Path,
-    process::Command,
-    sync::{Arc, Mutex, OnceLock},
-};
+use rand::{RngCore, rngs::OsRng};
+use std::{fs, sync::Arc};
 
 #[link(name = "Security", kind = "framework")]
 unsafe extern "C" {
     fn SecKeychainCreate(
-        path: *const std::ffi::c_char,
+        path: *const c_char,
         password_length: u32,
         password: *const c_void,
         prompt_user: u8,
@@ -24,21 +15,19 @@ unsafe extern "C" {
     ) -> i32;
     fn SecKeychainDelete(keychain: *mut c_void) -> i32;
 }
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFRelease(value: *mut c_void);
-}
 
-/// A keychain file created for one test and deleted when it ends. It is never added to the
-/// user's search list, and its own unlock password is random and never leaves this process.
-struct Throwaway {
+/// A keychain file created in a private temporary directory for one test and deleted when
+/// it ends. It never joins the search list, and its random unlock password stays in memory.
+pub(crate) struct Throwaway {
     handle: *mut c_void,
-    path: PathBuf,
+    pub path: PathBuf,
+    pub dir: tempfile::TempDir,
 }
 unsafe impl Send for Throwaway {}
 impl Throwaway {
-    fn new(fixture: &Fixture) -> Self {
-        let path = fixture.dir.path().join("throwaway.keychain-db");
+    pub fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("throwaway.keychain-db");
         let c_path = CString::new(path.to_str().unwrap()).unwrap();
         let mut password = Zeroizing::new([0u8; 32]);
         OsRng.fill_bytes(&mut password[..]);
@@ -54,106 +43,26 @@ impl Throwaway {
             )
         };
         assert_eq!(status, 0, "throwaway keychain");
-        Self { handle, path }
+        Self { handle, path, dir }
+    }
+    fn keychain(&self) -> Keychain {
+        explicit(&self.path).unwrap()
     }
 }
 impl Drop for Throwaway {
     fn drop(&mut self) {
         unsafe {
             assert_eq!(SecKeychainDelete(self.handle), 0);
-            CFRelease(self.handle);
+            core_foundation::base::CFRelease(self.handle as CFTypeRef);
         }
         assert!(!self.path.exists());
     }
 }
 
-/// Builds the real Swift helper once per test process.
-fn built_helper() -> &'static Path {
-    static BUILT: OnceLock<PathBuf> = OnceLock::new();
-    BUILT.get_or_init(|| {
-        let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("native/macos");
-        let status = Command::new("/usr/bin/xcrun")
-            .args([
-                "swift",
-                "build",
-                "-c",
-                "release",
-                "--product",
-                "mailroom-keychain",
-                "--package-path",
-            ])
-            .arg(&package)
-            .output()
-            .unwrap();
-        assert!(
-            status.status.success(),
-            "swift build: {}",
-            String::from_utf8_lossy(&status.stderr)
-        );
-        package.join(".build/release/mailroom-keychain")
-    })
-}
-
-fn sign(path: &Path, identifier: &str) -> Helper {
-    let signed = Command::new("/usr/bin/codesign")
-        .args(["-s", "-", "-f", "-o", "runtime", "--identifier", identifier])
-        .arg(path)
-        .output()
-        .unwrap();
-    assert!(signed.status.success());
-    Helper {
-        pin: Pin::AdHocCdHash(cdhash(path)),
-        path: path.to_owned(),
-    }
-}
-
-struct Setup {
-    fixture: Fixture,
-    keychain: Option<Throwaway>,
-    helper: Helper,
-}
-impl Setup {
-    fn new() -> Self {
-        let fixture = Fixture::new();
-        let copy = fixture.copy("mailroom-keychain", built_helper());
-        let helper = sign(&copy, "org.mailroom.keychain");
-        let keychain = Some(Throwaway::new(&fixture));
-        Self {
-            fixture,
-            keychain,
-            helper,
-        }
-    }
-    fn path(&self) -> PathBuf {
-        self.keychain.as_ref().unwrap().path.clone()
-    }
-    fn backend(&self) -> Keychain<Helper> {
-        Keychain::new(self.helper.clone(), self.path())
-    }
-    /// No file in the test directory, keychain included, holds the dummy or its encodings.
-    fn assert_no_plaintext(&self, dummy: &[u8]) {
-        let encoded = data_encoding::BASE64.encode(dummy);
-        for entry in walk(self.fixture.dir.path()) {
-            let bytes = fs::read(entry).unwrap();
-            for needle in [dummy, encoded.as_bytes()] {
-                assert!(
-                    !bytes.windows(needle.len()).any(|w| w == needle),
-                    "plaintext in a file"
-                );
-            }
-        }
-    }
-}
-impl Drop for Setup {
-    fn drop(&mut self) {
-        drop(self.keychain.take());
-    }
-}
-
-fn dummy() -> SecretValue {
+fn dummy() -> Zeroizing<Vec<u8>> {
     let mut random = [0u8; 12];
     OsRng.fill_bytes(&mut random);
-    SecretValue::new(
+    Zeroizing::new(
         format!(
             "nk-dummy-secret-{}",
             data_encoding::HEXLOWER.encode(&random)
@@ -162,220 +71,368 @@ fn dummy() -> SecretValue {
     )
 }
 
-fn assert_clean(error: AcquisitionError, dummy: &SecretValue) {
-    let text = format!("{error} {error:?}");
-    assert!(!text.contains(dummy.text().unwrap()), "secret in an error");
-    assert!(
-        !text.contains("nk-dummy-secret"),
-        "secret prefix in an error"
+fn application(path: &str) -> CFType {
+    let path = CString::new(path).unwrap();
+    let mut application = std::ptr::null_mut();
+    assert_eq!(
+        unsafe { SecTrustedApplicationCreateFromPath(path.as_ptr(), &mut application) },
+        0
     );
+    unsafe { CFType::wrap_under_create_rule(application as CFTypeRef) }
+}
+/// An ad-hoc signed binary other than this one, trusted the way an earlier build would be.
+fn other() -> CFType {
+    application(crate::native::tests::fake_helper().to_str().unwrap())
+}
+fn own() -> CFType {
+    let (application, _) = own_application().unwrap();
+    unsafe { CFType::wrap_under_get_rule(application.0 as CFTypeRef) }
+}
+fn trusting(applications: &[CFType]) -> CFArray<CFType> {
+    CFArray::from_CFTypes(applications)
 }
 
-#[test]
-fn pinned_local_keys_round_trip_without_overwrite_and_delete_idempotently() {
-    let setup = Setup::new();
-    let backend = setup.backend();
-    let value = dummy();
-    backend.put("acct-census-key", &value).unwrap();
-    assert_eq!(
-        backend.protection("acct-census-key").unwrap(),
-        Some(Protection::PinnedHelper)
-    );
-    assert_eq!(
-        backend.get("acct-census-key").unwrap().bytes(),
-        value.bytes()
-    );
-    let overwrite = backend.put("acct-census-key", &dummy()).unwrap_err();
-    assert_eq!(overwrite, AcquisitionError::Credentials);
-    assert_eq!(
-        backend.get("acct-census-key").unwrap().bytes(),
-        value.bytes()
-    );
-    backend.delete("acct-census-key").unwrap();
-    assert_eq!(
-        backend.get("acct-census-key").unwrap_err(),
-        AcquisitionError::CredentialMissing
-    );
-    backend.delete("acct-census-key").unwrap();
-    setup.assert_no_plaintext(value.bytes());
-    assert_eq!(format!("{value:?}"), "SecretValue([REDACTED])");
-}
-
-#[test]
-fn mailbox_passwords_trust_no_application_and_need_a_person_at_every_read() {
-    let setup = Setup::new();
-    let backend = setup.backend();
-    let value = dummy();
-    backend.put("acct-password", &value).unwrap();
-    assert_eq!(
-        backend.protection("acct-password").unwrap(),
-        Some(Protection::EveryAccess)
-    );
-    for _ in 0..2 {
-        let denied = backend.get("acct-password").unwrap_err();
-        assert_eq!(denied, AcquisitionError::Credentials);
-        assert_clean(denied, &value);
+/// No file under the test directory, keychain included, holds the dummy or its base64.
+fn assert_no_plaintext(root: &Path, dummy: &[u8]) {
+    let encoded = data_encoding::BASE64.encode(dummy);
+    for path in walk(root) {
+        let bytes = fs::read(path).unwrap();
+        for needle in [dummy, encoded.as_bytes()] {
+            assert!(
+                !bytes.windows(needle.len()).any(|w| w == needle),
+                "plaintext in a file"
+            );
+        }
     }
-    backend.delete("acct-password").unwrap();
-    setup.assert_no_plaintext(value.bytes());
+}
+fn walk(root: &Path) -> Vec<PathBuf> {
+    let mut files = vec![];
+    for entry in fs::read_dir(root).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(walk(&path))
+        } else {
+            files.push(path)
+        }
+    }
+    files
 }
 
 #[test]
-fn another_helper_build_cannot_read_items_pinned_to_the_original() {
-    let setup = Setup::new();
-    let value = dummy();
-    setup.backend().put("acct-key-g2", &value).unwrap();
-    let rebuilt = setup.fixture.copy("rebuilt", built_helper());
-    let rebuilt = Keychain::new(sign(&rebuilt, "org.mailroom.rebuilt"), setup.path());
-    let denied = rebuilt.get("acct-key-g2").unwrap_err();
-    assert_eq!(denied, AcquisitionError::Credentials);
-    assert_clean(denied, &value);
+fn this_binary_is_trusted_by_its_kernel_cdhash() {
+    let (_, requirement) = own_application().unwrap();
     assert_eq!(
-        setup.backend().get("acct-key-g2").unwrap().bytes(),
-        value.bytes()
+        requirement,
+        format!("cdhash H\"{}\"", crate::native::own_cdhash().unwrap())
     );
 }
 
 #[test]
-fn substituted_unpinned_or_answerless_helpers_deny_before_any_keychain_access() {
-    let setup = Setup::new();
+fn pinned_keys_round_trip_without_overwrite_and_delete_idempotently() {
+    let throwaway = Throwaway::new();
+    let keychain = throwaway.keychain();
     let value = dummy();
-    let mut wrong = setup.helper.clone();
-    wrong.pin = Pin::AdHocCdHash([1; 20]);
-    let echo = setup.fixture.pinned("echo");
-    assert!(installed().is_err(), "this test build pins no helper");
+    assert_eq!(keychain.create("acct-census-key", &value), Status::Ok);
+    assert_eq!(keychain.status("acct-census-key"), Status::Ok);
+    assert_eq!(
+        keychain.read("acct-census-key").unwrap().as_slice(),
+        value.as_slice()
+    );
+    assert_eq!(keychain.create("acct-census-key", &dummy()), Status::Exists);
+    assert_eq!(
+        keychain.read("acct-census-key").unwrap().as_slice(),
+        value.as_slice()
+    );
+    assert_eq!(keychain.remove("acct-census-key"), Status::Ok);
+    assert_eq!(
+        keychain.read("acct-census-key").err(),
+        Some(Status::Missing)
+    );
+    assert_eq!(keychain.remove("acct-census-key"), Status::Missing);
+    assert_no_plaintext(throwaway.dir.path(), &value);
+}
+
+#[test]
+fn passwords_trust_no_application_and_every_read_needs_a_person() {
+    let throwaway = Throwaway::new();
+    let keychain = throwaway.keychain();
+    let value = dummy();
+    assert_eq!(keychain.create("acct-password", &value), Status::Ok);
+    assert_eq!(keychain.status("acct-password"), Status::Ok);
+    for _ in 0..2 {
+        assert_eq!(keychain.read("acct-password").err(), Some(Status::Denied));
+    }
+    assert_no_plaintext(throwaway.dir.path(), &value);
+}
+
+/// "Always Allow" or a Keychain Access edit adds an application. Keychain would then hand
+/// the password over silently; the read boundary refuses it instead.
+#[test]
+fn a_granted_or_edited_access_list_is_refused_at_read() {
+    let throwaway = Throwaway::new();
+    let keychain = throwaway.keychain();
+    let value = dummy();
+    assert_eq!(
+        keychain.add(SERVICE, "acct-password", &trusting(&[own()]), &value),
+        Status::Ok
+    );
+    let item = keychain.item(SERVICE, "acct-password").unwrap();
+    assert_eq!(
+        keychain.data(&item).unwrap().as_slice(),
+        value.as_slice(),
+        "Keychain itself reads silently"
+    );
+    assert_eq!(keychain.status("acct-password"), Status::Changed);
+    assert_eq!(keychain.read("acct-password").err(), Some(Status::Changed));
+    assert_eq!(
+        keychain.add(SERVICE, "b-password", &trusting(&[other()]), &value),
+        Status::Ok
+    );
+    assert_eq!(keychain.read("b-password").err(), Some(Status::Changed));
+    assert_eq!(
+        keychain.add(
+            SERVICE,
+            "acct-census-key",
+            &trusting(&[own(), other()]),
+            &value
+        ),
+        Status::Ok
+    );
+    assert_eq!(
+        keychain.read("acct-census-key").err(),
+        Some(Status::Changed)
+    );
+    assert_eq!(
+        keychain.add(SERVICE, "acct-key-g2", &trusting(&[]), &value),
+        Status::Ok
+    );
+    assert_eq!(keychain.read("acct-key-g2").err(), Some(Status::Changed));
+}
+
+#[test]
+fn a_key_trusting_another_binary_is_reported_and_never_read_silently() {
+    let throwaway = Throwaway::new();
+    let keychain = throwaway.keychain();
+    let value = dummy();
+    assert_eq!(
+        keychain.add(SERVICE, "acct-census-key", &trusting(&[other()]), &value),
+        Status::Ok
+    );
+    assert_eq!(keychain.status("acct-census-key"), Status::OtherBinary);
+    assert_eq!(
+        keychain.read("acct-census-key").err(),
+        Some(Status::OtherBinary)
+    );
+    assert_eq!(
+        keychain.retrust("acct-census-key").err(),
+        Some(Status::Denied)
+    );
+    assert_eq!(
+        keychain.status("acct-census-key"),
+        Status::OtherBinary,
+        "the original stays"
+    );
+    assert_eq!(keychain.status("acct-census-key-retrust"), Status::Missing);
+}
+
+#[test]
+fn an_interrupted_retrust_finishes_from_its_staged_copy() {
+    let throwaway = Throwaway::new();
+    let keychain = throwaway.keychain();
+    let value = dummy();
+    assert_eq!(
+        keychain.create_as("acct-identity-retrust", Class::PinnedSelf, &value),
+        Status::Ok
+    );
+    assert_eq!(keychain.retrust("acct-identity"), Ok(Status::Ok));
+    assert_eq!(
+        keychain.read("acct-identity").unwrap().as_slice(),
+        value.as_slice()
+    );
+    assert_eq!(
+        keychain.status_as("acct-identity-retrust", Class::PinnedSelf),
+        Status::Missing
+    );
+    assert_eq!(keychain.retrust("acct-identity"), Ok(Status::Exists));
+    assert_eq!(
+        keychain.create_as("acct-identity-retrust", Class::PinnedSelf, &value),
+        Status::Ok
+    );
+    assert_eq!(keychain.retrust("acct-identity"), Ok(Status::Exists));
+    assert_eq!(
+        keychain.status_as("acct-identity-retrust", Class::PinnedSelf),
+        Status::Missing
+    );
+    assert_eq!(
+        keychain.create_as("acct-identity-retrust", Class::PinnedSelf, &dummy()),
+        Status::Ok
+    );
+    assert_eq!(keychain.retrust("acct-identity"), Err(Status::Changed));
+    assert_eq!(keychain.retrust("acct-password"), Err(Status::Failed));
+}
+
+fn legacy(keychain: &Keychain, reference: &str, value: &[u8], trusted: &[CFType]) {
+    assert_eq!(
+        keychain.add(LEGACY_SERVICE, reference, &trusting(trusted), value),
+        Status::Ok
+    );
+}
+
+#[test]
+fn migration_proves_the_copy_and_retirement_needs_an_equal_protected_value() {
+    let throwaway = Throwaway::new();
+    let keychain = throwaway.keychain();
+    let value = dummy();
+    legacy(&keychain, "a-census-key", &value, &[own()]);
+    assert_eq!(
+        keychain.legacy_references().unwrap(),
+        vec!["a-census-key".to_owned()]
+    );
+    assert_eq!(keychain.migrate("a-census-key"), Ok(Status::Ok));
+    assert_eq!(keychain.migrate("a-census-key"), Ok(Status::Exists));
+    assert_eq!(keychain.retire_legacy("a-census-key"), Ok(()));
+    assert!(keychain.legacy_references().unwrap().is_empty());
+    assert_eq!(
+        keychain.read("a-census-key").unwrap().as_slice(),
+        value.as_slice()
+    );
+
+    assert_eq!(keychain.create("b-census-key", &dummy()), Status::Ok);
+    legacy(&keychain, "b-census-key", &value, &[own()]);
+    assert_eq!(keychain.migrate("b-census-key"), Err(Migration::Mismatch));
+    assert_eq!(
+        keychain.retire_legacy("b-census-key"),
+        Err(Migration::Mismatch)
+    );
+    assert_eq!(
+        keychain.legacy_references().unwrap(),
+        vec!["b-census-key".to_owned()],
+        "the original stays"
+    );
+
+    legacy(&keychain, "c-census-key", &value, &[other()]);
+    assert_eq!(
+        keychain.migrate("c-census-key"),
+        Err(Migration::Legacy(Status::Denied))
+    );
+    assert_eq!(keychain.status("c-census-key"), Status::Missing);
+
+    legacy(&keychain, "d-password", &value, &[own()]);
+    assert_eq!(
+        keychain.migrate("d-password"),
+        Err(Migration::Protected(Status::Denied))
+    );
+    assert_eq!(keychain.status("d-password"), Status::Ok);
+    assert_eq!(
+        keychain.retire_legacy("d-password"),
+        Err(Migration::Protected(Status::Denied))
+    );
+    assert!(
+        keychain
+            .legacy_references()
+            .unwrap()
+            .contains(&"d-password".to_owned())
+    );
+
+    assert_eq!(
+        keychain.add(SERVICE, "e-census-key", &trusting(&[other()]), &value),
+        Status::Ok
+    );
+    legacy(&keychain, "e-census-key", &value, &[own()]);
+    assert_eq!(
+        keychain.migrate("e-census-key"),
+        Err(Migration::Protected(Status::OtherBinary))
+    );
+    assert_eq!(
+        keychain.retire_legacy("e-census-key"),
+        Err(Migration::Protected(Status::OtherBinary))
+    );
+    assert_eq!(
+        keychain.migrate("f-census-key"),
+        Err(Migration::Legacy(Status::Missing))
+    );
+    assert_no_plaintext(throwaway.dir.path(), &value);
+}
+
+#[test]
+fn explicit_keychains_never_open_the_login_or_system_keychains() {
+    let throwaway = Throwaway::new();
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    for path in [
+        home.join("Library/Keychains/login.keychain-db"),
+        PathBuf::from("/Library/Keychains/System.keychain"),
+        throwaway.dir.path().join("absent.keychain-db"),
+        PathBuf::from("relative.keychain-db"),
+    ] {
+        assert!(explicit(&path).is_err(), "{}", path.display());
+    }
+    let link = throwaway.dir.path().join("link.keychain-db");
+    std::os::unix::fs::symlink(home.join("Library/Keychains/login.keychain-db"), &link).unwrap();
+    assert!(explicit(&link).is_err(), "a symlink to the login keychain");
+}
+
+#[test]
+fn production_backend_refuses_this_unhardened_binary() {
+    assert!(installed().is_err());
     let os = crate::acquisition::OsCredentials;
     assert_eq!(
         os.get("acct-census-key").err(),
         Some(AcquisitionError::Credentials)
     );
     assert_eq!(
-        os.put("acct-census-key", &value).err(),
+        os.put("acct-census-key", &SecretValue::new(dummy().to_vec()))
+            .err(),
         Some(AcquisitionError::Credentials)
     );
     assert_eq!(
         os.delete("acct-census-key").err(),
         Some(AcquisitionError::Credentials)
     );
-    for helper in [wrong, echo] {
-        let backend = Keychain::new(helper, setup.path());
-        for error in [
-            backend.put("acct-census-key", &value).unwrap_err(),
-            backend.get("acct-census-key").unwrap_err(),
-            backend.delete("acct-census-key").unwrap_err(),
-        ] {
-            assert_eq!(error, AcquisitionError::Credentials);
-            assert_clean(error, &value);
-        }
-    }
-    assert_eq!(
-        setup.backend().get("acct-census-key").unwrap_err(),
-        AcquisitionError::CredentialMissing
-    );
-}
-
-/// Records each exchange and lets a test rewrite or replay the helper's reply.
-struct Tamper {
-    inner: Helper,
-    edit: fn(&mut serde_json::Value, Option<&serde_json::Value>),
-    last: Mutex<Option<serde_json::Value>>,
-}
-impl Channel for Tamper {
-    fn exchange(&self, input: &[u8]) -> Result<Zeroizing<Vec<u8>>, LaunchError> {
-        let reply = self.inner.exchange(input)?;
-        let mut value: serde_json::Value = serde_json::from_slice(&reply).unwrap();
-        let previous = self.last.lock().unwrap().replace(value.clone());
-        (self.edit)(&mut value, previous.as_ref());
-        Ok(Zeroizing::new(serde_json::to_vec(&value).unwrap()))
-    }
 }
 
 #[test]
-fn altered_replayed_or_unauthenticated_replies_deny() {
-    let setup = Setup::new();
-    let value = dummy();
-    setup.backend().put("acct-census-key", &value).unwrap();
-    let edits: [fn(&mut serde_json::Value, Option<&serde_json::Value>); 6] = [
-        |v, _| {
-            v["secret"] = data_encoding::BASE64
-                .encode(b"nk-dummy-secret-swapped")
-                .into()
-        },
-        |v, _| v["status"] = "missing".into(),
-        |v, _| v["authentication"] = "0".repeat(64).into(),
-        |v, _| v["extra"] = true.into(),
-        |v, _| {
-            v.as_object_mut().unwrap().remove("secret");
-        },
-        |v, previous| {
-            if let Some(previous) = previous {
-                *v = previous.clone();
-            }
-        },
-    ];
-    for (index, edit) in edits.into_iter().enumerate() {
-        let tamper = Tamper {
-            inner: setup.helper.clone(),
-            edit,
-            last: Mutex::new(None),
-        };
-        let backend = Keychain::new(tamper, setup.path());
-        if index == 5 {
-            assert_eq!(
-                backend.get("acct-census-key").unwrap().bytes(),
-                value.bytes()
-            );
-        }
-        let denied = backend.get("acct-census-key").unwrap_err();
-        assert_eq!(denied, AcquisitionError::Credentials, "edit {index}");
-        assert_clean(denied, &value);
-    }
-    assert_eq!(
-        setup.backend().get("acct-census-key").unwrap().bytes(),
-        value.bytes()
-    );
-}
-
-#[test]
-fn account_lifecycle_runs_on_the_keychain_backend_and_never_reads_the_password_silently() {
-    let setup = Setup::new();
-    let root = setup.fixture.dir.path().join("accounts");
+fn account_lifecycle_runs_on_the_keychain_and_never_reads_the_password_silently() {
+    let throwaway = Throwaway::new();
+    let root = throwaway.dir.path().join("accounts");
     let repo = Accounts::new(
         AccountPaths {
             config: root.join("config"),
             data: root.join("data"),
         },
-        Arc::new(setup.backend()),
+        Arc::new(throwaway.keychain()),
     );
-    let password = dummy();
+    let password = SecretValue::new(dummy().to_vec());
     let account = repo
         .create(Provider::MailboxOrg, "login@example.test".into(), &password)
         .unwrap();
     repo.store(&account).unwrap();
     let denied = repo.password(&account).err().unwrap();
     assert_eq!(denied, AcquisitionError::Credentials);
-    assert_clean(denied, &password);
-    let backend = setup.backend();
-    assert_eq!(
-        backend.protection(&account.password_ref).unwrap(),
-        Some(Protection::EveryAccess)
-    );
-    assert_eq!(
-        backend.protection(&account.local_secret_ref).unwrap(),
-        Some(Protection::PinnedHelper)
-    );
-    setup.assert_no_plaintext(password.bytes());
+    let text = format!("{denied} {denied:?}");
+    assert!(!text.contains("nk-dummy-secret"));
+    let keychain = throwaway.keychain();
+    assert_eq!(Class::of(&account.password_ref), Class::EveryAccess);
+    assert_eq!(keychain.status(&account.password_ref), Status::Ok);
+    assert_eq!(Class::of(&account.local_secret_ref), Class::PinnedSelf);
+    assert_eq!(keychain.status(&account.local_secret_ref), Status::Ok);
+    assert_no_plaintext(throwaway.dir.path(), password.bytes());
 }
 
-fn walk(root: &Path) -> Vec<PathBuf> {
-    let mut files = vec![];
-    for entry in fs::read_dir(root).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            files.extend(walk(&path));
-        } else {
-            files.push(path);
-        }
+#[test]
+fn reference_classes() {
+    for (reference, class) in [
+        ("a-census-key", Class::PinnedSelf),
+        ("a-key-g3", Class::PinnedSelf),
+        ("a-identity", Class::PinnedSelf),
+        ("a-password", Class::EveryAccess),
+        ("a-password-0a1b", Class::EveryAccess),
+        ("a-key-g", Class::EveryAccess),
+        ("a-census-key-retrust", Class::EveryAccess),
+        ("unknown", Class::EveryAccess),
+    ] {
+        assert_eq!(Class::of(reference), class, "{reference}");
     }
-    files
+    for bad in ["", "a/b", "a b", "ä", &"a".repeat(129)] {
+        assert!(!valid_reference(bad));
+    }
 }

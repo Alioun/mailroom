@@ -256,6 +256,34 @@ fn pins_parse_strictly_and_developer_id_is_a_denied_slot() {
 
 #[test]
 fn this_test_build_pins_no_helper() {
-    assert_eq!(installed(Kind::Confirm), Err(LaunchError::NotPinned));
-    assert_eq!(installed(Kind::Keychain), Err(LaunchError::NotPinned));
+    assert_eq!(installed(), Err(LaunchError::NotPinned));
+}
+
+#[test]
+fn core_dumps_are_disabled_soft_and_hard() {
+    assert!(disable_core_dumps());
+    assert!(core_dumps_disabled());
+    let raise = libc::rlimit {
+        rlim_cur: 1 << 20,
+        rlim_max: 1 << 20,
+    };
+    assert_ne!(
+        unsafe { libc::setrlimit(libc::RLIMIT_CORE, &raise) },
+        0,
+        "the hard limit cannot be raised again"
+    );
+}
+
+#[test]
+fn own_identity_is_read_from_the_kernel() {
+    let own = own_cdhash().unwrap();
+    assert_eq!(own.len(), 40);
+    assert_eq!(
+        own,
+        data_encoding::HEXLOWER.encode(&cdhash(&std::env::current_exe().unwrap()))
+    );
+    assert!(
+        !own_process_hardened(),
+        "cargo's linker signature has no hardened runtime"
+    );
 }

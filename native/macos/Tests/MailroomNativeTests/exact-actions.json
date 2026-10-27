@@ -72,13 +72,5 @@
   "challenge_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
   "request_digest": "34ba7edc659529113f574cef3cf8c8e52a26c3ecf3d5ca8e711ca16b73552c98",
   "approved_tag": "afd1eae5d12e61f9a448ed3a3408683a71f025029563b91adbda752d8ae1d0e8"
- },
- "keychain": {
-  "op": "get",
-  "reference": "acct-census-key",
-  "status": "ok",
-  "secret_hex": "6e6b2d64756d6d792d7365637265742d766563746f72",
-  "challenge_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-  "tag": "b3ff3de2d4d9e5cf9a0533fbcddb6fcd5e8621bd7af0f7cbface71c60125c1ec"
  }
 }

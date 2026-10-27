@@ -14,15 +14,8 @@ struct Fixture: Decodable {
         let request_digest: String
         let approved_tag: String
     }
-    struct KeychainVector: Decodable {
-        let reference: String
-        let secret_hex: String
-        let challenge_hex: String
-        let tag: String
-    }
     let actions: [Case]
     let outcome: OutcomeVector
-    let keychain: KeychainVector
 
     static func load() throws -> Fixture {
         let url = try XCTUnwrap(Bundle.module.url(forResource: "exact-actions", withExtension: "json"))
@@ -108,24 +101,11 @@ final class ExactTests: XCTestCase {
         XCTAssertThrowsError(try validate(request: Data("not json".utf8)))
     }
 
-    func testKeychainChannelTagMatchesRust() throws {
-        let vector = try Fixture.load().keychain
-        let tag = channelTag(challenge: bytes(vector.challenge_hex), op: .get, reference: vector.reference, status: .ok, protection: nil, secret: bytes(vector.secret_hex))
-        XCTAssertEqual(tag, vector.tag)
-        XCTAssertNotEqual(channelTag(challenge: bytes(vector.challenge_hex), op: .get, reference: vector.reference, status: .denied, protection: nil, secret: nil), vector.tag)
-    }
-
-    func testReferenceClassesAndNames() {
-        XCTAssertEqual(Protection(reference: "acct-1-census-key"), .pinnedHelper)
-        XCTAssertEqual(Protection(reference: "acct-1-key-g3"), .pinnedHelper)
-        XCTAssertEqual(Protection(reference: "acct-1-identity"), .pinnedHelper)
-        XCTAssertEqual(Protection(reference: "acct-1-password"), .everyAccess)
-        XCTAssertEqual(Protection(reference: "acct-1-password-0a1b"), .everyAccess)
-        XCTAssertEqual(Protection(reference: "acct-1-key-g"), .everyAccess)
-        XCTAssertEqual(Protection(reference: "unknown"), .everyAccess)
-        XCTAssertTrue(validReference("acct-1-password"))
-        for bad in ["", "a/b", "a b", "ä", String(repeating: "a", count: 129)] {
-            XCTAssertFalse(validReference(bad))
-        }
+    func testCoreDumpsAreDisabledBeforeAnythingIsRead() throws {
+        try disableCoreDumps()
+        var limit = rlimit()
+        XCTAssertEqual(getrlimit(RLIMIT_CORE, &limit), 0)
+        XCTAssertEqual(limit.rlim_cur, 0)
+        XCTAssertEqual(limit.rlim_max, 0)
     }
 }

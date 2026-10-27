@@ -185,7 +185,7 @@ grep -qx "tree_digest mismatch" <(records) && [[ ! -e "$out/libexec/mailroom/cal
 
 tree bad_metadata; install_fake happy; printf '%s' '{"id":"other","password_ref":"other-password","local_secret_ref":"other-census-key"}' >"$out/config/acct.json"
 run_phase "owner_phase \"$frozen\""
-grep -qx "account_metadata unreadable" <(records) && [[ ! -e "$out/libexec/mailroom/calls.log" ]] || fail "metadata whose id differs from its file name is refused"; ok
+grep -qx "account_metadata unreadable" <(records) && [[ ! -e "$out/libexec/mailroom/calls.log" ]] || fail "metadata whose id differs from its file name is refused"; ok; stopped bad_metadata
 
 tree acl_frozen; install_fake happy; chmod +a "user:$me allow write" "$frozen/README"
 run_phase "owner_phase \"$frozen\""
@@ -197,7 +197,7 @@ grep -qx "installation untrusted" <(records) && [[ ! -e "$out/libexec/mailroom/c
 
 tree acl_install; install_fake happy; chmod +a "user:$me allow add_file" "$out/libexec/mailroom"
 run_phase "owner_phase \"$frozen\""
-grep -qx "installation untrusted" <(records) || fail "an ACL on the installation is refused"; ok
+grep -qx "installation untrusted" <(records) || fail "an ACL on the installation is refused"; ok; stopped acl_install
 
 # The ACL scanner consumes the whole listing. An ACL on the first entry of a listing far
 # larger than a pipe buffer, and an unreadable subdirectory, both refuse.
@@ -233,7 +233,7 @@ ui_digest=$(sed -n 's/^ui_digest //p' "$out/records")
 cp -R "$built" "$work/built"
 
 tree outside_config; mkdir "$out/build/.cargo"; run_phase "build_phase \"$frozen\""
-grep -qx "build outside_config" <(records) || fail "a cargo config above the build is refused"; ok
+grep -qx "build outside_config" <(records) && [[ "$(ls -A "$out/build")" == .cargo ]] || fail "a cargo config above the build is refused and its directory removed"; ok; stopped outside_config
 
 # Install phase on the built outputs.
 install_run() {
@@ -250,20 +250,20 @@ bash -c 'source "$1"; TRUSTED_OWNER="$2"; trusted_tree "$3"' _ "$tree_script" "$
 [[ "$(ls -A "$out/libexec")" == mailroom ]] || fail "no staging is left behind"; ok
 
 install_run install_wrong 0000000000000000000000000000000000000000; install_go
-grep -qx "install identity" <(records) && ! installed || fail "a copy with another cdhash is refused"; ok
+grep -qx "install identity" <(records) && ! installed || fail "a copy with another cdhash is refused"; ok; stopped install_wrong
 install_run install_ui; echo changed >"$out/out/ui/index.html"; install_go
 grep -qx "install ui_digest" <(records) && ! installed || fail "a changed UI is refused"; ok
 install_run install_symlink; rm "$out/out/mailroom"; ln -s /etc/hosts "$out/out/mailroom"; install_go
 grep -qx "install not_plain" <(records) && ! installed || fail "a symlinked output is copied as a link and refused"; ok
 install_run install_fifo; rm "$out/out/mailroom-confirm"; mkfifo "$out/out/mailroom-confirm"; install_go
-grep -qx "install not_plain" <(records) && ! installed || fail "a FIFO output is never read and is refused"; ok
+grep -qx "install not_plain" <(records) && ! installed || fail "a FIFO output is never read and is refused"; ok; stopped install_fifo
 install_run install_malformed "not-a-cdhash"; install_go
-grep -qx "identities malformed" <(records) && ! installed || fail "a malformed typed identity is refused"; ok
+grep -qx "identities malformed" <(records) && ! installed || fail "a malformed typed identity is refused"; ok; stopped install_malformed
 [[ -z "$(ls -A "$work/install_wrong/libexec")" && -z "$(ls -A "$work/install_fifo/libexec")" ]] || fail "refused staging is removed"; ok
 install_run planted_pins; mkdir -m 755 "$out/libexec/mailroom"; echo keep >"$out/victim"; ln -s "$out/victim" "$out/libexec/mailroom/pins"; install_go
 [[ "$(cat "$out/victim")" == keep && ! -L "$out/libexec/mailroom/pins" ]] && grep -qx "install ok" <(records) || fail "a planted pins symlink is moved aside, never followed"; ok
 install_run acl_parent; chmod +a "user:$me allow add_subdirectory" "$out/libexec"; install_go
-grep -qx "install untrusted_parent" <(records) && ! installed || fail "an ACL on the install parent is refused"; ok
+grep -qx "install untrusted_parent" <(records) && ! installed || fail "an ACL on the install parent is refused"; ok; stopped acl_parent
 
 # The freeze bootstrap, copied from the docs and run without sudo: it accepts only the
 # approved digest, ignores Git replacement objects, never reuses a destination and never

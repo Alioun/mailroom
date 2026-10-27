@@ -412,9 +412,10 @@ sign() {
 build_as_owner() {
   local frozen="$1" work="${2:?}"
   local build=(/usr/bin/env -i PATH="/usr/bin:/bin:$(/usr/bin/dirname "$RUSTC"):$(/usr/bin/dirname "$NODE")" HOME="$work/home"
-    CARGO_HOME="$work/cargo-home" RUSTC="$RUSTC" CARGO_TARGET_DIR="$work/target" NPM_CONFIG_USERCONFIG=/dev/null
-    NPM_CONFIG_GLOBALCONFIG=/dev/null NPM_CONFIG_CACHE="$work/npm-cache" NPM_CONFIG_UPDATE_NOTIFIER=false)
+    CARGO_HOME="$work/cargo-home" RUSTC="$RUSTC" CARGO_TARGET_DIR="$work/target" NPM_CONFIG_USERCONFIG="$work/home/user-npmrc"
+    NPM_CONFIG_GLOBALCONFIG="$work/home/global-npmrc" NPM_CONFIG_CACHE="$work/npm-cache" NPM_CONFIG_UPDATE_NOTIFIER=false)
   /bin/mkdir -m 700 "$work/home" "$work/cargo-home" "$work/npm-cache" "$work/out" || return 1
+  : >"$work/home/user-npmrc" && : >"$work/home/global-npmrc" || return 1
   /usr/bin/ditto "$frozen" "$work/src" || return 1
   /bin/rm -rf "${work:?}/src/ui/dist" "${work:?}/src/ui/node_modules"
   no_outside_config "$work" || { BUILD_FAILURE=outside_config; return 1; }
@@ -560,9 +561,9 @@ say "Owner decision Q28 waives the frozen-copy requirement for this build step o
 say "Any program running as you, agents included, could alter these binaries or their"
 say "build inputs before they are signed. The install phase checks only that its copies"
 say "match what this phase signed; it cannot show that the build was untouched."
-work="$(/usr/bin/mktemp -d "$BUILD_BASE/mailroom-build.XXXXXX")" || { expect build_dir created failed; stop_incomplete; return 1; }
+work="$(/usr/bin/mktemp -d "$BUILD_BASE/mailroom-build.XXXXXX")" || { expect build_dir created failed || stop_incomplete; return 1; }
 BUILD_FAILURE=failed
-if ! build_as_owner "$frozen" "$work"; then expect build ok "$BUILD_FAILURE"; /bin/rm -rf "${work:?}"; stop_incomplete; return 1; fi
+if ! build_as_owner "$frozen" "$work"; then /bin/rm -rf "${work:?}"; expect build ok "$BUILD_FAILURE" || stop_incomplete; return 1; fi
 expect build ok ok
 note_result output "$work/out"
 note_result mailroom_cdhash "$MAILROOM_CDHASH"; note_result confirm_cdhash "$CONFIRM_CDHASH"; note_result ui_digest "$UI_DIGEST"
@@ -589,10 +590,10 @@ ask MAILROOM_CDHASH "mailroom cdhash:"
 ask CONFIRM_CDHASH "mailroom-confirm cdhash:"
 ask UI_DIGEST "UI digest:"
 if [[ ! "$MAILROOM_CDHASH" =~ ^[0-9a-f]{40}$ || ! "$CONFIRM_CDHASH" =~ ^[0-9a-f]{40}$ || ! "$UI_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
-  expect identities typed malformed; stop_incomplete; return 1
+  expect identities typed malformed || stop_incomplete; return 1
 fi
 INSTALL_FAILURE=failed
-install_fresh "$output" || { expect install ok "$INSTALL_FAILURE"; stop_incomplete; return 1; }
+install_fresh "$output" || { expect install ok "$INSTALL_FAILURE" || stop_incomplete; return 1; }
 expect install ok ok
 note_result confirm_cdhash "$CONFIRM_CDHASH"; note_result mailroom_cdhash "$MAILROOM_CDHASH"
 say "Installed mailroom $MAILROOM_CDHASH and mailroom-confirm $CONFIRM_CDHASH."
@@ -607,9 +608,9 @@ banner "Mailroom native confirmation and Keychain setup"
 
 stage "Check the frozen copy and the installation"
 check_frozen "$frozen" || { stop_incomplete; return 1; }
-read_pins || { expect installation trusted untrusted; stop_incomplete; return 1; }
+read_pins || { expect installation trusted untrusted || stop_incomplete; return 1; }
 expect installation trusted trusted
-expected_references || { expect account_metadata readable unreadable; stop_incomplete; return 1; }
+expected_references || { expect account_metadata readable unreadable || stop_incomplete; return 1; }
 
 stage "See the native confirmation"
 say "A dialog names an invented invoice send to nobody@example.invalid. Nothing is sent."
@@ -632,7 +633,7 @@ while read -r id <&3; do
     note_result "settle $id" "$RESULT"
     warn "Account $id was saved before identity keys carried a commitment. Nothing can show"
     warn "that its identity key is the one mailroom created. Adopting it trusts the key as it is now."
-    confirm_no "Adopt the current identity key of $id?" || { expect "adopt $id" adopted declined; stop_incomplete; return 1; }
+    confirm_no "Adopt the current identity key of $id?" || { expect "adopt $id" adopted declined || stop_incomplete; return 1; }
     mailroom keychain adopt "$id"
     expect "adopt $id" "status=settled status=unchanged" "$RESULT" || { stop_incomplete; return 1; }
   else

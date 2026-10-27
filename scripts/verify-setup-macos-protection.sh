@@ -316,7 +316,8 @@ clone="$work/clone"; git clone -q --no-local "$repo" "$clone"; git -C "$clone" c
 echo "echo replaced" >>"$clone/scripts/setup-macos-protection.sh"
 git -C "$clone" -c user.name=t -c user.email=t@example.invalid commit -qam replaced
 git -C "$clone" replace "$head_commit" "$(git -C "$clone" rev-parse HEAD)"
-git -C "$clone" archive --format=tar "$head_commit" | tar -xO scripts/setup-macos-protection.sh | grep -q "^echo replaced$" \
+replaced=$(git -C "$clone" archive --format=tar "$head_commit" | tar -xO scripts/setup-macos-protection.sh)
+[[ $'\n'"$replaced"$'\n' == *$'\n''echo replaced'$'\n'* ]] \
   || fail "the replacement object fixture changes plain git archive output"; ok
 base=$(fresh_base freeze_replaced); freeze "$base" "$clone" "$head_commit" "$head_digest" || fail "the bootstrap ignores replacement objects: $(cat "$base/freeze.out")"; ok
 ! grep -q "^echo replaced$" "$base/share/mailroom/setup-$head_commit/scripts/setup-macos-protection.sh" || fail "replaced bytes were frozen"; ok

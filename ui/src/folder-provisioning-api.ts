@@ -1,4 +1,4 @@
-import { recipientEvidence } from './api'
+import { recipientEvidence, sortingPost, missingLabel, type BacklogOptions } from './api'
 import { z } from 'zod'
 import { localFetch } from './api'
 const name = z.object({ decoded: z.string().max(1024), wire: z.string().max(2048) })
@@ -21,3 +21,8 @@ export async function folderCommand(account: string, command: Command): Promise<
 export async function folderStatus(account: string): Promise<FolderView> { return view.parse(await folderCommand(account, { action: 'status' })) }
 export async function folderPreview(account: string): Promise<FolderPreview> { return preview.parse(await folderCommand(account, { action: 'preview' })) }
 export async function folderReconcile(account: string, operation: string): Promise<FolderView> { return view.parse(await folderCommand(account, { action: 'reconcile', operation })) }
+export const labelJournal = journal
+const labelPreview = z.object({ operation, receipt: z.string(), proof: z.object({ saved_proof: z.string().length(64), options: z.object({ scope: z.string(), protect_flagged: z.boolean(), selected: z.array(z.string()).nullable() }), missing: z.array(missingLabel) }), limitations: z.string() })
+export type LabelPreview = z.infer<typeof labelPreview>
+export type LabelOperation = z.infer<typeof operation>
+export async function labelPreviewFor(account: string, options: BacklogOptions): Promise<LabelPreview> { return labelPreview.parse(await sortingPost('gmail', account, { action: 'label_preview', options })) }

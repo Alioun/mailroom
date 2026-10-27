@@ -51,7 +51,7 @@ try {
     assert.equal(await region.locator('.ledger-inclusion').isChecked(), false)
     if (multiple) await region.locator('.ledger-inclusion').check()
     const offer = await response('selected_capture_preview', region.getByRole('button', { name: 'Preview exact capture', exact: true }))
-    assert.ok(offer.preview.accounts.every(a => a.state_schema === 20))
+    assert.ok(offer.preview.accounts.every(a => a.state_schema === 21))
     assert.equal(await region.locator('.recovery-preview').getByRole('checkbox').isChecked(), false)
     assert.equal(await region.getByRole('button', { name: 'Create this synthetic encrypted bundle', exact: true }).isEnabled(), false)
     await region.locator('.recovery-preview').getByRole('checkbox').check()

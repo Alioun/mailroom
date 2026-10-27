@@ -777,7 +777,7 @@ fn synthetic_operation(
     saved: &mut AccountState,
 ) -> String {
     let mut session = repo
-        .folder_session(account, Cancellation::default())
+        .creator(Target::Folders, account, store, Cancellation::default())
         .unwrap();
     let before = session.observe().unwrap();
     session.logout();
@@ -800,7 +800,9 @@ fn synthetic_operation(
     );
     saved.folder_provisioning.history.push(Operation {
         id: id.clone(),
-        context: repo.folder_context(account, store).unwrap(),
+        context: repo
+            .provision_context(Target::Folders, account, store)
+            .unwrap(),
         artifact: artifact.identity().into(),
         proof_binding: "a".repeat(64),
         receipt: "b".repeat(64),

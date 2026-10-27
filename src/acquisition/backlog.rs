@@ -7,7 +7,10 @@ use crate::{
     backlog::{
         Options,
         imap_move::*,
-        protocol::{self as model, Binding, Preview, Reverse, Run, SavedPlan, Status, UndoPreview},
+        protocol::{
+            self as model, Binding, ClosePreview, CloseReason, Preview, Reverse, Run, SavedPlan,
+            Status, UndoPreview,
+        },
     },
     census::{AccountId, AccountState, Census, EncryptedStore, folder_provisioning::Inventory},
     rules::{proof, workspace},
@@ -54,8 +57,8 @@ impl Accounts {
         self.backlog_binding_with(account, store, material)
     }
     /// The binding with an already computed material digest. The digest covers
-    /// the whole account state, census included, so a run computes it once and
-    /// reuses it while it changes only its own journal.
+    /// the account state a run relies on, so a run computes it once and reuses
+    /// it while it changes only its own journal.
     fn backlog_binding_with(
         &self,
         account: &Account,
@@ -185,7 +188,7 @@ impl Accounts {
     ) -> Result<(Preview, Connection), AcquisitionError> {
         let binding = self.backlog_binding(account, store, saved)?;
         if saved.protocol_backlog.runs.len() >= model::HISTORY
-            || saved.protocol_backlog.runs.iter().any(|r| !r.finished())
+            || saved.protocol_backlog.runs.iter().any(|r| !r.settled())
         {
             return Err(invalid());
         }
@@ -305,6 +308,7 @@ impl Accounts {
             undo_receipt: None,
             undo_conflicts: 0,
             completed_at: None,
+            closed: None,
         };
         Ok((
             Preview {
@@ -390,7 +394,7 @@ impl Accounts {
         if !model::same_binding(
             &binding,
             &saved.protocol_backlog.runs[i].plan.binding,
-            || model::material_v1(saved, store.keys()),
+            || model::material_legacy(saved, store.keys()),
         ) {
             saved.protocol_backlog.runs[i].status = Status::Conflict;
             save(store, saved)?;
@@ -464,7 +468,7 @@ impl Accounts {
                 if !model::same_binding(
                     &self.backlog_binding_with(account, store, binding.material.clone())?,
                     &saved.protocol_backlog.runs[i].plan.binding,
-                    || None,
+                    Vec::new,
                 ) {
                     return Err(invalid());
                 }
@@ -532,12 +536,12 @@ impl Accounts {
             .protocol_backlog
             .runs
             .iter()
-            .position(|r| r.id == id)
+            .position(|r| r.id == id && r.closed.is_none())
             .ok_or_else(invalid)?;
         if !model::same_binding(
             &binding,
             &saved.protocol_backlog.runs[i].plan.binding,
-            || model::material_v1(saved, store.keys()),
+            || model::material_legacy(saved, store.keys()),
         ) {
             if saved.protocol_backlog.runs[i].status != Status::Conflict {
                 saved.protocol_backlog.runs[i].status = Status::Conflict;
@@ -606,8 +610,9 @@ impl Accounts {
             .find(|r| r.id == id)
             .ok_or_else(invalid)?;
         if !model::same_binding(&binding, &run.plan.binding, || {
-            model::material_v1(saved, store.keys())
+            model::material_legacy(saved, store.keys())
         }) || run.undo_receipt.is_some()
+            || run.closed.is_some()
             || run.batches.iter().any(|b| b.attempted() && !b.observed())
             || !crate::backlog::retention::undo_open(run.completed_at, self.now())
         {
@@ -759,6 +764,91 @@ impl Accounts {
         boundary("move_undo_consumed");
         self.backlog_run(account, store, saved, id, true, cancel, fresh)
     }
+}
+impl Accounts {
+    /// Whether the owner may close a conflicted MOVE run, and why. It reads
+    /// the provider only to confirm a fresh Undo would reverse nothing.
+    pub(crate) fn backlog_close_preview(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &AccountState,
+        id: &str,
+        cancel: Cancellation,
+    ) -> Result<ClosePreview, AcquisitionError> {
+        let binding = self.backlog_binding(account, store, saved)?;
+        let run = saved
+            .protocol_backlog
+            .runs
+            .iter()
+            .find(|r| r.id == id)
+            .ok_or_else(invalid)?;
+        if !run.closable() {
+            return Err(invalid());
+        }
+        let reason = if run.undo_receipt.is_some() {
+            CloseReason::UndoEnded
+        } else if !model::same_binding(&binding, &run.plan.binding, || {
+            model::material_legacy(saved, store.keys())
+        }) || !crate::backlog::retention::undo_open(run.completed_at, self.now())
+        {
+            CloseReason::UndoUnavailable
+        } else if self
+            .backlog_undo_preview(account, store, saved, id, cancel)?
+            .reverse
+            .is_empty()
+        {
+            CloseReason::NothingToUndo
+        } else {
+            return Err(invalid());
+        };
+        close_preview(store, saved, "imap-move", id, reason)
+    }
+    pub(crate) fn backlog_close(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &mut AccountState,
+        id: &str,
+        receipt: &str,
+        cancel: Cancellation,
+    ) -> Result<(), AcquisitionError> {
+        let p = self.backlog_close_preview(account, store, saved, id, cancel)?;
+        if !bool::from(p.receipt.as_bytes().ct_eq(receipt.as_bytes())) {
+            return Err(invalid());
+        }
+        let run = saved
+            .protocol_backlog
+            .runs
+            .iter_mut()
+            .find(|r| r.id == id)
+            .ok_or_else(invalid)?;
+        run.closed = Some(model::Closure {
+            at: self.now(),
+            receipt: p.receipt,
+        });
+        save(store, saved)
+    }
+}
+/// The exact-purpose receipt for closing one conflicted run. It binds the
+/// whole saved state, so any later change needs a fresh preview.
+pub(super) fn close_preview(
+    store: &EncryptedStore,
+    saved: &AccountState,
+    kind: &str,
+    run: &str,
+    reason: CloseReason,
+) -> Result<ClosePreview, AcquisitionError> {
+    let receipt = store.keys().binding_for(
+        b"mailroom/backlog-close/v1",
+        &crate::census::binding::bound(|| serde_json::to_vec(&(kind, saved, run, reason)))
+            .map_err(failure)?,
+    );
+    Ok(ClosePreview {
+        run: run.into(),
+        reason,
+        receipt,
+    })
 }
 fn observe(
     connection: &mut Connection,

@@ -171,6 +171,7 @@ macro_rules! journal_delta {
                     undo_receipt,
                     undo_conflicts,
                     completed_at,
+                    closed,
                 } = run;
                 let mut o = Object::default();
                 o.field("id", &before.id, id)?;
@@ -183,6 +184,7 @@ macro_rules! journal_delta {
                 o.field("undo_receipt", &before.undo_receipt, undo_receipt)?;
                 o.field("undo_conflicts", &before.undo_conflicts, undo_conflicts)?;
                 o.optional("completed_at", &before.completed_at, completed_at)?;
+                o.optional("closed", &before.closed, closed)?;
                 if let Delta::Patch(p) = o.finish() {
                     set.push((index, p));
                 }

@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const PROFILE: &str = "loopback-imap4rev1-empty-slash-v1";
+/// Gmail labels created over IMAP with X-GM-EXT-1, under the same plan,
+/// journal and recovery rules as folders.
+pub const GMAIL_PROFILE: &str = "loopback-gmail-x-gm-ext-1-labels-v1";
 pub const HISTORY: usize = 8;
 pub const NAMES: usize = 256;
 pub const STEPS: usize = 64;
@@ -380,6 +383,9 @@ pub struct FolderJournal {
     pub history: Vec<Operation>,
 }
 impl FolderJournal {
+    pub fn is_empty(&self) -> bool {
+        self.history.is_empty()
+    }
     pub(crate) fn interrupted(&mut self) {
         for op in &mut self.history {
             if op.status == Status::Running {
@@ -400,6 +406,13 @@ impl FolderJournal {
         }
     }
     pub(crate) fn validate(&self, account: &AccountId) -> Result<(), CensusError> {
+        self.validate_as(account, PROFILE)
+    }
+    pub(crate) fn validate_as(
+        &self,
+        account: &AccountId,
+        profile: &str,
+    ) -> Result<(), CensusError> {
         let fail = || CensusError::Storage;
         if self.history.len() > HISTORY {
             return Err(fail());
@@ -412,7 +425,7 @@ impl FolderJournal {
                         .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
             };
             if op.context.account != *account
-                || op.context.profile != PROFILE
+                || op.context.profile != profile
                 || !digest(&op.context.source)
                 || !digest(&op.context.authority)
                 || [&op.id, &op.artifact, &op.proof_binding, &op.receipt]
@@ -488,16 +501,28 @@ impl FolderJournal {
         Ok(())
     }
 }
+/// Whether `after` is `before` plus exactly `name`. A server reporting the
+/// CHILDREN extension (RFC 3348) flips `\HasNoChildren` to `\HasChildren` on
+/// the new mailbox's ancestors; that change alone is expected.
 pub(crate) fn desired_delta(before: &Inventory, after: &Inventory, name: &ExactName) -> bool {
+    let neutral = |m: &Mailbox| {
+        let mut m = m.clone();
+        if name.decoded.starts_with(&format!("{}/", m.name.decoded)) {
+            m.attributes.remove("\\HASCHILDREN");
+            m.attributes.remove("\\HASNOCHILDREN");
+        }
+        m
+    };
     before.capabilities == after.capabilities
         && before.namespaces == after.namespaces
         && after
             .get(&name.decoded)
             .is_some_and(|m| m.name == *name && m.selectable())
-        && before
+        && before.mailboxes.iter().map(neutral).eq(after
             .mailboxes
             .iter()
-            .eq(after.mailboxes.iter().filter(|m| m.name != *name))
+            .filter(|m| m.name != *name)
+            .map(neutral))
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -582,3 +582,106 @@ fn schema_twenty_adds_folder_modseqs_and_earlier_files_stay_readable() {
     }
     drop(state);
 }
+
+/// Schema 21 adds Gmail `label_provisioning` and `closed` on backlog runs.
+/// Files of schemas 2 to 20, frames included, stay readable with neither and
+/// their next save writes a schema-21 base; an older file carrying label
+/// provisioning, in its base or through a frame, is refused.
+#[test]
+fn schema_twenty_one_adds_label_provisioning_and_earlier_files_stay_readable() {
+    use crate::census::folder_provisioning::{
+        Context, FolderJournal, FolderPlan, GMAIL_PROFILE, Inventory, Namespaces, Operation, Status,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (store, state) = seeded(dir.path(), 50);
+    let snapshot = serde_json::to_string(&state).unwrap();
+    assert!(
+        !snapshot.contains("label_provisioning"),
+        "omitted while empty"
+    );
+    for version in [2, 18, 19, 20] {
+        store
+            .stage_snapshot(version, &snapshot)
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        let mut loaded = store.load_state().unwrap();
+        assert!(bytes(&loaded) == bytes(&state), "schema {version}");
+        journal_change(&mut loaded, version);
+        store.save_state(&mut loaded).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA, "schema {version}");
+    }
+    let digest = "a".repeat(64);
+    let before = Inventory {
+        capabilities: ["IMAP4REV1", "NAMESPACE"].map(String::from).into(),
+        namespaces: Namespaces {
+            personal: vec![crate::census::folder_provisioning::Namespace {
+                prefix: String::new(),
+                delimiter: Some("/".into()),
+            }],
+            other: vec![],
+            shared: vec![],
+        },
+        mailboxes: vec![],
+    };
+    let labels = FolderJournal {
+        history: vec![Operation {
+            id: digest.clone(),
+            context: Context {
+                account: state.census.account.clone(),
+                source: digest.clone(),
+                authority: digest.clone(),
+                profile: GMAIL_PROFILE.into(),
+            },
+            artifact: digest.clone(),
+            proof_binding: digest.clone(),
+            receipt: digest.clone(),
+            before,
+            plan: FolderPlan {
+                logical_leaves: Default::default(),
+                entries: vec![],
+            },
+            status: Status::Complete,
+            steps: vec![],
+        }],
+    };
+    let mut marked = state.clone();
+    marked.label_provisioning = labels.clone();
+    for version in [2, 18, 19, 20] {
+        store
+            .stage_snapshot(version, &serde_json::to_string(&marked).unwrap())
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        assert!(
+            matches!(store.load_state(), Err(CensusError::UnsupportedVersion)),
+            "schema {version} base"
+        );
+    }
+    store
+        .stage_snapshot(20, &snapshot)
+        .unwrap()
+        .persist(store.path())
+        .unwrap();
+    let mut loaded = store.load_state().unwrap();
+    let file = std::fs::read(store.path()).unwrap();
+    let cipher = Aes256Gcm::new_from_slice(store.keys().encryption.as_ref()).unwrap();
+    let decoded = log::decode(&cipher, store.keys().account.as_str(), &file).unwrap();
+    store.persisted.borrow_mut().as_mut().unwrap().tail = Some(Tail {
+        base_tag: decoded.base_tag,
+        base_len: decoded.base_len,
+        valid_end: decoded.valid_end,
+        next_sequence: 0,
+    });
+    loaded.label_provisioning = labels;
+    store.save_state(&mut loaded).unwrap();
+    assert!(
+        std::fs::metadata(store.path()).unwrap().len() > decoded.valid_end,
+        "a frame on the schema-20 base"
+    );
+    super::decoded::forget(&store.path());
+    assert!(
+        matches!(store.load_state(), Err(CensusError::UnsupportedVersion)),
+        "a frame never gives a schema-20 base label provisioning"
+    );
+}

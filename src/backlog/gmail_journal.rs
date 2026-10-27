@@ -2,7 +2,7 @@ use super::{
     Operation, Options, Plan,
     gmail_label::{INBOX, LabelBatch, Outcome, StepKind},
     imap_move::Purpose,
-    protocol::{SavedPlan, Status},
+    protocol::{Closure, SavedPlan, Status},
     retention,
 };
 use crate::{
@@ -79,6 +79,9 @@ pub struct Run {
     /// See `protocol::Run::completed_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<u64>,
+    /// See `protocol::Run::closed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed: Option<Closure>,
 }
 impl Run {
     pub fn stamp(&mut self, now: u64) {
@@ -117,6 +120,23 @@ impl Run {
                 .iter()
                 .all(|b| b.all_outcomes().all(|o| o != Outcome::Uncertain))
     }
+    /// See `protocol::Run::settled`.
+    pub fn settled(&self) -> bool {
+        self.finished() || self.closed.is_some()
+    }
+    /// See `protocol::Run::closable`.
+    pub fn closable(&self) -> bool {
+        !self.settled()
+            && matches!(self.status, Status::Conflict | Status::Undone)
+            && self.observed_without_uncertainty()
+    }
+    /// See `protocol::Run::observed_without_uncertainty`.
+    pub fn observed_without_uncertainty(&self) -> bool {
+        self.batches
+            .iter()
+            .chain(self.reverse.iter().map(|r| &r.batch))
+            .all(|b| b.observed() && b.all_outcomes().all(|o| o != Outcome::Uncertain))
+    }
     pub fn entries(&self, reverse: bool) -> Vec<&LabelBatch> {
         if reverse {
             self.reverse.iter().map(|r| &r.batch).collect()
@@ -138,7 +158,17 @@ pub struct Preview {
     pub receipt: String,
     pub saved: crate::rules::workspace::ProofPreview,
     pub execution: Proof,
+    /// Destinations excluded as `missing_label`. Label provisioning creates
+    /// those that are not blocked; no label store creates labels.
+    pub missing_labels: Vec<MissingLabel>,
     pub limitations: &'static str,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MissingLabel {
+    pub name: String,
+    pub messages: usize,
+    /// Why creating it is refused, or none when label provisioning can.
+    pub blocked: Option<crate::census::folder_provisioning::Failure>,
 }
 #[derive(Serialize)]
 pub struct UndoPreview {
@@ -175,14 +205,31 @@ pub fn outcomes(journal: &Journal) -> serde_json::Value {
         .into()
 }
 
-const EXCLUDED: &[&str] = &["revision", "protocol_backlog", "gmail_backlog"];
+const EXCLUDED: &[&str] = &[
+    "revision",
+    "protocol_backlog",
+    "gmail_backlog",
+    "label_provisioning",
+];
 pub(crate) const MATERIAL_V1: &[u8] = b"mailroom/gmail-backlog-material/v1";
-/// See `protocol::material`.
+/// See `protocol::material`: v3 leaves out the census.
 pub fn material(state: &AccountState, keys: &CensusKeys) -> Result<String, String> {
-    super::protocol::material_as(state, keys, EXCLUDED, b"mailroom/gmail-backlog-material/v2")
+    super::protocol::material_as(
+        state,
+        keys,
+        &[EXCLUDED, &["census"]].concat(),
+        b"mailroom/gmail-backlog-material/v3",
+    )
 }
-pub(crate) fn material_v1(state: &AccountState, keys: &CensusKeys) -> Option<String> {
-    super::protocol::material_as(state, keys, EXCLUDED, MATERIAL_V1).ok()
+/// See `protocol::material_legacy`.
+pub(crate) fn material_legacy(state: &AccountState, keys: &CensusKeys) -> Vec<String> {
+    [
+        b"mailroom/gmail-backlog-material/v2".as_slice(),
+        MATERIAL_V1,
+    ]
+    .iter()
+    .filter_map(|purpose| super::protocol::material_as(state, keys, EXCLUDED, purpose).ok())
+    .collect()
 }
 
 pub fn outcome(run: &Run, reverse: bool) -> Status {
@@ -226,7 +273,7 @@ impl Journal {
     pub fn validate(&self, account: &AccountId) -> Result<(), CensusError> {
         let invalid = || CensusError::Storage;
         if self.runs.len() > HISTORY
-            || self.runs.iter().filter(|r| !r.finished()).count() > 1
+            || self.runs.iter().filter(|r| !r.settled()).count() > 1
             || self.summaries.len() > retention::SUMMARIES
         {
             return Err(invalid());
@@ -276,6 +323,9 @@ fn valid_run(r: &Run, account: &AccountId) -> bool {
         || (r.undo_receipt.is_none() && r.undo_conflicts != 0)
         || r.undo_conflicts > filing.changes.len()
         || r.undo_receipt.as_ref().is_some_and(|s| !digest(s))
+        || r.closed
+            .as_ref()
+            .is_some_and(|c| !c.valid(r.status) || !r.observed_without_uncertainty())
         || r.plan.topology.validate().is_err()
     {
         return false;

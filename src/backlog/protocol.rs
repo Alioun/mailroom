@@ -74,12 +74,78 @@ pub struct Run {
     /// save under the new rule stamps them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<u64>,
+    /// Set when the owner closed a run that ended in conflict with nothing
+    /// left to undo or observe. Since schema 21.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed: Option<Closure>,
+}
+/// The owner's confirmed acknowledgment of a conflicted run. It changes no
+/// mail and keeps the whole journal. A closed run no longer blocks new runs,
+/// and it is never compacted (Q27 keeps conflicted runs whole).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Closure {
+    pub at: u64,
+    pub receipt: String,
+}
+impl Closure {
+    pub(crate) fn valid(&self, status: Status) -> bool {
+        matches!(status, Status::Conflict | Status::Undone)
+            && self.receipt.len() == 64
+            && self
+                .receipt
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+}
+/// Why the owner may close a conflicted run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseReason {
+    /// A fresh Undo preview would reverse nothing.
+    NothingToUndo,
+    /// The run's Undo already ran and ended in conflict.
+    UndoEnded,
+    /// Undo is not offered: the approval inputs changed or the window closed.
+    UndoUnavailable,
+}
+#[derive(Debug, Serialize)]
+pub struct ClosePreview {
+    pub run: String,
+    pub reason: CloseReason,
+    pub receipt: String,
 }
 impl Run {
     pub fn finished(&self) -> bool {
         (self.status == Status::Undone
             || self.status == Status::Complete && self.undo_receipt.is_none())
             && self.batches.iter().all(|b| !b.attempted() || verified(b))
+    }
+    /// Finished, or closed by the owner. Only an unsettled run blocks a new one.
+    pub fn settled(&self) -> bool {
+        self.finished() || self.closed.is_some()
+    }
+    /// Whether the run is stuck in a state only closing can settle: a
+    /// conflict, or an Undo that finished beside forward conflicts, with every
+    /// attempt observed and nothing uncertain.
+    pub fn closable(&self) -> bool {
+        !self.settled()
+            && matches!(self.status, Status::Conflict | Status::Undone)
+            && self.observed_without_uncertainty()
+    }
+    /// Every attempted batch, forward and reverse, has saved readback and no
+    /// message is uncertain. Only then can a conflicted run be closed.
+    pub fn observed_without_uncertainty(&self) -> bool {
+        self.batches
+            .iter()
+            .chain(self.reverse.iter().map(|r| &r.evidence))
+            .all(|e| {
+                !e.attempted()
+                    || e.observed()
+                        && e.resolutions()
+                            .values()
+                            .all(|r| *r != Resolution::Uncertain)
+            })
     }
     /// Records the first completion. Called wherever a run's status is set.
     pub fn stamp(&mut self, now: u64) {
@@ -129,17 +195,28 @@ pub struct UndoPreview {
     pub limitations: &'static str,
 }
 
-/// Digest of the account state a run may rely on: everything except the
-/// revision and the journals the runs themselves write.
+/// Fields no material form covers: the revision, the journals runs write
+/// themselves, and Gmail label provisioning, which only adds labels a run can
+/// file into.
+pub(crate) const UNBOUND: &[&str] = &["revision", "protocol_backlog", "label_provisioning"];
+/// Digest of the account state a run may rely on: the workspace, ledger,
+/// exports and every other aggregate, but not the census. The census is a
+/// cached observation. Every effect, Resume and Undo reads the messages it
+/// touches fresh and refuses any that differ from the approved snapshot, so a
+/// read-only refresh changes nothing a run relies on.
 pub fn material(state: &AccountState, keys: &CensusKeys) -> Result<String, String> {
-    material_as(state, keys, &["revision", "protocol_backlog"], MATERIAL_V2)
+    material_as(state, keys, &[UNBOUND, &["census"]].concat(), MATERIAL_V3)
 }
-/// v1 serialized the census whole. v2 binds it by digest. Runs saved with a
-/// v1 material keep being checked against v1.
+/// v1 serialized the census whole and v2 binds it by digest. A run saved with
+/// either keeps being checked in that form, so a refresh still invalidates it.
 pub(crate) const MATERIAL_V1: &[u8] = b"mailroom/imap-backlog-material/v1";
 const MATERIAL_V2: &[u8] = b"mailroom/imap-backlog-material/v2";
-pub(crate) fn material_v1(state: &AccountState, keys: &CensusKeys) -> Option<String> {
-    material_as(state, keys, &["revision", "protocol_backlog"], MATERIAL_V1).ok()
+const MATERIAL_V3: &[u8] = b"mailroom/imap-backlog-material/v3";
+pub(crate) fn material_legacy(state: &AccountState, keys: &CensusKeys) -> Vec<String> {
+    [MATERIAL_V2, MATERIAL_V1]
+        .iter()
+        .filter_map(|purpose| material_as(state, keys, UNBOUND, purpose).ok())
+        .collect()
 }
 pub(crate) fn material_as(
     state: &AccountState,
@@ -147,7 +224,7 @@ pub(crate) fn material_as(
     excluded: &[&str],
     purpose: &[u8],
 ) -> Result<String, String> {
-    let legacy = !purpose.ends_with(b"/v2");
+    let legacy = purpose.ends_with(b"/v1");
     let encode = || -> Result<Vec<u8>, String> {
         let mut value = serde_json::to_value(state).map_err(|_| "Cannot bind material state")?;
         for field in excluded {
@@ -163,14 +240,14 @@ pub(crate) fn material_as(
     Ok(keys.binding_for(purpose, &bytes))
 }
 /// Whether a freshly computed binding still matches a saved run's. A saved
-/// material that differs from the current form is recomputed in the v1 form
-/// it may have been written in.
-pub fn same_binding(a: &Binding, b: &Binding, v1: impl FnOnce() -> Option<String>) -> bool {
+/// material that differs from the current form is recomputed in the legacy
+/// forms it may have been written in.
+pub fn same_binding(a: &Binding, b: &Binding, legacy: impl FnOnce() -> Vec<String>) -> bool {
     a.account == b.account
         && a.source == b.source
         && a.authority == b.authority
         && a.workspace == b.workspace
-        && (a.material == b.material || v1().is_some_and(|m| m == b.material))
+        && (a.material == b.material || legacy().contains(&b.material))
 }
 pub fn verified(e: &MoveEvidence) -> bool {
     e.attempted()
@@ -249,7 +326,7 @@ impl Journal {
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         };
         if self.runs.len() > HISTORY
-            || self.runs.iter().filter(|r| !r.finished()).count() > 1
+            || self.runs.iter().filter(|r| !r.settled()).count() > 1
             || self.summaries.len() > retention::SUMMARIES
         {
             return Err(invalid());
@@ -306,6 +383,9 @@ impl Journal {
                 || (r.undo_receipt.is_none() && r.undo_conflicts != 0)
                 || r.undo_conflicts > r.plan.filing.changes.len()
                 || r.undo_receipt.as_ref().is_some_and(|s| !digest(s))
+                || r.closed
+                    .as_ref()
+                    .is_some_and(|c| !c.valid(r.status) || !r.observed_without_uncertainty())
             {
                 return Err(invalid());
             }

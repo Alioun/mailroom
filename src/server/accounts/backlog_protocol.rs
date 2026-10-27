@@ -34,6 +34,25 @@ enum Action {
     ResumeUndo {
         run: String,
     },
+    ClosePreview {
+        run: String,
+    },
+    Close {
+        run: String,
+        receipt: String,
+        confirmed: bool,
+    },
+    LabelPreview {
+        options: Options,
+    },
+    LabelConfirm {
+        options: Options,
+        receipt: String,
+        confirmed: bool,
+    },
+    LabelReconcile {
+        operation: String,
+    },
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -142,6 +161,7 @@ async fn serve(
             | Action::Resume { .. }
             | Action::Undo { .. }
             | Action::ResumeUndo { .. }
+            | Action::LabelConfirm { .. }
     ) {
         let admission = match state.accounts.admission.try_lock() {
             Ok(g) => g,
@@ -241,6 +261,30 @@ fn execute(
         }
         value
     };
+    let report = |saved: &crate::census::AccountState, mut value: serde_json::Value| {
+        value["closable"] = json!(match kind {
+            Kind::Move => saved
+                .protocol_backlog
+                .runs
+                .iter()
+                .filter(|r| r.closable())
+                .map(|r| &r.id)
+                .collect::<Vec<_>>(),
+            Kind::Gmail => saved
+                .gmail_backlog
+                .runs
+                .iter()
+                .filter(|r| r.closable())
+                .map(|r| &r.id)
+                .collect(),
+        });
+        if kind == Kind::Gmail {
+            value["labels"] = json!(saved.label_provisioning);
+            value["label_limitations"] =
+                json!(crate::acquisition::folder_provisioning::LABEL_LIMITATIONS);
+        }
+        report(saved, value)
+    };
     if matches!(request.command, Action::Status {}) {
         return Ok(report(
             &saved,
@@ -331,8 +375,84 @@ fn execute(
         }
         Ok(())
     };
+    match &request.command {
+        Action::ClosePreview { run } => {
+            return Ok(json!(match kind {
+                Kind::Move => repo.backlog_close_preview(&account, &store, &saved, run, cancel)?,
+                Kind::Gmail => repo.gmail_close_preview(&account, &store, &saved, run, cancel)?,
+            }));
+        }
+        Action::Close {
+            run,
+            receipt,
+            confirmed,
+        } => {
+            if !confirmed {
+                return Err(AcquisitionError::InvalidInput);
+            }
+            mailbox_consent(
+                state,
+                &account.id,
+                "Close the conflicted sorting run without changing mail",
+                receipt,
+            )?;
+            match kind {
+                Kind::Move => {
+                    repo.backlog_close(&account, &store, &mut saved, run, receipt, cancel)?
+                }
+                Kind::Gmail => {
+                    repo.gmail_close(&account, &store, &mut saved, run, receipt, cancel)?
+                }
+            }
+            return Ok(report(&saved, json!({"journal":journal(&saved)})));
+        }
+        Action::LabelPreview { .. }
+        | Action::LabelConfirm { .. }
+        | Action::LabelReconcile { .. }
+            if kind == Kind::Move =>
+        {
+            return Err(AcquisitionError::InvalidInput);
+        }
+        _ => {}
+    }
     if kind == Kind::Gmail {
         match &request.command {
+            Action::LabelPreview { options } => {
+                return Ok(json!(repo.label_preview(
+                    &account,
+                    &store,
+                    &saved,
+                    options.clone(),
+                    cancel
+                )?));
+            }
+            Action::LabelConfirm {
+                options,
+                receipt,
+                confirmed,
+            } => {
+                if !confirmed {
+                    return Err(AcquisitionError::InvalidInput);
+                }
+                mailbox_consent(
+                    state,
+                    &account.id,
+                    "Create the previewed Gmail labels",
+                    receipt,
+                )?;
+                repo.label_confirm(
+                    &account,
+                    &store,
+                    &mut saved,
+                    options.clone(),
+                    receipt,
+                    cancel,
+                    |s| ledger_fresh(s, guard.as_ref()),
+                )?;
+            }
+            Action::LabelReconcile { operation } => {
+                repo.label_reconcile(&account, &store, &mut saved, operation, cancel)?
+            }
             Action::Preview { options } => {
                 return Ok(json!(repo.gmail_preview(
                     &account,
@@ -396,11 +516,12 @@ fn execute(
             Action::ResumeUndo { run } => {
                 repo.gmail_run(&account, &store, &mut saved, run, true, cancel, fresh)?
             }
-            Action::Status {} | Action::Cancel {} => unreachable!(),
+            Action::Status {}
+            | Action::Cancel {}
+            | Action::ClosePreview { .. }
+            | Action::Close { .. } => unreachable!(),
         }
-        return Ok(
-            json!({"journal":saved.gmail_backlog,"outcomes":gmail_journal::outcomes(&saved.gmail_backlog)}),
-        );
+        return Ok(report(&saved, json!({"journal":saved.gmail_backlog})));
     }
     match &request.command {
         Action::Preview { options } => {
@@ -466,7 +587,13 @@ fn execute(
         Action::ResumeUndo { run } => {
             repo.backlog_run(&account, &store, &mut saved, run, true, cancel, fresh)?
         }
-        Action::Status {} | Action::Cancel {} => unreachable!(),
+        Action::Status {}
+        | Action::Cancel {}
+        | Action::ClosePreview { .. }
+        | Action::Close { .. }
+        | Action::LabelPreview { .. }
+        | Action::LabelConfirm { .. }
+        | Action::LabelReconcile { .. } => unreachable!(),
     }
     Ok(json!({"journal":saved.protocol_backlog}))
 }

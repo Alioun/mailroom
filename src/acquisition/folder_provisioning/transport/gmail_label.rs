@@ -151,6 +151,33 @@ impl Connection {
         Ok(inventory)
     }
 
+    /// The topology, read without the All Mail requirement, for label
+    /// provisioning, which must also report a missing All Mail as a refusal.
+    pub(in crate::acquisition) fn observe(&mut self) -> Result<Inventory, Error> {
+        let inventory = self.io.observe()?;
+        if inventory.capabilities != self.capabilities {
+            return Err(Error::Unstable);
+        }
+        Ok(inventory)
+    }
+
+    /// Creates one user label with an exact CREATE. Labels are never
+    /// created by STORE.
+    pub(in crate::acquisition) fn create(
+        &mut self,
+        permit: &LabelPermit<'_>,
+        name: &ExactName,
+    ) -> Result<(), Error> {
+        if self.io.source != permit.0.identity() || !crate::backlog::gmail_label::user_label(name) {
+            return Err(Error::Unsupported);
+        }
+        self.io.create_exact(name)
+    }
+
+    pub(in crate::acquisition) fn logout(&mut self) {
+        self.io.logout();
+    }
+
     fn exchange(
         &mut self,
         command: &[u8],

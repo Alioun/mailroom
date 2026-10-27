@@ -264,15 +264,21 @@ export const undoDeadline = z.object({ run: z.string(), completed_at: z.number()
 export const runSummary = z.object({ id: z.string(), receipt: z.string(), status: z.enum(['complete', 'undone']), completed_at: z.number(), compacted_at: z.number(), messages: z.number(), batches: z.number(), applied: z.number(), restored: z.number(), folders: z.record(z.string(), z.record(z.string(), z.number())) })
 export type UndoDeadline = z.infer<typeof undoDeadline>
 export type RunSummary = z.infer<typeof runSummary>
-const retained = { undo_deadlines: z.array(undoDeadline).default([]), undo_window_days: z.number().default(90) }
-const protocolRun = z.object({ id: z.string(), receipt: z.string(), plan: z.object({ filing: backlogPlan, binding: z.object({ account: z.string(), source: z.string(), authority: z.string(), workspace: z.string(), material: z.string() }), saved_proof: z.string(), execution_proof: z.string() }), status: z.enum(['prepared', 'running', 'stopped', 'complete', 'uncertain', 'conflict', 'undo_running', 'undone']), stop_requested: z.boolean(), batches: z.array(moveEvidence), reverse: z.array(reverseMove), undo_receipt: z.string().nullable(), undo_conflicts: z.number().int().nonnegative().default(0), completed_at: z.number().optional() })
+const retained = { undo_deadlines: z.array(undoDeadline).default([]), undo_window_days: z.number().default(90), closable: z.array(z.string()).default([]) }
+export const closure = z.object({ at: z.number(), receipt: z.string().length(64) })
+const protocolRun = z.object({ id: z.string(), receipt: z.string(), plan: z.object({ filing: backlogPlan, binding: z.object({ account: z.string(), source: z.string(), authority: z.string(), workspace: z.string(), material: z.string() }), saved_proof: z.string(), execution_proof: z.string() }), status: z.enum(['prepared', 'running', 'stopped', 'complete', 'uncertain', 'conflict', 'undo_running', 'undone']), stop_requested: z.boolean(), batches: z.array(moveEvidence), reverse: z.array(reverseMove), undo_receipt: z.string().nullable(), undo_conflicts: z.number().int().nonnegative().default(0), completed_at: z.number().optional(), closed: closure.optional() })
 const protocolView = z.object({ installed: z.boolean(), recovery_hold: z.boolean(), journal: z.object({ runs: z.array(protocolRun), summaries: z.array(runSummary).default([]) }), ...retained, limitations: z.string() })
 const protocolPreview = z.object({ operation: protocolRun, receipt: z.string(), saved: proofPreview, execution: preview, limitations: z.string() })
 const protocolUndo = z.object({ run: z.string(), reverse: z.array(reverseMove), conflicts: z.number(), receipt: z.string(), limitations: z.string() })
 export type ProtocolView = z.infer<typeof protocolView>
 export type ProtocolPreview = z.infer<typeof protocolPreview>
 export type ProtocolUndo = z.infer<typeof protocolUndo>
-type ProtocolAction = { action: 'status' | 'cancel' } | { action: 'preview'; options: BacklogOptions } | { action: 'confirm'; options: BacklogOptions; receipt: string; confirmed: boolean } | { action: 'reconcile' | 'resume' | 'undo_preview' | 'resume_undo'; run: string } | { action: 'undo'; run: string; receipt: string; confirmed: boolean }
+type ProtocolAction = { action: 'status' | 'cancel' } | { action: 'preview' | 'label_preview'; options: BacklogOptions } | { action: 'confirm' | 'label_confirm'; options: BacklogOptions; receipt: string; confirmed: boolean } | { action: 'reconcile' | 'resume' | 'undo_preview' | 'resume_undo' | 'close_preview'; run: string } | { action: 'undo' | 'close'; run: string; receipt: string; confirmed: boolean } | { action: 'label_reconcile'; operation: string }
+export const closePreview = z.object({ run: z.string(), reason: z.enum(['nothing_to_undo', 'undo_ended', 'undo_unavailable']), receipt: z.string().length(64) })
+export type ClosePreview = z.infer<typeof closePreview>
+export type BacklogKind = 'protocol' | 'gmail'
+export async function sortingPost(kind: BacklogKind, account: string, command: ProtocolAction): Promise<unknown> { return accountPost(`backlog/${kind}`, { account, command }) }
+export async function previewClose(kind: BacklogKind, account: string, run: string): Promise<ClosePreview> { return closePreview.parse(await sortingPost(kind, account, { action: 'close_preview', run })) }
 export async function protocolAction(account: string, command: ProtocolAction): Promise<void> { await accountPost('backlog/protocol', { account, command }) }
 export async function openProtocolBacklog(account: string): Promise<ProtocolView> { return protocolView.parse(await accountPost('backlog/protocol', { account, command: { action: 'status' } })) }
 export async function previewProtocolBacklog(account: string, options: BacklogOptions): Promise<ProtocolPreview> { return protocolPreview.parse(await accountPost('backlog/protocol', { account, command: { action: 'preview', options } })) }
@@ -287,8 +293,9 @@ const gmailReverse = z.object({ forward: z.number().int().nonnegative(), batch: 
 const gmailRun = protocolRun.extend({ batches: z.array(gmailBatch), reverse: z.array(gmailReverse) })
 const gmailOutcome = z.enum(['pending', 'verified', 'changed', 'unapplied', 'uncertain', 'conflict'])
 const gmailOutcomes = z.record(z.string(), z.object({ forward: z.array(z.array(z.record(z.string(), gmailOutcome))), reverse: z.array(z.array(z.record(z.string(), gmailOutcome))) }))
-const gmailView = z.object({ installed: z.boolean(), recovery_hold: z.boolean(), journal: z.object({ runs: z.array(gmailRun), summaries: z.array(runSummary).default([]) }), outcomes: gmailOutcomes, ...retained, limitations: z.string() })
-const gmailPreview = z.object({ operation: gmailRun, receipt: z.string(), saved: proofPreview, execution: preview, limitations: z.string() })
+const gmailView = z.object({ installed: z.boolean(), recovery_hold: z.boolean(), journal: z.object({ runs: z.array(gmailRun), summaries: z.array(runSummary).default([]) }), outcomes: gmailOutcomes, ...retained, labels: z.object({ history: z.array(z.any()) }).default({ history: [] }), label_limitations: z.string().default(''), limitations: z.string() })
+export const missingLabel = z.object({ name: z.string(), messages: z.number().int().positive(), blocked: z.string().nullable() })
+const gmailPreview = z.object({ operation: gmailRun, receipt: z.string(), saved: proofPreview, execution: preview, missing_labels: z.array(missingLabel).default([]), limitations: z.string() })
 const gmailUndo = z.object({ run: z.string(), reverse: z.array(gmailReverse), conflicts: z.number(), receipt: z.string(), limitations: z.string() })
 export type GmailView = z.infer<typeof gmailView>
 export type GmailPreview = z.infer<typeof gmailPreview>

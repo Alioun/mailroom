@@ -1535,3 +1535,90 @@ fn previews_read_only_what_changed_since_the_census_and_confirm_reuses_the_sessi
         assert_eq!(w.run().status, Status::Complete);
     }
 }
+
+impl Workflow {
+    fn close_preview(&self) -> Result<crate::backlog::protocol::ClosePreview, AcquisitionError> {
+        let id = self.run().id;
+        let store = self.store();
+        let saved = store.load_state().unwrap();
+        self.repo
+            .backlog_close_preview(&self.account, &store, &saved, &id, Cancellation::default())
+    }
+    fn close(&self, receipt: &str) -> Result<(), AcquisitionError> {
+        let id = self.run().id;
+        let store = self.store();
+        let mut saved = store.load_state().unwrap();
+        self.repo.backlog_close(
+            &self.account,
+            &store,
+            &mut saved,
+            &id,
+            receipt,
+            Cancellation::default(),
+        )
+    }
+}
+
+/// A MOVE run whose Undo restored every verified message still holds its
+/// forward conflict, so before closing it blocked every new run.
+#[test]
+fn a_move_run_left_with_only_conflicts_is_closed_without_mail_changes() {
+    let w = Workflow::start(false);
+    let preview = w.preview().unwrap();
+    w.set("move-race", "source_flag");
+    let _ = w.confirm(&preview);
+    w.set("move-race", "");
+    assert_eq!(w.run().status, Status::Conflict);
+    assert_eq!(
+        w.close_preview().unwrap_err(),
+        AcquisitionError::InvalidInput,
+        "verified moves are still undoable"
+    );
+    let undo = w.undo_preview().unwrap();
+    w.undo(&undo).unwrap();
+    let run = w.run();
+    assert_eq!(run.status, Status::Undone);
+    assert!(!run.finished());
+    assert!(w.preview().is_err(), "the forward conflict blocks new runs");
+    let wires = w.wires();
+    let provider = w.provider();
+    let p = w.close_preview().unwrap();
+    assert_eq!(p.reason, crate::backlog::protocol::CloseReason::UndoEnded);
+    assert!(w.close(&"0".repeat(64)).is_err());
+    w.close(&p.receipt).unwrap();
+    let closed = w.run();
+    assert!(closed.closed.is_some());
+    assert!(closed.batches == run.batches && closed.reverse == run.reverse);
+    assert_eq!(w.wires(), wires, "closing sends nothing");
+    untouched(&provider, &w.provider(), &[], &[]);
+    let mut journal = w.store().load_state().unwrap().protocol_backlog;
+    assert!(
+        !journal.compact(u64::MAX / 2),
+        "a closed run keeps its journal"
+    );
+    assert!(w.reconcile().is_err());
+    assert!(w.preview().is_ok());
+}
+
+/// A read-only refresh changes only the census, which every effect reads
+/// fresh, so Undo of an earlier run stays available and still refuses a
+/// message another client changed.
+#[test]
+fn a_refresh_keeps_undo_of_an_earlier_move_run() {
+    let w = Workflow::start(false);
+    let preview = w.preview().unwrap();
+    w.confirm(&preview).unwrap();
+    assert_eq!(w.run().status, Status::Complete);
+    let bound = w.run().plan.binding.material;
+    let census = w.store().load_state().unwrap().census.folders.clone();
+    w.repo
+        .scan(&w.account.id, Cancellation::default(), |_| {})
+        .unwrap();
+    let saved = w.store().load_state().unwrap();
+    assert!(saved.census.folders != census, "the refresh saw the moves");
+    assert_eq!(model::material(&saved, w.store().keys()).unwrap(), bound);
+    let undo = w.undo_preview().unwrap();
+    assert!(!undo.reverse.is_empty());
+    w.undo(&undo).unwrap();
+    assert_eq!(w.run().status, Status::Undone);
+}

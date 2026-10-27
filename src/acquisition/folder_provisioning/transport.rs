@@ -528,6 +528,9 @@ impl Session {
         {
             return Err(if code.starts_with("[OVERQUOTA") {
                 Error::Quota
+            } else if status == "NO" && code.starts_with("[ALREADYEXISTS") {
+                // RFC 5530 §3: the target already exists, so nothing was done.
+                Error::No
             } else {
                 Error::UnknownCode
             });
@@ -777,8 +780,15 @@ impl Session {
         permit: &CreatePermit<'_>,
         name: &ExactName,
     ) -> Result<(), Error> {
-        if self.source != permit.0.identity()
-            || ExactName::from_wire(&name.wire)? != *name
+        if self.source != permit.0.identity() {
+            return Err(Error::Unsupported);
+        }
+        self.create_exact(name)
+    }
+    /// One CREATE of an exact, canonically encoded name. The caller has
+    /// checked that the session belongs to its permit.
+    fn create_exact(&mut self, name: &ExactName) -> Result<(), Error> {
+        if ExactName::from_wire(&name.wire)? != *name
             || name
                 .decoded
                 .split('/')

@@ -1,7 +1,7 @@
 use super::{
     Account, Accounts, AcquisitionError, Cancellation,
     folder_provisioning::transport::{
-        gmail_label::{Connection, InstalledSource, all_mail},
+        gmail_label::{Connection, InstalledSource, LabelPermit, all_mail},
         message_move::RuntimeBinding,
     },
     imap::{MailRead, ReadOnlyImap},
@@ -9,10 +9,10 @@ use super::{
 use crate::{
     backlog::{
         Options,
-        gmail_journal::{self as model, Preview, Reverse, Run, UndoPreview},
+        gmail_journal::{self as model, MissingLabel, Preview, Reverse, Run, UndoPreview},
         gmail_label::{GmailId, INBOX, LabelBatch, LabelIntent, Outcome, Snapshot, StepKind},
         imap_move::{Completion, MailboxIdentity, Purpose, Uid, UidValidity},
-        protocol::{Binding, SavedPlan, Status, same_binding},
+        protocol::{Binding, ClosePreview, CloseReason, Closure, SavedPlan, Status, same_binding},
     },
     census::{
         AccountId, AccountState, Census, EncryptedStore,
@@ -84,6 +84,74 @@ fn snapshot(m: &crate::census::MessageRecord) -> Result<Snapshot, AcquisitionErr
     })
 }
 
+struct Filing {
+    saved_proof: workspace::ProofPreview,
+    topology: Inventory,
+    observed: Census,
+    execution: proof::Proof,
+    plan: crate::backlog::Plan,
+    missing: Vec<MissingLabel>,
+    connection: Connection,
+}
+
+/// What label provisioning starts from: the saved artifact and proof it is
+/// bound to, the observed topology and the labels the plan lacks.
+pub(super) struct MissingLabels {
+    pub artifact: String,
+    pub saved_proof: String,
+    pub topology: Inventory,
+    pub missing: Vec<MissingLabel>,
+    pub connection: Connection,
+}
+
+/// Destinations of `plan` that `topology` lacks as selectable labels of
+/// exactly that name, with the messages each would receive. A label is
+/// blocked when creating it would need a case variant of an existing label,
+/// a reserved name or a parent that cannot hold it; Mailroom then neither
+/// creates, renames nor reuses anything.
+fn missing_labels(plan: &crate::backlog::Plan, topology: &Inventory) -> Vec<MissingLabel> {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for c in &plan.changes {
+        if topology
+            .get(&c.destination)
+            .is_none_or(|m| !m.selectable() || m.name.decoded != c.destination)
+        {
+            *counts.entry(&c.destination).or_default() += 1;
+        }
+    }
+    let system = all_mail(topology).ok().and_then(|m| {
+        m.name
+            .decoded
+            .split_once('/')
+            .map(|(root, _)| root.to_owned())
+    });
+    counts
+        .into_iter()
+        .map(|(name, messages)| MissingLabel {
+            name: name.into(),
+            messages,
+            blocked: creatable(name, topology, system.as_deref()).err(),
+        })
+        .collect()
+}
+
+/// Whether one missing label can be created on its own: a user label outside
+/// the system root whose path builds into an exact plan.
+pub(super) fn creatable(
+    name: &str,
+    topology: &Inventory,
+    system: Option<&str>,
+) -> Result<(), Failure> {
+    let exact = crate::census::folder_provisioning::ExactName::new(name)?;
+    if !crate::backlog::gmail_label::user_label(&exact)
+        || system.is_none_or(|root| name.split('/').next() == Some(root))
+    {
+        return Err(Failure::Unsupported);
+    }
+    crate::census::folder_provisioning::FolderPlan::build(&[name.to_owned()].into(), topology)
+        .map(|_| ())
+}
+
 impl Accounts {
     pub(crate) fn labels_installed(&self, id: Option<&AccountId>) -> bool {
         self.label_source
@@ -111,8 +179,8 @@ impl Accounts {
         self.gmail_binding_with(account, store, material)
     }
     /// The binding with an already computed material digest. The digest covers
-    /// the whole account state, census included, so a request computes it once
-    /// and a run reuses it while it changes only its own journal.
+    /// the account state a run relies on, so a request computes it once and a
+    /// run reuses it while it changes only its own journal.
     fn gmail_binding_with(
         &self,
         account: &Account,
@@ -150,6 +218,29 @@ impl Accounts {
                 &serde_json::to_vec(&(PROFILE, &saved.census.folder_roles)).map_err(failure)?,
             ),
         })
+    }
+    /// The label source's permit under the account's current authority and
+    /// workspace, for label provisioning.
+    pub(super) fn label_permit(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+    ) -> Result<LabelPermit<'_>, AcquisitionError> {
+        let source = self.label_source(account)?;
+        if store.recovery_pending() {
+            return Err(AcquisitionError::LifecyclePending);
+        }
+        source
+            .runtime_permit(&RuntimeBinding {
+                account: account.id.clone(),
+                provider: account.provider,
+                login: account.login.clone(),
+                source: source.identity(),
+                credential_key_recovery: self.sieve_authority(account, store)?,
+                workspace: self.workspace_context(account, store)?.binding().into(),
+                topology: PROFILE.into(),
+            })
+            .map_err(failure)
     }
     fn gmail_connect(
         &self,
@@ -242,28 +333,24 @@ impl Accounts {
         self.gmail_prepare(account, store, saved, options, cancel)
             .map(|(preview, _)| preview)
     }
-    /// The preview and the label session it observed through, which a
-    /// confirm goes on to use.
-    fn gmail_prepare(
+    /// The saved and fresh proofs, the topology, All Mail as observed, and
+    /// the filing plan with every destination it needs, labels missing from
+    /// the topology included. The label session stays open.
+    fn gmail_filing(
         &self,
         account: &Account,
         store: &EncryptedStore,
         saved: &AccountState,
+        binding: &Binding,
         options: Options,
         cancel: Cancellation,
-    ) -> Result<(Preview, Connection), AcquisitionError> {
-        let binding = self.gmail_binding(account, store, saved)?;
-        if saved.gmail_backlog.runs.len() >= model::HISTORY
-            || saved.gmail_backlog.runs.iter().any(|r| !r.finished())
-        {
-            return Err(invalid());
-        }
+    ) -> Result<Filing, AcquisitionError> {
         let context = self.workspace_context(account, store)?;
         let saved_proof = workspace::preview(saved, &context, store.keys()).map_err(failure)?;
         if saved_proof.proof.gate == "blocked" {
             return Err(invalid());
         }
-        let runtime = self.gmail_runtime(account, store, saved, &binding)?;
+        let runtime = self.gmail_runtime(account, store, saved, binding)?;
         let (topology, observed, connection) =
             self.gmail_observe(account, saved, &runtime, cancel)?;
         let input = &saved.workspace.as_ref().ok_or_else(invalid)?.input;
@@ -284,22 +371,75 @@ impl Accounts {
         if execution.gate == "blocked" {
             return Err(invalid());
         }
-        let mut filing = model::project(saved, &observed, &execution, options).map_err(failure)?;
+        let plan = model::project(saved, &observed, &execution, options).map_err(failure)?;
+        let missing = missing_labels(&plan, &topology);
+        Ok(Filing {
+            saved_proof,
+            topology,
+            observed,
+            execution,
+            plan,
+            missing,
+            connection,
+        })
+    }
+
+    /// The labels a Gmail filing plan for `options` needs and the topology
+    /// lacks, with the label session they were observed through.
+    pub(super) fn gmail_missing_labels(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &AccountState,
+        options: Options,
+        cancel: Cancellation,
+    ) -> Result<MissingLabels, AcquisitionError> {
+        let binding = self.gmail_binding(account, store, saved)?;
+        let f = self.gmail_filing(account, store, saved, &binding, options, cancel)?;
+        Ok(MissingLabels {
+            artifact: f.saved_proof.proof.artifact.identity().into(),
+            saved_proof: f.saved_proof.receipt,
+            topology: f.topology,
+            missing: f.missing,
+            connection: f.connection,
+        })
+    }
+
+    /// The preview and the label session it observed through, which a
+    /// confirm goes on to use.
+    fn gmail_prepare(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &AccountState,
+        options: Options,
+        cancel: Cancellation,
+    ) -> Result<(Preview, Connection), AcquisitionError> {
+        let binding = self.gmail_binding(account, store, saved)?;
+        if saved.gmail_backlog.runs.len() >= model::HISTORY
+            || saved.gmail_backlog.runs.iter().any(|r| !r.settled())
+        {
+            return Err(invalid());
+        }
+        let Filing {
+            saved_proof,
+            topology,
+            observed,
+            execution,
+            plan: mut filing,
+            missing,
+            connection,
+        } = self.gmail_filing(account, store, saved, &binding, options, cancel)?;
         let all = all_mail(&topology).map_err(failure)?.name.clone();
-        let mut missing = BTreeSet::new();
-        filing.changes.retain(|c| {
-            let present = topology
-                .get(&c.destination)
-                .is_some_and(|m| m.selectable() && m.name.decoded == c.destination);
-            if !present {
-                missing.insert(c.destination.clone());
-            }
-            present
-        });
-        for name in &missing {
-            let count = filing.groups.get(name).map_or(0, |g| g.count);
-            *filing.excluded.entry("missing_label".into()).or_default() += count;
-            filing.diagnostics.push(format!("Missing destination label {name}: create it through approved folder provisioning first. No label store creates labels."));
+        filing
+            .changes
+            .retain(|c| !missing.iter().any(|m| m.name == c.destination));
+        for m in &missing {
+            *filing.excluded.entry("missing_label".into()).or_default() += m.messages;
+            filing.diagnostics.push(match m.blocked {
+                None => format!("Missing destination label {}: create it with label provisioning first. No label store creates labels.", m.name),
+                Some(_) => format!("Destination label {} cannot be created: a label differing only in case, a reserved name or the system root is in the way. Mailroom never renames or reuses a label.", m.name),
+            });
         }
         let folder = observed.folders.get(&all.decoded).ok_or_else(invalid)?;
         let identity = MailboxIdentity {
@@ -368,10 +508,12 @@ impl Accounts {
                     undo_receipt: None,
                     undo_conflicts: 0,
                     completed_at: None,
+                    closed: None,
                 },
                 receipt,
                 saved: saved_proof,
                 execution,
+                missing_labels: missing,
                 limitations: model::LIMITATIONS,
             },
             connection,
@@ -449,7 +591,7 @@ impl Accounts {
             .ok_or_else(invalid)?;
         let mut binding = self.gmail_binding(account, store, saved)?;
         if !same_binding(&binding, &saved.gmail_backlog.runs[i].plan.binding, || {
-            model::material_v1(saved, store.keys())
+            model::material_legacy(saved, store.keys())
         }) {
             saved.gmail_backlog.runs[i].status = Status::Conflict;
             save(store, saved)?;
@@ -506,7 +648,7 @@ impl Accounts {
                     if !same_binding(
                         &self.gmail_binding_with(account, store, binding.material.clone())?,
                         &saved.gmail_backlog.runs[i].plan.binding,
-                        || None,
+                        Vec::new,
                     ) {
                         return Err(invalid());
                     }
@@ -575,7 +717,7 @@ impl Accounts {
             .gmail_backlog
             .runs
             .iter()
-            .position(|r| r.id == id)
+            .position(|r| r.id == id && r.closed.is_none())
             .ok_or_else(invalid)?;
         let conflict = |saved: &mut AccountState| -> Result<(), AcquisitionError> {
             if saved.gmail_backlog.runs[i].status != Status::Conflict {
@@ -585,7 +727,7 @@ impl Accounts {
             Ok(())
         };
         if !same_binding(&binding, &saved.gmail_backlog.runs[i].plan.binding, || {
-            model::material_v1(saved, store.keys())
+            model::material_legacy(saved, store.keys())
         }) {
             conflict(saved)?;
             return Err(invalid());
@@ -647,8 +789,9 @@ impl Accounts {
             .find(|r| r.id == id)
             .ok_or_else(invalid)?;
         if !same_binding(&binding, &run.plan.binding, || {
-            model::material_v1(saved, store.keys())
+            model::material_legacy(saved, store.keys())
         }) || run.undo_receipt.is_some()
+            || run.closed.is_some()
             || run.batches.iter().any(|b| !b.observed())
             || !crate::backlog::retention::undo_open(run.completed_at, self.now())
         {
@@ -788,11 +931,92 @@ impl Accounts {
     }
 }
 
+impl Accounts {
+    /// See `backlog_close_preview`.
+    pub(crate) fn gmail_close_preview(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &AccountState,
+        id: &str,
+        cancel: Cancellation,
+    ) -> Result<ClosePreview, AcquisitionError> {
+        let binding = self.gmail_binding(account, store, saved)?;
+        let run = saved
+            .gmail_backlog
+            .runs
+            .iter()
+            .find(|r| r.id == id)
+            .ok_or_else(invalid)?;
+        if !run.closable() {
+            return Err(invalid());
+        }
+        let reason = if run.undo_receipt.is_some() {
+            CloseReason::UndoEnded
+        } else if !same_binding(&binding, &run.plan.binding, || {
+            model::material_legacy(saved, store.keys())
+        }) || !crate::backlog::retention::undo_open(run.completed_at, self.now())
+        {
+            CloseReason::UndoUnavailable
+        } else if self
+            .gmail_undo_preview(account, store, saved, id, cancel)?
+            .reverse
+            .is_empty()
+        {
+            CloseReason::NothingToUndo
+        } else {
+            return Err(invalid());
+        };
+        super::backlog::close_preview(store, saved, "gmail-labels", id, reason)
+    }
+    pub(crate) fn gmail_close(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &mut AccountState,
+        id: &str,
+        receipt: &str,
+        cancel: Cancellation,
+    ) -> Result<(), AcquisitionError> {
+        let p = self.gmail_close_preview(account, store, saved, id, cancel)?;
+        if !bool::from(p.receipt.as_bytes().ct_eq(receipt.as_bytes())) {
+            return Err(invalid());
+        }
+        let run = saved
+            .gmail_backlog
+            .runs
+            .iter_mut()
+            .find(|r| r.id == id)
+            .ok_or_else(invalid)?;
+        run.closed = Some(Closure {
+            at: self.now(),
+            receipt: p.receipt,
+        });
+        save(store, saved)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's stand-in for a crash: runs at the named boundary on the
+    /// thread that reaches it, for example to capture both stores there.
+    pub(crate) static AT_BOUNDARY: std::cell::RefCell<Option<(String, Box<dyn FnMut()>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 pub(crate) fn boundary(name: &str) {
     #[cfg(test)]
     if name == "gmail_between_batches" {
         super::backlog::stop_between_batches();
     }
+    #[cfg(test)]
+    AT_BOUNDARY.with(|hook| {
+        if let Some((at, action)) = hook.borrow_mut().as_mut() {
+            if at == name {
+                action();
+            }
+        }
+    });
     #[cfg(test)]
     if let Some(root) = std::env::var_os("MAILROOM_GMAIL_FIXTURE") {
         let root = std::path::Path::new(&root);
@@ -868,6 +1092,7 @@ fn gmail_workflow_observer() {
         "independent": digest(&independent),
         "uid_next": provider.synthetic_uid_next,
         "wires": std::fs::read_to_string(root.join("gmail-wire-exact.jsonl")).unwrap_or_default().lines().map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()).collect::<Vec<_>>(),
+        "creates": std::fs::read_to_string(root.join("gmail-create-exact.jsonl")).unwrap_or_default().lines().map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()).collect::<Vec<_>>(),
         "forbidden": std::fs::read_to_string(root.join("gmail-forbidden")).ok(),
     });
     if action != "provider_only" {
@@ -881,7 +1106,7 @@ fn gmail_workflow_observer() {
         value["ciphertext"] =
             crate::unsubscribe::digest(&std::fs::read(store.path()).unwrap()).into();
         let mut canonical = serde_json::to_value(&saved).unwrap();
-        for f in ["revision", "gmail_backlog"] {
+        for f in ["revision", "gmail_backlog", "label_provisioning"] {
             canonical.as_object_mut().unwrap().remove(f);
         }
         value["unrelated"] = digest(&canonical).into();
@@ -891,6 +1116,7 @@ fn gmail_workflow_observer() {
         value["revision"] = saved.revision.into();
         value["schema"] = store.schema_version().unwrap().into();
         value["journal"] = serde_json::to_value(&saved.gmail_backlog).unwrap();
+        value["labels"] = serde_json::to_value(&saved.label_provisioning).unwrap();
         value["exports"] = serde_json::to_value(&saved.exports).unwrap();
         value["saved_census"] = serde_json::to_value(
             saved

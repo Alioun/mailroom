@@ -548,6 +548,108 @@ fn store_labels(state: &mut AccountState, gmail_ids: &[String], add: bool, value
     }
 }
 
+/// Adds a label as Gmail is assumed to: missing parents are created
+/// implicitly, and every parent reports `\HasChildren` afterwards.
+fn create_label(state: &mut AccountState, name: &str) {
+    let p = state.synthetic_folders.as_mut().unwrap();
+    let segments: Vec<&str> = name.split('/').collect();
+    for i in 1..=segments.len() {
+        let path = segments[..i].join("/");
+        let leaf = i == segments.len();
+        match p
+            .inventory
+            .mailboxes
+            .iter_mut()
+            .find(|m| m.name.decoded == path)
+        {
+            Some(m) if !leaf => {
+                m.attributes.remove("\\HasNoChildren");
+                m.attributes.insert("\\HasChildren".into());
+            }
+            Some(_) => {}
+            None => p.inventory.mailboxes.push(mailbox(
+                &path,
+                &[if leaf {
+                    "\\HasNoChildren"
+                } else {
+                    "\\HasChildren"
+                }],
+            )),
+        }
+    }
+    p.inventory
+        .mailboxes
+        .sort_by(|a, b| a.name.decoded.cmp(&b.name.decoded));
+}
+
+/// Answers one CREATE. `gmail-create-mode` selects an unverified Google
+/// behaviour: `refuse`, `lost` (created, then the connection drops),
+/// `case_fold` (the new leaf stored in lower case) or `concurrent` (another
+/// client creates the same label first). Uniqueness is assumed
+/// case-insensitive.
+fn create(
+    state: &mut AccountState,
+    root: &Path,
+    tag: &str,
+    command: &str,
+) -> std::io::Result<Option<String>> {
+    let name = ExactName::from_wire(&unquote(&command[7..])?)
+        .map_err(|_| std::io::ErrorKind::InvalidData)?
+        .decoded;
+    let mode = std::fs::read_to_string(root.join("gmail-create-mode")).unwrap_or_default();
+    if mode == "concurrent" {
+        create_label(state, &name);
+    }
+    let exists = state
+        .synthetic_folders
+        .as_ref()
+        .unwrap()
+        .inventory
+        .mailboxes
+        .iter()
+        .any(|m| m.name.decoded.to_lowercase() == name.to_lowercase());
+    let effected = mode != "refuse" && !exists;
+    if effected {
+        create_label(
+            state,
+            &match name.rsplit_once('/') {
+                Some((parent, leaf)) if mode == "case_fold" => {
+                    format!("{parent}/{}", leaf.to_lowercase())
+                }
+                _ => name.clone(),
+            },
+        );
+        state
+            .synthetic_folders
+            .as_mut()
+            .unwrap()
+            .commands
+            .push("CREATE".into());
+    }
+    sync(state);
+    let mut exact = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("gmail-create-exact.jsonl"))?;
+    exact.write_all(
+        &serde_json::to_vec(
+            &serde_json::json!({"command":command,"effected":effected,"mode":mode}),
+        )
+        .unwrap(),
+    )?;
+    exact.write_all(b"\n")?;
+    exact.sync_all()?;
+    Ok(Some(if mode == "refuse" {
+        format!("{tag} NO refused\r\n")
+    } else if !effected {
+        format!("{tag} NO [ALREADYEXISTS] exists\r\n")
+    } else if mode == "lost" {
+        return Ok(None);
+    } else {
+        format!("{tag} OK Success\r\n")
+    }))
+}
+
 fn serve(
     tcp: Peer,
     config: Arc<ServerConfig>,
@@ -754,6 +856,15 @@ fn serve(
                         reply.push_str(&format!("* {seq} FETCH ({parts})\r\n"));
                     }
                 }
+                _ if command.starts_with("CREATE ") => {
+                    let answer = create(&mut state, root, tag, command)?;
+                    cache.save(&store, &mut state);
+                    crate::acquisition::gmail_backlog::boundary("label_provider_effect");
+                    match answer {
+                        Some(answer) => reply = answer,
+                        None => return Ok(()),
+                    }
+                }
                 _ if command.starts_with("UID STORE ") => {
                     let (set, rest) = command[10..].split_once(' ').unwrap();
                     let (operation, list) = rest.split_once(' ').unwrap();
@@ -876,6 +987,7 @@ pub(crate) fn other_client(repo: &Accounts, id: &AccountId, root: &Path, action:
         ["unlabel", id, label] => {
             store_labels(&mut state, &[(*id).into()], false, &[(*label).into()]);
         }
+        ["create_label", name] => create_label(&mut state, name),
         ["validity"] => state.census.folders.get_mut(ALL).unwrap().uidvalidity += 1,
         ["no_extension"] => {
             state

@@ -40,7 +40,7 @@ try {
     const accounts = selected ? [f.account, peer].sort() : [f.account]
     const offer = await recovery(selected ? { action: 'selected_capture_preview', accounts, include_ledger: true } : { action: 'capture_preview', account: f.account })
     const manifests = selected ? offer.preview.accounts : [offer.preview]
-    assert.ok(manifests.every(m => m.state_schema === 20))
+    assert.ok(manifests.every(m => m.state_schema === 21))
     assert.equal(manifests.find(m => m.account === f.account).resources.find(r => r.resource === 'local_encrypted_state').sha256, before.ciphertext)
     if (selected) assert.ok(offer.preview.excluded_accounts.includes(excluded))
     const captured = await recovery({ action: selected ? 'selected_capture' : 'capture', preview: offer.preview, receipt: offer.receipt })

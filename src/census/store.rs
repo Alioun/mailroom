@@ -37,8 +37,9 @@ pub(crate) const MAX_FILE: u64 = 2 * MAX_SNAPSHOT + 4096;
 const MIN_FRAME_BUDGET: u64 = 64 * 1024;
 /// Schema of new base snapshots. 19 adds Q27 undo retention to the backlog
 /// journals: `completed_at` on runs and compacted `summaries`. 20 adds each
-/// census folder's `highestmodseq`.
-pub(crate) const SCHEMA: u32 = 20;
+/// census folder's `highestmodseq`. 21 adds Gmail `label_provisioning` and
+/// `closed` on backlog runs.
+pub(crate) const SCHEMA: u32 = 21;
 
 pub struct LocalSecret(Zeroizing<Vec<u8>>);
 
@@ -243,6 +244,12 @@ pub struct AccountState {
     pub gmail_backlog: crate::backlog::gmail_journal::Journal,
     #[serde(default)]
     pub folder_provisioning: super::folder_provisioning::FolderJournal,
+    /// Gmail labels created through the folder provisioning workflow.
+    #[serde(
+        default,
+        skip_serializing_if = "super::folder_provisioning::FolderJournal::is_empty"
+    )]
+    pub label_provisioning: super::folder_provisioning::FolderJournal,
     #[serde(default)]
     pub synthetic_folders: Option<super::folder_provisioning::FakeProvider>,
     #[serde(default)]
@@ -279,6 +286,7 @@ impl AccountState {
             protocol_backlog: Default::default(),
             gmail_backlog: Default::default(),
             folder_provisioning: Default::default(),
+            label_provisioning: Default::default(),
             synthetic_folders: None,
             sieve: Default::default(),
             sieve_transactions: Default::default(),
@@ -359,6 +367,7 @@ macro_rules! frame_fields {
 frame_fields!(
     sieve_placement,
     folder_provisioning,
+    label_provisioning,
     synthetic_folders,
     sieve_transactions,
     synthetic_sieve,
@@ -906,6 +915,10 @@ impl EncryptedStore {
             return Err(CensusError::Storage);
         }
         state.folder_provisioning.validate(&state.census.account)?;
+        state.label_provisioning.validate_as(
+            &state.census.account,
+            super::folder_provisioning::GMAIL_PROFILE,
+        )?;
         state.protocol_backlog.validate(&state.census.account)?;
         state.gmail_backlog.validate(&state.census.account)?;
         if state
@@ -1311,7 +1324,7 @@ impl EncryptedStore {
             return Err(CensusError::UnsupportedVersion);
         }
         let frames = decoded.as_ref().map_or(&[][..], |d| &d.frames[..]);
-        if !frames.is_empty() && !matches!(version, 18 | 19 | SCHEMA) {
+        if !frames.is_empty() && !matches!(version, 18..=SCHEMA) {
             return Err(CensusError::UnsupportedVersion);
         }
         let mut patched = std::collections::BTreeMap::new();
@@ -1338,6 +1351,17 @@ impl EncryptedStore {
         }
         for (name, value) in patched {
             apply_frame_field(&mut state, &name, value)?;
+        }
+        if version < 21
+            && (!state.label_provisioning.is_empty()
+                || state
+                    .protocol_backlog
+                    .runs
+                    .iter()
+                    .any(|r| r.closed.is_some())
+                || state.gmail_backlog.runs.iter().any(|r| r.closed.is_some()))
+        {
+            return Err(CensusError::UnsupportedVersion);
         }
         if version < 20
             && state
@@ -1396,6 +1420,7 @@ fn normalize_journals(state: &mut AccountState) {
     state.sieve.interrupted();
     state.sieve_transactions.interrupted();
     state.folder_provisioning.interrupted();
+    state.label_provisioning.interrupted();
     state.protocol_backlog.interrupted();
     state.gmail_backlog.interrupted();
 }

@@ -188,7 +188,10 @@ try {
   }
   const preview = await lifecycle({ action: 'forget_preview', account })
   assert.equal(preview.receipt.length, 64)
-  assert.equal(preview.resources.length, 5)
+  // Rolled-back rotations above leave one rollback folder per store; forget lists each as one resource.
+  const folders = preview.resources.filter(r => r.path.endsWith(`/.${account}.rollback`))
+  assert.ok(folders.length >= 1)
+  assert.equal(preview.resources.length - folders.length, 5)
   for (const alteration of [{ ...preview, consequences: { ...preview.consequences, en: 'altered' } }, { ...preview, revision: preview.revision + 1 }, { ...preview, resources: [] }, { ...preview, receipt: proof.receipt }]) await lifecycle({ action: 'forget', account, preview: alteration, confirmed: true }, 422)
   await lifecycle({ action: 'forget', account: comparison, preview, confirmed: true }, 422)
   await lifecycle({ action: 'forget', account, preview, confirmed: false }, 422)

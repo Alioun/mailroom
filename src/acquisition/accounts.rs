@@ -1,5 +1,5 @@
-#[cfg(target_os = "macos")]
 pub(crate) mod exclusive;
+#[cfg(target_os = "macos")]
 pub(crate) mod keychain;
 pub mod lifecycle;
 pub(crate) mod recovery;

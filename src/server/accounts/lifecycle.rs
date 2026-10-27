@@ -24,10 +24,6 @@ pub(in crate::server) enum Request {
     Recover {
         account: AccountId,
     },
-    DiscardRollbackCopies {
-        account: AccountId,
-        confirmed: bool,
-    },
 }
 impl Request {
     fn account(&self) -> Option<&AccountId> {
@@ -37,8 +33,7 @@ impl Request {
             | Self::ForgetPreview { account }
             | Self::Forget { account, .. }
             | Self::Rotate { account, .. }
-            | Self::Recover { account }
-            | Self::DiscardRollbackCopies { account, .. } => Some(account),
+            | Self::Recover { account } => Some(account),
         }
     }
 }
@@ -59,9 +54,6 @@ pub(in crate::server) async fn handle(
             confirmed: false,
             ..
         } | Request::Rotate {
-            confirmed: false,
-            ..
-        } | Request::DiscardRollbackCopies {
             confirmed: false,
             ..
         }
@@ -130,15 +122,6 @@ pub(in crate::server) async fn handle(
                 repo.rotate(account, mailboxes)?;
             }
             Request::Recover { account } => repo.recover(account, mailboxes)?,
-            Request::DiscardRollbackCopies { account, confirmed } => {
-                if !confirmed {
-                    return Err(AcquisitionError::InvalidInput);
-                }
-                let removed = repo.discard_rollback_copies(account, mailboxes)?;
-                return Ok(
-                    json!({"saved":true,"removed":removed,"recovery":repo.recovery_status()?}),
-                );
-            }
         }
         let mut job = state.accounts.job.lock().expect("account job");
         if job.as_ref().is_some_and(|j| {

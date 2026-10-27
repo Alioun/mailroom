@@ -1212,19 +1212,30 @@ fn an_interrupted_rollback_resumes_and_removes_only_the_rotations_own_entries() 
     }
 }
 
-/// The contents of every file rollback moved into quarantine in `dir` for account `id`.
+/// The contents of every file rollback moved into the slots of account `id`'s rollback
+/// folder in `dir`.
 fn quarantined(dir: &Path, id: &AccountId) -> Vec<Vec<u8>> {
     let mut found = vec![];
-    for entry in fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
-        if name.starts_with(&format!(".{}.rollback-", id.as_str())) {
-            for file in fs::read_dir(&path).unwrap() {
-                found.push(fs::read(file.unwrap().path()).unwrap());
-            }
+    let namespace = rollback_namespace(dir, id);
+    if !namespace.exists() {
+        return found;
+    }
+    for slot in fs::read_dir(namespace).unwrap() {
+        for file in fs::read_dir(slot.unwrap().path()).unwrap() {
+            found.push(fs::read(file.unwrap().path()).unwrap());
         }
     }
     found
+}
+
+/// The names in account `id`'s rollback folder in `dir`, sorted.
+fn slots(dir: &Path, id: &AccountId) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(rollback_namespace(dir, id))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
 }
 
 #[test]
@@ -1270,6 +1281,15 @@ fn rollback_preserves_whatever_file_holds_a_next_generation_name_across_retries(
             again.is_ok(),
             "{interrupt:?}: quarantine frees the names for a later rotation"
         );
+        // A successful rotation deletes no rollback copy, foreign or genuine.
+        assert!(
+            quarantined(&repo.paths.data, &a.id)
+                .contains(&b"unrelated bytes moved into this name".to_vec()),
+            "{interrupt:?}: the swapped-in file survives the next rotation"
+        );
+        for (dir, bytes) in dirs[1..].iter().zip(&genuine) {
+            assert!(quarantined(dir, &a.id).contains(bytes), "{interrupt:?}");
+        }
     }
 }
 
@@ -1376,12 +1396,15 @@ fn rollback_refuses_rather_than_overwrite_a_planted_destination_or_follow_a_subs
         fs::write(elsewhere.join("keep"), b"unrelated file B").unwrap();
         let planted = std::rc::Rc::new(std::cell::RefCell::new(None::<PathBuf>));
         let seen = planted.clone();
-        let (store, file_name, target) = (data.clone(), entry.clone(), elsewhere.clone());
-        set_after_create(Some(Box::new(move |folder: &str| {
-            let folder = store.join(folder);
-            if seen.borrow().is_some() || !folder.starts_with(&store) {
+        let namespace = rollback_namespace(&data, &a.id);
+        let (folder_root, file_name, target) =
+            (namespace.clone(), entry.clone(), elsewhere.clone());
+        // Runs right after the first slot of the primary store's rollback folder is made.
+        set_after_create(Some(Box::new(move |made: &str| {
+            if seen.borrow().is_some() || made != "1" {
                 return;
             }
+            let folder = folder_root.join(made);
             if plant == "file" {
                 fs::write(folder.join(&file_name), b"unrelated file B").unwrap();
             } else {
@@ -1422,9 +1445,10 @@ fn rollback_refuses_rather_than_overwrite_a_planted_destination_or_follow_a_subs
         drop(repo);
         let repo = persistent_accounts(root.path());
         repo.recover(&a.id, &effects).unwrap();
-        assert!(
-            quarantined(&data, &a.id).contains(&genuine),
-            "{plant}: a retry moves it"
+        assert_eq!(
+            fs::read(namespace.join("2").join(&entry)).unwrap(),
+            genuine,
+            "{plant}: a retry moves it into the next slot"
         );
         assert_eq!(
             fs::read(elsewhere.join("keep")).unwrap(),
@@ -1446,100 +1470,238 @@ fn a_fresh_folder_must_not_already_exist() {
     assert_eq!(fs::read(root.path().join("taken/keep")).unwrap(), b"keep");
 }
 
-#[test]
-fn rollback_syncs_both_directories_of_every_move_before_it_is_done() {
+fn synced() -> Vec<(u64, u64)> {
+    crate::acquisition::accounts::exclusive::SYNCED.with(|s| s.borrow().clone())
+}
+fn assert_synced(synced: &[(u64, u64)], dirs: &[PathBuf]) {
     use std::os::unix::fs::MetadataExt;
-    let (_root, repo, a, effects) = pending_rotation();
-    crate::acquisition::accounts::exclusive::SYNCED.with(|s| s.borrow_mut().clear());
-    repo.recover(&a.id, &effects).unwrap();
-    let synced = crate::acquisition::accounts::exclusive::SYNCED.with(|s| s.borrow().clone());
-    let folders = repo.rollback_directories(&a.id, &effects).unwrap();
-    assert_eq!(folders.len(), 4, "one move per recorded store");
-    for folder in folders {
-        for dir in [folder.clone(), folder.parent().unwrap().to_path_buf()] {
-            let m = fs::metadata(&dir).unwrap();
-            assert!(
-                synced.contains(&(m.dev() as u64, m.ino())),
-                "{} synced",
-                dir.display()
-            );
-        }
+    for dir in dirs {
+        let m = fs::metadata(dir).unwrap();
+        assert!(
+            synced.contains(&(m.dev() as u64, m.ino())),
+            "{} synced",
+            dir.display()
+        );
     }
 }
 
 #[test]
-fn rollback_copies_are_bounded_listed_by_forget_and_removed_by_forget_rotation_or_discard() {
+fn rollback_syncs_the_slot_folder_and_store_of_every_move_before_it_is_done() {
     let (_root, repo, a, effects) = pending_rotation();
+    crate::acquisition::accounts::exclusive::SYNCED.with(|s| s.borrow_mut().clear());
     repo.recover(&a.id, &effects).unwrap();
-    assert_eq!(repo.rollback_directories(&a.id, &effects).unwrap().len(), 4);
-
-    // An explicit discard removes them.
-    assert_eq!(repo.discard_rollback_copies(&a.id, &effects).unwrap(), 4);
-    assert!(
-        repo.rollback_directories(&a.id, &effects)
-            .unwrap()
-            .is_empty()
-    );
-
-    // At the bound a rotation refuses before recording anything.
-    for i in 0..MAX_ROLLBACK_DIRECTORIES {
-        fs::create_dir(
-            repo.paths
-                .data
-                .join(format!(".{}.rollback-x{i}", a.id.as_str())),
-        )
-        .unwrap();
+    let synced = synced();
+    for dir in repo.directories(&effects) {
+        let namespace = rollback_namespace(&dir, &a.id);
+        assert_eq!(slots(&dir, &a.id), ["1"], "one move per recorded store");
+        assert_synced(&synced, &[namespace.join("1"), namespace, dir]);
     }
-    assert!(repo.rotate(&a.id, &effects).is_err());
+}
+
+#[test]
+fn a_retry_after_an_unsynced_move_syncs_it() {
+    let (_root, repo, a, effects) = pending_rotation();
+    // An earlier attempt moved the primary file and stopped before any sync.
+    let data = repo.paths.data.clone();
+    let namespace = rollback_namespace(&data, &a.id);
+    fs::create_dir_all(namespace.join("1")).unwrap();
+    let canonical = cipher_path(&data, &a.id, 1);
+    fs::rename(
+        &canonical,
+        namespace.join("1").join(canonical.file_name().unwrap()),
+    )
+    .unwrap();
+    crate::acquisition::accounts::exclusive::SYNCED.with(|s| s.borrow_mut().clear());
+    repo.recover(&a.id, &effects).unwrap();
+    assert_synced(&synced(), &[namespace.join("1"), namespace, data]);
+}
+
+#[test]
+fn rollback_copies_take_numbered_slots_and_never_go_past_the_last() {
+    let (_root, repo, a, effects) = pending_rotation();
+    let data = repo.paths.data.clone();
+    let namespace = rollback_namespace(&data, &a.id);
+    let genuine = fs::read(cipher_path(&data, &a.id, 1)).unwrap();
+    // Seven slots already taken, by earlier rollbacks or anyone else: the rollback takes
+    // the last one, and makes nothing past it.
+    for n in 1..ROLLBACK_SLOTS {
+        fs::create_dir_all(namespace.join(n.to_string())).unwrap();
+    }
+    repo.recover(&a.id, &effects).unwrap();
+    let expected: Vec<String> = (1..=ROLLBACK_SLOTS).map(|n| n.to_string()).collect();
+    let mut expected_sorted = expected.clone();
+    expected_sorted.sort();
+    assert_eq!(slots(&data, &a.id), expected_sorted);
+    assert_eq!(
+        fs::read(
+            namespace
+                .join("8")
+                .join(cipher_path(&data, &a.id, 1).file_name().unwrap())
+        )
+        .unwrap(),
+        genuine
+    );
+
+    // With the last slot taken, a rotation refuses before recording anything and says how
+    // to clear the copies.
+    let refused = repo.rotate(&a.id, &effects).unwrap_err();
+    assert_eq!(refused, AcquisitionError::RollbackCopiesFull);
+    assert!(refused.to_string().contains(".rollback"));
     assert!(!repo.intent_path(&a.id).exists());
-    repo.discard_rollback_copies(&a.id, &effects).unwrap();
-
-    // A successful rotation removes those left by an earlier interrupted one.
-    fail(Some("rotate_primary"));
-    assert!(repo.rotate(&a.id, &effects).is_err());
-    fail(None);
-    repo.recover(&a.id, &effects).unwrap();
-    assert!(
-        !repo
-            .rollback_directories(&a.id, &effects)
-            .unwrap()
-            .is_empty()
-    );
-    repo.rotate(&a.id, &effects).unwrap();
-    assert!(
-        repo.rollback_directories(&a.id, &effects)
-            .unwrap()
-            .is_empty()
+    // The last slot alone decides, whoever took it.
+    for n in 1..ROLLBACK_SLOTS {
+        fs::remove_dir_all(namespace.join(n.to_string())).unwrap();
+    }
+    assert_eq!(
+        repo.rotate(&a.id, &effects).unwrap_err(),
+        AcquisitionError::RollbackCopiesFull
     );
 
-    // Forget lists them in its preview, refuses a changed folder, and removes them.
-    fail(Some("rotate_primary"));
+    // The owner deletes the folder by hand; a rotation starts again.
+    fs::remove_dir_all(&namespace).unwrap();
+    fail(Some("rotate_unsubscribe"));
     assert!(repo.rotate(&a.id, &effects).is_err());
     fail(None);
+    // Every slot is taken after the rotation started: the rollback refuses, keeps the
+    // entry where it is and the rotation pending, and makes no ninth slot.
+    for n in 1..=ROLLBACK_SLOTS {
+        fs::create_dir_all(namespace.join(n.to_string())).unwrap();
+    }
+    let canonical = cipher_path(&data, &a.id, 1);
+    let pending = fs::read(&canonical).unwrap();
+    assert_eq!(
+        repo.recover(&a.id, &effects).unwrap_err(),
+        AcquisitionError::RollbackCopiesFull
+    );
+    assert_eq!(fs::read(&canonical).unwrap(), pending);
+    assert!(repo.intent_path(&a.id).exists());
+    assert_eq!(slots(&data, &a.id), expected_sorted);
+    fs::remove_dir_all(&namespace).unwrap();
     repo.recover(&a.id, &effects).unwrap();
-    let folders = repo.rollback_directories(&a.id, &effects).unwrap();
-    assert!(!folders.is_empty());
+    assert!(quarantined(&data, &a.id).contains(&pending));
+}
+
+#[test]
+fn forget_binds_the_whole_rollback_folder_and_removes_it_with_the_account() {
+    let (root, repo, a, effects) = pending_rotation();
+    repo.recover(&a.id, &effects).unwrap();
+    let dirs = repo.directories(&effects);
     let preview = repo.forget_preview(&a.id, &effects).unwrap();
-    for folder in &folders {
+    for dir in &dirs {
+        let namespace = rollback_namespace(dir, &a.id);
         assert!(
-            preview.resources.iter().any(|r| &r.path == folder),
+            preview.resources.iter().any(|r| r.path == namespace),
             "{} listed",
-            folder.display()
+            namespace.display()
         );
     }
-    fs::write(folders[0].join("added-later"), b"x").unwrap();
-    assert!(
-        repo.forget(&a.id, &effects, &preview, true).is_err(),
-        "a changed folder refuses"
-    );
-    fs::remove_file(folders[0].join("added-later")).unwrap();
+    let slot = rollback_namespace(&dirs[0], &a.id).join("1");
+    let entry = cipher_path(&dirs[0], &a.id, 1);
+    let copy = slot.join(entry.file_name().unwrap());
+    let original = fs::read(&copy).unwrap();
+    let outside = root.path().join("outside");
+    fs::write(&outside, b"outside the account").unwrap();
+    std::os::unix::fs::symlink(&outside, slot.join("link")).unwrap();
+    let nested = slot.join("nested");
+    fs::create_dir(&nested).unwrap();
+    fs::write(nested.join("deep"), b"deep bytes").unwrap();
+
+    // Each change after the preview, however deep, refuses the forget and deletes nothing.
+    let changes: Vec<(&str, Box<dyn Fn()>, Box<dyn Fn()>)> = vec![
+        (
+            "nested file contents",
+            Box::new(|| fs::write(nested.join("deep"), b"DEEP bytes").unwrap()),
+            Box::new(|| fs::write(nested.join("deep"), b"deep bytes").unwrap()),
+        ),
+        (
+            "nested file added",
+            Box::new(|| fs::write(nested.join("added"), b"").unwrap()),
+            Box::new(|| fs::remove_file(nested.join("added")).unwrap()),
+        ),
+        (
+            "copy contents, same length",
+            Box::new(|| {
+                let mut changed = original.clone();
+                changed[0] ^= 1;
+                fs::write(&copy, changed).unwrap();
+            }),
+            Box::new(|| fs::write(&copy, &original).unwrap()),
+        ),
+        (
+            "link target",
+            Box::new(|| {
+                fs::remove_file(slot.join("link")).unwrap();
+                std::os::unix::fs::symlink(root.path().join("other"), slot.join("link")).unwrap();
+            }),
+            Box::new(|| {
+                fs::remove_file(slot.join("link")).unwrap();
+                std::os::unix::fs::symlink(&outside, slot.join("link")).unwrap();
+            }),
+        ),
+        (
+            "file replaced by a link",
+            Box::new(|| {
+                fs::rename(nested.join("deep"), root.path().join("deep")).unwrap();
+                std::os::unix::fs::symlink(root.path().join("deep"), nested.join("deep")).unwrap();
+            }),
+            Box::new(|| {
+                fs::remove_file(nested.join("deep")).unwrap();
+                fs::rename(root.path().join("deep"), nested.join("deep")).unwrap();
+            }),
+        ),
+    ];
+    for (name, change, undo) in &changes {
+        let preview = repo.forget_preview(&a.id, &effects).unwrap();
+        change();
+        assert!(
+            repo.forget(&a.id, &effects, &preview, true).is_err(),
+            "{name}: refused"
+        );
+        assert!(!repo.intent_path(&a.id).exists(), "{name}");
+        undo();
+    }
+
+    // An entry of a type the digest cannot bind refuses the preview.
+    let fifo = std::ffi::CString::new(nested.join("fifo").to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    assert!(repo.forget_preview(&a.id, &effects).is_err());
+    fs::remove_file(nested.join("fifo")).unwrap();
+
     let preview = repo.forget_preview(&a.id, &effects).unwrap();
     repo.forget(&a.id, &effects, &preview, true).unwrap();
-    for folder in folders {
+    for dir in &dirs {
         assert!(
-            fs::symlink_metadata(&folder).is_err(),
+            fs::symlink_metadata(rollback_namespace(dir, &a.id)).is_err(),
             "{} removed",
-            folder.display()
+            dir.display()
         );
     }
+    assert_eq!(
+        fs::read(&outside).unwrap(),
+        b"outside the account",
+        "a link inside is removed, never followed"
+    );
+}
+
+#[test]
+fn a_resumed_forget_never_removes_a_directory_put_at_a_file_name() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = persistent_accounts(root.path());
+    let a = account(&repo);
+    let effects = root.path().join("mailboxes");
+    populate(&repo, &a, &effects);
+    let preview = repo.forget_preview(&a.id, &effects).unwrap();
+    fail(Some("intent"));
+    assert!(repo.forget(&a.id, &effects, &preview, true).is_err());
+    fail(None);
+    // Another process puts a directory where the confirmed file was.
+    let file = cipher_path(&effects, &a.id, 0);
+    fs::remove_file(&file).unwrap();
+    fs::create_dir(&file).unwrap();
+    fs::write(file.join("keep"), b"not the account's").unwrap();
+    assert!(repo.recover(&a.id, &effects).is_err());
+    assert_eq!(fs::read(file.join("keep")).unwrap(), b"not the account's");
+    fs::remove_dir_all(&file).unwrap();
+    repo.recover(&a.id, &effects).unwrap();
+    assert!(repo.load(&a.id).is_err());
 }

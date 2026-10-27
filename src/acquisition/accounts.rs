@@ -37,6 +37,20 @@ pub trait CredentialBackend: Send + Sync {
     fn get(&self, reference: &str) -> Result<SecretValue, AcquisitionError>;
     fn put(&self, reference: &str, value: &SecretValue) -> Result<(), AcquisitionError>;
     fn delete(&self, reference: &str) -> Result<(), AcquisitionError>;
+    /// Deletes the item only when its value satisfies `owned`, reading and deleting the
+    /// same item, so cleanup never removes an entry it did not prove it created. Returns
+    /// whether it deleted. Backends without item handles read and delete by name.
+    fn delete_owned(
+        &self,
+        reference: &str,
+        owned: &dyn Fn(&[u8]) -> bool,
+    ) -> Result<bool, AcquisitionError> {
+        match self.get(reference) {
+            Ok(value) if owned(value.bytes()) => self.delete(reference).map(|()| true),
+            Ok(_) | Err(AcquisitionError::CredentialMissing) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 pub struct OsCredentials;
@@ -51,6 +65,13 @@ impl CredentialBackend for OsCredentials {
     }
     fn delete(&self, reference: &str) -> Result<(), AcquisitionError> {
         keychain::installed()?.delete(reference)
+    }
+    fn delete_owned(
+        &self,
+        reference: &str,
+        owned: &dyn Fn(&[u8]) -> bool,
+    ) -> Result<bool, AcquisitionError> {
+        keychain::installed()?.delete_owned(reference, owned)
     }
 }
 #[cfg(not(target_os = "macos"))]

@@ -822,6 +822,11 @@ fn rotation_recovery_follows_the_state_table_and_never_uses_an_unauthenticated_n
                 plant(&repo, &next_key);
             }
             let later = fs::read(&later_path).ok();
+            let later_files: Vec<Option<Vec<u8>>> = repo
+                .directories(&effects)
+                .iter()
+                .map(|dir| fs::read(cipher_path(dir, &a.id, 1)).ok())
+                .collect();
             let earlier_now = fs::read(&earlier_path).ok();
             drop(repo);
             let repo = persistent_accounts(root.path());
@@ -848,18 +853,48 @@ fn rotation_recovery_follows_the_state_table_and_never_uses_an_unauthenticated_n
                     earlier,
                     "{case}: earlier data untouched"
                 );
-                for dir in repo.directories(&effects) {
-                    assert!(
-                        !cipher_path(&dir, &a.id, 1).exists(),
-                        "{case}: next-generation data removed"
-                    );
+                // Next-generation files go only with a key proved to be the rotation's own.
+                let owned = matches!(variant, "genuine" | "metadata_only");
+                for (dir, before_rollback) in repo.directories(&effects).iter().zip(&later_files) {
+                    let now = fs::read(cipher_path(dir, &a.id, 1)).ok();
+                    if owned {
+                        assert!(
+                            now.is_none(),
+                            "{case}: the rotation's own next-generation data is removed"
+                        );
+                    } else {
+                        assert_eq!(
+                            &now, before_rollback,
+                            "{case}: unprovable next-generation data is kept"
+                        );
+                    }
                 }
-                for reference in [&next_key, &identity] {
-                    assert_eq!(
-                        repo.backend.get(reference).err(),
+                assert_eq!(
+                    repo.backend.get(&identity).err(),
+                    Some(AcquisitionError::CredentialMissing),
+                    "{case}: the identity the rotation derived is deleted"
+                );
+                // Only a key that reproduces the recorded commitment is provably the
+                // rotation's own; a planted key, or any key of a pre-commitment intent, stays.
+                let next = repo.backend.get(&next_key);
+                match variant {
+                    "genuine" | "metadata_only" => assert_eq!(
+                        next.err(),
                         Some(AcquisitionError::CredentialMissing),
-                        "{case}: the next key and new identity are deleted"
-                    );
+                        "{case}: the rotation's own next key is deleted"
+                    ),
+                    "planted" | "pre_commitment_planted" => {
+                        assert_eq!(
+                            next.unwrap().bytes(),
+                            &[0x5a; 32][..],
+                            "{case}: a planted key is kept"
+                        )
+                    }
+                    _ => assert_eq!(
+                        next.is_ok(),
+                        !matches!(phase, "intent" | "rotate_identity"),
+                        "{case}: an unprovable key is kept"
+                    ),
                 }
                 let s = repo.store(&current).unwrap();
                 assert_eq!(
@@ -936,5 +971,226 @@ fn rotation_recovery_follows_the_state_table_and_never_uses_an_unauthenticated_n
         } else {
             assert_eq!(repo.load(&a.id).unwrap().generation, 1, "{phase}");
         }
+    }
+}
+
+/// Answers the first read of one reference genuinely and every later read with a plant, as
+/// a process replacing the item between two reads would.
+struct Swapping {
+    inner: Arc<dyn CredentialBackend>,
+    reference: String,
+    plant: Vec<u8>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+impl CredentialBackend for Swapping {
+    fn get(&self, reference: &str) -> Result<SecretValue, AcquisitionError> {
+        if reference == self.reference
+            && self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1
+        {
+            return Ok(SecretValue::new(self.plant.clone()));
+        }
+        self.inner.get(reference)
+    }
+    fn put(&self, reference: &str, value: &SecretValue) -> Result<(), AcquisitionError> {
+        self.inner.put(reference, value)
+    }
+    fn delete(&self, reference: &str) -> Result<(), AcquisitionError> {
+        self.inner.delete(reference)
+    }
+}
+
+#[test]
+fn repair_commits_only_the_identity_it_authenticated_even_if_the_item_changes_between_reads() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = persistent_accounts(root.path());
+    let a = account(&repo);
+    let effects = root.path().join("mailboxes");
+    populate(&repo, &a, &effects);
+    let placeholder = repo
+        .store(&a)
+        .unwrap()
+        .keys()
+        .placeholder("sender", "a@example.test");
+    fail(Some("metadata"));
+    assert!(repo.rotate(&a.id, &effects).is_err());
+    fail(None);
+    strip_commitments(&repo, &a.id, &["after"]);
+    let files = |repo: &Accounts| {
+        [0, 1].map(|g| fs::read(cipher_path(&repo.paths.data, &a.id, g)).unwrap())
+    };
+    let before_files = files(&repo);
+    let identity = format!("{}-identity", a.id.as_str());
+    let plant = vec![0x6b; 128];
+    let swapping = Accounts::new(
+        repo.paths.clone(),
+        Arc::new(Swapping {
+            inner: repo.backend.clone(),
+            reference: identity.clone(),
+            plant: plant.clone(),
+            reads: Default::default(),
+        }),
+    );
+    assert!(
+        swapping.recover(&a.id, &effects).is_err(),
+        "the planted identity is refused"
+    );
+    assert!(repo.intent_path(&a.id).exists(), "the intent is kept");
+    assert_eq!(
+        files(&repo),
+        before_files,
+        "both generations are kept unchanged"
+    );
+    let saved = repo.load_metadata(&a.id).unwrap();
+    let next = repo.backend.get(&saved.local_secret_ref).unwrap();
+    let with_plant = CensusKeys::rotated(
+        &LocalSecret::from_bytes(next.bytes().to_vec()).unwrap(),
+        &a.id,
+        &plant,
+        1,
+    )
+    .unwrap();
+    assert!(
+        !with_plant.commits_to(saved.identity_commitment.as_deref()),
+        "no commitment authenticating the plant was published"
+    );
+    repo.recover(&a.id, &effects).unwrap();
+    let current = repo.load(&a.id).unwrap();
+    assert_eq!(current.generation, 1);
+    assert_eq!(
+        repo.store(&current)
+            .unwrap()
+            .keys()
+            .placeholder("sender", "a@example.test"),
+        placeholder,
+        "the genuine identity carries on"
+    );
+}
+
+#[test]
+fn rotation_never_deletes_an_entry_it_did_not_create() {
+    // An entry that exists before a rotation, at each place the rotation would create one,
+    // refuses the rotation before anything is recorded, and survives recovery.
+    for place in [
+        "identity",
+        "next_key",
+        "data",
+        "mailbox",
+        "invoice",
+        "unsubscribe",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let repo = persistent_accounts(root.path());
+        let a = account(&repo);
+        let effects = root.path().join("mailboxes");
+        populate(&repo, &a, &effects);
+        let foreign = SecretValue::new(vec![0x33; 32]);
+        let dirs = repo.directories(&effects);
+        let file = |kind: usize| cipher_path(&dirs[kind], &a.id, 1);
+        let check: Box<dyn Fn(&Accounts) -> bool> = match place {
+            "identity" | "next_key" => {
+                let reference = if place == "identity" {
+                    format!("{}-identity", a.id.as_str())
+                } else {
+                    format!("{}-key-g1", a.id.as_str())
+                };
+                repo.backend.put(&reference, &foreign).unwrap();
+                Box::new(move |r: &Accounts| {
+                    r.backend
+                        .get(&reference)
+                        .is_ok_and(|v| v.bytes() == &[0x33; 32][..])
+                })
+            }
+            _ => {
+                let kind = ["data", "mailbox", "invoice", "unsubscribe"]
+                    .iter()
+                    .position(|p| *p == place)
+                    .unwrap();
+                fs::create_dir_all(&dirs[kind]).unwrap();
+                fs::write(file(kind), b"pre-existing").unwrap();
+                let path = file(kind);
+                Box::new(move |_: &Accounts| fs::read(&path).is_ok_and(|b| b == b"pre-existing"))
+            }
+        };
+        assert!(repo.rotate(&a.id, &effects).is_err(), "{place}: refused");
+        assert!(
+            !repo.intent_path(&a.id).exists(),
+            "{place}: nothing was recorded"
+        );
+        assert!(check(&repo), "{place}: kept");
+        repo.recover(&a.id, &effects).unwrap();
+        assert!(check(&repo), "{place}: kept after recovery");
+        assert_eq!(repo.load(&a.id).unwrap().generation, 0, "{place}");
+    }
+
+    // Entries that appear after the intent, in place of the rotation's own, are not
+    // provably its own either, so the rollback keeps them.
+    let root = tempfile::tempdir().unwrap();
+    let repo = persistent_accounts(root.path());
+    let a = account(&repo);
+    let effects = root.path().join("mailboxes");
+    populate(&repo, &a, &effects);
+    fail(Some("intent"));
+    assert!(repo.rotate(&a.id, &effects).is_err());
+    fail(None);
+    let identity = format!("{}-identity", a.id.as_str());
+    let next_key = format!("{}-key-g1", a.id.as_str());
+    repo.backend
+        .put(&identity, &SecretValue::new(vec![0x44; 128]))
+        .unwrap();
+    repo.backend
+        .put(&next_key, &SecretValue::new(vec![0x55; 32]))
+        .unwrap();
+    let foreign_file = cipher_path(&repo.paths.data, &a.id, 1);
+    fs::write(&foreign_file, b"foreign").unwrap();
+    repo.recover(&a.id, &effects).unwrap();
+    assert!(!repo.intent_path(&a.id).exists());
+    assert_eq!(
+        repo.backend.get(&identity).unwrap().bytes(),
+        &[0x44; 128][..]
+    );
+    assert_eq!(
+        repo.backend.get(&next_key).unwrap().bytes(),
+        &[0x55; 32][..]
+    );
+    assert_eq!(fs::read(&foreign_file).unwrap(), b"foreign");
+}
+
+#[test]
+fn an_interrupted_rollback_resumes_and_removes_only_the_rotations_own_entries() {
+    for phase in ["rollback_data", "rollback_keys"] {
+        let root = tempfile::tempdir().unwrap();
+        let repo = persistent_accounts(root.path());
+        let a = account(&repo);
+        let effects = root.path().join("mailboxes");
+        populate(&repo, &a, &effects);
+        let earlier = fs::read(cipher_path(&repo.paths.data, &a.id, 0)).unwrap();
+        fail(Some("rotate_invoice"));
+        assert!(repo.rotate(&a.id, &effects).is_err());
+        fail(Some(phase));
+        assert!(repo.recover(&a.id, &effects).is_err(), "{phase}");
+        fail(None);
+        drop(repo);
+        let repo = persistent_accounts(root.path());
+        repo.recover(&a.id, &effects).unwrap();
+        assert!(!repo.intent_path(&a.id).exists(), "{phase}");
+        assert_eq!(
+            fs::read(cipher_path(&repo.paths.data, &a.id, 0)).unwrap(),
+            earlier,
+            "{phase}"
+        );
+        for dir in repo.directories(&effects) {
+            assert!(!cipher_path(&dir, &a.id, 1).exists(), "{phase}");
+        }
+        for reference in [
+            format!("{}-key-g1", a.id.as_str()),
+            format!("{}-identity", a.id.as_str()),
+        ] {
+            assert_eq!(
+                repo.backend.get(&reference).err(),
+                Some(AcquisitionError::CredentialMissing),
+                "{phase}"
+            );
+        }
+        assert!(repo.store(&repo.load(&a.id).unwrap()).is_ok(), "{phase}");
     }
 }

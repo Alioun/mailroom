@@ -785,10 +785,43 @@ impl Keychain {
     }
 
     fn legacy_read(&self, reference: &str) -> Result<Zeroizing<Vec<u8>>, Status> {
+        self.legacy_item(reference).map(|(_, value)| value)
+    }
+    /// One legacy item and its value, read from that same item.
+    fn legacy_item(&self, reference: &str) -> Result<(CFType, Zeroizing<Vec<u8>>), Status> {
         if !valid_reference(reference) {
             return Err(Status::Failed);
         }
-        self.data(&self.item(LEGACY_SERVICE, reference)?)
+        let item = self.item(LEGACY_SERVICE, reference)?;
+        let value = self.data(&item)?;
+        Ok((item, value))
+    }
+    /// One protected item and its value, read from that same item after its access lists
+    /// pass the check for `class`.
+    fn protected_item(
+        &self,
+        reference: &str,
+        class: Class,
+    ) -> Result<(CFType, Zeroizing<Vec<u8>>), Status> {
+        if !valid_reference(reference) {
+            return Err(Status::Failed);
+        }
+        let item = self.item(SERVICE, reference)?;
+        match Self::check(&item, class) {
+            Status::Ok => {}
+            status => return Err(status),
+        }
+        let value = self.data(&item)?;
+        Ok((item, value))
+    }
+    /// Deletes exactly the item that was read, never another one found later by name.
+    fn delete_item(item: &CFType) -> Result<(), Status> {
+        match Status::of(unsafe {
+            SecKeychainItemDelete(item.as_CFTypeRef() as SecKeychainItemRef)
+        }) {
+            Status::Ok | Status::Missing => Ok(()),
+            status => Err(status),
+        }
     }
 
     /// Copies a legacy password into a protected item, then proves the protected item holds
@@ -816,53 +849,58 @@ impl Keychain {
     }
 
     /// Deletes a legacy original only when the protected item is correctly protected and
-    /// holds the same value.
+    /// holds the same value. The legacy item compared is the one deleted.
     pub(crate) fn retire_legacy(&self, reference: &str) -> Result<(), Migration> {
         let protected = self.read(reference).map_err(Migration::Protected)?;
-        let legacy = self.legacy_read(reference).map_err(Migration::Legacy)?;
+        let (item, legacy) = self.legacy_item(reference).map_err(Migration::Legacy)?;
         if !equal(&protected, &legacy) {
             return Err(Migration::Mismatch);
         }
-        match self.remove_in(LEGACY_SERVICE, reference) {
-            Status::Ok => Ok(()),
-            status => Err(Migration::Legacy(status)),
-        }
+        Self::delete_item(&item).map_err(Migration::Legacy)
     }
 
     /// Finds one key's value wherever an earlier build or an interrupted move left it, and
     /// changes nothing. Reading an earlier build's item needs a person. Nothing here says
     /// the value is genuine: anyone can plant an item, so the caller checks the account's
-    /// whole set against its saved state before `settle` moves any of it.
+    /// whole set against its saved state before `settle` moves any of it. Each item found is
+    /// kept by handle, so `settle` deletes exactly the items whose values were checked.
     pub(crate) fn gather(&self, reference: &str) -> Result<Gathered, Status> {
         if !valid_reference(reference) || Class::of(reference) != Class::PinnedSelf {
             return Err(Status::Failed);
         }
-        let staged_reference = staged(reference);
-        let staged = match self.status_as(&staged_reference, Class::PinnedSelf) {
-            Status::Ok => Some(self.read_as(&staged_reference, Class::PinnedSelf)?),
-            Status::Missing => None,
-            status => return Err(status),
+        let staged = match self.protected_item(&staged(reference), Class::PinnedSelf) {
+            Ok(found) => Some(found),
+            Err(Status::Missing) => None,
+            Err(status) => return Err(status),
         };
-        let (origin, value) = match (self.status(reference), staged) {
-            (Status::Ok, staged) => {
+        let agrees = |copy: &Option<(CFType, Zeroizing<Vec<u8>>)>, value: &[u8]| {
+            copy.as_ref().is_none_or(|(_, copied)| equal(copied, value))
+        };
+        let (origin, value) = match self.status(reference) {
+            Status::Ok => {
                 let value = self.read(reference)?;
-                if staged.as_ref().is_some_and(|copy| !equal(copy, &value)) {
+                if !agrees(&staged, &value) {
                     return Err(Status::Changed);
                 }
                 let origin = match staged {
-                    Some(_) => Origin::CurrentAndStaged,
+                    Some((item, _)) => Origin::CurrentAndStaged(item),
                     None => Origin::Current,
                 };
                 (origin, value)
             }
-            (Status::OtherBinary, _) => {
+            Status::OtherBinary => {
                 let item = self.item(SERVICE, reference)?;
                 let value = self.data(&item)?;
-                (Origin::Earlier(item), value)
+                if !agrees(&staged, &value) {
+                    return Err(Status::Changed);
+                }
+                (Origin::Earlier(item, staged.map(|(copy, _)| copy)), value)
             }
-            (Status::Missing, Some(value)) => (Origin::Staged, value),
-            (Status::Missing, None) => (Origin::Legacy, self.legacy_read(reference)?),
-            (status, _) => return Err(status),
+            Status::Missing => match staged {
+                Some((item, value)) => (Origin::Staged(item), value),
+                None => (Origin::Legacy, self.legacy_read(reference)?),
+            },
+            status => return Err(status),
         };
         Ok(Gathered {
             reference: reference.to_owned(),
@@ -873,50 +911,40 @@ impl Keychain {
 
     /// Leaves one verified key as a current item trusting this binary. A move from an
     /// earlier build goes through a staged copy, so a rerun after an interruption at any
-    /// step gathers the key again from where it was left.
+    /// step gathers the key again from where it was left. Only items read by `gather`, or
+    /// created here, are deleted.
     pub(crate) fn settle(&self, key: &Gathered) -> Result<(), Status> {
-        let staged = staged(&key.reference);
         match &key.origin {
             Origin::Current => Ok(()),
-            Origin::CurrentAndStaged => self.removed(&staged),
-            Origin::Staged => self.publish(&key.reference, &staged, &key.value),
-            Origin::Legacy => self.created(&key.reference, Class::PinnedSelf, &key.value),
-            Origin::Earlier(item) => {
-                self.removed(&staged)?;
-                self.created(&staged, Class::PinnedSelf, &key.value)?;
-                match Status::of(unsafe {
-                    SecKeychainItemDelete(item.as_CFTypeRef() as SecKeychainItemRef)
-                }) {
-                    Status::Ok => {}
-                    status => return Err(status),
-                }
-                self.publish(&key.reference, &staged, &key.value)
+            Origin::CurrentAndStaged(copy) => Self::delete_item(copy),
+            Origin::Staged(copy) => {
+                self.created(&key.reference, &key.value)?;
+                Self::delete_item(copy)
+            }
+            Origin::Legacy => self.created(&key.reference, &key.value).map(|_| ()),
+            Origin::Earlier(item, copy) => {
+                let copy = match copy {
+                    Some(copy) => copy.clone(),
+                    None => self.created(&staged(&key.reference), &key.value)?,
+                };
+                Self::delete_item(item)?;
+                self.created(&key.reference, &key.value)?;
+                Self::delete_item(&copy)
             }
         }
     }
 
-    fn publish(&self, reference: &str, staged: &str, value: &[u8]) -> Result<(), Status> {
-        self.created(reference, Class::PinnedSelf, value)?;
-        self.removed(staged)
-    }
-
-    /// Creates an item and proves it reads back as `value`.
-    fn created(&self, reference: &str, class: Class, value: &[u8]) -> Result<(), Status> {
-        match self.create_as(reference, class, value) {
+    /// Creates a pinned item and proves it reads back as `value`. Returns that item.
+    fn created(&self, reference: &str, value: &[u8]) -> Result<CFType, Status> {
+        match self.create_as(reference, Class::PinnedSelf, value) {
             Status::Ok => {}
             status => return Err(status),
         }
-        if equal(&self.read_as(reference, class)?, value) {
-            Ok(())
+        let (item, read) = self.protected_item(reference, Class::PinnedSelf)?;
+        if equal(&read, value) {
+            Ok(item)
         } else {
             Err(Status::Failed)
-        }
-    }
-
-    fn removed(&self, reference: &str) -> Result<(), Status> {
-        match self.remove(reference) {
-            Status::Ok | Status::Missing => Ok(()),
-            status => Err(status),
         }
     }
 }
@@ -932,11 +960,12 @@ pub(crate) enum Origin {
     /// The protected item trusts this binary.
     Current,
     /// As `Current`, with an equal staged copy left by an interrupted move.
-    CurrentAndStaged,
+    CurrentAndStaged(CFType),
     /// Only the staged copy of an interrupted move is left.
-    Staged,
-    /// The protected item trusts an earlier build; a person allowed one read of it.
-    Earlier(CFType),
+    Staged(CFType),
+    /// The protected item trusts an earlier build; a person allowed one read of it. An
+    /// equal staged copy from an interrupted move may already exist.
+    Earlier(CFType, Option<CFType>),
     /// Only the legacy `keyring` item exists.
     Legacy,
 }
@@ -1014,6 +1043,26 @@ impl CredentialBackend for Keychain {
             Status::Ok | Status::Missing => Ok(()),
             _ => Err(AcquisitionError::Credentials),
         }
+    }
+    /// Reads one item, and deletes that same item only if its protection is unchanged and
+    /// its value satisfies `owned`.
+    fn delete_owned(
+        &self,
+        reference: &str,
+        owned: &dyn Fn(&[u8]) -> bool,
+    ) -> Result<bool, AcquisitionError> {
+        if !valid_reference(reference) {
+            return Err(AcquisitionError::Credentials);
+        }
+        let item = match self.item(SERVICE, reference) {
+            Ok(item) => item,
+            Err(Status::Missing) => return Ok(false),
+            Err(status) => return Err(status.into()),
+        };
+        if Self::check(&item, Class::of(reference)) != Status::Ok || !owned(&self.data(&item)?) {
+            return Ok(false);
+        }
+        Self::delete_item(&item).map(|()| true).map_err(Into::into)
     }
 }
 

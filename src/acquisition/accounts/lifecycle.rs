@@ -562,6 +562,30 @@ impl Accounts {
             .ok_or(AcquisitionError::Storage)?;
         after.local_secret_ref = format!("{}-key-g{}", id.as_str(), after.generation);
         after.identity_ref = Some(format!("{}-identity", id.as_str()));
+        // Every entry this rotation creates must be absent now, so whatever a rollback later
+        // proves it created cannot be an entry that existed before.
+        let created = std::iter::once(&after.local_secret_ref).chain(
+            before
+                .identity_ref
+                .is_none()
+                .then_some(after.identity_ref.as_ref())
+                .flatten(),
+        );
+        for reference in created {
+            match self.backend.get(reference) {
+                Err(AcquisitionError::CredentialMissing) => {}
+                Ok(_) => return Err(AcquisitionError::InvalidInput),
+                Err(e) => return Err(e),
+            }
+        }
+        for dir in self.directories(effects) {
+            if cipher_path(&dir, id, after.generation)
+                .try_exists()
+                .map_err(|_| AcquisitionError::Storage)?
+            {
+                return Err(AcquisitionError::InvalidInput);
+            }
+        }
         let mut key = Zeroizing::new(vec![0; 32]);
         OsRng.fill_bytes(&mut key);
         after.identity_commitment = CensusKeys::rotated(
@@ -753,7 +777,7 @@ impl Accounts {
             }) => {
                 let current = self.load_metadata(id)?;
                 if current.generation == before.generation {
-                    return self.roll_back_rotation(&before, &after, effects);
+                    return self.roll_back_rotation(&before, &after, &stores, effects);
                 }
                 if current.generation != after.generation
                     || current.local_secret_ref != after.local_secret_ref
@@ -772,32 +796,102 @@ impl Accounts {
         }
     }
     /// Recovery of a rotation whose metadata still selects the earlier generation. The
-    /// earlier ciphertexts and key are intact, so the rotation is undone, and no
-    /// next-generation key is ever trusted: one planted in the meantime is deleted with it.
+    /// earlier ciphertexts and key are intact, so the rotation is undone and no
+    /// next-generation key is ever trusted. Cleanup deletes only what this rotation provably
+    /// created, and `rotate` refused to start over any existing entry it would create:
+    /// the next key only when it reproduces the commitment recorded before it was created;
+    /// next-generation files of the recorded stores only when that key opens them; and a
+    /// first identity only when it equals the bytes derived from the earlier key. Anything
+    /// else, including a key planted in place of the rotation's own, is kept.
     fn roll_back_rotation(
         &self,
         before: &Account,
         after: &Account,
+        stores: &[usize],
         effects: &Path,
     ) -> Result<(), AcquisitionError> {
-        for dir in self.directories(effects) {
-            remove_file(&cipher_path(&dir, &after.id, after.generation))?;
-            for path in attributable_staging(&dir, &after.id)? {
-                remove_file(&path)?;
+        let identity = self.rotation_identity(before)?;
+        let owns_key = |key: &[u8]| {
+            let (Some(identity), Some(commitment)) =
+                (&identity, after.identity_commitment.as_deref())
+            else {
+                return false;
+            };
+            LocalSecret::from_bytes(key.to_vec())
+                .and_then(|secret| {
+                    CensusKeys::rotated(&secret, &after.id, identity, after.generation)
+                })
+                .is_ok_and(|keys| keys.commits_to(Some(commitment)))
+        };
+        let next = match self.backend.get(&after.local_secret_ref) {
+            Ok(key) if owns_key(key.bytes()) => Some(key),
+            Ok(_) | Err(AcquisitionError::CredentialMissing) => None,
+            Err(e) => return Err(e),
+        };
+        if let (Some(key), Some(identity)) = (&next, &identity) {
+            let directories = self.directories(effects);
+            for &kind in stores {
+                let dir = directories.get(kind).ok_or(AcquisitionError::Storage)?;
+                let path = cipher_path(dir, &after.id, after.generation);
+                if !path.try_exists().map_err(|_| AcquisitionError::Storage)? {
+                    continue;
+                }
+                let keys = CensusKeys::rotated(
+                    &LocalSecret::from_bytes(key.bytes().to_vec())?,
+                    &after.id,
+                    identity,
+                    after.generation,
+                )?;
+                let opens = EncryptedStore::new(dir.clone(), Self::kind_keys(after, keys, kind)?)?
+                    .load_state()
+                    .is_ok();
+                if opens {
+                    remove_file(&path)?;
+                }
             }
         }
         boundary("rollback_data")?;
-        self.backend.delete(&after.local_secret_ref)?;
-        if before.identity_ref.is_none() {
-            self.backend.delete(
+        self.backend
+            .delete_owned(&after.local_secret_ref, &owns_key)?;
+        if let (None, Some(identity)) = (&before.identity_ref, &identity) {
+            let derived = |value: &[u8]| {
+                bool::from(subtle::ConstantTimeEq::ct_eq(value, identity.as_slice()))
+            };
+            self.backend.delete_owned(
                 after
                     .identity_ref
                     .as_ref()
                     .ok_or(AcquisitionError::Storage)?,
+                &derived,
             )?;
         }
         boundary("rollback_keys")?;
         self.clear_intent(&after.id)
+    }
+    /// The identity bytes a rotation of `before` carries forward: derived from the earlier
+    /// key on a first rotation, the earlier identity item otherwise. None when the earlier
+    /// key or identity is gone, which leaves nothing provably created.
+    fn rotation_identity(
+        &self,
+        before: &Account,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, AcquisitionError> {
+        let read = |reference: &str| match self.backend.get(reference) {
+            Ok(value) => Ok(Some(value)),
+            Err(AcquisitionError::CredentialMissing) => Ok(None),
+            Err(e) => Err(e),
+        };
+        Ok(match &before.identity_ref {
+            Some(reference) => read(reference)?.map(|v| Zeroizing::new(v.bytes().to_vec())),
+            None => match read(&before.local_secret_ref)? {
+                Some(key) => {
+                    let secret = LocalSecret::from_bytes(key.bytes().to_vec())?;
+                    Some(Zeroizing::new(
+                        CensusKeys::derive(&secret, &before.id).identity_material(),
+                    ))
+                }
+                None => None,
+            },
+        })
     }
     /// Metadata published by a rotation from before identity commitments carries none. It
     /// is repaired only from authenticated material: the earlier key, authenticated by the
@@ -833,9 +927,18 @@ impl Accounts {
         )) {
             return Err(AcquisitionError::Credentials);
         }
+        // The next keys carry the identity bytes just authenticated, never a second read of
+        // the item, which another process could replace in between.
+        let key = self.backend.get(&current.local_secret_ref)?;
+        let later_keys = CensusKeys::rotated(
+            &LocalSecret::from_bytes(key.bytes().to_vec())?,
+            &current.id,
+            &identity,
+            current.generation,
+        )?;
         let later = EncryptedStore::new(
             self.paths.data.clone(),
-            Self::kind_keys(&current, self.uncommitted_keys(&current)?, 0)?,
+            Self::kind_keys(&current, later_keys, 0)?,
         )?;
         if serde_json::to_vec(&later.load_state()?).ok() != serde_json::to_vec(&snapshot).ok() {
             return Err(AcquisitionError::Credentials);

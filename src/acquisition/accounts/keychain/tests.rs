@@ -239,6 +239,7 @@ fn a_key_trusting_another_binary_is_reported_and_never_read_silently() {
 fn gathered(keychain: &Keychain, reference: &str) -> (String, Zeroizing<Vec<u8>>) {
     let key = keychain.gather(reference).unwrap();
     let origin = format!("{:?}", key.origin);
+    let origin = origin.split('(').next().unwrap().to_owned();
     keychain.settle(&key).unwrap();
     (origin, key.value)
 }

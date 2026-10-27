@@ -5,7 +5,7 @@
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)"; work="$(cd "$work" && pwd -P)"
-trap '[[ -n "${KEEP:-}" ]] && echo "work=$work" || rm -rf "$work"' EXIT
+trap '[[ -n "${KEEP:-}" ]] && echo "work=$work" || { chmod -R u+w "$work"; rm -rf "$work"; }' EXIT
 chmod 700 "$work"
 me="$(id -un)"
 dummy="nk-dummy-wizard-$RANDOM$RANDOM"

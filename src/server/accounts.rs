@@ -90,7 +90,7 @@ impl AccountController {
             confirmations: Mutex::new(if synthetic {
                 crate::confirmation::Boundary::synthetic()
             } else {
-                crate::confirmation::Boundary::default()
+                crate::confirmation::Boundary::native()
             }),
             #[cfg(test)]
             repository_accesses: std::sync::atomic::AtomicUsize::new(0),

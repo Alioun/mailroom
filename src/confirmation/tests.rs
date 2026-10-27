@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::{Arc, Mutex};
 
 fn plan() -> Plan {
     Plan {
@@ -16,163 +17,134 @@ fn plan() -> Plan {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Fault {
     None,
-    WrongIdentity,
-    WrongOwner,
-    WrongPath,
-    Missing,
-    Replaced,
+    Unverified,
     Cancelled,
     Malformed,
     Forged,
+    OtherResponder,
     WrongRequest,
+    Oversized,
     Failure,
+}
+#[derive(Default)]
+struct Seen {
+    prompts: usize,
+    shown: Vec<Vec<u8>>,
 }
 struct Fake {
     fault: Fault,
-    checks: usize,
-    prompts: usize,
-    displayed: Option<Request>,
-}
-impl Fake {
-    fn new(fault: Fault) -> Self {
-        Self {
-            fault,
-            checks: 0,
-            prompts: 0,
-            displayed: None,
-        }
-    }
+    seen: Arc<Mutex<Seen>>,
 }
 impl Backend for Fake {
-    fn verify_expected_identity(&mut self) -> Result<VerifiedExecutable, String> {
-        self.checks += 1;
-        if matches!(self.fault, Fault::Missing) {
-            return Err("Wrong or missing helper".into());
-        }
-        let mut verified = SyntheticBackend.verify_expected_identity()?;
-        match self.fault {
-            Fault::WrongIdentity => verified.signing_requirement = "any-valid-signature".into(),
-            Fault::WrongOwner => verified.owner = 1000,
-            Fault::WrongPath => verified.path = "/tmp/substituted-helper".into(),
-            _ => {}
-        }
-        Ok(verified)
+    fn available(&self) -> Result<(), String> {
+        Ok(())
     }
-    fn confirm(
-        &mut self,
-        executable: &VerifiedExecutable,
-        request: &Request,
-        key: &[u8; 32],
-    ) -> Result<Response, String> {
-        self.prompts += 1;
-        self.displayed = Some(request.clone());
-        if matches!(self.fault, Fault::Failure) {
-            return Err("Helper failed".into());
+    fn synthetic(&self) -> bool {
+        false
+    }
+    fn exchange(&mut self, request: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
+        if matches!(self.fault, Fault::Unverified) {
+            return Err(crate::native::LaunchError::IdentityMismatch.to_string());
         }
-        let mut response = SyntheticBackend.confirm(executable, request, key)?;
-        match self.fault {
-            Fault::Replaced => response.executable.file_identity.push_str("-replaced"),
-            Fault::Malformed => response.bytes = b"{\"approved\":true}".to_vec(),
+        let mut seen = self.seen.lock().unwrap();
+        seen.prompts += 1;
+        seen.shown.push(request.to_vec());
+        Ok(match self.fault {
+            Fault::None | Fault::Unverified => answer(request, key, Outcome::Approved)?,
+            Fault::Cancelled => answer(request, key, Outcome::Cancelled)?,
+            Fault::Malformed => b"{\"approved\":true}".to_vec(),
+            Fault::Oversized => vec![b' '; 4097],
+            Fault::Failure => return Err("Helper refused or failed".into()),
             Fault::Forged => {
-                let mut wire: WireOutcome = serde_json::from_slice(&response.bytes).unwrap();
+                let mut wire: WireOutcome =
+                    serde_json::from_slice(&answer(request, key, Outcome::Approved)?).unwrap();
                 wire.authentication = "0".repeat(64);
-                response.bytes = serde_json::to_vec(&wire).unwrap();
+                serde_json::to_vec(&wire).unwrap()
             }
+            Fault::OtherResponder => answer(request, &random(), Outcome::Approved)?,
             Fault::WrongRequest => {
-                let mut altered = request.clone();
-                altered.request_id = "0".repeat(64);
-                response = SyntheticBackend.confirm(executable, &altered, key)?;
+                let mut altered: serde_json::Value = serde_json::from_slice(request).unwrap();
+                altered["request_id"] = "0".repeat(64).into();
+                answer(
+                    &serde_json::to_vec(&altered).unwrap(),
+                    key,
+                    Outcome::Approved,
+                )?
             }
-            Fault::Cancelled => {
-                let request_digest = digest(&serde_json::to_vec(request).unwrap());
-                let outcome = Outcome::Cancelled;
-                response.bytes = serde_json::to_vec(&WireOutcome {
-                    request_id: request.request_id.clone(),
-                    authentication: tag(key, &request.request_id, &request_digest, outcome),
-                    request_digest,
-                    outcome,
-                })
-                .unwrap();
-            }
-            _ => {}
-        }
-        Ok(response)
+        })
     }
+}
+fn boundary(fault: Fault) -> (Boundary, Arc<Mutex<Seen>>) {
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    (
+        Boundary::with_backend(Box::new(Fake {
+            fault,
+            seen: seen.clone(),
+        })),
+        seen,
+    )
 }
 
 #[test]
 fn exact_display_and_single_use_consumption() {
-    let mut boundary = Boundary::synthetic();
+    let (mut boundary, seen) = boundary(Fault::None);
     let plan = plan();
     let (handle, request) = boundary.offer(plan.clone()).unwrap();
-    let mut fake = Fake::new(Fault::None);
+    assert!(!request.synthetic);
     let consent = boundary
-        .confirm(&handle, &plan, &mut fake, || Ok(plan.clone()))
+        .confirm(&handle, &plan, || Ok(plan.clone()))
         .unwrap();
     assert_eq!(consent.receipt(), plan.exact_receipt);
-    let shown = fake.displayed.unwrap();
-    assert_eq!(
-        serde_json::to_value(&shown).unwrap(),
-        serde_json::to_value(&request).unwrap()
-    );
+    let shown = seen.lock().unwrap().shown[0].clone();
+    assert_eq!(shown, serde_json::to_vec(&request).unwrap());
     for exact in [
         "invented-account",
         "target@example.test",
         "sender@example.test",
         &"b".repeat(64),
     ] {
-        assert!(shown.display.contains(exact));
+        assert!(request.display.contains(exact));
     }
     assert!(
         boundary
-            .confirm(&handle, &plan, &mut SyntheticBackend, || Ok(plan.clone()))
+            .confirm(&handle, &plan, || Ok(plan.clone()))
             .is_err()
     );
-    assert_eq!(fake.checks, 1);
-    assert_eq!(fake.prompts, 1);
+    assert_eq!(seen.lock().unwrap().prompts, 1);
 }
 
 #[test]
-fn missing_wrong_replaced_cancelled_malformed_forged_and_failed_helpers_consume_request() {
+fn unverified_cancelled_malformed_forged_unauthenticated_and_failed_helpers_deny_and_consume() {
     for fault in [
-        Fault::WrongIdentity,
-        Fault::WrongOwner,
-        Fault::WrongPath,
-        Fault::Missing,
-        Fault::Replaced,
+        Fault::Unverified,
         Fault::Cancelled,
         Fault::Malformed,
         Fault::Forged,
+        Fault::OtherResponder,
         Fault::WrongRequest,
+        Fault::Oversized,
         Fault::Failure,
     ] {
-        let mut boundary = Boundary::synthetic();
+        let (mut boundary, seen) = boundary(fault);
         let plan = plan();
         let (handle, _) = boundary.offer(plan.clone()).unwrap();
-        let mut fake = Fake::new(fault);
         let mut revalidated = false;
-        assert!(
-            boundary
-                .confirm(&handle, &plan, &mut fake, || {
-                    revalidated = true;
-                    Ok(plan.clone())
-                })
-                .is_err()
-        );
-        assert!(!revalidated);
-        if matches!(
-            fault,
-            Fault::WrongIdentity | Fault::WrongOwner | Fault::WrongPath | Fault::Missing
-        ) {
-            assert_eq!(fake.prompts, 0);
+        let denied = boundary.confirm(&handle, &plan, || {
+            revalidated = true;
+            Ok(plan.clone())
+        });
+        assert!(denied.is_err(), "{fault:?}");
+        assert!(!revalidated, "{fault:?}");
+        if matches!(fault, Fault::Unverified) {
+            assert_eq!(seen.lock().unwrap().prompts, 0);
         }
-        assert!(
-            boundary
-                .confirm(&handle, &plan, &mut SyntheticBackend, || Ok(plan.clone()))
-                .is_err()
+        let replay = boundary.confirm(&handle, &plan, || Ok(plan.clone()));
+        assert_eq!(
+            replay.err().as_deref(),
+            Some("Unknown or consumed confirmation request")
         );
     }
 }
@@ -215,75 +187,158 @@ fn every_action_binding_is_revalidated_before_and_after_confirmation() {
     });
     for changed in alterations {
         for after in [false, true] {
-            let mut boundary = Boundary::synthetic();
+            let (mut boundary, seen) = boundary(Fault::None);
             let (handle, _) = boundary.offer(plan.clone()).unwrap();
-            let mut fake = Fake::new(Fault::None);
             let current = if after { &plan } else { &changed };
             assert!(
                 boundary
-                    .confirm(&handle, current, &mut fake, || Ok(changed.clone()))
+                    .confirm(&handle, current, || Ok(changed.clone()))
                     .is_err()
             );
-            assert_eq!(fake.prompts, usize::from(after));
+            assert_eq!(seen.lock().unwrap().prompts, usize::from(after));
         }
     }
 }
 
 #[test]
-fn expiry_restart_and_native_gap_deny_without_effect() {
+fn expiry_and_other_boundaries_deny_without_prompt() {
     let plan = plan();
-    let mut boundary = Boundary::synthetic();
+    let (mut boundary, seen) = boundary(Fault::None);
     let (handle, _) = boundary.offer(plan.clone()).unwrap();
     boundary.pending.get_mut(&handle).unwrap().created = Instant::now() - LIFETIME;
-    let mut fake = Fake::new(Fault::None);
     assert!(
         boundary
-            .confirm(&handle, &plan, &mut fake, || Ok(plan.clone()))
+            .confirm(&handle, &plan, || Ok(plan.clone()))
             .is_err()
     );
-    assert_eq!(fake.checks, 0);
     let (handle, _) = boundary.offer(plan.clone()).unwrap();
     assert!(
         Boundary::synthetic()
-            .confirm(&handle, &plan, &mut fake, || Ok(plan.clone()))
+            .confirm(&handle, &plan, || Ok(plan.clone()))
             .is_err()
     );
-    let result = boundary.confirm(&handle, &plan, &mut MacOsBackend, || {
-        panic!("Native denial must precede access")
-    });
-    assert!(matches!(result, Err(e) if e == NATIVE_GAP));
+    assert_eq!(seen.lock().unwrap().prompts, 0);
 }
 
 #[test]
 fn outcome_rejects_unknown_fields_oversize_and_previous_challenge() {
-    let mut boundary = Boundary::synthetic();
+    let (mut boundary, _) = boundary(Fault::None);
     let (_, request) = boundary.offer(plan()).unwrap();
+    let bytes = serde_json::to_vec(&request).unwrap();
     let key = random();
-    let executable = SyntheticBackend.verify_expected_identity().unwrap();
-    let response = SyntheticBackend
-        .confirm(&executable, &request, &key)
-        .unwrap();
-    assert!(authenticate(&request, &random(), &response.bytes).is_err());
-    assert!(authenticate(&request, &key, &vec![b' '; 4097]).is_err());
-    let mut wire: serde_json::Value = serde_json::from_slice(&response.bytes).unwrap();
+    let answer = answer(&bytes, &key, Outcome::Approved).unwrap();
+    assert!(authenticate(&request.request_id, &bytes, &key, &answer).is_ok());
+    assert!(authenticate(&request.request_id, &bytes, &random(), &answer).is_err());
+    assert!(authenticate(&request.request_id, &bytes, &key, &vec![b' '; 4097]).is_err());
+    let mut wire: serde_json::Value = serde_json::from_slice(&answer).unwrap();
     wire["extra"] = true.into();
-    assert!(authenticate(&request, &key, &serde_json::to_vec(&wire).unwrap()).is_err());
+    assert!(
+        authenticate(
+            &request.request_id,
+            &bytes,
+            &key,
+            &serde_json::to_vec(&wire).unwrap()
+        )
+        .is_err()
+    );
+}
+
+/// The Swift helper rederives this text and these tags from the same fixture.
+#[test]
+fn display_and_authentication_match_the_swift_helper_fixture() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../native/macos/Tests/MailroomNativeTests/exact-actions.json"
+    ))
+    .unwrap();
+    let actions = [
+        ExactAction::Recovery {
+            account: "invented-account".into(),
+            operation: "Restore captured state".into(),
+            manifest_digest: "c".repeat(64),
+            consequences: "Local state only. No provider effect.".into(),
+        },
+        plan().actions.remove(0),
+        ExactAction::UnsubscribeLocalMail {
+            account: "invented-account".into(),
+            revision: 3,
+            workspace_revision: None,
+            subscription: "sub-1".into(),
+            target: "unsubscribe@list.example.test".into(),
+            sending_identity: "sender@example.test".into(),
+            receiving_identity: "alias@example.test".into(),
+            subject: "unsubscribe".into(),
+            content_digest: "b".repeat(64),
+            source_digest: "e".repeat(64),
+        },
+        ExactAction::SubscriptionAction {
+            account: "invented-account".into(),
+            revision: 3,
+            workspace_revision: Some(7),
+            subscription: "sub-2".into(),
+            method: crate::unsubscribe::Method::OneClick,
+            receiving_identity: "alias@example.test".into(),
+            host: None,
+            content_digest: "b".repeat(64),
+            source_digest: "e".repeat(64),
+            effect: "Success unknown.".into(),
+            destination: None,
+        },
+    ];
+    let cases = fixture["actions"].as_array().unwrap();
+    assert_eq!(cases.len(), actions.len());
+    for (action, case) in actions.iter().zip(cases) {
+        assert_eq!(serde_json::to_value(action).unwrap(), case["action"]);
+        assert_eq!(
+            display(std::slice::from_ref(action)),
+            case["display"].as_str().unwrap()
+        );
+    }
+    let outcome = &fixture["outcome"];
+    let key: [u8; 32] = data_encoding::HEXLOWER
+        .decode(outcome["challenge_hex"].as_str().unwrap().as_bytes())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let request = outcome["request"].as_str().unwrap().as_bytes();
+    assert_eq!(digest(request), outcome["request_digest"].as_str().unwrap());
+    assert_eq!(
+        tag(&key, &"1".repeat(64), &digest(request), Outcome::Approved),
+        outcome["approved_tag"].as_str().unwrap()
+    );
 }
 
 #[test]
-fn production_boundary_has_no_trusted_helper_or_request_issuance() {
-    assert!(Boundary::default().offer(plan()).is_err());
+fn production_boundary_issues_nothing_without_a_pinned_helper() {
+    let mut native = Boundary::native();
+    assert_eq!(
+        native.offer(plan()).err().as_deref(),
+        Some("No helper identity was pinned into this build")
+    );
+    assert_eq!(
+        native_status(),
+        "No helper identity was pinned into this build"
+    );
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_credentials_deny_without_touching_keyring() {
-    use crate::acquisition::{CredentialBackend, OsCredentials, SecretValue};
-    assert!(OsCredentials.get("synthetic-never-looked-up").is_err());
-    assert!(
-        OsCredentials
-            .put("synthetic-never-installed", &SecretValue::new(vec![]))
-            .is_err()
-    );
-    assert!(OsCredentials.delete("synthetic-never-deleted").is_err());
+fn native_backend_denies_substituted_and_non_answering_helpers() {
+    let fixture = crate::native::tests::Fixture::new();
+    let echo = fixture.pinned("echo");
+    let mut wrong = echo.clone();
+    wrong.pin = crate::native::Pin::AdHocCdHash([7; 20]);
+    for (helper, expected) in [
+        (
+            wrong,
+            "Started helper does not have the pinned code identity",
+        ),
+        (echo, "Malformed confirmation outcome"),
+    ] {
+        let mut boundary = Boundary::with_backend(Box::new(NativeBackend { helper: Ok(helper) }));
+        let plan = plan();
+        let (handle, request) = boundary.offer(plan.clone()).unwrap();
+        assert!(!request.synthetic);
+        let denied = boundary.confirm(&handle, &plan, || panic!("no revalidation after denial"));
+        assert_eq!(denied.err().as_deref(), Some(expected));
+    }
 }

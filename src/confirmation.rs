@@ -11,7 +11,6 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 const LIFETIME: Duration = Duration::from_secs(300);
-pub const NATIVE_GAP: &str = "Native invocation denied: owner-selected signing identity, protected executable continuity and authenticated launch channel are not established. Credential trust and per-access Keychain approval also require owner-run verification.";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "purpose", rename_all = "snake_case")]
@@ -98,27 +97,12 @@ struct Pending {
     plan: Plan,
     created: Instant,
 }
+/// Issues single-use requests and consumes them through one backend chosen at startup.
 pub(crate) struct Boundary {
     #[cfg(test)]
     pub(crate) accesses: usize,
     pending: BTreeMap<String, Pending>,
-    expected_helper: Option<ExpectedHelper>,
-}
-#[derive(Clone)]
-struct ExpectedHelper {
-    path: String,
-    signing_requirement: String,
-    owner: u32,
-}
-impl Default for Boundary {
-    fn default() -> Self {
-        Self {
-            #[cfg(test)]
-            accesses: 0,
-            pending: BTreeMap::new(),
-            expected_helper: None,
-        }
-    }
+    backend: Box<dyn Backend>,
 }
 
 /// This capability is produced only after consuming and revalidating consent.
@@ -129,19 +113,30 @@ impl Confirmed {
     pub fn receipt(&self) -> &str {
         &self.exact_receipt
     }
+    #[cfg(test)]
+    pub(crate) fn for_test(exact_receipt: &str) -> Self {
+        Self {
+            exact_receipt: exact_receipt.into(),
+        }
+    }
 }
 
 impl Boundary {
     pub fn synthetic() -> Self {
+        Self::with_backend(Box::new(SyntheticBackend))
+    }
+    /// The production boundary. It issues no request unless a helper was pinned into this build.
+    pub fn native() -> Self {
+        Self::with_backend(Box::new(NativeBackend {
+            helper: crate::native::installed(crate::native::Kind::Confirm),
+        }))
+    }
+    pub(crate) fn with_backend(backend: Box<dyn Backend>) -> Self {
         Self {
             #[cfg(test)]
             accesses: 0,
             pending: BTreeMap::new(),
-            expected_helper: Some(ExpectedHelper {
-                path: "in-process synthetic helper".into(),
-                signing_requirement: "synthetic fixture identity only".into(),
-                owner: 0,
-            }),
+            backend,
         }
     }
     pub fn offer(&mut self, plan: Plan) -> Result<(String, Request), String> {
@@ -149,9 +144,7 @@ impl Boundary {
         {
             self.accesses += 1;
         }
-        if self.expected_helper.is_none() {
-            return Err(NATIVE_GAP.into());
-        }
+        self.backend.available()?;
         self.pending.retain(|_, p| p.created.elapsed() < LIFETIME);
         if self.pending.len() >= 128
             || plan.actions.is_empty()
@@ -171,7 +164,7 @@ impl Boundary {
                     .map_err(|_| "Plan encoding")?,
             ),
             expires_after_seconds: LIFETIME.as_secs(),
-            synthetic: true,
+            synthetic: self.backend.synthetic(),
         };
         self.pending.insert(
             request_id.clone(),
@@ -184,11 +177,12 @@ impl Boundary {
         Ok((request_id, request))
     }
 
+    /// Consumes the request whatever happens, asks the backend, authenticates its answer and
+    /// revalidates the plan. Only an approved, authenticated, unchanged plan yields `Confirmed`.
     pub fn confirm(
         &mut self,
         handle: &str,
         current: &Plan,
-        backend: &mut impl Backend,
         revalidate: impl FnOnce() -> Result<Plan, String>,
     ) -> Result<Confirmed, String> {
         let pending = self
@@ -198,21 +192,10 @@ impl Boundary {
         if pending.created.elapsed() >= LIFETIME || pending.plan != *current {
             return Err("Expired or changed confirmation plan".into());
         }
-        let executable = backend.verify_expected_identity()?;
-        let expected = self.expected_helper.as_ref().ok_or(NATIVE_GAP)?;
-        if executable.path != expected.path
-            || executable.signing_requirement != expected.signing_requirement
-            || executable.owner != expected.owner
-            || executable.file_identity.is_empty()
-        {
-            return Err("Unexpected helper identity, location or ownership".into());
-        }
+        let request = serde_json::to_vec(&pending.request).map_err(|_| "Request encoding")?;
         let challenge = Zeroizing::new(random());
-        let response = backend.confirm(&executable, &pending.request, &challenge)?;
-        if response.executable != executable {
-            return Err("Verified helper was substituted".into());
-        }
-        let outcome = authenticate(&pending.request, &challenge, &response.bytes)?;
+        let answer = self.backend.exchange(&request, &challenge)?;
+        let outcome = authenticate(&pending.request.request_id, &request, &challenge, &answer)?;
         if outcome != Outcome::Approved {
             return Err("Confirmation cancelled".into());
         }
@@ -225,25 +208,11 @@ impl Boundary {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct VerifiedExecutable {
-    pub path: String,
-    pub signing_requirement: String,
-    pub owner: u32,
-    pub file_identity: String,
-}
-pub(crate) struct Response {
-    pub executable: VerifiedExecutable,
-    pub bytes: Vec<u8>,
-}
-pub(crate) trait Backend {
-    fn verify_expected_identity(&mut self) -> Result<VerifiedExecutable, String>;
-    fn confirm(
-        &mut self,
-        executable: &VerifiedExecutable,
-        request: &Request,
-        challenge: &[u8; 32],
-    ) -> Result<Response, String>;
+/// Shows one exact request to a person and returns the raw, still unauthenticated answer.
+pub(crate) trait Backend: Send {
+    fn available(&self) -> Result<(), String>;
+    fn synthetic(&self) -> bool;
+    fn exchange(&mut self, request: &[u8], challenge: &[u8; 32]) -> Result<Vec<u8>, String>;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,15 +235,15 @@ fn tag(key: &[u8; 32], id: &str, request_digest: &str, outcome: Outcome) -> Stri
     mac.update(&serde_json::to_vec(&(id, request_digest, outcome)).expect("Outcome encoding"));
     data_encoding::HEXLOWER.encode(&mac.finalize().into_bytes())
 }
-fn authenticate(request: &Request, key: &[u8; 32], bytes: &[u8]) -> Result<Outcome, String> {
+fn authenticate(id: &str, request: &[u8], key: &[u8; 32], bytes: &[u8]) -> Result<Outcome, String> {
     if bytes.len() > 4096 {
         return Err("Oversized confirmation outcome".into());
     }
     let wire: WireOutcome =
         serde_json::from_slice(bytes).map_err(|_| "Malformed confirmation outcome")?;
-    let request_digest = digest(&serde_json::to_vec(request).map_err(|_| "Request encoding")?);
-    let expected = tag(key, &request.request_id, &request_digest, wire.outcome);
-    if wire.request_id != request.request_id
+    let request_digest = digest(request);
+    let expected = tag(key, id, &request_digest, wire.outcome);
+    if wire.request_id != id
         || wire.request_digest != request_digest
         || wire.authentication.len() != 64
         || !bool::from(expected.as_bytes().ct_eq(wire.authentication.as_bytes()))
@@ -283,58 +252,67 @@ fn authenticate(request: &Request, key: &[u8; 32], bytes: &[u8]) -> Result<Outco
     }
     Ok(wire.outcome)
 }
+fn answer(request: &[u8], key: &[u8; 32], outcome: Outcome) -> Result<Vec<u8>, String> {
+    #[derive(Deserialize)]
+    struct Id {
+        request_id: String,
+    }
+    let id: Id = serde_json::from_slice(request).map_err(|_| "Request encoding")?;
+    let request_digest = digest(request);
+    serde_json::to_vec(&WireOutcome {
+        authentication: tag(key, &id.request_id, &request_digest, outcome),
+        request_id: id.request_id,
+        request_digest,
+        outcome,
+    })
+    .map_err(|_| "Outcome encoding".into())
+}
 
+/// Approves in process. Used only by the synthetic fixture server, whose requests say so.
 pub(crate) struct SyntheticBackend;
 impl Backend for SyntheticBackend {
-    fn verify_expected_identity(&mut self) -> Result<VerifiedExecutable, String> {
-        Ok(VerifiedExecutable {
-            path: "in-process synthetic helper".into(),
-            signing_requirement: "synthetic fixture identity only".into(),
-            owner: 0,
-            file_identity: "installed-fake-v1".into(),
-        })
+    fn available(&self) -> Result<(), String> {
+        Ok(())
     }
-    fn confirm(
-        &mut self,
-        executable: &VerifiedExecutable,
-        request: &Request,
-        challenge: &[u8; 32],
-    ) -> Result<Response, String> {
-        let request_digest = digest(&serde_json::to_vec(request).map_err(|_| "Request encoding")?);
-        let outcome = Outcome::Approved;
-        let authentication = tag(challenge, &request.request_id, &request_digest, outcome);
-        let bytes = serde_json::to_vec(&WireOutcome {
-            request_id: request.request_id.clone(),
-            request_digest,
-            outcome,
-            authentication,
-        })
-        .map_err(|_| "Outcome encoding")?;
-        Ok(Response {
-            executable: executable.clone(),
-            bytes,
-        })
+    fn synthetic(&self) -> bool {
+        true
+    }
+    fn exchange(&mut self, request: &[u8], challenge: &[u8; 32]) -> Result<Vec<u8>, String> {
+        answer(request, challenge, Outcome::Approved)
     }
 }
 
-/// No path-based spawn is allowed while executable continuity is unproven.
-pub(crate) struct MacOsBackend;
-impl MacOsBackend {
-    pub fn unavailable_reason(&self) -> &'static str {
-        NATIVE_GAP
+/// Runs the pinned `mailroom-confirm` helper. The request and one-time challenge travel only
+/// on its private stdin pipe.
+pub(crate) struct NativeBackend {
+    helper: Result<crate::native::Helper, crate::native::LaunchError>,
+}
+impl Backend for NativeBackend {
+    fn available(&self) -> Result<(), String> {
+        self.helper.as_ref().map(|_| ()).map_err(|e| e.to_string())
+    }
+    fn synthetic(&self) -> bool {
+        false
+    }
+    fn exchange(&mut self, request: &[u8], challenge: &[u8; 32]) -> Result<Vec<u8>, String> {
+        let helper = self.helper.as_ref().map_err(|e| e.to_string())?;
+        let mut envelope = Zeroizing::new(String::with_capacity(request.len() * 2 + 128));
+        envelope.push_str("{\"request\":\"");
+        data_encoding::BASE64.encode_append(request, &mut envelope);
+        envelope.push_str("\",\"challenge\":\"");
+        data_encoding::BASE64.encode_append(challenge, &mut envelope);
+        envelope.push_str("\"}");
+        crate::native::exchange(helper, envelope.as_bytes(), 4096, LIFETIME)
+            .map(|answer| answer.to_vec())
+            .map_err(|e| e.to_string())
     }
 }
-impl Backend for MacOsBackend {
-    fn verify_expected_identity(&mut self) -> Result<VerifiedExecutable, String> {
-        Err(NATIVE_GAP.into())
-    }
-    fn confirm(
-        &mut self,
-        _: &VerifiedExecutable,
-        _: &Request,
-        _: &[u8; 32],
-    ) -> Result<Response, String> {
-        Err(NATIVE_GAP.into())
+
+/// Why production confirmation is or is not available in this build.
+pub(crate) fn native_status() -> String {
+    match crate::native::installed(crate::native::Kind::Confirm) {
+        Ok(_) => "Native confirmation helper pinned into this build".into(),
+        Err(e) => e.to_string(),
     }
 }
 

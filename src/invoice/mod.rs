@@ -250,16 +250,15 @@ pub(crate) fn preview(
     })
 }
 
-pub(crate) struct SyntheticConfirmation;
-
-impl SyntheticConfirmation {
-    pub(crate) fn confirm(
-        &self,
-        state: &mut AccountState,
-        preview: Preview,
-        receipt: &str,
-        action: &str,
-    ) -> Result<String, String> {
+/// Records send intent for a plan the confirmation boundary approved and revalidated.
+pub(crate) fn record_intent(
+    state: &mut AccountState,
+    preview: Preview,
+    consent: &crate::confirmation::Confirmed,
+    action: &str,
+) -> Result<String, String> {
+    {
+        let receipt = consent.receipt();
         if preview.plan.mode != SendMode::SyntheticTransport
             || action != preview.plan.confirmation_action
             || receipt.len() != 64

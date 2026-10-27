@@ -135,9 +135,13 @@ fn exact_send_hmac_rejects_state_content_targets_sender_and_other_account() {
     )
     .unwrap();
     assert!(
-        SyntheticConfirmation
-            .confirm(&mut state, fresh, &receipt, &action)
-            .is_err()
+        record_intent(
+            &mut state,
+            fresh,
+            &crate::confirmation::Confirmed::for_test(&receipt),
+            &action
+        )
+        .is_err()
     );
     let other_keys = CensusKeys::derive(&LocalSecret::random(), &state.census.account);
     let other = preview(
@@ -151,9 +155,13 @@ fn exact_send_hmac_rejects_state_content_targets_sender_and_other_account() {
     )
     .unwrap();
     assert!(
-        SyntheticConfirmation
-            .confirm(&mut state, other, &receipt, &action)
-            .is_err()
+        record_intent(
+            &mut state,
+            other,
+            &crate::confirmation::Confirmed::for_test(&receipt),
+            &action
+        )
+        .is_err()
     );
     assert!(
         preview(
@@ -196,9 +204,13 @@ fn durable_effect_reconciles_exact_bytes_and_missing_ack_never_retries() {
     let receipt = p.receipt.clone();
     let action = p.plan.confirmation_action.clone();
     let exact = p.plan.clone();
-    let id = SyntheticConfirmation
-        .confirm(&mut state, p, &receipt, &action)
-        .unwrap();
+    let id = record_intent(
+        &mut state,
+        p,
+        &crate::confirmation::Confirmed::for_test(&receipt),
+        &action,
+    )
+    .unwrap();
     store.save_state(&mut state).unwrap();
     let mut state = store.load_state().unwrap();
     assert_eq!(state.invoices.sends[0].status, Status::Uncertain);

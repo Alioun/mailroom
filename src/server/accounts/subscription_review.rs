@@ -280,7 +280,7 @@ pub(in crate::server) async fn handle(
                 let (mut reviews,current)=prepare(&state,&input,ledger_guard.as_ref())?;
                 if confirmation_action!=CONFIRM || reviews.iter().any(|r|r.preview.local_mail_confirmation.is_some_and(|a|mail_confirmation_action.as_deref()!=Some(a))) {return Err("Exact multi-account subscription list changed".into());}
                 let current_plan=confirmation_plan(&reviews,&current);
-                let consent=state.accounts.confirmations.lock().expect("confirmations").confirm(&receipt,&current_plan,&mut crate::confirmation::SyntheticBackend,|| {
+                let consent=state.accounts.confirmations.lock().expect("confirmations").confirm(&receipt,&current_plan,|| {
                     revalidate(&reviews,&input,ledger_guard.as_ref())
                 })?;
                 if consent.receipt().as_bytes().ct_eq(current.as_bytes()).unwrap_u8()!=1 {return Err("Exact subscription receipt changed".into());}

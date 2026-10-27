@@ -1,5 +1,5 @@
 use super::*;
-use crate::invoice::{self, SyntheticConfirmation, SyntheticTransport};
+use crate::invoice::{self, SyntheticTransport};
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -38,7 +38,7 @@ pub(in crate::server) async fn handle(
         Err(e) => return e,
     };
     if !state.accounts.synthetic() && !matches!(request.command, Action::Open) {
-        return (StatusCode::FORBIDDEN, Json(json!({"error":"No production invoice, native confirmation or SMTP adapter is installed", "native_gap":crate::confirmation::MacOsBackend.unavailable_reason()}))).into_response();
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"No production invoice, native confirmation or SMTP adapter is installed", "native_status":crate::confirmation::native_status()}))).into_response();
     }
     match tokio::task::spawn_blocking(move || {
         let _operation = state.accounts.operation.lock().expect("account operation");
@@ -72,13 +72,12 @@ pub(in crate::server) async fn handle(
                 let preview = invoice::preview(&saved, account.provider, store.keys(), &selection, &target, synthetic, false)?;
                 if confirmation_action != preview.plan.confirmation_action { return Err("Action changed".into()); }
                 let current = invoice::confirmation_plan(&preview);
-                let consent = state.accounts.confirmations.lock().expect("confirmations").confirm(&receipt, &current, &mut crate::confirmation::SyntheticBackend, || {
+                let consent = state.accounts.confirmations.lock().expect("confirmations").confirm(&receipt, &current, || {
                     let latest = store.load_state().map_err(|_| "Revalidate invoice state")?;
                     ledger_fresh(&latest, ledger_guard.as_ref())?;
                     invoice::preview(&latest, account.provider, store.keys(), &selection, &target, synthetic, false).map(|p| invoice::confirmation_plan(&p))
                 })?;
-                let confirmation = match state.accounts.source { AccountSource::Synthetic { .. } => SyntheticConfirmation, _ => return Err("No installed confirmation adapter".into()) };
-                let id = confirmation.confirm(&mut saved, preview, consent.receipt(), &confirmation_action)?;
+                let id = invoice::record_intent(&mut saved, preview, &consent, &confirmation_action)?;
                 store.save_state(&mut saved).map_err(|e| e.to_string())?;
                 invoice::boundary("before");
                 let send = saved.invoices.sends.last().ok_or("Missing intent")?;

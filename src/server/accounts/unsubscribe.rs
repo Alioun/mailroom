@@ -62,7 +62,7 @@ pub(in crate::server) async fn handle(
                 let preview = unsubscribe::preview(&saved, account.provider, store.keys(), &input, installed.as_ref())?;
                 if confirmation_action != preview.confirmation_action || preview.local_mail_confirmation.is_some_and(|a| mail_confirmation_action.as_deref() != Some(a)) { return Err("Action changed".into()); }
                 let current = unsubscribe::confirmation_plan(&preview);
-                let consent = state.accounts.confirmations.lock().expect("confirmations").confirm(&receipt, &current, &mut crate::confirmation::SyntheticBackend, || {
+                let consent = state.accounts.confirmations.lock().expect("confirmations").confirm(&receipt, &current, || {
                     let latest = store.load_state().map_err(|_| "Revalidate unsubscribe state")?;
                     ledger_fresh(&latest, ledger_guard.as_ref())?;
                     unsubscribe::preview(&latest, account.provider, store.keys(), &input, installed.as_ref()).map(|p| unsubscribe::confirmation_plan(&p))

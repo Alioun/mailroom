@@ -121,7 +121,7 @@ pub(in crate::server) async fn handle(
         }
         let secret = fake_secret(&root, matches!(request, Request::CapturePreview { .. } | Request::Capture { .. } | Request::SelectedCapturePreview { .. } | Request::SelectedCapture { .. }))?;
         let consent = |plan: crate::confirmation::Plan, receipt: &str| {
-            state.accounts.confirmations.lock().expect("confirmations").confirm(receipt, &plan, &mut crate::confirmation::SyntheticBackend, || Ok(plan.clone())).map(|_| ()).map_err(|_| AcquisitionError::InvalidInput)
+            state.accounts.confirmations.lock().expect("confirmations").confirm(receipt, &plan, || Ok(plan.clone())).map(|_| ()).map_err(|_| AcquisitionError::InvalidInput)
         };
         match request {
             Request::Status => unreachable!(),

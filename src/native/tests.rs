@@ -45,34 +45,32 @@ int main(int argc, char **argv) {
 }
 "#;
 
+/// Built under `target/` so repeated runs reuse one location instead of leaving temp directories.
 pub(crate) fn fake_helper() -> &'static Path {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     BUILT.get_or_init(|| {
-        let dir = tempfile::Builder::new()
-            .prefix("mailroom-fake-helper")
-            .tempdir()
-            .unwrap()
-            .keep();
-        fs::write(dir.join("fake.c"), FAKE).unwrap();
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/native-test-helper");
+        fs::create_dir_all(&dir).unwrap();
+        let unique = format!("{}", std::process::id());
+        let source = dir.join(format!("fake-{unique}.c"));
+        let staged = dir.join(format!("fake-{unique}"));
+        fs::write(&source, FAKE).unwrap();
+        let built = Command::new("/usr/bin/clang")
+            .arg("-o")
+            .arg(&staged)
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(built.success());
+        let signed = Command::new("/usr/bin/codesign")
+            .args(["-s", "-", "-f", "-o", "runtime"])
+            .arg(&staged)
+            .output()
+            .unwrap();
+        assert!(signed.status.success());
+        fs::remove_file(&source).unwrap();
         let binary = dir.join("fake");
-        assert!(
-            Command::new("/usr/bin/clang")
-                .arg("-o")
-                .arg(&binary)
-                .arg(dir.join("fake.c"))
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(
-            Command::new("/usr/bin/codesign")
-                .args(["-s", "-", "-f", "-o", "runtime"])
-                .arg(&binary)
-                .output()
-                .unwrap()
-                .status
-                .success()
-        );
+        fs::rename(&staged, &binary).unwrap();
         binary
     })
 }

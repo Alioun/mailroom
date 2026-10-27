@@ -208,137 +208,232 @@ finish() {
 # the whole file before the first prompt, so an edit mid-run can't break it.
 # ──────────────────────────────────────────────────────────────────────────
 
+# Trusted locations. Only root can change anything under them.
+SHARE=/usr/local/share/mailroom
+LIBEXEC=/usr/local/libexec/mailroom
+TRUSTED_OWNER=root
+RECORDS="$HOME/.config/mailroom/native-setup-records"
+INCOMPLETE=()
+
+privileged() { /usr/bin/sudo "$@"; }
+
+# The tree digest the approval record names. ui/dist is built and installed later.
+tree_digest() {
+  (cd "$1" && LC_ALL=C /usr/bin/find . -type f ! -path './ui/dist/*' -print0 | LC_ALL=C /usr/bin/sort -z \
+    | /usr/bin/xargs -0 /usr/bin/shasum -a 256) | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-64
+}
+
+# Every component up to / and every file below must be owned by the trusted owner and
+# not writable by anyone else.
+trusted_path() {
+  local path="$1" owner mode
+  while :; do
+    owner=$(/usr/bin/stat -f %Su "$path" 2>/dev/null) || return 1
+    mode=$(/usr/bin/stat -f %Lp "$path")
+    [[ ( "$owner" == root || "$owner" == "$TRUSTED_OWNER" ) && $(( 8#$mode & 8#022 )) -eq 0 ]] || return 1
+    [[ "$path" == / ]] && return 0
+    path=$(/usr/bin/dirname "$path")
+  done
+}
+trusted_tree() {
+  trusted_path "$1" || return 1
+  [[ -z "$(/usr/bin/find "$1" \( ! -user "$TRUSTED_OWNER" -o -perm -g+w -o -perm -o+w -o -type l \) -print -quit)" ]]
+}
+
+# Keeps only fixed records from a command's output. Anything else becomes "unexpected".
+records() {
+  local line
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if [[ "$line" =~ ^(status|outcome)=[a-z_]+(\ class=(every_access|pinned_self))?$ || "$line" =~ ^ref=[A-Za-z0-9-]+\ class=(every_access|pinned_self)$ ]]; then
+      printf '%s\n' "$line"
+    else
+      printf '%s\n' "status=unexpected"
+    fi
+  done
+}
+
+# Runs an installed binary only after checking its location and its exact cdhash.
+# stderr is discarded and stdout is reduced to fixed records, which carry the result.
+verified() {
+  local binary="$1" cdhash="$2"; shift 2
+  trusted_path "$binary" || { printf 'status=untrusted_binary\n'; return 1; }
+  /usr/bin/codesign --verify --strict -R="cdhash H\"$cdhash\"" "$binary" >/dev/null 2>&1 \
+    || { printf 'status=identity_mismatch\n'; return 1; }
+  local output code=0
+  output=$(/usr/bin/env -i HOME="$HOME" "$binary" "$@" 2>/dev/null) || code=$?
+  printf '%s\n' "$output" | records
+  # A killed or failing run leaves no matching record, so the caller's expect stops.
+  (( code < 128 )) || printf 'status=terminated\n'
+}
+
+note_result() { printf '%s %s\n' "$1" "$2" >>"$RECORDS"; }
+
+# expect STEP WANT GOT: records the step and stops the wizard when GOT is not one of WANT.
+expect() {
+  local step="$1" want="$2" got="$3" w
+  note_result "$step" "$got"
+  for w in $want; do [[ "$got" == "$w" ]] && { say "$step: $got"; return 0; }; done
+  warn "$step: $got (expected ${want// / or })"
+  INCOMPLETE+=("$step")
+  return 1
+}
+
+stop_incomplete() {
+  _clear
+  printf '\n%s%s  ✗ Setup incomplete%s\n' "$BOLD" "$YELLOW" "$RESET"
+  note "Failed step: ${INCOMPLETE[*]}"
+  note "Every step is recorded in $RECORDS. Fix the cause and run the wizard again; finished steps converge."
+  return 1
+}
+
+mailroom() { verified "$LIBEXEC/mailroom" "$MAILROOM_CDHASH" "$@"; }
+first_status() { local line; while IFS= read -r line; do [[ "$line" == status=* || "$line" == outcome=* ]] && { printf '%s' "${line%% *}"; return; }; done; }
+
+build_helpers() {
+  local frozen="$1" work="$2" cdhash
+  (cd "$work" && /bin/cp -R "$frozen/ui" ui && /bin/rm -rf ui/node_modules ui/dist \
+    && npm --prefix ui ci && npm --prefix ui run build) >/dev/null 2>&1 || return 1
+  privileged /bin/rm -rf "$frozen/ui/dist" && privileged /bin/cp -R "$work/ui/dist" "$frozen/ui/dist" \
+    && privileged /usr/sbin/chown -R "$TRUSTED_OWNER" "$frozen/ui/dist" || return 1
+  /usr/bin/xcrun swift build -c release --package-path "$frozen/native/macos" --scratch-path "$work/swift" >/dev/null 2>&1 || return 1
+  install_signed "$work/swift/release/mailroom-confirm" mailroom-confirm org.mailroom.confirm || return 1
+  CONFIRM_CDHASH="$SIGNED_CDHASH"
+  (cd "$work" && /usr/bin/env MAILROOM_CONFIRM_HELPER="$LIBEXEC/mailroom-confirm" MAILROOM_CONFIRM_HELPER_CDHASH="$CONFIRM_CDHASH" \
+    CARGO_TARGET_DIR="$work/target" cargo build --release --locked --manifest-path "$frozen/Cargo.toml") >/dev/null 2>&1 || return 1
+  install_signed "$work/target/release/mailroom" mailroom org.mailroom || return 1
+  MAILROOM_CDHASH="$SIGNED_CDHASH"
+}
+
+# Signs a build output, installs it root-owned and reads the cdhash of the installed file.
+install_signed() {
+  local built="$1" name="$2" identifier="$3" before
+  /usr/bin/codesign -s - -f -o runtime --identifier "$identifier" "$built" >/dev/null 2>&1 || return 1
+  before=$(/usr/bin/codesign -d -vvv --arch "$(/usr/bin/uname -m)" "$built" 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')
+  privileged /bin/mkdir -p "$LIBEXEC" && privileged /usr/sbin/chown "$TRUSTED_OWNER" "$LIBEXEC" && privileged /bin/chmod 755 "$LIBEXEC" || return 1
+  privileged /bin/rm -f "$LIBEXEC/$name" && privileged /usr/bin/install -o "$TRUSTED_OWNER" -m 755 "$built" "$LIBEXEC/$name" || return 1
+  SIGNED_CDHASH=$(/usr/bin/codesign -d -vvv --arch "$(/usr/bin/uname -m)" "$LIBEXEC/$name" 2>&1 | /usr/bin/sed -n 's/^CDHash=//p')
+  [[ "$SIGNED_CDHASH" =~ ^[0-9a-f]{40}$ && "$SIGNED_CDHASH" == "$before" ]]
+}
+
 run_wizard() {
-TOTAL_STAGES=6
-local repo swift codesign cargo python helpers pins config confirm keychain arch
-repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-swift="${MAILROOM_SWIFT:-xcrun swift}"
-codesign="${MAILROOM_CODESIGN:-/usr/bin/codesign}"
-cargo="${MAILROOM_CARGO:-cargo}"
-python="${MAILROOM_PYTHON:-/usr/bin/python3}"
-helpers="${MAILROOM_HELPERS:-$HOME/Library/Application Support/mailroom/helpers}"
-pins="${MAILROOM_PINS:-$HOME/.config/mailroom/native-pins.env}"
-config="${MAILROOM_CONFIG:-$HOME/.config/mailroom}"
-local build="${MAILROOM_NATIVE_BUILD:-$repo/native/macos/.build/release}"
-confirm="$helpers/mailroom-confirm"
-keychain="$helpers/mailroom-keychain"
-arch="$(uname -m)"
-if [[ "${1:-}" == "--plan" ]]; then
-  printf '%s\n' \
-    "1. Build both Swift helpers, install them in $helpers and ad-hoc sign them with the hardened runtime." \
-    "2. Record their cdhashes in $pins and build mailroom with those pins." \
-    '3. Approve one invented action in the native prompt, then cancel a second one.' \
-    '4. Copy legacy keyring items into protected items. The originals stay until you retire them.' \
-    '5. Type any missing mailbox password into the helper'"'"'s hidden prompt.' \
-    '6. Check that every password read asks you, and that a denied read returns nothing.'
-  return 0
-fi
+  if [[ $- != *p* ]]; then
+    exec /bin/bash -p "${BASH_SOURCE[0]}" "$@"
+  fi
+  export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.cargo/bin:/opt/homebrew/bin"
+  setup_main "$@"
+}
+
+setup_main() {
+TOTAL_STAGES=7
+local script frozen
+script="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(/usr/bin/basename "${BASH_SOURCE[0]}")"
+frozen="$(/usr/bin/dirname "$(/usr/bin/dirname "$script")")"
+case "${1:-}" in
+  --plan)
+    printf '%s\n' \
+      "1. Check that this copy is the frozen, root-owned approved tree under $SHARE." \
+      "2. Build the UI, the confirmation helper and mailroom; install them root-owned in $LIBEXEC." \
+      '3. Approve one invented action in the native dialog, then cancel a second one.' \
+      '4. Copy legacy keyring items into protected items and verify each copy.' \
+      '5. Move census keys that trust an earlier mailroom build to this one.' \
+      '6. Type any missing mailbox password into the hidden prompt.' \
+      '7. Check that every password read asks you, and that a denied read returns nothing.'
+    return 0 ;;
+  --digest) tree_digest "$frozen"; return 0 ;;
+esac
 if [[ $# -ne 0 || ! -t 0 ]]; then
-  printf '%s\n' 'Run this in a terminal. Use --plan for a noninteractive preview.' >&2
+  printf '%s\n' 'Run this in a terminal. Use --plan for a preview.' >&2
   return 2
 fi
-ENV_FILE="$pins"
+ENV_FILE=/dev/null
+/bin/mkdir -p "$(/usr/bin/dirname "$RECORDS")" && : >"$RECORDS"
 banner "Mailroom native confirmation and Keychain setup"
 
-stage "Build and sign the helpers"
-say "This builds the two Swift helpers from this checkout and signs them ad hoc."
-say "Their exact code identity (cdhash) becomes the only identity mailroom will launch."
-note "Helpers go to: $helpers"
-confirm "Build and install the helpers now?" || return 1
-(cd "$repo/native/macos" && $swift build -c release) >/dev/null
-mkdir -p "$helpers" && chmod 700 "$helpers"
-local name cdhash
-for name in mailroom-confirm mailroom-keychain; do
-  rm -f "$helpers/$name"
-  install -m 700 "$build/$name" "$helpers/$name"
-  "$codesign" -s - -f -o runtime --identifier "org.mailroom.${name#mailroom-}" "$helpers/$name" >/dev/null 2>&1
-  cdhash="$("$codesign" -d -vvv --arch "$arch" "$helpers/$name" 2>&1 | sed -n 's/^CDHash=//p')"
-  [[ "$cdhash" =~ ^[0-9a-f]{40}$ ]] || { warn "no cdhash for $name"; return 1; }
-  say "$name cdhash $cdhash"
-  if [[ "$name" == mailroom-confirm ]]; then
-    mkdir -p "$(dirname "$pins")"
-    write_env MAILROOM_CONFIRM_HELPER "$confirm"
-    write_env MAILROOM_CONFIRM_HELPER_CDHASH "$cdhash"
-  else
-    write_env MAILROOM_KEYCHAIN_HELPER "$keychain"
-    write_env MAILROOM_KEYCHAIN_HELPER_CDHASH "$cdhash"
-  fi
-done
-note "Rerunning this stage after a rebuild changes the cdhash. Protected local keys then need stage 4 again."
+stage "Check the frozen approved copy"
+say "This wizard runs only from a root-owned copy of the approved commit."
+local expected_digest actual_digest
+if [[ ! "$frozen" =~ ^$SHARE/setup-[0-9a-f]{40}$ ]] || ! trusted_tree "$frozen"; then
+  expect frozen_copy trusted untrusted; stop_incomplete; return 1
+fi
+ask expected_digest "Tree digest from your approval record:"
+actual_digest="$(tree_digest "$frozen")"
+expect tree_digest match "$([[ "$actual_digest" == "$expected_digest" ]] && echo match || echo mismatch)" || { stop_incomplete; return 1; }
 
-stage "Build mailroom with the pins"
-say "The pins are compiled into the binary. Changing a helper file afterwards makes mailroom refuse it."
-confirm "Build the pinned release binary now?" || return 1
-(cd "$repo" && env MAILROOM_CONFIRM_HELPER="$MAILROOM_CONFIRM_HELPER" MAILROOM_CONFIRM_HELPER_CDHASH="$MAILROOM_CONFIRM_HELPER_CDHASH" \
-  MAILROOM_KEYCHAIN_HELPER="$MAILROOM_KEYCHAIN_HELPER" MAILROOM_KEYCHAIN_HELPER_CDHASH="$MAILROOM_KEYCHAIN_HELPER_CDHASH" \
-  $cargo build --release --locked) >/dev/null
-say "Built $repo/target/release/mailroom with both pins."
+stage "Build and install"
+say "Builds in a private temporary directory, then installs root-owned copies. sudo asks for your password."
+confirm "Build and install now?" || { expect build confirmed declined; stop_incomplete; return 1; }
+local work; work="$(/usr/bin/mktemp -d)" && /bin/chmod 700 "$work"
+if build_helpers "$frozen" "$work"; then expect build ok ok; else expect build ok failed; /bin/rm -rf "$work"; stop_incomplete; return 1; fi
+/bin/rm -rf "$work"
+printf 'MAILROOM_CONFIRM_HELPER_CDHASH=%s\nMAILROOM_CDHASH=%s\n' "$CONFIRM_CDHASH" "$MAILROOM_CDHASH" | privileged /usr/bin/tee "$LIBEXEC/pins" >/dev/null
+say "Run mailroom from $LIBEXEC/mailroom from now on. Other builds cannot read its keys."
 
 stage "See the native confirmation"
 say "A dialog names an invented invoice send to nobody@example.invalid. Nothing is sent."
 step "First: read the dialog, click Approve, then authenticate."
-local outcome
-outcome="$("$python" -I "$repo/scripts/native-confirm-check.py" "$confirm" || true)"
-say "Result: $outcome (expected outcome=approved)"
-step "Second: click Cancel in the dialog."
-outcome="$("$python" -I "$repo/scripts/native-confirm-check.py" "$confirm" || true)"
-say "Result: $outcome (expected outcome=cancelled)"
-pause "Note both results in your acceptance record, then press Enter."
+expect native_approve outcome=approved "$(mailroom native-check | first_status)" || { stop_incomplete; return 1; }
+step "Second: click Cancel."
+expect native_cancel outcome=cancelled "$(mailroom native-check | first_status)" || { stop_incomplete; return 1; }
 
 stage "Migrate legacy keyring items"
-local legacy reference
-legacy="$("$keychain" legacy || true)"
+local legacy reference line all_matched=1
+legacy="$(mailroom keychain legacy)"
+[[ "$(printf '%s\n' "$legacy" | /usr/bin/tail -1)" == status=ok ]] || { expect legacy_list status=ok "$(printf '%s\n' "$legacy" | /usr/bin/tail -1)"; stop_incomplete; return 1; }
+legacy="$(printf '%s\n' "$legacy" | /usr/bin/sed -n 's/^ref=\([A-Za-z0-9-]*\) .*/\1/p')"
 if [[ -z "$legacy" ]]; then
   say "No legacy items under the keyring service \"mailroom\"."
 else
-  say "Legacy items found (names only):"
-  while IFS= read -r reference <&3; do step "$reference"; done 3<<<"$legacy"
-  say "macOS asks you to allow the helper to read each original once. Click Allow, never Always Allow."
-  if confirm "Copy each into a protected item now?"; then
+  say "Click Allow (never Always Allow) when macOS asks about each original and each copy."
+  while IFS= read -r reference <&3; do
+    expect "migrate $reference" "status=migrated status=matched" "$(mailroom keychain migrate "$reference" | first_status)" || all_matched=0
+  done 3<<<"$legacy"
+  (( all_matched )) || { stop_incomplete; return 1; }
+  if confirm_no "Delete the verified legacy originals now? Keep them until mailroom has worked for a while."; then
     while IFS= read -r reference <&3; do
-      say "$reference: $("$keychain" migrate "$reference" </dev/tty || true)"
-      say "$reference: $("$keychain" status "$reference" || true)"
-    done 3<<<"$legacy"
-  fi
-  if confirm_no "Delete the legacy originals now? Keep them until mailroom has worked for a while."; then
-    while IFS= read -r reference <&3; do
-      say "$reference: $("$keychain" retire-legacy "$reference" || true)"
+      expect "retire $reference" status=retired "$(mailroom keychain retire-legacy "$reference" | first_status)" || { stop_incomplete; return 1; }
     done 3<<<"$legacy"
   fi
 fi
+
+stage "Move keys from an earlier build"
+local refs
+refs="$(mailroom keychain refs)"
+[[ "$(printf '%s\n' "$refs" | /usr/bin/tail -1)" == status=ok ]] || { expect account_refs status=ok "$(printf '%s\n' "$refs" | /usr/bin/tail -1)"; stop_incomplete; return 1; }
+local keys passwords got
+keys="$(printf '%s\n' "$refs" | /usr/bin/sed -n 's/^ref=\([A-Za-z0-9-]*\) class=pinned_self$/\1/p')"
+passwords="$(printf '%s\n' "$refs" | /usr/bin/sed -n 's/^ref=\([A-Za-z0-9-]*\) class=every_access$/\1/p')"
+while IFS= read -r reference <&3; do
+  [[ -n "$reference" ]] || continue
+  got="$(mailroom keychain status "$reference" | first_status)"
+  case "$got" in
+    status=ok) say "$reference already trusts this build." ;;
+    status=other_binary)
+      say "Click Allow (never Always Allow) to let this build read the key once."
+      expect "retrust $reference" status=retrusted "$(mailroom keychain retrust "$reference" | first_status)" || { stop_incomplete; return 1; } ;;
+    *) expect "key $reference" "status=ok status=other_binary" "$got"; stop_incomplete; return 1 ;;
+  esac
+done 3<<<"$keys"
 
 stage "Enter missing mailbox passwords"
-local refs
-refs="$("$python" -I -c 'import json,pathlib,sys
-for p in sorted(pathlib.Path(sys.argv[1]).glob("*.json")):
-    r = json.loads(p.read_text()).get("password_ref")
-    if isinstance(r, str): print(r)' "$config" 2>/dev/null || true)"
-if [[ -z "$refs" ]]; then
-  say "No saved accounts in $config. Add accounts through mailroom; it stores passwords itself."
-else
-  while IFS= read -r reference <&3; do
-    if "$keychain" status "$reference" >/dev/null 2>&1; then
-      say "$reference is already protected."
-    elif confirm "Type the password for $reference into the helper's hidden prompt now?"; then
-      say "The helper reads it straight from this terminal. It is never echoed, stored in a file or passed as an argument."
-      say "$reference: $("$keychain" enroll "$reference" </dev/tty || true)"
-    fi
-  done 3<<<"$refs"
-fi
+while IFS= read -r reference <&3; do
+  [[ -n "$reference" ]] || continue
+  got="$(mailroom keychain status "$reference" | first_status)"
+  if [[ "$got" == status=ok ]]; then say "$reference is already protected."; continue; fi
+  expect "password $reference" "status=ok status=missing" "$got" || { stop_incomplete; return 1; }
+  say "Type the password for $reference at the hidden prompt. It is never echoed, stored in a file or passed as an argument."
+  expect "enroll $reference" status=ok "$(mailroom keychain enroll "$reference" | first_status)" || { stop_incomplete; return 1; }
+done 3<<<"$passwords"
 
 stage "Check the prompt at every access"
-if [[ -z "$refs" ]]; then
-  say "No saved accounts to check yet. Rerun this wizard after adding one."
-else
-  while IFS= read -r reference <&3; do
-    step "$reference: click Deny in the dialog that appears."
-    say "Result: $("$keychain" probe "$reference" || true) (expected status=denied)"
-    step "$reference: now click Allow, never Always Allow."
-    say "Result: $("$keychain" probe "$reference" || true) (expected status=ok)"
-    say "Protection: $("$keychain" status "$reference" || true) (expected protection=every_access)"
-  done 3<<<"$refs"
-fi
-pause "Record these results, then press Enter."
+while IFS= read -r reference <&3; do
+  [[ -n "$reference" ]] || continue
+  step "$reference: click Deny in the dialog that appears."
+  expect "deny $reference" status=denied "$(mailroom keychain probe "$reference" | first_status)" || { stop_incomplete; return 1; }
+  step "$reference: now click Allow, never Always Allow."
+  expect "allow $reference" status=ok "$(mailroom keychain probe "$reference" | first_status)" || { stop_incomplete; return 1; }
+  expect "protection $reference" status=ok "$(mailroom keychain status "$reference" | first_status)" || { stop_incomplete; return 1; }
+done 3<<<"$passwords"
 finish
 }
 

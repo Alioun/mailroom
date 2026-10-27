@@ -1,90 +1,162 @@
 #!/usr/bin/env bash
-# Drives the owner wizard end to end against fake tools in a pseudo-terminal.
+# Drives the owner wizard's real stage logic in a pseudo-terminal against a signed fake
+# mailroom binary, in a temporary tree standing in for the root-owned locations.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-work="$(mktemp -d)"
-trap '[[ -n "${KEEP:-}" ]] || rm -rf "$work"' EXIT
-fakes="$work/fakes"; build="$work/build"; helpers="$work/helpers"; config="$work/config"
-mkdir -p "$fakes" "$build" "$config"
+work="$(mktemp -d)"; trap '[[ -n "${KEEP:-}" ]] && echo "work=$work" || rm -rf "$work"' EXIT
+chmod 700 "$work"
 dummy="nk-dummy-wizard-$RANDOM$RANDOM"
-log="$work/calls.log"
-
-cat >"$fakes/swift" <<FAKE
-#!/bin/bash
-echo "swift \$*" >>"$log"
-for n in mailroom-confirm mailroom-keychain; do cp "$fakes/\$n" "$build/\$n"; done
-FAKE
-cat >"$fakes/codesign" <<FAKE
-#!/bin/bash
-echo "codesign \$*" >>"$log"
-if [[ "\$1" == -d ]]; then name="\${@: -1}"; printf 'CDHash=%s\n' "\$(printf '%s' "\$(basename "\$name")" | shasum | cut -c1-40)" >&2; fi
-FAKE
-cat >"$fakes/cargo" <<FAKE
-#!/bin/bash
-echo "cargo \$* pins=\${MAILROOM_CONFIRM_HELPER_CDHASH:-}/\${MAILROOM_KEYCHAIN_HELPER_CDHASH:-}" >>"$log"
-FAKE
-cat >"$fakes/mailroom-confirm" <<'FAKE'
-#!/usr/bin/python3 -I
-import base64, hashlib, hmac, json, os, sys
-envelope = json.loads(sys.stdin.read())
-request = base64.b64decode(envelope["request"]); challenge = base64.b64decode(envelope["challenge"])
-marker = os.path.join(os.path.dirname(os.path.realpath(__file__)), "asked")
-outcome = "cancelled" if os.path.exists(marker) else "approved"
-open(marker, "a").close()
-rid = json.loads(request)["request_id"]; digest = hashlib.sha256(request).hexdigest()
-message = b"mailroom-exact-action-outcome-v1\0" + json.dumps([rid, digest, outcome], separators=(",", ":")).encode()
-print(json.dumps({"request_id": rid, "request_digest": digest, "outcome": outcome,
-                  "authentication": hmac.new(challenge, message, hashlib.sha256).hexdigest()}), end="")
-FAKE
-cat >"$fakes/mailroom-keychain" <<FAKE
-#!/bin/bash
-echo "keychain \$*" >>"$log"
-state="\$(dirname "\$0")/state"
-case "\$1" in
-  legacy) echo acct-old-census-key ;;
-  migrate) echo status=ok ;;
-  status) [[ "\$2" != acct-new-password || -e "\$state" ]] || { echo status=missing; exit 1; }
-          echo "status=ok protection=every_access expected=every_access" ;;
-  enroll) IFS= read -rs a </dev/tty; IFS= read -rs b </dev/tty
-          [[ "\$a" == "\$b" ]] || { echo status=mismatch; exit 1; }
-          printf '%s' "\$a" | shasum >"\$state"; echo "status=ok length=\${#a}" ;;
-  probe) if [[ -e "\$state.probed" ]]; then echo status=ok; else touch "\$state.probed"; echo status=denied; exit 1; fi ;;
-  retire-legacy) echo status=ok ;;
-esac
-FAKE
-chmod +x "$fakes"/*
-printf '{"password_ref":"acct-new-password","login":"invented@example.test"}' >"$config/acct-new.json"
-
-answers="$work/answers"
-printf '\n\n\n\n\n\n\n%s\n%s\n\n' "$dummy" "$dummy" >"$answers"
-transcript="$work/transcript"
-env -i HOME="$work/home" PATH="/usr/bin:/bin" TERM=dumb \
-  MAILROOM_SWIFT="$fakes/swift" MAILROOM_CODESIGN="$fakes/codesign" MAILROOM_CARGO="$fakes/cargo" \
-  MAILROOM_HELPERS="$helpers" MAILROOM_PINS="$work/pins.env" MAILROOM_CONFIG="$config" MAILROOM_NATIVE_BUILD="$build" \
-  script -q "$transcript" /bin/bash "$repo/scripts/setup-macos-protection.sh" \
-  < <(while IFS= read -r line; do sleep 0.4; printf '%s\n' "$line"; done <"$answers"; sleep 1) >/dev/null
-status=$?
-
+passed=0
 fail() { echo "FAIL: $1"; exit 1; }
-[[ $status -eq 0 ]] || fail "wizard exit $status"
-confirm_hash="$(printf '%s' mailroom-confirm | shasum | cut -c1-40)"
-keychain_hash="$(printf '%s' mailroom-keychain | shasum | cut -c1-40)"
-grep -qx "MAILROOM_CONFIRM_HELPER_CDHASH='$confirm_hash'" "$work/pins.env" || fail "confirm pin recorded"
-grep -qx "MAILROOM_KEYCHAIN_HELPER_CDHASH='$keychain_hash'" "$work/pins.env" || fail "keychain pin recorded"
-grep -qx "MAILROOM_KEYCHAIN_HELPER='$helpers/mailroom-keychain'" "$work/pins.env" || fail "keychain path recorded"
-grep -q "codesign -s - -f -o runtime --identifier org.mailroom.confirm $helpers/mailroom-confirm" "$log" || fail "hardened ad-hoc signing"
-grep -q "cargo build --release --locked pins=$confirm_hash/$keychain_hash" "$log" || fail "pinned release build"
-[[ "$(stat -f %Lp "$helpers")" == 700 ]] || fail "private helper directory"
-grep -q "outcome=approved (expected outcome=approved)" "$transcript" || fail "approved native check"
-grep -q "outcome=cancelled (expected outcome=cancelled)" "$transcript" || fail "cancelled native check"
-grep -q "keychain migrate acct-old-census-key" "$log" || fail "legacy migration"
-! grep -q "retire-legacy" "$log" || fail "legacy originals kept by default"
-grep -q "keychain enroll acct-new-password" "$log" || fail "missing password enrolled"
-grep -q "status=ok length=${#dummy}" "$transcript" || fail "password reached the helper through the terminal"
-grep -q "status=denied (expected status=denied)" "$transcript" || fail "denied probe"
-grep -q "status=ok (expected status=ok)" "$transcript" || fail "allowed probe"
-if grep -rqF "$dummy" "$work" --exclude=answers; then fail "dummy password appeared in a file, the transcript or an argv log"; fi
+ok() { passed=$((passed + 1)); }
+
+cat >"$work/wrapper.c" <<'C'
+#include <libgen.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+  char script[4096]; char self[4096]; strncpy(self, argv[0], sizeof self - 1);
+  snprintf(script, sizeof script, "%s/fake.sh", dirname(self));
+  argv[0] = script; execv("/bin/sh", (char *[]){"/bin/sh", script, argc > 1 ? argv[1] : "", argc > 2 ? argv[2] : "", argc > 3 ? argv[3] : "", NULL});
+  return 127;
+}
+C
+/usr/bin/clang -o "$work/fake-mailroom" "$work/wrapper.c"
+
+cat >"$work/fake.sh" <<'SH'
+#!/bin/sh
+here=$(dirname "$0"); scenario=$(cat "$here/scenario"); log="$here/calls.log"
+echo "$*" >>"$log"
+once() { [ -e "$here/$1" ] && return 1; : >"$here/$1"; }
+case "$1 $2" in
+  "native-check ")
+    [ "$scenario" = native_denied ] && { echo outcome=denied; exit 1; }
+    if once asked; then echo outcome=approved; else echo outcome=cancelled; fi ;;
+  "keychain legacy") echo "ref=old-census-key class=pinned_self"; echo status=ok ;;
+  "keychain migrate") [ "$scenario" = mismatch ] && { echo status=mismatch; exit 1; }; echo status=migrated ;;
+  "keychain retire-legacy") echo status=retired ;;
+  "keychain refs") echo "ref=acct-password class=every_access"; echo "ref=acct-census-key class=pinned_self"; echo status=ok ;;
+  "keychain status")
+    case "$3" in
+      acct-census-key) if once key-moved; then echo "status=other_binary class=pinned_self"; else echo "status=ok class=pinned_self"; fi ;;
+      acct-password) if [ -e "$here/enrolled" ]; then echo "status=ok class=every_access"; else echo "status=missing class=every_access"; exit 1; fi ;;
+    esac ;;
+  "keychain retrust") [ "$scenario" = killed ] && kill -9 $$; echo status=retrusted ;;
+  "keychain enroll")
+    stty -echo </dev/tty; printf 'Password: ' >/dev/tty; IFS= read -r a </dev/tty
+    printf 'Repeat it: ' >/dev/tty; IFS= read -r b </dev/tty; stty echo </dev/tty
+    [ "$a" = "$b" ] || { echo status=mismatch; exit 1; }
+    printf '%s' "$a" | shasum >"$here/enrolled"
+    [ "$scenario" = garbage ] && echo "password was $a"
+    echo status=ok ;;
+  "keychain probe")
+    if once probed; then
+      [ "$scenario" = probe_wrong ] && { echo status=ok; exit 0; }
+      echo status=denied; exit 1
+    fi
+    echo status=ok ;;
+  *) echo status=usage; exit 2 ;;
+esac
+SH
+
+# scenario NAME OWNER DIGEST_ANSWER: runs one wizard pass and leaves its results in $out.
+scenario() {
+  local name="$1" owner="$2" answer="$3"
+  local root="$work/$name"; mkdir -p "$root/share" "$root/libexec" "$root/home"
+  chmod 755 "$root" "$root/share" "$root/libexec"
+  local frozen="$root/share/setup-0123456789abcdef0123456789abcdef01234567"
+  mkdir -p "$frozen/scripts" "$frozen/ui"
+  sed '$d' "$repo/scripts/setup-macos-protection.sh" >"$frozen/scripts/setup-macos-protection.sh"
+  echo "approved source" >"$frozen/README"
+  chmod -R go-w "$frozen"
+  cp "$work/fake-mailroom" "$work/fake.sh" "$root/libexec/" 2>/dev/null || true
+  rm -f "$root/libexec/fake-mailroom" "$root/libexec/fake.sh"
+  mkdir -p "$root/build"; cp "$work/fake-mailroom" "$root/build/mailroom"; cp "$work/fake.sh" "$root/libexec/fake.sh"
+  echo "$name" >"$root/libexec/scenario"
+  local digest; digest=$(MAILROOM_SETUP_TEST=1 bash -c 'source "$1"; tree_digest "$2"' _ "$frozen/scripts/setup-macos-protection.sh" "$frozen")
+  [[ "$answer" == right ]] && answer="$digest"
+  out="$root"
+  cat >"$root/driver.sh" <<DRV
+source "$frozen/scripts/setup-macos-protection.sh"
+SHARE="$(cd "$root/share" && pwd -P)"; LIBEXEC="$(cd "$root/libexec" && pwd -P)"; TRUSTED_OWNER="$owner"; HOME="$root/home"
+RECORDS="$root/home/.config/mailroom/native-setup-records"
+privileged() { "\$@"; }
+build_helpers() { install_signed "$root/build/mailroom" mailroom org.mailroom.fake && MAILROOM_CDHASH="\$SIGNED_CDHASH" && CONFIRM_CDHASH=\$MAILROOM_CDHASH; }
+setup_main
+DRV
+  printf '%s\n' "$answer" "$dummy" | /usr/bin/python3 -I -c '
+import os, pty, select, sys
+digest, password = sys.stdin.read().split("\n")[:2]
+rules = [(b"Ready to start?", ""), (b"approval record:", digest), (b"Build and install now?", ""),
+         (b"for a while. [y/N]", ""), (b"Password: ", password), (b"Repeat it: ", password)]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv("/bin/bash", ["/bin/bash", sys.argv[1]])
+seen, answered = b"", 0
+while True:
+    ready, _, _ = select.select([fd], [], [], 20)
+    if not ready:
+        break
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    seen += chunk
+    tail = seen[answered:]
+    for prompt, answer in rules:
+        if prompt in tail:
+            answered = len(seen)
+            os.write(fd, (answer + "\n").encode())
+            break
+_, status = os.waitpid(pid, 0)
+open(sys.argv[2], "wb").write(seen)
+sys.exit(os.waitstatus_to_exitcode(status))
+' "$root/driver.sh" "$root/transcript" && code=0 || code=$?
+  echo "$code" >"$root/exit"
+}
+records() { cat "$out/home/.config/mailroom/native-setup-records" 2>/dev/null || true; }
+calls() { cat "$out/libexec/calls.log" 2>/dev/null || true; }
+no_secret() { if grep -rqaF "$dummy" "$out" --exclude=driver.sh; then fail "$1: dummy password appeared in output, a file or an argv log"; fi; ok; }
+
+scenario happy "$(id -un)" right
+[[ $(cat "$out/exit") == 0 ]] || fail "happy exit"; ok
+grep -qa "Setup complete" "$out/transcript" || fail "happy reaches completion"; ok
+for step in "tree_digest match" "build ok" "native_approve outcome=approved" "native_cancel outcome=cancelled" "migrate old-census-key status=migrated" "retrust acct-census-key status=retrusted" "enroll acct-password status=ok" "deny acct-password status=denied" "allow acct-password status=ok" "protection acct-password status=ok"; do
+  grep -qx "$step" <(records) || fail "happy record: $step"; ok
+done
+! grep -q "retire-legacy" <(calls) || fail "legacy originals kept by default"; ok
+[[ "$(stat -f %Lp "$out/libexec/mailroom")" == 755 ]] || fail "installed mode"; ok
+no_secret happy
+
+scenario probe_wrong "$(id -un)" right
+[[ $(cat "$out/exit") != 0 ]] && grep -qa "Setup incomplete" "$out/transcript" || fail "a silent read stops setup"; ok
+grep -qx "deny acct-password status=ok" <(records) || fail "wrong probe recorded"; ok
+! grep -qa "Setup complete" "$out/transcript" || fail "no completion after a wrong probe"; ok
+
+scenario mismatch "$(id -un)" right
+grep -qx "migrate old-census-key status=mismatch" <(records) && ! grep -q retire-legacy <(calls) || fail "mismatch stops before retirement"; ok
+
+scenario native_denied "$(id -un)" right
+grep -qx "native_approve outcome=denied" <(records) && ! grep -q "keychain" <(calls) || fail "denied native check stops before Keychain steps"; ok
+
+scenario garbage "$(id -un)" right
+grep -qx "enroll acct-password status=unexpected" <(records) || fail "unexpected output becomes a fixed record"; ok
+no_secret garbage
+
+scenario killed "$(id -un)" right
+grep -qx "retrust acct-census-key status=terminated" <(records) || fail "a killed helper is recorded as terminated"; ok
+[[ $(cat "$out/exit") != 0 ]] && ! grep -q "keychain enroll" <(calls) || fail "a killed helper stops later stages"; ok
+
+scenario wrong_digest "$(id -un)" 0000000000000000000000000000000000000000000000000000000000000000
+grep -qx "tree_digest mismatch" <(records) && [[ ! -e "$out/libexec/mailroom" ]] || fail "a changed tree is refused before building"; ok
+
+scenario untrusted root right
+grep -qx "frozen_copy untrusted" <(records) && [[ ! -e "$out/libexec/mailroom" ]] || fail "a user-owned copy is refused"; ok
+
 plan="$(bash "$repo/scripts/setup-macos-protection.sh" --plan)"
-[[ "$(wc -l <<<"$plan")" -eq 6 ]] || fail "plan lists six stages"
-if bash "$repo/scripts/setup-macos-protection.sh" </dev/null >/dev/null 2>&1; then fail "noninteractive run refused"; fi
-echo "wizard fake run: 16 checks passed"
+[[ "$(wc -l <<<"$plan")" -eq 7 ]] || fail "plan lists seven stages"; ok
+if bash "$repo/scripts/setup-macos-protection.sh" </dev/null >/dev/null 2>&1; then fail "noninteractive run refused"; fi; ok
+echo "wizard runs: $passed checks passed"

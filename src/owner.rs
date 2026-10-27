@@ -2,7 +2,7 @@
 //! `status=<code>`, `outcome=<code>` or `ref=<name> class=<class>`. No value, OS text or
 //! error detail is ever printed, and nothing is written to stderr.
 use crate::acquisition::{
-    AccountPaths, Accounts, AcquisitionError, CredentialBackend, SecretValue,
+    Account, AccountPaths, Accounts, AcquisitionError, CredentialBackend, SecretValue,
     keychain::{self, Class, Keychain, Migration, Status},
 };
 use std::{path::PathBuf, sync::Arc};
@@ -26,41 +26,79 @@ fn status(code: &str, success: bool) -> u8 {
     record(&format!("status={code}"), success)
 }
 
+/// Parsed command line. Each option appears at most once and always with a value.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Options<'a> {
+    pub positional: Vec<&'a str>,
+    pub keychain: Option<PathBuf>,
+    pub config: Option<PathBuf>,
+}
+
+/// Rejects missing values, repeated options and unknown options, before any backend opens.
+pub(crate) fn parse(arguments: &[String]) -> Option<Options<'_>> {
+    let mut options = Options::default();
+    let mut rest = arguments.iter();
+    while let Some(argument) = rest.next() {
+        let slot = match argument.as_str() {
+            "--keychain" => &mut options.keychain,
+            "--config" => &mut options.config,
+            other if other.starts_with('-') => return None,
+            other => {
+                options.positional.push(other);
+                continue;
+            }
+        };
+        let value = rest
+            .next()
+            .filter(|v| !v.is_empty() && !v.starts_with('-'))?;
+        if slot.replace(PathBuf::from(value)).is_some() {
+            return None;
+        }
+    }
+    Some(options)
+}
+
 /// Runs `mailroom keychain …` or `mailroom native-check`. Returns the process exit code.
 pub fn run(arguments: &[String]) -> u8 {
     if !crate::native::core_dumps_disabled() {
         return status("core_dumps_enabled", false);
     }
-    let mut positional = Vec::new();
-    let mut keychain_path = None;
-    let mut config = None;
-    let mut rest = arguments.iter();
-    while let Some(argument) = rest.next() {
-        match argument.as_str() {
-            "--keychain" => keychain_path = rest.next().map(PathBuf::from),
-            "--config" => config = rest.next().map(PathBuf::from),
-            _ => positional.push(argument.as_str()),
-        }
-    }
-    match positional.as_slice() {
-        ["native-check"] => native_check(),
-        ["keychain", "refs"] => references(config),
-        ["keychain", command, tail @ ..] => {
+    let Some(options) = parse(arguments) else {
+        return status("usage", false);
+    };
+    match (options.positional.as_slice(), &options.keychain) {
+        (["native-check"], None) if options.config.is_none() => native_check(),
+        (["keychain", "refs"], None) => references(options.config),
+        (["keychain", command, tail @ ..], keychain_path) => {
+            let usable = match (*command, tail) {
+                ("legacy", []) => true,
+                (_, [reference]) => keychain::valid_reference(reference),
+                _ => false,
+            };
+            if !usable {
+                return status("usage", false);
+            }
             if !crate::native::own_process_hardened() {
                 return status("unhardened", false);
             }
-            let opened = match &keychain_path {
+            let opened = match keychain_path {
                 Some(path) => keychain::explicit(path).map_err(|_| ()),
                 None => keychain::installed().map_err(|_| ()),
             };
             let Ok(keychain) = opened else {
                 return status("keychain_unavailable", false);
             };
+            let keychain = Arc::new(keychain);
+            let paths = match options.config {
+                Some(config) => Some(AccountPaths {
+                    data: config.join("data"),
+                    config,
+                }),
+                None => AccountPaths::per_user().ok(),
+            };
             match (*command, tail) {
                 ("legacy", []) => legacy(&keychain),
-                (command, [reference]) if keychain::valid_reference(reference) => {
-                    item(&keychain, command, reference)
-                }
+                (command, [reference]) => item(&keychain, paths, command, reference),
                 _ => status("usage", false),
             }
         }
@@ -68,7 +106,99 @@ pub fn run(arguments: &[String]) -> u8 {
     }
 }
 
-fn item(keychain: &Keychain, command: &str, reference: &str) -> u8 {
+/// What a candidate key value does to the account that owns the reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StoreCheck {
+    /// The value opens the account's existing authenticated state.
+    Verified,
+    /// The account's state does not decrypt under the value.
+    Mismatch,
+    /// The account has no saved state to authenticate the value against.
+    NoState,
+    /// No saved account uses this reference.
+    NoAccount,
+}
+impl StoreCheck {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::Mismatch => "mismatch",
+            Self::NoState => "no_state",
+            Self::NoAccount => "no_account",
+        }
+    }
+}
+
+/// Answers `get` for one reference with a candidate value and every other from Keychain.
+struct Candidate {
+    keychain: Arc<Keychain>,
+    reference: String,
+    value: Zeroizing<Vec<u8>>,
+}
+impl CredentialBackend for Candidate {
+    fn get(&self, reference: &str) -> Result<SecretValue, AcquisitionError> {
+        if reference == self.reference {
+            Ok(SecretValue::new(self.value.to_vec()))
+        } else {
+            self.keychain.get(reference)
+        }
+    }
+    fn put(&self, _: &str, _: &SecretValue) -> Result<(), AcquisitionError> {
+        Err(AcquisitionError::Credentials)
+    }
+    fn delete(&self, _: &str) -> Result<(), AcquisitionError> {
+        Err(AcquisitionError::Credentials)
+    }
+}
+
+fn owner_of(paths: &AccountPaths, reference: &str) -> Option<Account> {
+    let accounts = Accounts::new(paths.clone(), Arc::new(Refusing))
+        .list()
+        .ok()?;
+    accounts
+        .into_iter()
+        .find(|a| a.credential_references().contains(&reference))
+}
+
+/// Opens the owning account's encrypted state with `value` in place of `reference`.
+pub(crate) fn check_store(
+    keychain: &Arc<Keychain>,
+    paths: &AccountPaths,
+    reference: &str,
+    value: &[u8],
+) -> StoreCheck {
+    let Some(account) = owner_of(paths, reference) else {
+        return StoreCheck::NoAccount;
+    };
+    let backend = Candidate {
+        keychain: keychain.clone(),
+        reference: reference.into(),
+        value: Zeroizing::new(value.to_vec()),
+    };
+    let repo = Accounts::new(paths.clone(), Arc::new(backend));
+    let Ok(store) = repo.store(&account) else {
+        return StoreCheck::Mismatch;
+    };
+    if !store.path().exists() {
+        return StoreCheck::NoState;
+    }
+    match store.load_state() {
+        Ok(_) => StoreCheck::Verified,
+        Err(_) => StoreCheck::Mismatch,
+    }
+}
+
+fn item(
+    keychain: &Arc<Keychain>,
+    paths: Option<AccountPaths>,
+    command: &str,
+    reference: &str,
+) -> u8 {
+    let verify = |value: &[u8]| {
+        paths
+            .as_ref()
+            .is_some_and(|p| check_store(keychain, p, reference, value) == StoreCheck::Verified)
+    };
     match command {
         "status" => {
             let observed = keychain.status(reference);
@@ -85,8 +215,23 @@ fn item(keychain: &Keychain, command: &str, reference: &str) -> u8 {
             Ok(_) => status("ok", true),
             Err(observed) => status(observed.code(), false),
         },
+        "check-store" => {
+            if Class::of(reference) != Class::PinnedSelf {
+                return status("refused", false);
+            }
+            let Some(paths) = &paths else {
+                return status("no_account", false);
+            };
+            match keychain.read(reference) {
+                Ok(value) => {
+                    let checked = check_store(keychain, paths, reference, &value);
+                    status(checked.code(), checked == StoreCheck::Verified)
+                }
+                Err(observed) => status(observed.code(), false),
+            }
+        }
         "enroll" => enroll(keychain, reference),
-        "migrate" => match keychain.migrate(reference) {
+        "migrate" => match keychain.migrate(reference, &verify) {
             Ok(Status::Ok) => status("migrated", true),
             Ok(_) => status("matched", true),
             Err(failure) => migration(failure),
@@ -95,7 +240,7 @@ fn item(keychain: &Keychain, command: &str, reference: &str) -> u8 {
             Ok(()) => status("retired", true),
             Err(failure) => migration(failure),
         },
-        "retrust" => match keychain.retrust(reference) {
+        "retrust" => match keychain.retrust(reference, &verify) {
             Ok(Status::Ok) => status("retrusted", true),
             Ok(_) => status("unchanged", true),
             Err(observed) => status(observed.code(), false),
@@ -236,3 +381,6 @@ fn native_check() -> u8 {
         Err(_) => record("outcome=denied", false),
     }
 }
+
+#[cfg(test)]
+mod tests;

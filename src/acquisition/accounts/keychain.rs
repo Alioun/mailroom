@@ -96,6 +96,8 @@ pub(crate) enum Status {
     Changed,
     /// A key item trusts exactly one other binary, such as an earlier mailroom build.
     OtherBinary,
+    /// A key value that does not open the account's existing encrypted state.
+    Unverified,
     Failed,
 }
 impl Status {
@@ -107,6 +109,7 @@ impl Status {
             Self::Denied => "denied",
             Self::Changed => "changed",
             Self::OtherBinary => "other_binary",
+            Self::Unverified => "unverified",
             Self::Failed => "failed",
         }
     }
@@ -173,6 +176,61 @@ enum Observed {
     Changed,
 }
 
+/// One access-list entry as macOS reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Entry {
+    pub authorizations: Vec<String>,
+    /// None means any application may use the entry without a prompt.
+    pub trusted: Option<Vec<String>>,
+    pub selector: u16,
+}
+
+/// The prompt selector `SecAccessCreate` gives every entry. Any other selector means the
+/// prompt policy was edited, so the item is refused.
+pub(crate) const CREATED_SELECTOR: u16 = 0;
+
+/// The policy check, separate from the Security calls so every shape can be tested.
+/// Encryption-only entries are ignored. Change-ACL entries must trust nobody. Every other
+/// entry must carry the created selector, trust a listed set and agree with the others.
+fn classify(entries: &[Entry]) -> Observed {
+    let mut reading: Option<&Vec<String>> = None;
+    for entry in entries {
+        if entry
+            .authorizations
+            .iter()
+            .all(|a| a == "ACLAuthorizationEncrypt")
+        {
+            continue;
+        }
+        let Some(trusted) = &entry.trusted else {
+            return Observed::Changed;
+        };
+        if entry.selector != CREATED_SELECTOR {
+            return Observed::Changed;
+        }
+        if entry
+            .authorizations
+            .iter()
+            .all(|a| a == "ACLAuthorizationChangeACL")
+        {
+            if !trusted.is_empty() {
+                return Observed::Changed;
+            }
+            continue;
+        }
+        match reading {
+            None => reading = Some(trusted),
+            Some(previous) if previous == trusted => {}
+            Some(_) => return Observed::Changed,
+        }
+    }
+    match reading {
+        Some(trusted) if trusted.is_empty() => Observed::EveryAccess,
+        Some(trusted) if trusted.len() == 1 => Observed::Pinned(trusted[0].clone()),
+        _ => Observed::Changed,
+    }
+}
+
 struct Owned(*mut c_void);
 impl Drop for Owned {
     fn drop(&mut self) {
@@ -237,48 +295,87 @@ pub(crate) fn installed() -> Result<Keychain, AcquisitionError> {
     Ok(Keychain { explicit: None })
 }
 
-fn search_list_paths() -> Vec<PathBuf> {
-    let mut list = std::ptr::null();
-    if unsafe { SecKeychainCopySearchList(&mut list) } != 0 || list.is_null() {
-        return vec![];
+fn keychain_path(keychain: *mut c_void) -> Result<PathBuf, Status> {
+    let mut buffer = [0 as c_char; 1024];
+    let mut length = buffer.len() as u32;
+    if unsafe { SecKeychainGetPath(keychain, &mut length, buffer.as_mut_ptr()) } != 0 {
+        return Err(Status::Failed);
     }
-    let list: CFArray<CFType> = unsafe { CFArray::wrap_under_create_rule(list) };
-    list.iter()
-        .filter_map(|keychain| {
-            let mut buffer = [0 as c_char; 1024];
-            let mut length = buffer.len() as u32;
-            let status = unsafe {
-                SecKeychainGetPath(
-                    keychain.as_CFTypeRef() as *mut c_void,
-                    &mut length,
-                    buffer.as_mut_ptr(),
-                )
-            };
-            (status == 0).then(|| {
-                let path = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
-                PathBuf::from(path.to_string_lossy().into_owned())
-            })
-        })
-        .filter_map(|p| p.canonicalize().ok())
-        .collect()
+    let path = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
+    Ok(PathBuf::from(path.to_str().map_err(|_| Status::Failed)?))
 }
 
-/// An explicit keychain file for tests and checks. It must already exist and must not be
-/// a system or user keychain; nothing ever falls back to the default keychain.
+/// Every keychain on the user's search list. Any failure refuses rather than returning less.
+fn search_list_paths() -> Result<Vec<PathBuf>, Status> {
+    let mut list = std::ptr::null();
+    if unsafe { SecKeychainCopySearchList(&mut list) } != 0 || list.is_null() {
+        return Err(Status::Failed);
+    }
+    let list: CFArray<CFType> = unsafe { CFArray::wrap_under_create_rule(list) };
+    let mut paths = Vec::new();
+    for keychain in list.iter() {
+        let path = keychain_path(keychain.as_CFTypeRef() as *mut c_void)?;
+        paths.push(path.canonicalize().unwrap_or(path));
+    }
+    if paths.is_empty() {
+        return Err(Status::Failed);
+    }
+    Ok(paths)
+}
+
+/// The account's home directory from the user database, not from the environment.
+fn account_home() -> Result<PathBuf, Status> {
+    let mut record = unsafe { std::mem::zeroed::<libc::passwd>() };
+    let mut buffer = vec![0 as c_char; 16384];
+    let mut found = std::ptr::null_mut();
+    let status = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            &mut record,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &mut found,
+        )
+    };
+    if status != 0 || found.is_null() || record.pw_dir.is_null() {
+        return Err(Status::Failed);
+    }
+    let home = unsafe { std::ffi::CStr::from_ptr(record.pw_dir) };
+    Ok(PathBuf::from(home.to_str().map_err(|_| Status::Failed)?))
+}
+
+/// An explicit keychain file for tests. It must be an existing regular file owned by this
+/// user in a directory nobody else can write, outside the system and user keychain
+/// folders and off the search list. The opened keychain must resolve to the same file.
+/// Any doubt refuses; nothing ever falls back to the default keychain.
 pub(crate) fn explicit(path: &Path) -> Result<Keychain, Status> {
+    use std::os::unix::fs::MetadataExt;
     if !path.is_absolute() {
         return Err(Status::Failed);
     }
     let canonical = path.canonicalize().map_err(|_| Status::Failed)?;
     let meta = std::fs::symlink_metadata(&canonical).map_err(|_| Status::Failed)?;
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let protected = ["/Library/Keychains", "/System", "/private/var/db"]
-        .iter()
-        .map(PathBuf::from)
-        .chain(home.map(|h| h.join("Library/Keychains")))
-        .filter_map(|root| root.canonicalize().ok().or(Some(root)))
-        .any(|root| canonical.starts_with(root));
-    if !meta.is_file() || protected || search_list_paths().contains(&canonical) {
+    let parent = std::fs::symlink_metadata(canonical.parent().ok_or(Status::Failed)?)
+        .map_err(|_| Status::Failed)?;
+    let uid = unsafe { libc::getuid() };
+    let private = |m: &std::fs::Metadata| m.uid() == uid && m.mode() & 0o022 == 0;
+    let home = account_home()?;
+    let home = home.canonicalize().unwrap_or(home);
+    let protected = [
+        PathBuf::from("/Library"),
+        PathBuf::from("/System"),
+        PathBuf::from("/private/var/db"),
+        home.join("Library/Keychains"),
+    ]
+    .into_iter()
+    .any(|root| canonical.starts_with(root));
+    let listed = search_list_paths()?;
+    if !meta.is_file()
+        || !private(&meta)
+        || !private(&parent)
+        || protected
+        || listed.contains(&canonical)
+    {
         return Err(Status::Failed);
     }
     let text =
@@ -288,6 +385,14 @@ pub(crate) fn explicit(path: &Path) -> Result<Keychain, Status> {
         return Err(Status::Failed);
     }
     let keychain = unsafe { CFType::wrap_under_create_rule(keychain as CFTypeRef) };
+    let opened = keychain_path(keychain.as_CFTypeRef() as *mut c_void)?;
+    let again = std::fs::symlink_metadata(&opened).map_err(|_| Status::Failed)?;
+    if opened.canonicalize().map_err(|_| Status::Failed)? != canonical
+        || (again.dev(), again.ino()) != (meta.dev(), meta.ino())
+        || search_list_paths()?.contains(&canonical)
+    {
+        return Err(Status::Failed);
+    }
     if unsafe { SecKeychainSetUserInteractionAllowed(0) } != 0 {
         return Err(Status::Failed);
     }
@@ -392,39 +497,32 @@ impl Keychain {
         }
     }
 
-    /// Reduces every access list that grants more than encryption to one trusted set.
-    fn observe(item: &CFType) -> Observed {
+    /// Reads every access-list entry of an item: authorizations, trusted requirements
+    /// (None means any application) and prompt selector.
+    fn entries(item: &CFType) -> Option<Vec<Entry>> {
         let mut access = std::ptr::null_mut();
         if unsafe {
             SecKeychainItemCopyAccess(item.as_CFTypeRef() as SecKeychainItemRef, &mut access)
         } != 0
             || access.is_null()
         {
-            return Observed::Changed;
+            return None;
         }
         let access = Owned(access);
         let mut list = std::ptr::null();
         if unsafe { SecAccessCopyACLList(access.0, &mut list) } != 0 || list.is_null() {
-            return Observed::Changed;
+            return None;
         }
         let list: CFArray<CFType> = unsafe { CFArray::wrap_under_create_rule(list) };
-        let mut reading: Option<Vec<String>> = None;
+        let mut entries = Vec::new();
         for acl in list.iter() {
             let acl = acl.as_CFTypeRef() as SecAclRef;
             let authorizations = unsafe { SecACLCopyAuthorizations(acl) };
             if authorizations.is_null() {
-                return Observed::Changed;
+                return None;
             }
             let authorizations: CFArray<CFString> =
                 unsafe { CFArray::wrap_under_create_rule(authorizations) };
-            let authorizations: Vec<String> =
-                authorizations.iter().map(|a| a.to_string()).collect();
-            if authorizations
-                .iter()
-                .all(|a| a == "ACLAuthorizationEncrypt")
-            {
-                continue;
-            }
             let mut applications = std::ptr::null();
             let mut description = std::ptr::null();
             let mut selector = 0u16;
@@ -432,43 +530,35 @@ impl Keychain {
                 SecACLCopyContents(acl, &mut applications, &mut description, &mut selector)
             } != 0
             {
-                return Observed::Changed;
+                return None;
             }
             if !description.is_null() {
                 drop(unsafe { CFString::wrap_under_create_rule(description) });
             }
-            if applications.is_null() {
-                return Observed::Changed;
-            }
-            let applications: CFArray<CFType> =
-                unsafe { CFArray::wrap_under_create_rule(applications) };
-            let mut trusted = Vec::new();
-            for application in applications.iter() {
-                match requirement_of(application.as_CFTypeRef() as SecTrustedApplicationRef) {
-                    Some(requirement) => trusted.push(requirement),
-                    None => return Observed::Changed,
+            let trusted = if applications.is_null() {
+                None
+            } else {
+                let applications: CFArray<CFType> =
+                    unsafe { CFArray::wrap_under_create_rule(applications) };
+                let mut trusted = Vec::new();
+                for application in applications.iter() {
+                    trusted.push(requirement_of(
+                        application.as_CFTypeRef() as SecTrustedApplicationRef
+                    )?);
                 }
-            }
-            if authorizations
-                .iter()
-                .all(|a| a == "ACLAuthorizationChangeACL")
-            {
-                if !trusted.is_empty() {
-                    return Observed::Changed;
-                }
-                continue;
-            }
-            match &reading {
-                None => reading = Some(trusted),
-                Some(previous) if *previous == trusted => {}
-                Some(_) => return Observed::Changed,
-            }
+                Some(trusted)
+            };
+            entries.push(Entry {
+                authorizations: authorizations.iter().map(|a| a.to_string()).collect(),
+                trusted,
+                selector,
+            });
         }
-        match reading {
-            Some(trusted) if trusted.is_empty() => Observed::EveryAccess,
-            Some(mut trusted) if trusted.len() == 1 => Observed::Pinned(trusted.remove(0)),
-            _ => Observed::Changed,
-        }
+        Some(entries)
+    }
+
+    fn observe(item: &CFType) -> Observed {
+        Self::entries(item).map_or(Observed::Changed, |entries| classify(&entries))
     }
 
     /// Checks one item's access lists against the class its reference requires.
@@ -636,9 +726,14 @@ impl Keychain {
     }
 
     /// Copies a legacy value into a protected item, then proves the protected item holds it.
-    /// Returns `Ok` when created and `Exists` when an equal item was already there.
-    pub(crate) fn migrate(&self, reference: &str) -> Result<Status, Migration> {
+    /// A key is copied only when `verify` shows it opens the account's existing state, since
+    /// anyone can plant a legacy item. Returns `Ok` when created and `Exists` when an equal
+    /// item was already there.
+    pub(crate) fn migrate(&self, reference: &str, verify: Verify) -> Result<Status, Migration> {
         let legacy = self.legacy_read(reference).map_err(Migration::Legacy)?;
+        if Class::of(reference) == Class::PinnedSelf && !verify(&legacy) {
+            return Err(Migration::Protected(Status::Unverified));
+        }
         let outcome = match self.status(reference) {
             Status::Missing => match self.create(reference, &legacy) {
                 Status::Ok => Status::Ok,
@@ -672,8 +767,10 @@ impl Keychain {
     /// Moves a key item that trusts another binary, such as an earlier mailroom build, to
     /// this binary. Reading the old item needs a person. The value is staged in a second
     /// pinned item first, so an interruption at any step leaves a readable copy and a
-    /// rerun finishes. Returns `Ok` when moved and `Exists` when nothing needed moving.
-    pub(crate) fn retrust(&self, reference: &str) -> Result<Status, Status> {
+    /// rerun finishes. Anyone can plant an item trusting this binary, so a value is moved
+    /// only when `verify` shows it opens the account's existing state. Returns `Ok` when
+    /// moved and `Exists` when nothing needed moving.
+    pub(crate) fn retrust(&self, reference: &str, verify: Verify) -> Result<Status, Status> {
         if !valid_reference(reference) || Class::of(reference) != Class::PinnedSelf {
             return Err(Status::Failed);
         }
@@ -692,11 +789,17 @@ impl Keychain {
             }
             Status::Missing => {
                 let value = self.read_as(&staged, Class::PinnedSelf)?;
+                if !verify(&value) {
+                    return Err(Status::Unverified);
+                }
                 self.publish(reference, &staged, &value)
             }
             Status::OtherBinary => {
                 let item = self.item(SERVICE, reference)?;
                 let value = self.data(&item)?;
+                if !verify(&value) {
+                    return Err(Status::Unverified);
+                }
                 let kept = match self.status_as(&staged, Class::PinnedSelf) {
                     Status::Missing => false,
                     Status::Ok => equal(&self.read_as(&staged, Class::PinnedSelf)?, &value),
@@ -744,6 +847,35 @@ impl Keychain {
     }
 }
 
+#[cfg(test)]
+impl Keychain {
+    pub(crate) fn create_staged_for_test(&self, reference: &str, value: &[u8]) -> Status {
+        self.create_as(&format!("{reference}-retrust"), Class::PinnedSelf, value)
+    }
+    pub(crate) fn remove_staged_for_test(&self, reference: &str) -> Status {
+        self.remove(&format!("{reference}-retrust"))
+    }
+    pub(crate) fn create_legacy_for_test(&self, reference: &str, value: &[u8]) -> Status {
+        let own = match own_application() {
+            Ok((application, _)) => application,
+            Err(status) => return status,
+        };
+        let trusted = [unsafe { CFType::wrap_under_get_rule(own.0 as CFTypeRef) }];
+        self.add(
+            LEGACY_SERVICE,
+            reference,
+            &CFArray::from_CFTypes(&trusted),
+            value,
+        )
+    }
+    pub(crate) fn remove_legacy_for_test(&self, reference: &str) -> Status {
+        self.remove_in(LEGACY_SERVICE, reference)
+    }
+}
+
+/// Whether a candidate key value opens the account's existing encrypted state.
+pub(crate) type Verify<'a> = &'a dyn Fn(&[u8]) -> bool;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Migration {
     Legacy(Status),
@@ -771,4 +903,4 @@ impl CredentialBackend for Keychain {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

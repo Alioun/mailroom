@@ -45,7 +45,7 @@ impl Throwaway {
         assert_eq!(status, 0, "throwaway keychain");
         Self { handle, path, dir }
     }
-    fn keychain(&self) -> Keychain {
+    pub fn keychain(&self) -> Keychain {
         explicit(&self.path).unwrap()
     }
 }
@@ -59,7 +59,7 @@ impl Drop for Throwaway {
     }
 }
 
-fn dummy() -> Zeroizing<Vec<u8>> {
+pub(crate) fn dummy() -> Zeroizing<Vec<u8>> {
     let mut random = [0u8; 12];
     OsRng.fill_bytes(&mut random);
     Zeroizing::new(
@@ -224,7 +224,7 @@ fn a_key_trusting_another_binary_is_reported_and_never_read_silently() {
         Some(Status::OtherBinary)
     );
     assert_eq!(
-        keychain.retrust("acct-census-key").err(),
+        keychain.retrust("acct-census-key", &|_| true).err(),
         Some(Status::Denied)
     );
     assert_eq!(
@@ -244,7 +244,7 @@ fn an_interrupted_retrust_finishes_from_its_staged_copy() {
         keychain.create_as("acct-identity-retrust", Class::PinnedSelf, &value),
         Status::Ok
     );
-    assert_eq!(keychain.retrust("acct-identity"), Ok(Status::Ok));
+    assert_eq!(keychain.retrust("acct-identity", &|_| true), Ok(Status::Ok));
     assert_eq!(
         keychain.read("acct-identity").unwrap().as_slice(),
         value.as_slice()
@@ -253,12 +253,18 @@ fn an_interrupted_retrust_finishes_from_its_staged_copy() {
         keychain.status_as("acct-identity-retrust", Class::PinnedSelf),
         Status::Missing
     );
-    assert_eq!(keychain.retrust("acct-identity"), Ok(Status::Exists));
+    assert_eq!(
+        keychain.retrust("acct-identity", &|_| true),
+        Ok(Status::Exists)
+    );
     assert_eq!(
         keychain.create_as("acct-identity-retrust", Class::PinnedSelf, &value),
         Status::Ok
     );
-    assert_eq!(keychain.retrust("acct-identity"), Ok(Status::Exists));
+    assert_eq!(
+        keychain.retrust("acct-identity", &|_| true),
+        Ok(Status::Exists)
+    );
     assert_eq!(
         keychain.status_as("acct-identity-retrust", Class::PinnedSelf),
         Status::Missing
@@ -267,8 +273,14 @@ fn an_interrupted_retrust_finishes_from_its_staged_copy() {
         keychain.create_as("acct-identity-retrust", Class::PinnedSelf, &dummy()),
         Status::Ok
     );
-    assert_eq!(keychain.retrust("acct-identity"), Err(Status::Changed));
-    assert_eq!(keychain.retrust("acct-password"), Err(Status::Failed));
+    assert_eq!(
+        keychain.retrust("acct-identity", &|_| true),
+        Err(Status::Changed)
+    );
+    assert_eq!(
+        keychain.retrust("acct-password", &|_| true),
+        Err(Status::Failed)
+    );
 }
 
 fn legacy(keychain: &Keychain, reference: &str, value: &[u8], trusted: &[CFType]) {
@@ -288,8 +300,11 @@ fn migration_proves_the_copy_and_retirement_needs_an_equal_protected_value() {
         keychain.legacy_references().unwrap(),
         vec!["a-census-key".to_owned()]
     );
-    assert_eq!(keychain.migrate("a-census-key"), Ok(Status::Ok));
-    assert_eq!(keychain.migrate("a-census-key"), Ok(Status::Exists));
+    assert_eq!(keychain.migrate("a-census-key", &|_| true), Ok(Status::Ok));
+    assert_eq!(
+        keychain.migrate("a-census-key", &|_| true),
+        Ok(Status::Exists)
+    );
     assert_eq!(keychain.retire_legacy("a-census-key"), Ok(()));
     assert!(keychain.legacy_references().unwrap().is_empty());
     assert_eq!(
@@ -299,7 +314,10 @@ fn migration_proves_the_copy_and_retirement_needs_an_equal_protected_value() {
 
     assert_eq!(keychain.create("b-census-key", &dummy()), Status::Ok);
     legacy(&keychain, "b-census-key", &value, &[own()]);
-    assert_eq!(keychain.migrate("b-census-key"), Err(Migration::Mismatch));
+    assert_eq!(
+        keychain.migrate("b-census-key", &|_| true),
+        Err(Migration::Mismatch)
+    );
     assert_eq!(
         keychain.retire_legacy("b-census-key"),
         Err(Migration::Mismatch)
@@ -312,14 +330,14 @@ fn migration_proves_the_copy_and_retirement_needs_an_equal_protected_value() {
 
     legacy(&keychain, "c-census-key", &value, &[other()]);
     assert_eq!(
-        keychain.migrate("c-census-key"),
+        keychain.migrate("c-census-key", &|_| true),
         Err(Migration::Legacy(Status::Denied))
     );
     assert_eq!(keychain.status("c-census-key"), Status::Missing);
 
     legacy(&keychain, "d-password", &value, &[own()]);
     assert_eq!(
-        keychain.migrate("d-password"),
+        keychain.migrate("d-password", &|_| true),
         Err(Migration::Protected(Status::Denied))
     );
     assert_eq!(keychain.status("d-password"), Status::Ok);
@@ -340,7 +358,7 @@ fn migration_proves_the_copy_and_retirement_needs_an_equal_protected_value() {
     );
     legacy(&keychain, "e-census-key", &value, &[own()]);
     assert_eq!(
-        keychain.migrate("e-census-key"),
+        keychain.migrate("e-census-key", &|_| true),
         Err(Migration::Protected(Status::OtherBinary))
     );
     assert_eq!(
@@ -348,7 +366,7 @@ fn migration_proves_the_copy_and_retirement_needs_an_equal_protected_value() {
         Err(Migration::Protected(Status::OtherBinary))
     );
     assert_eq!(
-        keychain.migrate("f-census-key"),
+        keychain.migrate("f-census-key", &|_| true),
         Err(Migration::Legacy(Status::Missing))
     );
     assert_no_plaintext(throwaway.dir.path(), &value);
@@ -434,5 +452,86 @@ fn reference_classes() {
     }
     for bad in ["", "a/b", "a b", "ä", &"a".repeat(129)] {
         assert!(!valid_reference(bad));
+    }
+}
+
+const READ: [&str; 6] = [
+    "ACLAuthorizationDecrypt",
+    "ACLAuthorizationDerive",
+    "ACLAuthorizationExportClear",
+    "ACLAuthorizationExportWrapped",
+    "ACLAuthorizationMAC",
+    "ACLAuthorizationSign",
+];
+fn entry(authorizations: &[&str], trusted: Option<&[&str]>, selector: u16) -> Entry {
+    Entry {
+        authorizations: authorizations.iter().map(|a| a.to_string()).collect(),
+        trusted: trusted.map(|t| t.iter().map(|r| r.to_string()).collect()),
+        selector,
+    }
+}
+fn created(trusted: &[&str]) -> Vec<Entry> {
+    vec![
+        entry(&READ, Some(trusted), 0),
+        entry(&["ACLAuthorizationEncrypt"], None, 0),
+        entry(&["ACLAuthorizationChangeACL"], Some(&[]), 0),
+    ]
+}
+
+#[test]
+fn created_items_have_exactly_the_entries_the_policy_expects() {
+    let throwaway = Throwaway::new();
+    let keychain = throwaway.keychain();
+    assert_eq!(keychain.create("acct-census-key", &dummy()), Status::Ok);
+    assert_eq!(keychain.create("acct-password", &dummy()), Status::Ok);
+    let own = format!("cdhash H\"{}\"", crate::native::own_cdhash().unwrap());
+    let mut key = Keychain::entries(&keychain.item(SERVICE, "acct-census-key").unwrap()).unwrap();
+    let mut password =
+        Keychain::entries(&keychain.item(SERVICE, "acct-password").unwrap()).unwrap();
+    key.sort_by_key(|e| e.authorizations.clone());
+    password.sort_by_key(|e| e.authorizations.clone());
+    let mut expected_key = created(&[&own]);
+    let mut expected_password = created(&[]);
+    expected_key.sort_by_key(|e| e.authorizations.clone());
+    expected_password.sort_by_key(|e| e.authorizations.clone());
+    assert_eq!(key, expected_key);
+    assert_eq!(password, expected_password);
+}
+
+#[test]
+fn the_policy_refuses_every_edited_shape() {
+    let own = "cdhash H\"0000000000000000000000000000000000000000\"";
+    assert_eq!(classify(&created(&[])), Observed::EveryAccess);
+    assert_eq!(classify(&created(&[own])), Observed::Pinned(own.into()));
+    let mut edits: Vec<Vec<Entry>> = Vec::new();
+    for selector in [1u16, 0x0010, 0xffff] {
+        let mut e = created(&[]);
+        e[0].selector = selector;
+        edits.push(e);
+        let mut e = created(&[]);
+        e[2].selector = selector;
+        edits.push(e);
+    }
+    let mut e = created(&[]);
+    e[0].trusted = None;
+    edits.push(e);
+    let mut e = created(&[]);
+    e[2].trusted = Some(vec![own.into()]);
+    edits.push(e);
+    let mut e = created(&[own]);
+    e.push(entry(
+        &["ACLAuthorizationDecrypt"],
+        Some(&["cdhash H\"1111111111111111111111111111111111111111\""]),
+        0,
+    ));
+    edits.push(e);
+    let mut e = created(&[]);
+    e.push(entry(&["ACLAuthorizationPartitionID"], None, 0));
+    edits.push(e);
+    edits.push(created(&[own, "anchor apple"]));
+    edits.push(vec![entry(&["ACLAuthorizationEncrypt"], None, 0)]);
+    edits.push(vec![]);
+    for (index, edit) in edits.iter().enumerate() {
+        assert_eq!(classify(edit), Observed::Changed, "edit {index}");
     }
 }

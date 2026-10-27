@@ -323,10 +323,11 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/census/demo/start", post(demo_start))
         .route("/api/census/demo/cancel", post(demo_cancel))
         .route("/api/census/demo/confirm", post(demo_confirm))
-        .fallback_service(ServeDir::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/ui/dist"
-        )))
+        // An installed build serves the root-owned copy the setup wizard put next to it.
+        .fallback_service(ServeDir::new(
+            option_env!("MAILROOM_UI_DIR")
+                .unwrap_or(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/dist")),
+        ))
         .layer(DefaultBodyLimit::max(256 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), boundary))
         .with_state(state)

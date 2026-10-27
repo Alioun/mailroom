@@ -8,13 +8,18 @@ use core_foundation::{
     dictionary::CFDictionary,
     string::{CFString, CFStringRef},
 };
+use mailroom::acquisition::{
+    AccountPaths, Accounts, AcquisitionError, CredentialBackend, Provider, SecretValue,
+};
 use std::{
+    collections::HashMap,
     ffi::{CString, c_char, c_void},
     fs,
     io::Write,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Arc, Mutex},
 };
 
 #[link(name = "Security", kind = "framework")]
@@ -48,8 +53,33 @@ struct Setup {
     other: PathBuf,
     dummies: Vec<String>,
 }
+#[derive(Default)]
+struct Memory(Mutex<HashMap<String, Vec<u8>>>);
+impl CredentialBackend for Memory {
+    fn get(&self, reference: &str) -> Result<SecretValue, AcquisitionError> {
+        self.0
+            .lock()
+            .unwrap()
+            .get(reference)
+            .map(|v| SecretValue::new(v.clone()))
+            .ok_or(AcquisitionError::CredentialMissing)
+    }
+    fn put(&self, reference: &str, value: &SecretValue) -> Result<(), AcquisitionError> {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(reference.into(), value.bytes().to_vec());
+        Ok(())
+    }
+    fn delete(&self, reference: &str) -> Result<(), AcquisitionError> {
+        self.0.lock().unwrap().remove(reference);
+        Ok(())
+    }
+}
+
 impl Drop for Setup {
     fn drop(&mut self) {
+        self.assert_no_children();
         unsafe { assert_eq!(SecKeychainDelete(self.keychain), 0) };
         assert!(!self.path.exists());
     }
@@ -106,7 +136,7 @@ impl Setup {
     }
 
     /// Adds an item directly, as an earlier `keyring` build or another binary would have.
-    fn add(&self, service: &str, reference: &str, value: &str, trusted: &[&Path]) {
+    fn add(&self, service: &str, reference: &str, value: impl AsRef<[u8]>, trusted: &[&Path]) {
         let applications: Vec<CFType> = trusted
             .iter()
             .map(|p| {
@@ -148,7 +178,7 @@ impl Setup {
             ),
             (
                 k(unsafe { kSecValueData }),
-                CFData::from_buffer(value.as_bytes()).as_CFType(),
+                CFData::from_buffer(value.as_ref()).as_CFType(),
             ),
             (k(unsafe { kSecAttrAccess }), unsafe {
                 CFType::wrap_under_create_rule(access as CFTypeRef)
@@ -191,6 +221,7 @@ impl Setup {
     fn run_with(&self, binary: &Path, arguments: &[&str]) -> (i32, String) {
         let mut argv: Vec<String> = arguments.iter().map(|a| a.to_string()).collect();
         argv.extend(["--keychain".into(), self.path.to_str().unwrap().into()]);
+        argv.extend(["--config".into(), self.config().to_str().unwrap().into()]);
         let output = Command::new(binary)
             .args(&argv)
             .env_clear()
@@ -209,16 +240,21 @@ impl Setup {
     /// The lines travel on the driver's stdin, never in argv.
     fn typed(&self, arguments: &[&str], lines: &[&str]) -> String {
         const DRIVER: &str = r#"
-import os, pty, select, sys
+import os, pty, select, signal, sys
 lines = sys.stdin.read().splitlines()
 pid, fd = pty.fork()
 if pid == 0:
     os.execv(sys.argv[1], sys.argv[1:])
+def stop(*_):
+    os.kill(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+    os._exit(3)
+signal.signal(signal.SIGTERM, stop)
 seen = b""
 while True:
-    ready, _, _ = select.select([fd], [], [], 30)
+    ready, _, _ = select.select([fd], [], [], 20)
     if not ready:
-        break
+        stop()
     try:
         chunk = os.read(fd, 4096)
     except OSError:
@@ -247,7 +283,23 @@ sys.stdout.buffer.write(seen)
             writeln!(stdin, "{line}").unwrap();
         }
         drop(stdin);
+        let started = std::time::Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            if started.elapsed() > std::time::Duration::from_secs(60) {
+                unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let _ = child.kill();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         let output = child.wait_with_output().unwrap();
+        self.assert_no_children();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "the driver finished without a timeout"
+        );
         for dummy in &self.dummies {
             assert!(
                 !output
@@ -266,9 +318,58 @@ sys.stdout.buffer.write(seen)
             .join("\n")
     }
 
+    /// No process started with this test's keychain is still running.
+    fn assert_no_children(&self) {
+        let found = Command::new("/usr/bin/pgrep")
+            .args(["-f", self.path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(found.stdout.is_empty(), "a child outlived its test");
+    }
+
+    fn config(&self) -> PathBuf {
+        self.dir.path().join("accounts")
+    }
+
+    /// Creates a real account whose secrets live in memory, then returns its reference
+    /// and the genuine census key, as an earlier `keyring` build would have stored them.
+    fn account(&self, login: &str) -> (String, Vec<u8>) {
+        let config = self.config();
+        let backend = Arc::new(Memory::default());
+        let repo = Accounts::new(
+            AccountPaths {
+                data: config.join("data"),
+                config,
+            },
+            backend.clone(),
+        );
+        let password = SecretValue::new(b"nk-dummy-secret-account".to_vec());
+        let account = repo
+            .create(Provider::MailboxOrg, login.into(), &password)
+            .unwrap();
+        let store = repo.store(&account).unwrap();
+        let mut state = store.load_state().unwrap();
+        store.save_state(&mut state).unwrap();
+        let reference = format!("{}-census-key", account.id.as_str());
+        let value = backend.0.lock().unwrap()[&reference].clone();
+        (reference, value)
+    }
+
     fn assert_no_plaintext(&self) {
-        for entry in fs::read_dir(self.dir.path()).unwrap() {
-            let bytes = fs::read(entry.unwrap().path()).unwrap();
+        fn walk(root: &Path, files: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(root).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, files)
+                } else {
+                    files.push(path)
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(self.dir.path(), &mut files);
+        for file in files {
+            let bytes = fs::read(file).unwrap();
             for dummy in &self.dummies {
                 assert!(
                     !bytes.windows(dummy.len()).any(|w| w == dummy.as_bytes()),
@@ -282,40 +383,36 @@ sys.stdout.buffer.write(seen)
 #[test]
 fn migration_retirement_and_their_failures_through_the_real_binary() {
     let mut s = Setup::new();
-    let (a, c, x) = (s.dummy(), s.dummy(), s.dummy());
+    let (a, a_key) = s.account("a@example.test");
+    let (b, b_key) = s.account("b@example.test");
+    let (x, other_value) = (s.dummy(), s.dummy());
     let binary = s.binary.clone();
     let other = s.other.clone();
-    s.add("mailroom", "a-census-key", &a, &[&binary]);
-    s.add("mailroom", "b-password", &a, &[&binary]);
-    s.add("mailroom", "c-census-key", &c, &[&binary]);
-    s.add("mailroom-protected-v1", "c-census-key", &x, &[&binary]);
-    s.add("mailroom", "d-census-key", &a, &[&other]);
+    s.add("mailroom", &a, &a_key, &[&binary]);
+    s.add("mailroom", "b-password", &x, &[&binary]);
+    s.add("mailroom", &b, &b_key, &[&binary]);
+    s.add("mailroom-protected-v1", &b, &other_value, &[&binary]);
+    s.add("mailroom", "d-census-key", &x, &[&other]);
+    s.add("mailroom", "p-census-key", &x, &[&binary]);
+    let listed = s.run(&["keychain", "legacy"]);
+    assert_eq!(listed.lines().count(), 6, "five names and the status");
+    assert_eq!(s.run(&["keychain", "migrate", &a]), "status=migrated");
     assert_eq!(
-        s.run(&["keychain", "legacy"]),
-        "ref=a-census-key class=pinned_self\nref=b-password class=every_access\nref=c-census-key class=pinned_self\nref=d-census-key class=pinned_self\nstatus=ok"
-    );
-    assert_eq!(
-        s.run(&["keychain", "migrate", "a-census-key"]),
-        "status=migrated"
-    );
-    assert_eq!(
-        s.run(&["keychain", "migrate", "a-census-key"]),
+        s.run(&["keychain", "migrate", &a]),
         "status=matched",
         "a rerun after an interruption converges"
     );
     assert_eq!(
-        s.run(&["keychain", "status", "a-census-key"]),
+        s.run(&["keychain", "status", &a]),
         "status=ok class=pinned_self"
     );
+    assert_eq!(s.run(&["keychain", "check-store", &a]), "status=verified");
+    assert_eq!(s.run(&["keychain", "retire-legacy", &a]), "status=retired");
     assert_eq!(
-        s.run(&["keychain", "retire-legacy", "a-census-key"]),
-        "status=retired"
-    );
-    assert_eq!(
-        s.run(&["keychain", "retire-legacy", "a-census-key"]),
+        s.run(&["keychain", "retire-legacy", &a]),
         "status=legacy_missing"
     );
-    assert_eq!(s.run(&["keychain", "probe", "a-census-key"]), "status=ok");
+    assert_eq!(s.run(&["keychain", "probe", &a]), "status=ok");
 
     assert_eq!(
         s.run(&["keychain", "migrate", "b-password"]),
@@ -323,21 +420,20 @@ fn migration_retirement_and_their_failures_through_the_real_binary() {
         "verifying a password needs a person"
     );
     assert_eq!(
-        s.run(&["keychain", "status", "b-password"]),
-        "status=ok class=every_access"
-    );
-    assert_eq!(
         s.run(&["keychain", "retire-legacy", "b-password"]),
         "status=protected_denied"
     );
 
     assert_eq!(
-        s.run(&["keychain", "migrate", "c-census-key"]),
-        "status=mismatch"
+        s.run(&["keychain", "migrate", &b]),
+        "status=mismatch",
+        "a planted protected key collides"
     );
+    assert_eq!(s.run(&["keychain", "retire-legacy", &b]), "status=mismatch");
     assert_eq!(
-        s.run(&["keychain", "retire-legacy", "c-census-key"]),
-        "status=mismatch"
+        s.run(&["keychain", "check-store", &b]),
+        "status=mismatch",
+        "the planted key does not open the account"
     );
 
     assert_eq!(
@@ -345,7 +441,12 @@ fn migration_retirement_and_their_failures_through_the_real_binary() {
         "status=legacy_denied"
     );
     assert_eq!(
-        s.run(&["keychain", "status", "d-census-key"]),
+        s.run(&["keychain", "migrate", "p-census-key"]),
+        "status=protected_unverified",
+        "a planted legacy key with no account"
+    );
+    assert_eq!(
+        s.run(&["keychain", "status", "p-census-key"]),
         "status=missing class=pinned_self"
     );
     assert_eq!(
@@ -353,10 +454,57 @@ fn migration_retirement_and_their_failures_through_the_real_binary() {
         "status=legacy_missing"
     );
     assert_eq!(
-        s.run(&["keychain", "legacy"]),
-        "ref=b-password class=every_access\nref=c-census-key class=pinned_self\nref=d-census-key class=pinned_self\nstatus=ok",
+        s.run(&["keychain", "legacy"]).lines().count(),
+        5,
         "only the verified original was deleted"
     );
+    s.assert_no_plaintext();
+}
+
+#[test]
+fn a_planted_staged_copy_is_refused_and_a_genuine_one_recovers() {
+    let mut s = Setup::new();
+    let (a, a_key) = s.account("a@example.test");
+    let planted = s.dummy();
+    let binary = s.binary.clone();
+    let staged = format!("{a}-retrust");
+    s.add("mailroom-protected-v1", &staged, &planted, &[&binary]);
+    assert_eq!(s.run(&["keychain", "retrust", &a]), "status=unverified");
+    assert_eq!(
+        s.run(&["keychain", "status", &a]),
+        "status=missing class=pinned_self",
+        "nothing was published"
+    );
+    let (b, b_key) = s.account("b@example.test");
+    s.add(
+        "mailroom-protected-v1",
+        &format!("{b}-retrust"),
+        &b_key,
+        &[&binary],
+    );
+    assert_eq!(
+        s.run(&["keychain", "retrust", &b]),
+        "status=retrusted",
+        "an interrupted move finishes"
+    );
+    assert_eq!(s.run(&["keychain", "check-store", &b]), "status=verified");
+    assert_eq!(s.run(&["keychain", "retrust", &b]), "status=unchanged");
+    s.add(
+        "mailroom-protected-v1",
+        &format!("{b}-retrust"),
+        &b_key,
+        &[&binary],
+    );
+    assert_eq!(
+        s.run(&["keychain", "retrust", &b]),
+        "status=unchanged",
+        "a leftover equal copy is cleaned"
+    );
+    assert_eq!(
+        s.run(&["keychain", "status", &format!("{b}-retrust")]),
+        "status=missing class=every_access"
+    );
+    let _ = a_key;
     s.assert_no_plaintext();
 }
 
@@ -377,7 +525,8 @@ fn an_earlier_build_is_detected_and_its_keys_need_a_person_to_move() {
     );
     assert_eq!(
         s.run(&["keychain", "retrust", "e-census-key"]),
-        "status=denied"
+        "status=denied",
+        "reading an earlier build's key needs a person"
     );
     assert_eq!(
         s.run(&["keychain", "status", "e-census-key"]),
@@ -469,6 +618,28 @@ fn unhardened_builds_unknown_keychains_and_bad_arguments_are_refused() {
         s.run_with(&s.binary, &["keychain", "status", "../x"]),
         (1, "status=usage".into())
     );
+    for malformed in [
+        &["keychain", "retire-legacy", "a-census-key", "--keychain"][..],
+        &[
+            "keychain",
+            "status",
+            "a-password",
+            "--keychain",
+            "/tmp/x",
+            "--keychain",
+        ],
+        &["keychain", "status", "a-password", "--keychain", "--config"],
+        &["keychain", "status", "a-password", "--unknown", "x"],
+    ] {
+        let output = Command::new(&s.binary).args(malformed).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "status=usage",
+            "{malformed:?}"
+        );
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stderr.is_empty());
+    }
     assert_eq!(
         s.run_with(&s.binary, &["keychain", "dump"]),
         (1, "status=usage".into())

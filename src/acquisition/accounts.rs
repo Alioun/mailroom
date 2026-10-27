@@ -14,7 +14,7 @@ impl SecretValue {
     pub fn new(value: Vec<u8>) -> Self {
         Self(Zeroizing::new(value))
     }
-    pub(crate) fn bytes(&self) -> &[u8] {
+    pub fn bytes(&self) -> &[u8] {
         &self.0
     }
     pub(crate) fn text(&self) -> Result<&str, AcquisitionError> {
@@ -115,6 +115,10 @@ pub struct Account {
 
 impl Account {
     /// Keychain references this account owns. Names only; never values.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn local_secret_ref_for_test(&self) -> &str {
+        &self.local_secret_ref
+    }
     pub(crate) fn credential_references(&self) -> Vec<&str> {
         let mut references = vec![self.password_ref.as_str(), self.local_secret_ref.as_str()];
         references.extend(self.identity_ref.as_deref());

@@ -723,3 +723,106 @@ fn released_locks_do_not_remain_owned_by_an_unrelated_child_before_exec() {
         assert_eq!(after, before, "{kind}");
     }
 }
+
+/// Removes identity commitments from an account's metadata and pending intent, as a build
+/// from before commitments would have written them.
+fn strip_commitments(repo: &Accounts, id: &AccountId, roles: &[&str]) {
+    let strip = |path: PathBuf, pointers: &[String]| {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for pointer in pointers {
+            if let Some(object) = value.pointer_mut(pointer).and_then(|v| v.as_object_mut()) {
+                object.remove("identity_commitment");
+            }
+        }
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    };
+    strip(
+        repo.intent_path(id),
+        &roles
+            .iter()
+            .map(|r| format!("/intent/{r}"))
+            .collect::<Vec<_>>(),
+    );
+    strip(repo.metadata_path(id), &[String::new()]);
+}
+
+#[test]
+fn a_rotation_recorded_before_commitments_recovers_only_from_authenticated_identity() {
+    for (phase, recovers) in [
+        ("rotate_key", true),
+        ("rotate_primary", true),
+        ("rotate_unsubscribe", true),
+        ("metadata", true),
+        ("rotate_verified", true),
+        ("rotate_retire_data", false),
+        ("rotate_retire_key", false),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let repo = persistent_accounts(root.path());
+        let a = account(&repo);
+        let effects = root.path().join("mailboxes");
+        populate(&repo, &a, &effects);
+        let placeholder = repo
+            .store(&a)
+            .unwrap()
+            .keys()
+            .placeholder("sender", "a@example.test");
+        fail(Some(phase));
+        assert!(repo.rotate(&a.id, &effects).is_err(), "{phase}");
+        fail(None);
+        strip_commitments(&repo, &a.id, &["after"]);
+        drop(repo);
+        let repo = persistent_accounts(root.path());
+        let outcome = repo.recover(&a.id, &effects);
+        assert_eq!(outcome.is_ok(), recovers, "{phase}");
+        if recovers {
+            let current = repo.load(&a.id).unwrap();
+            assert_eq!(current.generation, 1, "{phase}");
+            assert!(!current.uncommitted(), "{phase}: the commitment is saved");
+            let s = repo.store(&current).unwrap();
+            assert_eq!(
+                s.keys().placeholder("sender", "a@example.test"),
+                placeholder,
+                "{phase}"
+            );
+        } else {
+            assert!(
+                repo.intent_path(&a.id).exists(),
+                "{phase}: the intent is kept"
+            );
+            let current = repo.load(&a.id).unwrap();
+            for reference in [
+                &current.local_secret_ref,
+                current.identity_ref.as_ref().unwrap(),
+            ] {
+                assert!(
+                    repo.backend.get(reference).is_ok(),
+                    "{phase}: keys are kept"
+                );
+            }
+            assert!(
+                cipher_path(&repo.paths.data, &a.id, 1).exists(),
+                "{phase}: data is kept"
+            );
+        }
+    }
+
+    // An account already rotated before commitments has no authenticated identity at all.
+    let root = tempfile::tempdir().unwrap();
+    let repo = persistent_accounts(root.path());
+    let a = account(&repo);
+    let effects = root.path().join("mailboxes");
+    populate(&repo, &a, &effects);
+    repo.rotate(&a.id, &effects).unwrap();
+    fail(Some("rotate_primary"));
+    assert!(repo.rotate(&a.id, &effects).is_err());
+    fail(None);
+    strip_commitments(&repo, &a.id, &["before", "after"]);
+    assert!(repo.recover(&a.id, &effects).is_err());
+    assert!(repo.intent_path(&a.id).exists(), "the intent is kept");
+    assert!(
+        cipher_path(&repo.paths.data, &a.id, 1).exists(),
+        "earlier data is kept"
+    );
+}

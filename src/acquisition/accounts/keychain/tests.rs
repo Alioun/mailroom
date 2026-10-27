@@ -600,3 +600,31 @@ fn the_policy_refuses_every_edited_shape() {
         assert_eq!(classify(edit), Observed::Changed, "edit {index}");
     }
 }
+
+#[test]
+fn a_failed_empty_or_unresolved_search_list_refuses() {
+    let throwaway = Throwaway::new();
+    let real = throwaway.path.canonicalize().unwrap();
+    assert_eq!(
+        resolved_search_list(None),
+        Err(Status::Failed),
+        "Security could not list"
+    );
+    assert_eq!(
+        resolved_search_list(Some(vec![])),
+        Err(Status::Failed),
+        "an empty list"
+    );
+    assert_eq!(
+        resolved_search_list(Some(vec![
+            real.clone(),
+            throwaway.dir.path().join("gone.keychain-db")
+        ])),
+        Err(Status::Failed),
+        "one path that does not resolve"
+    );
+    assert_eq!(
+        resolved_search_list(Some(vec![throwaway.path.clone()])),
+        Ok(vec![real])
+    );
+}

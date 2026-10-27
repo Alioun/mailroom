@@ -469,6 +469,9 @@ fn validate_captured(captured: &Captured) -> Result<(), AcquisitionError> {
         || captured.key.0.len() != 32
         || captured.identity.as_ref().is_some_and(|i| i.0.len() != 128)
         || captured.account.identity_ref.is_some() != captured.identity.is_some()
+        // A rotated account captured before identity commitments cannot be authenticated,
+        // so it is refused here, before any key is imported, rather than adopted silently.
+        || captured.account.uncommitted()
         || m.shared_state != "excluded_preserve_current"
         || m.excluded != exclusions()
         || m.limitations != LIMITATIONS
@@ -519,6 +522,11 @@ fn authenticate_resource(captured: &Captured) -> Result<(), AcquisitionError> {
         }
         _ => return Err(AcquisitionError::InvalidInput),
     };
+    if captured.identity.is_some()
+        && !keys.commits_to(captured.account.identity_commitment.as_deref())
+    {
+        return Err(AcquisitionError::InvalidInput);
+    }
     let staged = captured.resource.path();
     let store = EncryptedStore::new(
         staged

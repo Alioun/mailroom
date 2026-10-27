@@ -767,10 +767,67 @@ impl Accounts {
                     }
                     return self.clear_intent(id);
                 }
+                let (current, after) = if after.uncommitted() {
+                    let after = self.commit_rotation(&before, after, &stores)?;
+                    if current.generation == after.generation {
+                        self.publish(&after)?;
+                        (after.clone(), after)
+                    } else {
+                        (current, after)
+                    }
+                } else {
+                    (current, after)
+                };
                 let locked = self.lock_stores(&current, effects)?;
                 self.finish_rotation(&before, &after, effects, &stores, locked)
             }
         }
+    }
+    /// A rotation recorded before identity commitments carries none. When the account had
+    /// no identity before rotating, its identity bytes derive from the earlier key, which
+    /// the earlier saved state authenticates, so the commitment is computed, not trusted.
+    /// Every other such rotation is refused, and its intent, keys and files stay as they are.
+    fn commit_rotation(
+        &self,
+        before: &Account,
+        mut after: Account,
+        stores: &[usize],
+    ) -> Result<Account, AcquisitionError> {
+        if before.identity_ref.is_some() {
+            return Err(AcquisitionError::Credentials);
+        }
+        let earlier = self.open_store(before, &self.paths.data, 0)?;
+        earlier.load_state()?;
+        let identity = Zeroizing::new(earlier.keys().identity_material());
+        let stored = self.backend.get(
+            after
+                .identity_ref
+                .as_ref()
+                .ok_or(AcquisitionError::Storage)?,
+        )?;
+        if !bool::from(subtle::ConstantTimeEq::ct_eq(
+            stored.bytes(),
+            identity.as_slice(),
+        )) {
+            return Err(AcquisitionError::Credentials);
+        }
+        let key = self.backend.get(&after.local_secret_ref)?;
+        after.identity_commitment = CensusKeys::rotated(
+            &LocalSecret::from_bytes(key.bytes().to_vec())?,
+            &after.id,
+            &identity,
+            after.generation,
+        )?
+        .identity_commitment();
+        self.record(
+            &after.id,
+            &Intent::Rotating {
+                before: before.clone(),
+                after: after.clone(),
+                stores: stores.to_vec(),
+            },
+        )?;
+        Ok(after)
     }
 }
 fn valid_nonce(value: &str) -> bool {

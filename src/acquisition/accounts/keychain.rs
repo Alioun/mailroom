@@ -317,18 +317,27 @@ fn keychain_path(keychain: *mut c_void) -> Result<PathBuf, Status> {
 fn search_list_paths() -> Result<Vec<PathBuf>, Status> {
     let mut list = std::ptr::null();
     if unsafe { SecKeychainCopySearchList(&mut list) } != 0 || list.is_null() {
-        return Err(Status::Failed);
+        return resolved_search_list(None);
     }
     let list: CFArray<CFType> = unsafe { CFArray::wrap_under_create_rule(list) };
-    let mut paths = Vec::new();
-    for keychain in list.iter() {
-        let path = keychain_path(keychain.as_CFTypeRef() as *mut c_void)?;
-        paths.push(path.canonicalize().map_err(|_| Status::Failed)?);
-    }
-    if paths.is_empty() {
-        return Err(Status::Failed);
-    }
-    Ok(paths)
+    let found = list
+        .iter()
+        .map(|keychain| keychain_path(keychain.as_CFTypeRef() as *mut c_void))
+        .collect::<Result<Vec<_>, _>>()
+        .ok();
+    resolved_search_list(found)
+}
+
+/// The canonical search-list paths, refusing when Security could not list them, when the
+/// list is empty, or when any listed path does not resolve.
+fn resolved_search_list(found: Option<Vec<PathBuf>>) -> Result<Vec<PathBuf>, Status> {
+    let found = found
+        .filter(|paths| !paths.is_empty())
+        .ok_or(Status::Failed)?;
+    found
+        .iter()
+        .map(|path| path.canonicalize().map_err(|_| Status::Failed))
+        .collect()
 }
 
 /// The account's home directory from the user database, not from the environment.

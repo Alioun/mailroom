@@ -195,10 +195,11 @@ pub(crate) fn verify(
     }
 }
 
-/// Moves every key of one account to this build, or none. Each key is gathered from
-/// wherever it is, the whole set is checked against the account's saved state and
-/// identity commitment, and only then is each key settled. `adopt` first commits an
-/// account whose identity predates commitments to the identity bytes found now.
+/// Moves the keys of one account to this build. Each key is gathered from wherever it is,
+/// and the whole set is checked against the account's saved state and identity commitment
+/// before the first key moves. The moves then run one key at a time, so an interruption
+/// can leave some keys moved; a rerun gathers them again and finishes. `adopt` first
+/// commits an account whose identity predates commitments to the identity bytes found now.
 pub(crate) fn settle(
     keychain: &Arc<Keychain>,
     paths: &AccountPaths,

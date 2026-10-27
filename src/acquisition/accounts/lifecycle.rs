@@ -3,7 +3,7 @@ use crate::file_lock::ExclusiveFileLock;
 use std::{io::Read, path::Path};
 
 const LIMIT: u64 = 1024 * 1024;
-const CONSEQUENCES_EN: &str = "Forget this account locally, including saved headers, original content, rules, decisions, exports, undo and reconciliation history, and independent synthetic mailbox/send/unsubscribe effect stores. No remote undo, unsubscribe or account shutdown occurs. Shared owner-authored addresses.yaml and unrelated accounts survive. Browser-managed downloads, exports and backups cannot be erased here. Stable coordination lock files remain.";
+const CONSEQUENCES_EN: &str = "Forget this account locally, including saved headers, original content, rules, decisions, exports, undo and reconciliation history, and independent synthetic mailbox/send/unsubscribe effect stores. No remote undo, unsubscribe or account shutdown occurs. Shared owner-authored addresses.yaml and unrelated accounts survive. Copies kept by interrupted key changes are deleted too. Browser-managed downloads, exports and backups cannot be erased here. Stable coordination lock files remain.";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
@@ -395,6 +395,58 @@ impl Accounts {
         }
         remove_file(&self.intent_path(id))
     }
+    /// Every rollback directory of account `id` in its store directories.
+    pub(crate) fn rollback_directories(
+        &self,
+        id: &AccountId,
+        effects: &Path,
+    ) -> Result<Vec<PathBuf>, AcquisitionError> {
+        let prefix = rollback_prefix(id);
+        let mut found = vec![];
+        for dir in self.directories(effects) {
+            if !dir.try_exists().map_err(|_| AcquisitionError::Storage)? {
+                continue;
+            }
+            for entry in fs::read_dir(&dir).map_err(|_| AcquisitionError::Storage)? {
+                let path = entry.map_err(|_| AcquisitionError::Storage)?.path();
+                if path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix))
+                {
+                    found.push(path);
+                }
+            }
+        }
+        found.sort();
+        Ok(found)
+    }
+    /// Removes the account's rollback directories, an account namespace cleanup like its
+    /// staging. A directory is removed with its contents; links inside are removed, never
+    /// followed. A link in a directory's place is removed itself.
+    fn remove_rollback_directories(
+        &self,
+        id: &AccountId,
+        effects: &Path,
+    ) -> Result<usize, AcquisitionError> {
+        let found = self.rollback_directories(id, effects)?;
+        for path in &found {
+            remove_entry(path)?;
+        }
+        Ok(found.len())
+    }
+    /// Discards the copies kept by interrupted key changes of one account, on the owner's
+    /// explicit request. Returns how many rollback directories were removed.
+    pub fn discard_rollback_copies(
+        &self,
+        id: &AccountId,
+        effects: &Path,
+    ) -> Result<usize, AcquisitionError> {
+        let _lease = self.lock_account(id)?;
+        self.require_ready(id)?;
+        self.load_metadata(id)?;
+        self.remove_rollback_directories(id, effects)
+    }
     fn manifest(&self, a: &Account, effects: &Path) -> Result<Vec<Resource>, AcquisitionError> {
         let mut paths = vec![self.metadata_path(&a.id)];
         for dir in self.directories(effects) {
@@ -418,6 +470,14 @@ impl Accounts {
                 });
             }
         }
+        for path in self.rollback_directories(&a.id, effects)? {
+            let (bytes, digest) = directory_digest(&path)?;
+            resources.push(Resource {
+                path,
+                bytes,
+                digest,
+            });
+        }
         resources.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(resources)
     }
@@ -436,7 +496,7 @@ impl Accounts {
             credential_references: Self::credential_refs(a),
             consequences: Consequences {
                 en: CONSEQUENCES_EN.into(),
-                de: "Dieses Konto lokal vergessen, einschließlich gespeicherter Kopfzeilen, Originalinhalte, Regeln, Entscheidungen, Exporte, Rückgängig- und Abgleichverlauf sowie unabhängiger synthetischer Postfach-, Versand- und Abmeldeeffekte. Keine entfernte Rücknahme, Abmeldung oder Kontoschließung. Gemeinsame eigene addresses.yaml und andere Konten bleiben erhalten. Browser-Downloads, Exporte und Sicherungen können hier nicht gelöscht werden. Stabile Koordinationssperren bleiben.".into(),
+                de: "Dieses Konto lokal vergessen, einschließlich gespeicherter Kopfzeilen, Originalinhalte, Regeln, Entscheidungen, Exporte, Rückgängig- und Abgleichverlauf sowie unabhängiger synthetischer Postfach-, Versand- und Abmeldeeffekte. Keine entfernte Rücknahme, Abmeldung oder Kontoschließung. Gemeinsame eigene addresses.yaml und andere Konten bleiben erhalten. Aus unterbrochenen Schlüsselwechseln aufbewahrte Kopien werden ebenfalls gelöscht. Browser-Downloads, Exporte und Sicherungen können hier nicht gelöscht werden. Stabile Koordinationssperren bleiben.".into(),
             },
             receipt: String::new(),
         };
@@ -507,6 +567,14 @@ impl Accounts {
                     .directories(effects)
                     .iter()
                     .any(|dir| resource.path == cipher_path(dir, &a.id, a.generation))
+                || self.directories(effects).iter().any(|dir| {
+                    resource.path.parent() == Some(dir.as_path())
+                        && resource
+                            .path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with(&rollback_prefix(&a.id)))
+                })
                 || self
                     .directories(effects)
                     .iter()
@@ -525,7 +593,7 @@ impl Accounts {
                 return Err(AcquisitionError::Storage);
             }
             if resource.path != self.metadata_path(&a.id) {
-                remove_file(&resource.path)?;
+                remove_entry(&resource.path)?;
                 boundary("forget_data")?;
             }
         }
@@ -562,6 +630,9 @@ impl Accounts {
             .ok_or(AcquisitionError::Storage)?;
         after.local_secret_ref = format!("{}-key-g{}", id.as_str(), after.generation);
         after.identity_ref = Some(format!("{}-identity", id.as_str()));
+        if self.rollback_directories(id, effects)?.len() >= MAX_ROLLBACK_DIRECTORIES {
+            return Err(AcquisitionError::InvalidInput);
+        }
         // Every entry this rotation creates must be absent now, so whatever a rollback later
         // proves it created cannot be an entry that existed before.
         let created = std::iter::once(&after.local_secret_ref).chain(
@@ -694,6 +765,7 @@ impl Accounts {
         }
         self.backend.delete(&before.local_secret_ref)?;
         boundary("rotate_retire_key")?;
+        self.remove_rollback_directories(&before.id, effects)?;
         self.clear_intent(&before.id)
     }
     pub fn recovery_status(&self) -> Result<Vec<Recovery>, AcquisitionError> {
@@ -828,11 +900,12 @@ impl Accounts {
         let directories = self.directories(effects);
         for &kind in stores {
             let dir = directories.get(kind).ok_or(AcquisitionError::Storage)?;
-            quarantine(
-                dir,
-                &cipher_path(dir, &after.id, after.generation),
-                &after.id,
-            )?;
+            let path = cipher_path(dir, &after.id, after.generation);
+            let entry = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or(AcquisitionError::Storage)?;
+            quarantine(dir, entry, &after.id)?;
         }
         boundary("rollback_data")?;
         self.backend
@@ -1030,32 +1103,88 @@ pub(crate) fn write_new_secret(path: &Path, bytes: &[u8]) -> Result<(), Acquisit
         .map_err(|_| AcquisitionError::Storage)?;
     sync_dir(parent)
 }
-/// Moves the entry at `path`, whatever it is, into a new private directory beside it,
-/// keeping its name. A rename moves the entry itself and never follows a link, so nothing
-/// is destroyed and no check has to match the entry moved. A missing entry moves nothing.
-fn quarantine(dir: &Path, path: &Path, id: &AccountId) -> Result<(), AcquisitionError> {
+/// Moves the entry `entry` of `dir`, whatever it is, into a new directory beside it named
+/// `.<account>.rollback-<random>`, keeping its name. The store directory is held open; the
+/// new directory must not already exist, is created with mode 0700 and opened without
+/// following a link; and the move refuses to replace anything already at its destination.
+/// So nothing is overwritten, unlinked or redirected. Both directories are synced before
+/// the move counts as done. A missing entry moves nothing; a taken destination refuses and
+/// leaves the entry where it is.
+fn quarantine(dir: &Path, entry: &str, id: &AccountId) -> Result<(), AcquisitionError> {
+    use super::exclusive::{Dir, Moved, move_exclusive};
+    if !dir.try_exists().map_err(|_| AcquisitionError::Storage)? {
+        return Ok(());
+    }
+    let store = Dir::open(dir)?;
+    if !store.has(entry)? {
+        return Ok(());
+    }
+    let folder = store.create_fresh(&format!("{}{}", rollback_prefix(id), nonce()))?;
+    match move_exclusive(&store, entry, &folder, entry)? {
+        Moved::Moved => {
+            folder.sync()?;
+            store.sync()
+        }
+        Moved::SourceMissing => store.sync(),
+        Moved::DestinationTaken => Err(AcquisitionError::Storage),
+    }
+}
+/// The name prefix of every rollback directory of account `id`.
+fn rollback_prefix(id: &AccountId) -> String {
+    format!(".{}.rollback-", id.as_str())
+}
+/// At most this many rollback directories may exist per account. A rotation refuses to
+/// start at the limit, so their number stays bounded until forget, the next successful
+/// rotation or an explicit discard removes them.
+pub(crate) const MAX_ROLLBACK_DIRECTORIES: usize = 8;
+/// Removes a file, a link or a whole directory at `path` without following a link.
+fn remove_entry(path: &Path) -> Result<(), AcquisitionError> {
     match fs::symlink_metadata(path) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(AcquisitionError::Storage),
-    }
-    let target = dir.join(format!(".{}.rollback-{}", id.as_str(), nonce()));
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&target)
-            .map_err(|_| AcquisitionError::Storage)?;
-    }
-    #[cfg(not(unix))]
-    fs::create_dir(&target).map_err(|_| AcquisitionError::Storage)?;
-    let name = path.file_name().ok_or(AcquisitionError::Storage)?;
-    match fs::rename(path, target.join(name)) {
-        Ok(()) => sync_dir(dir),
+        Ok(m) if m.is_dir() => {
+            fs::remove_dir_all(path).map_err(|_| AcquisitionError::Storage)?;
+            sync_dir(path.parent().ok_or(AcquisitionError::Storage)?)
+        }
+        Ok(_) => remove_file(path),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err(AcquisitionError::Storage),
     }
+}
+/// A rollback directory's size and a digest of its entries, so a forget preview binds
+/// exactly what it will remove: each entry's name and type, a link's target, and a regular
+/// file's length and SHA-256. Nothing is followed.
+fn directory_digest(path: &Path) -> Result<(u64, String), AcquisitionError> {
+    use sha2::{Digest, Sha256};
+    let metadata = fs::symlink_metadata(path).map_err(|_| AcquisitionError::Storage)?;
+    let mut lines = vec![];
+    let mut total = 0;
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path).map_err(|_| AcquisitionError::Storage)? {
+            let entry = entry.map_err(|_| AcquisitionError::Storage)?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let kind = fs::symlink_metadata(entry.path()).map_err(|_| AcquisitionError::Storage)?;
+            lines.push(if kind.is_file() {
+                let bytes = read_bounded(&entry.path(), crate::census::MAX_FILE)?;
+                total += bytes.len() as u64;
+                format!(
+                    "f {name} {} {}",
+                    bytes.len(),
+                    data_encoding::HEXLOWER.encode(&Sha256::digest(&bytes))
+                )
+            } else if kind.file_type().is_symlink() {
+                let target = fs::read_link(entry.path()).map_err(|_| AcquisitionError::Storage)?;
+                format!("l {name} {}", target.to_string_lossy())
+            } else {
+                format!("d {name}")
+            });
+        }
+    } else {
+        lines.push("not-a-directory".into());
+    }
+    lines.sort();
+    Ok((
+        total,
+        data_encoding::HEXLOWER.encode(&Sha256::digest(lines.join("\n").as_bytes())),
+    ))
 }
 pub(crate) fn remove_file(path: &Path) -> Result<(), AcquisitionError> {
     match fs::remove_file(path) {

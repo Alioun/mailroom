@@ -1308,3 +1308,238 @@ fn the_file_backend_deletes_only_the_entry_it_checked() {
         "the replacement survives"
     );
 }
+
+#[test]
+fn the_file_backend_never_unlinks_and_never_replaces_a_name_taken_meanwhile() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = persistent_accounts(root.path());
+    let backend = repo.backend.clone();
+    backend
+        .put("y-key-g1", &SecretValue::new(vec![1; 32]))
+        .unwrap();
+    // Not owned, and the name is taken again during the check: the new entry keeps the
+    // name, and the checked entry stays discarded rather than replacing it.
+    let take = |_: &[u8]| {
+        backend
+            .put("y-key-g1", &SecretValue::new(vec![7; 32]))
+            .unwrap();
+        false
+    };
+    assert!(!backend.delete_owned("y-key-g1", &take).unwrap());
+    assert_eq!(backend.get("y-key-g1").unwrap().bytes(), &[7; 32][..]);
+    let discarded: Vec<Vec<u8>> = fs::read_dir(root.path().join("fake-credentials"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with(".y-key-g1.discarded-")
+        })
+        .map(|p| fs::read(p.join("y-key-g1")).unwrap())
+        .collect();
+    assert_eq!(
+        discarded,
+        vec![vec![1; 32]],
+        "the checked entry is kept, not destroyed"
+    );
+}
+
+/// Interrupts a first rotation of a populated account after its next-generation files exist.
+fn pending_rotation() -> (tempfile::TempDir, Accounts, Account, PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let repo = persistent_accounts(root.path());
+    let a = account(&repo);
+    let effects = root.path().join("mailboxes");
+    populate(&repo, &a, &effects);
+    fail(Some("rotate_unsubscribe"));
+    assert!(repo.rotate(&a.id, &effects).is_err());
+    fail(None);
+    (root, repo, a, effects)
+}
+
+fn set_after_create(hook: Option<Box<dyn FnMut(&str)>>) {
+    crate::acquisition::accounts::exclusive::AFTER_CREATE.with(|h| *h.borrow_mut() = hook);
+}
+
+#[test]
+fn rollback_refuses_rather_than_overwrite_a_planted_destination_or_follow_a_substituted_folder() {
+    for plant in ["file", "symlink"] {
+        let (root, repo, a, effects) = pending_rotation();
+        let data = repo.paths.data.clone();
+        let canonical = cipher_path(&data, &a.id, 1);
+        let genuine = fs::read(&canonical).unwrap();
+        let entry = canonical.file_name().unwrap().to_str().unwrap().to_owned();
+        let elsewhere = root.path().join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        fs::write(elsewhere.join("keep"), b"unrelated file B").unwrap();
+        let planted = std::rc::Rc::new(std::cell::RefCell::new(None::<PathBuf>));
+        let seen = planted.clone();
+        let (store, file_name, target) = (data.clone(), entry.clone(), elsewhere.clone());
+        set_after_create(Some(Box::new(move |folder: &str| {
+            let folder = store.join(folder);
+            if seen.borrow().is_some() || !folder.starts_with(&store) {
+                return;
+            }
+            if plant == "file" {
+                fs::write(folder.join(&file_name), b"unrelated file B").unwrap();
+            } else {
+                fs::remove_dir(&folder).unwrap();
+                std::os::unix::fs::symlink(&target, &folder).unwrap();
+            }
+            *seen.borrow_mut() = Some(folder);
+        })));
+        assert!(repo.recover(&a.id, &effects).is_err(), "{plant}: refused");
+        set_after_create(None);
+        let folder = planted.borrow().clone().unwrap();
+        assert_eq!(
+            fs::read(&canonical).unwrap(),
+            genuine,
+            "{plant}: the source stays"
+        );
+        if plant == "file" {
+            assert_eq!(
+                fs::read(folder.join(&entry)).unwrap(),
+                b"unrelated file B",
+                "B survives"
+            );
+        } else {
+            let names: Vec<_> = fs::read_dir(&elsewhere)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            assert_eq!(
+                names,
+                vec![std::ffi::OsString::from("keep")],
+                "nothing moved through the link"
+            );
+        }
+        assert!(
+            repo.intent_path(&a.id).exists(),
+            "{plant}: the rollback is still pending"
+        );
+        drop(repo);
+        let repo = persistent_accounts(root.path());
+        repo.recover(&a.id, &effects).unwrap();
+        assert!(
+            quarantined(&data, &a.id).contains(&genuine),
+            "{plant}: a retry moves it"
+        );
+        assert_eq!(
+            fs::read(elsewhere.join("keep")).unwrap(),
+            b"unrelated file B"
+        );
+        if plant == "file" {
+            assert_eq!(fs::read(folder.join(&entry)).unwrap(), b"unrelated file B");
+        }
+    }
+}
+
+#[test]
+fn a_fresh_folder_must_not_already_exist() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("taken")).unwrap();
+    fs::write(root.path().join("taken/keep"), b"keep").unwrap();
+    let dir = crate::acquisition::accounts::exclusive::Dir::open(root.path()).unwrap();
+    assert!(dir.create_fresh("taken").is_err());
+    assert_eq!(fs::read(root.path().join("taken/keep")).unwrap(), b"keep");
+}
+
+#[test]
+fn rollback_syncs_both_directories_of_every_move_before_it_is_done() {
+    use std::os::unix::fs::MetadataExt;
+    let (_root, repo, a, effects) = pending_rotation();
+    crate::acquisition::accounts::exclusive::SYNCED.with(|s| s.borrow_mut().clear());
+    repo.recover(&a.id, &effects).unwrap();
+    let synced = crate::acquisition::accounts::exclusive::SYNCED.with(|s| s.borrow().clone());
+    let folders = repo.rollback_directories(&a.id, &effects).unwrap();
+    assert_eq!(folders.len(), 4, "one move per recorded store");
+    for folder in folders {
+        for dir in [folder.clone(), folder.parent().unwrap().to_path_buf()] {
+            let m = fs::metadata(&dir).unwrap();
+            assert!(
+                synced.contains(&(m.dev() as u64, m.ino())),
+                "{} synced",
+                dir.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn rollback_copies_are_bounded_listed_by_forget_and_removed_by_forget_rotation_or_discard() {
+    let (_root, repo, a, effects) = pending_rotation();
+    repo.recover(&a.id, &effects).unwrap();
+    assert_eq!(repo.rollback_directories(&a.id, &effects).unwrap().len(), 4);
+
+    // An explicit discard removes them.
+    assert_eq!(repo.discard_rollback_copies(&a.id, &effects).unwrap(), 4);
+    assert!(
+        repo.rollback_directories(&a.id, &effects)
+            .unwrap()
+            .is_empty()
+    );
+
+    // At the bound a rotation refuses before recording anything.
+    for i in 0..MAX_ROLLBACK_DIRECTORIES {
+        fs::create_dir(
+            repo.paths
+                .data
+                .join(format!(".{}.rollback-x{i}", a.id.as_str())),
+        )
+        .unwrap();
+    }
+    assert!(repo.rotate(&a.id, &effects).is_err());
+    assert!(!repo.intent_path(&a.id).exists());
+    repo.discard_rollback_copies(&a.id, &effects).unwrap();
+
+    // A successful rotation removes those left by an earlier interrupted one.
+    fail(Some("rotate_primary"));
+    assert!(repo.rotate(&a.id, &effects).is_err());
+    fail(None);
+    repo.recover(&a.id, &effects).unwrap();
+    assert!(
+        !repo
+            .rollback_directories(&a.id, &effects)
+            .unwrap()
+            .is_empty()
+    );
+    repo.rotate(&a.id, &effects).unwrap();
+    assert!(
+        repo.rollback_directories(&a.id, &effects)
+            .unwrap()
+            .is_empty()
+    );
+
+    // Forget lists them in its preview, refuses a changed folder, and removes them.
+    fail(Some("rotate_primary"));
+    assert!(repo.rotate(&a.id, &effects).is_err());
+    fail(None);
+    repo.recover(&a.id, &effects).unwrap();
+    let folders = repo.rollback_directories(&a.id, &effects).unwrap();
+    assert!(!folders.is_empty());
+    let preview = repo.forget_preview(&a.id, &effects).unwrap();
+    for folder in &folders {
+        assert!(
+            preview.resources.iter().any(|r| &r.path == folder),
+            "{} listed",
+            folder.display()
+        );
+    }
+    fs::write(folders[0].join("added-later"), b"x").unwrap();
+    assert!(
+        repo.forget(&a.id, &effects, &preview, true).is_err(),
+        "a changed folder refuses"
+    );
+    fs::remove_file(folders[0].join("added-later")).unwrap();
+    let preview = repo.forget_preview(&a.id, &effects).unwrap();
+    repo.forget(&a.id, &effects, &preview, true).unwrap();
+    for folder in folders {
+        assert!(
+            fs::symlink_metadata(&folder).is_err(),
+            "{} removed",
+            folder.display()
+        );
+    }
+}

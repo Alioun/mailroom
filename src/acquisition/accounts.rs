@@ -1,4 +1,5 @@
 #[cfg(target_os = "macos")]
+pub(crate) mod exclusive;
 pub(crate) mod keychain;
 pub mod lifecycle;
 pub(crate) mod recovery;
@@ -623,30 +624,38 @@ pub(crate) mod process_tests {
             private_directory(&self.0)?;
             lifecycle::write_new_secret(&self.0.join(reference), value.bytes())
         }
-        /// Moves the entry to a private name first, so the file checked is the file removed;
-        /// an entry that is not owned is linked back under its name, never over another.
+        /// Never unlinks. The entry is moved, by an exclusive rename between open
+        /// directories, into a fresh `.<reference>.discarded-<random>` directory, and the file
+        /// read is the one in that directory. An owned entry stays discarded there; any other
+        /// is moved back only if its name is still free, and otherwise stays there too. So no
+        /// entry another process puts at either name is ever removed or replaced.
         fn delete_owned(
             &self,
             reference: &str,
             owned: &dyn Fn(&[u8]) -> bool,
         ) -> Result<bool, AcquisitionError> {
-            let named = self.0.join(reference);
-            let private = self
-                .0
-                .join(format!(".{reference}.owned-{}", lifecycle::nonce()));
-            match fs::rename(&named, &private) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-                Err(_) => return Err(AcquisitionError::Storage),
+            use exclusive::{Dir, Moved, move_exclusive};
+            if !self.0.try_exists().map_err(|_| AcquisitionError::Storage)? {
+                return Ok(false);
             }
-            let value = Zeroizing::new(fs::read(&private).map_err(|_| AcquisitionError::Storage)?);
+            let store = Dir::open(&self.0)?;
+            if !store.has(reference)? {
+                return Ok(false);
+            }
+            let folder =
+                store.create_fresh(&format!(".{reference}.discarded-{}", lifecycle::nonce()))?;
+            match move_exclusive(&store, reference, &folder, reference)? {
+                Moved::Moved => {}
+                Moved::SourceMissing => return Ok(false),
+                Moved::DestinationTaken => return Err(AcquisitionError::Storage),
+            }
+            let value = folder.read(reference, 1024 * 1024)?;
             if owned(&value) {
-                lifecycle::remove_file(&private)?;
+                folder.sync()?;
+                store.sync()?;
                 return Ok(true);
             }
-            if fs::hard_link(&private, &named).is_ok() {
-                lifecycle::remove_file(&private)?;
-            }
+            move_exclusive(&folder, reference, &store, reference)?;
             Ok(false)
         }
     }

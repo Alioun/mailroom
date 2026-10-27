@@ -249,6 +249,7 @@ confirm "Build and install the helpers now?" || return 1
 mkdir -p "$helpers" && chmod 700 "$helpers"
 local name cdhash
 for name in mailroom-confirm mailroom-keychain; do
+  rm -f "$helpers/$name"
   install -m 700 "$build/$name" "$helpers/$name"
   "$codesign" -s - -f -o runtime --identifier "org.mailroom.${name#mailroom-}" "$helpers/$name" >/dev/null 2>&1
   cdhash="$("$codesign" -d -vvv --arch "$arch" "$helpers/$name" 2>&1 | sed -n 's/^CDHash=//p')"

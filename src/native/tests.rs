@@ -89,6 +89,8 @@ impl Fixture {
     /// Copies a signed binary into the private directory, keeping its signature.
     pub fn copy(&self, name: &str, from: &Path) -> PathBuf {
         let path = self.dir.path().join(name);
+        // A fresh inode each time: macOS caches a signature per vnode and kills images rewritten in place.
+        let _ = fs::remove_file(&path);
         fs::copy(from, &path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         path

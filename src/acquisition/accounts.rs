@@ -1,7 +1,7 @@
 pub mod lifecycle;
 pub(crate) mod recovery;
 use super::AcquisitionError;
-use crate::census::{AccountId, Census, CensusKeys, EncryptedStore, LocalSecret};
+use crate::census::{AccountId, AccountState, Census, CensusKeys, EncryptedStore, LocalSecret};
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{fs, io::Write, path::PathBuf, sync::Arc};
@@ -152,8 +152,34 @@ pub struct Accounts {
     pub(super) sieve_source: Option<Arc<super::managesieve::InstalledSource>>,
     #[cfg(test)]
     pub(super) imap_factory: Option<super::imap::TestConnection>,
+    /// Injected wall clock in seconds, for retention tests.
+    #[cfg(test)]
+    pub(crate) clock: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 impl Accounts {
+    /// Seconds since the Unix epoch, used for Q27 undo retention.
+    pub(crate) fn now(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(clock) = &self.clock {
+            return clock.load(std::sync::atomic::Ordering::SeqCst);
+        }
+        crate::backlog::retention::now()
+    }
+    /// Applies Q27 retention to both backlog journals and saves once if it
+    /// stamped or compacted a run.
+    pub(crate) fn retain_backlog(
+        &self,
+        store: &EncryptedStore,
+        saved: &mut AccountState,
+    ) -> Result<(), AcquisitionError> {
+        let now = self.now();
+        let protocol = saved.protocol_backlog.compact(now);
+        let gmail = saved.gmail_backlog.compact(now);
+        if protocol || gmail {
+            store.save_state(saved)?;
+        }
+        Ok(())
+    }
     #[cfg(test)]
     pub(crate) fn fixture_sieve_store(
         &self,
@@ -176,6 +202,8 @@ impl Accounts {
             sieve_write: None,
             #[cfg(test)]
             imap_factory: None,
+            #[cfg(test)]
+            clock: None,
         }
     }
     #[cfg(test)]

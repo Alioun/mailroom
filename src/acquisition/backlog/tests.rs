@@ -844,3 +844,421 @@ fn scale_move_backlog() {
         Default::default(),
     );
 }
+
+fn clocked(w: &mut Workflow, at: u64) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+    let clock = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(at));
+    w.repo.clock = Some(clock.clone());
+    clock
+}
+
+fn retain(w: &Workflow) -> AccountState {
+    let store = w.store();
+    let mut saved = store.load_state().unwrap();
+    w.repo.retain_backlog(&store, &mut saved).unwrap();
+    saved
+}
+
+const T0: u64 = 1_800_000_000;
+
+/// Q27 at the boundary: Undo is offered until the last second of day 90, and
+/// at 90 days the per-message journal becomes a summary of counts, folders
+/// and dates. A further retention pass writes nothing.
+#[test]
+fn completed_run_stays_undoable_for_ninety_days_then_compacts_to_a_summary() {
+    use crate::backlog::retention::WINDOW_SECS;
+    let mut w = Workflow::start(false);
+    let clock = clocked(&mut w, T0);
+    let preview = w.preview().unwrap();
+    w.confirm(&preview).unwrap();
+    let run = w.run();
+    assert_eq!(run.status, Status::Complete);
+    assert_eq!(run.completed_at, Some(T0));
+    clock.store(T0 + WINDOW_SECS - 1, std::sync::atomic::Ordering::SeqCst);
+    let kept = retain(&w);
+    assert_eq!(kept.protocol_backlog.runs.len(), 1);
+    assert!(kept.protocol_backlog.summaries.is_empty());
+    assert!(w.undo_preview().is_ok(), "undo is offered on day 89");
+    let deadlines = kept.protocol_backlog.deadlines(T0 + WINDOW_SECS - 1);
+    assert!(deadlines[0].undo_open);
+    assert_eq!(deadlines[0].undo_until, Some(T0 + WINDOW_SECS));
+    clock.store(T0 + WINDOW_SECS, std::sync::atomic::Ordering::SeqCst);
+    assert!(w.undo_preview().is_err(), "undo closes at 90 days");
+    let revision = w.store().load_state().unwrap().revision;
+    let compacted = retain(&w);
+    assert!(compacted.protocol_backlog.runs.is_empty());
+    let summary = &compacted.protocol_backlog.summaries[0];
+    assert_eq!(summary.id, run.id);
+    assert_eq!(summary.status, Status::Complete);
+    assert_eq!(
+        (summary.completed_at, summary.compacted_at),
+        (T0, T0 + WINDOW_SECS)
+    );
+    assert_eq!(summary.messages, run.plan.filing.changes.len());
+    assert_eq!(summary.applied, summary.messages);
+    assert_eq!(summary.restored, 0);
+    assert_eq!(
+        summary
+            .folders
+            .values()
+            .flat_map(|d| d.values())
+            .sum::<usize>(),
+        summary.messages
+    );
+    let reopened = w.store().load_state().unwrap();
+    assert_eq!(reopened.revision, revision + 1, "compaction is one save");
+    assert!(reopened.protocol_backlog == compacted.protocol_backlog);
+    reopened.protocol_backlog.validate(&w.account.id).unwrap();
+    retain(&w);
+    assert_eq!(w.store().load_state().unwrap().revision, revision + 1);
+}
+
+/// Runs saved before schema 19 carry no completion time. The first
+/// retention pass stamps them with the current time, so they keep a full
+/// 90-day window from the upgrade instead of losing Undo at once.
+#[test]
+fn runs_saved_before_retention_get_a_full_window_from_the_upgrade() {
+    use crate::backlog::retention::WINDOW_SECS;
+    let mut w = Workflow::start(false);
+    let clock = clocked(&mut w, T0);
+    let preview = w.preview().unwrap();
+    w.confirm(&preview).unwrap();
+    let store = w.store();
+    let mut saved = store.load_state().unwrap();
+    saved.protocol_backlog.runs[0].completed_at = None;
+    store.save_state(&mut saved).unwrap();
+    drop(store);
+    clock.store(T0 + 10 * WINDOW_SECS, std::sync::atomic::Ordering::SeqCst);
+    let stamped = retain(&w);
+    assert_eq!(
+        stamped.protocol_backlog.runs[0].completed_at,
+        Some(T0 + 10 * WINDOW_SECS)
+    );
+    assert!(w.undo_preview().is_ok());
+}
+
+/// Uncertain and conflicted runs are never compacted, however old.
+#[test]
+fn uncertain_and_conflicted_runs_are_never_compacted() {
+    use crate::backlog::retention::WINDOW_SECS;
+    let mut w = Workflow::start(false);
+    let clock = clocked(&mut w, T0);
+    let preview = w.preview().unwrap();
+    w.set("move-mode", "partial");
+    assert!(w.confirm(&preview).is_err());
+    w.set("move-mode", "");
+    assert_eq!(w.run().status, Status::Uncertain);
+    clock.store(T0 + 100 * WINDOW_SECS, std::sync::atomic::Ordering::SeqCst);
+    let uncertain = w.run();
+    let kept = retain(&w);
+    assert!(kept.protocol_backlog.summaries.is_empty());
+    assert!(kept.protocol_backlog.runs[0] == uncertain);
+    let store = w.store();
+    let mut saved = store.load_state().unwrap();
+    saved.protocol_backlog.runs[0].status = Status::Conflict;
+    store.save_state(&mut saved).unwrap();
+    drop(store);
+    let kept = retain(&w);
+    assert!(kept.protocol_backlog.summaries.is_empty());
+    assert_eq!(kept.protocol_backlog.runs[0].status, Status::Conflict);
+    assert!(kept.protocol_backlog.runs[0].completed_at.is_none());
+}
+
+#[test]
+fn compaction_kill_worker() {
+    let Some(root) = std::env::var_os("MAILROOM_COMPACTION_KILL_TEST") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    let repo = crate::acquisition::persistent_test_accounts(&root);
+    let id = AccountId::new(&std::fs::read_to_string(root.join("account-id")).unwrap()).unwrap();
+    let store = repo.store(&repo.load(&id).unwrap()).unwrap();
+    let mut saved = store.load_state().unwrap();
+    let now = std::fs::read_to_string(root.join("now"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(saved.protocol_backlog.compact(now));
+    store.save_state(&mut saved).unwrap();
+    std::fs::write(root.join("compacted"), b"saved").unwrap();
+}
+
+/// SIGKILL at each point of the compaction save: after the new base is
+/// staged, after it replaced the file, and with no kill. Every reopen shows
+/// either the full run or its summary, never both and never neither.
+#[test]
+fn sigkill_during_compaction_leaves_the_full_run_or_its_summary() {
+    use crate::backlog::retention::WINDOW_SECS;
+    use std::os::unix::process::ExitStatusExt;
+    for point in ["base_staged", "base_renamed", ""] {
+        let mut w = Workflow::start(false);
+        clocked(&mut w, T0);
+        let preview = w.preview().unwrap();
+        w.confirm(&preview).unwrap();
+        let run = w.run();
+        std::fs::write(w.path("account-id"), w.account.id.as_str()).unwrap();
+        std::fs::write(w.path("now"), (T0 + WINDOW_SECS).to_string()).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "acquisition::backlog::tests::compaction_kill_worker",
+            ])
+            .env("MAILROOM_COMPACTION_KILL_TEST", w.root.path())
+            .env("MAILROOM_KILL_AT", point)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        let reopened = w.store().load_state().unwrap();
+        reopened.protocol_backlog.validate(&w.account.id).unwrap();
+        let journal = &reopened.protocol_backlog;
+        let full = journal.runs.len() == 1 && journal.runs[0] == run;
+        let summarized = journal.runs.is_empty()
+            && journal.summaries.len() == 1
+            && journal.summaries[0].id == run.id;
+        assert!(full != summarized, "{point}: exactly one form survives");
+        match point {
+            "" => {
+                assert!(status.success() && summarized && w.path("compacted").exists());
+            }
+            "base_staged" => {
+                assert_eq!(status.signal(), Some(libc::SIGKILL));
+                assert!(full, "{point}: the old file stays until the rename");
+            }
+            _ => {
+                assert_eq!(status.signal(), Some(libc::SIGKILL));
+                assert!(summarized, "{point}: the rename committed the summary");
+            }
+        }
+        eprintln!("compaction.kill point={point:?} full={full} summarized={summarized}");
+    }
+}
+
+/// One phase of a personal-scale MOVE run that a single process cannot
+/// finish within its time limit. Each phase reopens the fixture installation
+/// at `$MAILROOM_SCALE_ROOT` and stops between batches after
+/// `$MAILROOM_SCALE_BUDGET` seconds, like Cancel; the next phase resumes.
+/// Phases: `setup`, `confirm`, `resume`, `undo`, `resume_undo`, `verify`.
+#[test]
+#[ignore = "personal-scale measurement; run explicitly"]
+fn scale_move_phase() {
+    use crate::backlog::retention::WINDOW_SECS;
+    use crate::census::scale;
+    let root = std::path::PathBuf::from(std::env::var("MAILROOM_SCALE_ROOT").unwrap());
+    let phase = std::env::var("MAILROOM_SCALE_PHASE").unwrap();
+    let budget: u64 = std::env::var("MAILROOM_SCALE_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(420);
+    if phase == "setup" {
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("workspace-authority"), "completion-fixture-v1").unwrap();
+        std::fs::write(
+            root.join("move-large"),
+            format!("{} exact eligible messages", scale::run_from_env()),
+        )
+        .unwrap();
+    }
+    let (mut repo, account, _fake) = fixture_install(&root);
+    let undo_day = T0 + WINDOW_SECS - 86_400;
+    let at = if phase.contains("undo") || phase == "verify" {
+        undo_day
+    } else {
+        T0
+    };
+    repo.clock = Some(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(at)));
+    let store = repo.store(&account).unwrap();
+    let cancel = Cancellation::default();
+    STOP_BETWEEN_BATCHES.with(|s| {
+        *s.borrow_mut() = Some((
+            std::time::Instant::now() + std::time::Duration::from_secs(budget),
+            cancel.clone(),
+        ))
+    });
+    let run = |saved: &AccountState| saved.protocol_backlog.runs.last().unwrap().clone();
+    let progress = |run: &Run| {
+        let entries: Vec<_> = if run.undo_receipt.is_some() {
+            run.reverse.iter().map(|r| &r.evidence).collect()
+        } else {
+            run.batches.iter().collect()
+        };
+        serde_json::json!({
+            "status": run.status,
+            "verified_batches": entries.iter().filter(|e| model::verified(e)).count(),
+            "batches": entries.len(),
+            "messages": run.plan.filing.changes.len(),
+            "completed_at": run.completed_at,
+        })
+    };
+    let report = |operation: &str, result: String| {
+        let saved = store.load_state().unwrap();
+        let mut extra = progress(&run(&saved));
+        extra["result"] = result.into();
+        extra["journal_bytes"] = serde_json::to_vec(&saved.protocol_backlog)
+            .unwrap()
+            .len()
+            .into();
+        extra["file_bytes"] = std::fs::metadata(store.path()).unwrap().len().into();
+        scale::report(operation, extra, Default::default());
+    };
+    match phase.as_str() {
+        "setup" => scale::report(
+            "move.setup",
+            scale::inflate_store(&store, false),
+            Default::default(),
+        ),
+        "confirm" => {
+            let saved = store.load_state().unwrap();
+            let preview = scale::measure("move.preview", serde_json::json!({}), || {
+                repo.backlog_preview(
+                    &account,
+                    &store,
+                    &saved,
+                    Options::default(),
+                    Cancellation::default(),
+                )
+            })
+            .unwrap();
+            let mut saved = store.load_state().unwrap();
+            let result = scale::measure(
+                "move.confirm_run",
+                serde_json::json!({"batches": preview.operation.batches.len(), "messages": preview.operation.plan.filing.changes.len()}),
+                || {
+                    repo.backlog_confirm(
+                        &account,
+                        &store,
+                        &mut saved,
+                        Options::default(),
+                        &preview.receipt,
+                        cancel.clone(),
+                        |_| Ok(()),
+                    )
+                },
+            );
+            report("move.after_confirm", format!("{result:?}"));
+        }
+        "resume" | "resume_undo" => {
+            let mut saved = store.load_state().unwrap();
+            let id = run(&saved).id;
+            let result = scale::measure(&format!("move.{phase}"), serde_json::json!({}), || {
+                repo.backlog_run(
+                    &account,
+                    &store,
+                    &mut saved,
+                    &id,
+                    phase == "resume_undo",
+                    cancel.clone(),
+                    |_| Ok(()),
+                )
+            });
+            report(&format!("move.after_{phase}"), format!("{result:?}"));
+        }
+        "undo" => {
+            let saved = store.load_state().unwrap();
+            let id = run(&saved).id;
+            let deadline = saved.protocol_backlog.deadlines(undo_day)[0].clone();
+            assert!(deadline.undo_open, "day 89 is inside the undo window");
+            let preview = scale::measure(
+                "move.undo_preview",
+                serde_json::json!({"undo_until": deadline.undo_until}),
+                || {
+                    repo.backlog_undo_preview(
+                        &account,
+                        &store,
+                        &saved,
+                        &id,
+                        Cancellation::default(),
+                    )
+                },
+            )
+            .unwrap();
+            let mut saved = store.load_state().unwrap();
+            let result = scale::measure(
+                "move.undo",
+                serde_json::json!({"batches": preview.reverse.len(), "conflicts": preview.conflicts}),
+                || {
+                    repo.backlog_undo(
+                        &account,
+                        &store,
+                        &mut saved,
+                        &id,
+                        &preview.receipt,
+                        cancel.clone(),
+                        |_| Ok(()),
+                    )
+                },
+            );
+            report("move.after_undo", format!("{result:?}"));
+        }
+        "verify" => {
+            let saved = store.load_state().unwrap();
+            saved.protocol_backlog.validate(&account.id).unwrap();
+            let r = run(&saved);
+            let forward: usize = r
+                .batches
+                .iter()
+                .filter(|b| model::verified(b))
+                .map(|b| b.command().messages().len())
+                .sum();
+            let reversed: usize = r
+                .reverse
+                .iter()
+                .filter(|b| model::verified(&b.evidence))
+                .map(|b| b.evidence.command().messages().len())
+                .sum();
+            scale::report(
+                "move.verify",
+                serde_json::json!({"status": r.status, "messages": r.plan.filing.changes.len(), "forward_verified": forward, "reverse_verified": reversed, "completed_at": r.completed_at, "undo_until": saved.protocol_backlog.deadlines(undo_day)[0].undo_until}),
+                Default::default(),
+            );
+            assert_eq!(r.status, Status::Undone);
+            assert_eq!(forward, r.plan.filing.changes.len());
+            assert_eq!(reversed, forward);
+        }
+        "recover" => {
+            let secret = crate::acquisition::SecretValue::new(vec![0x5c; 32]);
+            let raw = std::fs::read(store.path()).unwrap();
+            let journal =
+                serde_json::to_vec(&store.load_state().unwrap().protocol_backlog).unwrap();
+            drop(store);
+            let (preview, _) =
+                scale::measure("recovery.capture_preview", serde_json::json!({}), || {
+                    repo.capture_preview(&account.id, 1_800_000_000)
+                })
+                .unwrap();
+            let bundles = root.join("recovery-bundles");
+            let id = scale::measure(
+                "recovery.capture",
+                serde_json::json!({"journal_bytes": journal.len()}),
+                || repo.capture(&preview, &secret, &bundles, |_| Ok(())),
+            )
+            .unwrap();
+            let bundle =
+                crate::acquisition::accounts::recovery::bundle_file(&bundles, &id).unwrap();
+            drop(repo);
+            for lost in ["fake-credentials", "data", "config"] {
+                std::fs::rename(root.join(lost), root.join(format!("lost-{lost}"))).unwrap();
+            }
+            let fresh = crate::acquisition::persistent_test_accounts(&root);
+            let restore = scale::measure("recovery.restore_preview", serde_json::json!({}), || {
+                fresh.restore_preview(&bundle, &secret)
+            })
+            .unwrap();
+            scale::measure("recovery.restore", serde_json::json!({}), || {
+                fresh.restore(&bundle, &secret, &restore, |_| Ok(()))
+            })
+            .unwrap();
+            let restored = fresh.store(&fresh.load(&account.id).unwrap()).unwrap();
+            let exact = std::fs::read(restored.path()).unwrap() == raw;
+            let same_journal = serde_json::to_vec(&restored.load_state().unwrap().protocol_backlog)
+                .unwrap()
+                == journal;
+            scale::report(
+                "recovery.result",
+                serde_json::json!({"bundle_bytes": std::fs::metadata(&bundle).unwrap().len(), "exact_file": exact, "same_journal": same_journal, "held": restored.recovery_pending()}),
+                Default::default(),
+            );
+            assert!(exact && same_journal && restored.recovery_pending());
+        }
+        _ => unreachable!("{phase}"),
+    }
+}

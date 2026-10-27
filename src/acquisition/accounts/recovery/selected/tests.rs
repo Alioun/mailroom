@@ -105,7 +105,12 @@ fn schema_ten_protocol_and_proposal_sieve_facts_round_trip_with_selected_recover
             .unwrap();
     }
     let (manifest, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
-    assert!(manifest.accounts.iter().all(|m| m.state_schema == 18));
+    assert!(
+        manifest
+            .accounts
+            .iter()
+            .all(|m| m.state_schema == crate::census::SCHEMA)
+    );
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();
@@ -151,7 +156,7 @@ fn capture(
             Ok(())
         })
         .unwrap();
-    (p, root.join("bundles").join(format!("{id}.jwe")))
+    (p, bundle_file(&root.join("bundles"), &id).unwrap())
 }
 #[test]
 fn selected_loss_restore_every_boundary_preserves_bytes_histories_and_authority() {
@@ -292,7 +297,7 @@ fn selected_stale_set_ledger_owner_edits_and_collisions_publish_nothing() {
 fn selected_authenticates_every_resource_rejects_unknown_and_overlapping_identities() {
     let (root, repo, ids, ledger) = fixture();
     let (_, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
-    let original = fs::read(bundle).unwrap();
+    let altered = root.path().join("altered");
     for attack in [
         "duplicate",
         "overlap",
@@ -301,7 +306,7 @@ fn selected_authenticates_every_resource_rejects_unknown_and_overlapping_identit
         "second_key",
         "schema",
     ] {
-        let mut c = selected_open(&original, &secret()).unwrap();
+        let (mut c, _) = selected_open(&bundle, &secret()).unwrap();
         match attack {
             "duplicate" => c.manifest.accounts[1] = c.manifest.accounts[0].clone(),
             "overlap" => {
@@ -309,18 +314,34 @@ fn selected_authenticates_every_resource_rejects_unknown_and_overlapping_identit
             }
             "ledger" => c.ledger.as_mut().unwrap().0[0] ^= 1,
             "second_cipher" => {
-                c.accounts[1].ciphertext[0] ^= 1;
+                let path = c.accounts[1].resource.path().to_path_buf();
+                let mut file = fs::read(&path).unwrap();
+                file[100] ^= 1;
+                fs::write(&path, &file).unwrap();
                 c.accounts[1].manifest.resources =
-                    inventory(&c.accounts[1].account, &c.accounts[1].ciphertext).unwrap();
+                    inventory(&c.accounts[1].account, &stream::file_digest(&path).unwrap())
+                        .unwrap();
                 c.manifest.accounts[1] = c.accounts[1].manifest.clone();
             }
             "second_key" => c.accounts[1].key.0[0] ^= 1,
             _ => c.manifest.version = 999,
         }
-        assert!(
-            selected_open(&seal(&c, &secret()).unwrap(), &secret()).is_err(),
-            "{attack}"
-        );
+        let body = Body::Selected {
+            manifest: c.manifest.clone(),
+            accounts: c.accounts.iter().map(Captured::header).collect(),
+            ledger: c.ledger.clone(),
+        };
+        let files: Vec<_> = c.accounts.iter().map(|a| a.resource.path()).collect();
+        let resealed = reseal(&altered, &secret(), &body, &files);
+        assert!(selected_open(&resealed, &secret()).is_err(), "{attack}");
+        let legacy = LegacySelected {
+            manifest: c.manifest.clone(),
+            accounts: c.accounts.iter().map(Captured::legacy).collect(),
+            ledger: c.ledger.clone(),
+        };
+        let path = altered.join("legacy.jwe");
+        fs::write(&path, seal_legacy(&legacy, &secret())).unwrap();
+        assert!(selected_open(&path, &secret()).is_err(), "legacy {attack}");
     }
     let (preview, _) = repo.capture_preview(&ids[0], 1792915200).unwrap();
     let legacy = repo
@@ -333,15 +354,11 @@ fn selected_authenticates_every_resource_rejects_unknown_and_overlapping_identit
         .unwrap();
     assert_eq!(
         selected_open(
-            &fs::read(
-                root.path()
-                    .join("legacy-bundles")
-                    .join(format!("{legacy}.jwe"))
-            )
-            .unwrap(),
+            &bundle_file(&root.path().join("legacy-bundles"), &legacy).unwrap(),
             &secret()
         )
         .unwrap()
+        .0
         .accounts
         .len(),
         1
@@ -600,7 +617,7 @@ fn selected_schema_fourteen_keeps_complete_delivery_state_and_restored_holds() {
         &ledger,
         root.path(),
     );
-    assert_eq!(manifest.accounts[0].state_schema, 18);
+    assert_eq!(manifest.accounts[0].state_schema, crate::census::SCHEMA);
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();

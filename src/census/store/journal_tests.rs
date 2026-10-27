@@ -69,25 +69,66 @@ fn journal_saves_append_small_frames_and_reopen_exactly() {
     let reopened = open(dir.path());
     let loaded = reopened.load_state().unwrap();
     assert_eq!(bytes(&loaded), bytes(&state));
-    assert_eq!(reopened.schema_version().unwrap(), 18);
+    assert_eq!(reopened.schema_version().unwrap(), crate::census::SCHEMA);
 }
 
 #[test]
-fn census_change_writes_a_new_base() {
+fn census_changes_append_frames_that_carry_only_the_changed_messages() {
     let dir = tempfile::tempdir().unwrap();
-    let (store, mut state) = seeded(dir.path(), 200);
-    journal_change(&mut state, 1);
-    store.save_state(&mut state).unwrap();
-    assert_eq!(frames(&store), 1);
+    let (store, mut state) = seeded(dir.path(), 2_000);
+    let base = std::fs::metadata(store.path()).unwrap().len();
     state.census.account_login = Some("synthetic-owner@example.test".into());
     store.save_state(&mut state).unwrap();
-    assert_eq!(frames(&store), 0);
-    journal_change(&mut state, 2);
-    store.save_state(&mut state).unwrap();
     assert_eq!(frames(&store), 1);
+    let folder = state.census.folders.keys().next().unwrap().clone();
+    let next = *state.census.folders[&folder]
+        .messages
+        .keys()
+        .last()
+        .unwrap()
+        + 1;
+    let added = scale::record(9_999_999, next, false, false);
+    {
+        let census = &mut *state.census;
+        let f = census.folders.get_mut(&folder).unwrap();
+        f.live_uids.insert(next);
+        f.messages.insert(next, added);
+        let first = *f.messages.keys().next().unwrap();
+        f.messages
+            .get_mut(&first)
+            .unwrap()
+            .flags
+            .insert("\\Flagged".into());
+        let removed = *f.messages.keys().nth(1).unwrap();
+        f.messages.remove(&removed);
+        f.live_uids.remove(&removed);
+        census
+            .folders
+            .remove(&census.folders.keys().last().unwrap().clone());
+    }
+    let before = std::fs::metadata(store.path()).unwrap().len();
+    store.save_state(&mut state).unwrap();
+    assert_eq!(frames(&store), 2, "a census change appends a frame");
+    let frame = std::fs::metadata(store.path()).unwrap().len() - before;
+    assert!(
+        frame < base / 20,
+        "frame of {frame} B carries the change, not the census"
+    );
+    let mut census = state.census.clone().into_inner();
+    census.folders.get_mut(&folder).unwrap().state = crate::census::ScanState::Running;
+    store.save(&census).unwrap();
+    assert_eq!(
+        frames(&store),
+        3,
+        "Census-only saves append without rereading"
+    );
     drop(store);
     let loaded = open(dir.path()).load_state().unwrap();
-    assert_eq!(bytes(&loaded), bytes(&state));
+    state.census = census.into();
+    state.revision += 1;
+    let mut expected = state.clone();
+    normalize_interrupted(&mut expected);
+    assert_eq!(bytes(&loaded), bytes(&expected));
 }
 
 #[test]
@@ -350,4 +391,107 @@ fn actual_kill_during_frame_and_base_writes_keeps_a_committed_state() {
         }
     }
     assert!(rewrites_seen > 0);
+}
+
+#[test]
+fn torn_append_worker() {
+    let Some(dir) = std::env::var_os("MAILROOM_TORN_APPEND_TEST") else {
+        return;
+    };
+    let store = open(std::path::Path::new(&dir));
+    let mut state = store.load_state().unwrap();
+    journal_change(&mut state, 7_777);
+    let _ = store.save_state(&mut state);
+    unreachable!("the save kills this process halfway through its frame");
+}
+
+/// SIGKILL lands deterministically after half of a frame reached the file.
+/// The reopened store shows the save before it, and the next save replaces
+/// the torn bytes.
+#[test]
+fn sigkill_halfway_through_a_frame_rolls_back_to_the_previous_save() {
+    use std::os::unix::process::ExitStatusExt;
+    let dir = tempfile::tempdir().unwrap();
+    let (store, mut state) = seeded(dir.path(), 300);
+    journal_change(&mut state, 1);
+    store.save_state(&mut state).unwrap();
+    drop(store);
+    let committed = fs::read(open_path(dir.path())).unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "census::store::journal_tests::torn_append_worker",
+        ])
+        .env("MAILROOM_TORN_APPEND_TEST", dir.path())
+        .env("MAILROOM_KILL_AT", "frame_half")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(status.signal(), Some(libc::SIGKILL));
+    let torn = fs::read(open_path(dir.path())).unwrap();
+    assert!(
+        torn.len() > committed.len(),
+        "half a frame reached the file"
+    );
+    assert_eq!(&torn[..committed.len()], &committed[..]);
+    let store = open(dir.path());
+    let mut reopened = store.load_state().unwrap();
+    assert_eq!(bytes(&reopened), bytes(&state));
+    journal_change(&mut reopened, 2);
+    store.save_state(&mut reopened).unwrap();
+    drop(store);
+    assert_eq!(
+        bytes(&open(dir.path()).load_state().unwrap()),
+        bytes(&reopened)
+    );
+}
+
+/// A read served from the decoded-file cache, kept current by this
+/// process's own saves, equals decoding the file again, across journal
+/// frames, census frames, a torn tail and new bases.
+#[test]
+fn cached_reads_equal_fresh_decoding_after_every_kind_of_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, mut state) = seeded(dir.path(), 400);
+    let path = store.path();
+    let check = |store: &EncryptedStore, label: &str| {
+        assert!(super::decoded::holds(&path), "{label}: cached");
+        let cached = store.load_state().unwrap();
+        super::decoded::forget(&path);
+        let fresh = store.load_state().unwrap();
+        assert_eq!(bytes(&cached), bytes(&fresh), "{label}");
+        assert!(
+            super::decoded::holds(&path),
+            "{label}: decoding refilled the cache"
+        );
+    };
+    for round in 0..40u32 {
+        journal_change(&mut state, round);
+        if round % 3 == 0 {
+            let census = &mut *state.census;
+            let folder = census.folders.values_mut().next().unwrap();
+            let uid = folder.messages.keys().last().unwrap() + 1;
+            folder.live_uids.insert(uid);
+            folder
+                .messages
+                .insert(uid, scale::record(500_000 + round, uid, false, false));
+        }
+        if round == 20 {
+            state.census.account_login = Some("x".repeat(400_000));
+        }
+        store.save_state(&mut state).unwrap();
+        check(&store, &format!("round {round}"));
+    }
+    drop(store);
+    let mut torn = fs::read(&path).unwrap();
+    torn.extend_from_slice(&[7; 40]);
+    fs::write(&path, &torn).unwrap();
+    let store = open(dir.path());
+    store.load_state().unwrap();
+    check(&store, "torn tail");
+    let mut state = store.load_state().unwrap();
+    journal_change(&mut state, 999);
+    store.save_state(&mut state).unwrap();
+    check(&store, "after truncating the torn tail");
 }

@@ -1,5 +1,22 @@
 # Recovery bundle profile
 
+## Version 3: streamed bundles
+
+New captures write version 3, `<SHA-256>.bundle`. A personal-scale account file is hundreds of megabytes, so the bundle is written and read in chunks and never held in memory whole:
+
+```text
+MAILROOM-RECOVERY\x03 | u32 length | nonce | AES-256-GCM(header JSON)
+per captured account file, per chunk of at most 1 MiB: u32 length | nonce | AES-256-GCM(chunk)
+```
+
+The key is the same separately held 32-byte recovery secret. Each record has a fresh random 96-bit nonce. The header holds a random 128-bit stream identity and the single or selected manifest, account metadata, key material and optional ledger that versions 1 and 2 held. The account files follow in manifest order. Each chunk authenticates the magic, the stream identity, its file index, its chunk index and whether it ends its file, so chunks cannot be reordered, dropped, moved between files or bundles, or cut at a chunk boundary. Only a full chunk can continue a file. Bytes after the last file reject. The bundle identity is the SHA-256 of all its bytes.
+
+Opening a bundle decrypts each account file into a private temporary directory, checks its length and SHA-256 against the manifest and loads it with its captured key before anything is published. Restoration copies that authenticated file into place without replacing an existing file and compares an existing target by length and SHA-256. A version-3 bundle holds up to eight account files of the store's largest size; its header is limited to 4 MiB. The interrupted-restore copy keeps the bundle's extension. `scripts/recovery-bundle.mjs` is an independent Node decoder the verification scripts use.
+
+Versions 1 and 2 below stay readable and restorable unchanged, within their own limits.
+
+## Versions 1 and 2: JWE
+
 This development profile uses JWE Compact Serialization with `alg=dir` and `enc=A256GCM`. The separately held recovery secret is 32 random bytes, not a human password. The protected header is authenticated as its base64url ASCII representation. The IV is 12 bytes and the tag is 16 bytes. Compression and algorithm negotiation are rejected.
 
 Primary sources read before implementation:
@@ -14,7 +31,7 @@ The selected-state payload has version 2. It captures one explicit, sorted set o
 
 Each account manifest names its identity, state schema from versions 1 through 14, generation, revision, capture boundary, exact ciphertext and metadata inventory, key-material roles and lengths, and comparison dependencies. The selected manifest identifies excluded installed accounts. A dependency on another member is captured; other dependencies remain unavailable unless independently installed. Required decryption and stable-identity material stays inside authenticated ciphertext. Provider passwords and external mailbox, send and unsubscribe stores are absent. No ledger is reconstructed from account projections.
 
-The maximum encoded bundle is 24 MiB. Decrypted JSON is limited to 16 MiB, including all accounts and JSON encoding overhead. Each account ciphertext is limited to 8 MiB, metadata to 4 KiB, account dependencies to 64, and excluded account IDs to 64. The ledger is limited to 1 MiB and its existing version-1 contract, including its 4,000-entry bound. Restore transaction metadata is limited to 256 KiB. These limits can reject captures below the sum of individual resource limits.
+For a version-1 or version-2 bundle, the maximum encoded bundle is 24 MiB. Decrypted JSON is limited to 16 MiB, including all accounts and JSON encoding overhead. Each account ciphertext is limited to 8 MiB, metadata to 4 KiB, account dependencies to 64, and excluded account IDs to 64. The ledger is limited to 1 MiB and its existing version-1 contract, including its 4,000-entry bound. Restore transaction metadata is limited to 256 KiB. These limits can reject captures below the sum of individual resource limits.
 
 Capture acquires lifecycle and store locks in sorted account order. The installed ledger guard binds exact source bytes even when inclusion is unchecked. Every member version, selected and excluded set, ledger choice, source version, capture time and semantics enters a purpose-specific, single-use confirmation. Confirmation recomputes the complete snapshot. Source stores remain locked while the ledger is checked again under its guard before encrypted staging and no-clobber durable publication. Capture success follows file and directory synchronization. Interrupted staging cannot replace any usable bundle. Orphan encrypted stages and unknown files remain preserved.
 
@@ -43,3 +60,5 @@ Internal schema 14 adds separately bound current-delivery evidence and synthetic
 Internal schema 15 adds the account-owned protocol MOVE journal. Schemas 1 through 14 without its fields retain legacy history and reject injected protocol semantics. Both single and selected validators use the same journal phase, identity, membership and resource checks. Captured forward and reverse evidence, mappings, executable bytes and operation IDs survive restoration exactly. A bundle cannot install a protocol source, restore a usable approval or lift the read-only hold. Later independent mailbox effects remain preserved. Outer versions and limits are unchanged.
 
 Internal schema 18 adds the account-owned Gmail label journal (`gmail_backlog`). An empty journal is omitted from the stored state, so accounts without Gmail runs keep their previous bytes apart from the schema number. Schemas 1 through 17 reject a `gmail_backlog` field and the `gmail-label-readback/v1` semantics anywhere in the document. Both single and selected validators accept schemas 1 through 18, and the browser manifest bound matches. Captured label steps, readback and operation IDs survive restoration exactly. A bundle cannot install a label source, restore a usable approval or lift the read-only hold. Later independent label effects in the mailbox resource remain. Outer versions and limits are unchanged. See [Backlog sorting](backlog.md).
+
+Internal schema 19 adds Q27 undo retention to both backlog journals: an optional `completed_at` on each run and a `summaries` list of compacted runs. Both are omitted while empty, so stored state without them keeps its bytes apart from the schema number. Schemas 1 through 18 reject nonempty summaries or a completion time, in the base snapshot and after frames. A version-18 file with journal frames stays readable; its next save writes a schema-19 base. Single and selected validators and the browser manifest bound accept schemas 1 through 19. Restored runs keep their completion time and summaries exactly and stay held. See [Backlog sorting](backlog.md).

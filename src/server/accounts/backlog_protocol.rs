@@ -231,6 +231,10 @@ fn execute(
         Kind::Move => json!(saved.protocol_backlog),
         Kind::Gmail => json!(saved.gmail_backlog),
     };
+    let deadlines = |saved: &crate::census::AccountState| match kind {
+        Kind::Move => saved.protocol_backlog.deadlines(repo.now()),
+        Kind::Gmail => saved.gmail_backlog.deadlines(repo.now()),
+    };
     let report = |saved: &crate::census::AccountState, mut value: serde_json::Value| {
         if kind == Kind::Gmail {
             value["outcomes"] = gmail_journal::outcomes(&saved.gmail_backlog);
@@ -240,12 +244,13 @@ fn execute(
     if matches!(request.command, Action::Status {}) {
         return Ok(report(
             &saved,
-            json!({"installed":kind.installed(&repo, Some(&account.id)),"recovery_hold":store.recovery_pending(),"journal":journal(&saved),"limitations":match kind { Kind::Move => protocol::LIMITATIONS, Kind::Gmail => gmail_journal::LIMITATIONS }}),
+            json!({"installed":kind.installed(&repo, Some(&account.id)),"recovery_hold":store.recovery_pending(),"journal":journal(&saved),"undo_deadlines":deadlines(&saved),"undo_window_days":crate::backlog::retention::WINDOW_SECS / 86_400,"limitations":match kind { Kind::Move => protocol::LIMITATIONS, Kind::Gmail => gmail_journal::LIMITATIONS }}),
         ));
     }
     if store.recovery_pending() {
         return Err(AcquisitionError::LifecyclePending);
     }
+    repo.retain_backlog(&store, &mut saved)?;
     if matches!(request.command, Action::Cancel {}) {
         let runs: Vec<(&mut Status, &mut bool)> = match kind {
             Kind::Move => saved

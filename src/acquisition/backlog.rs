@@ -292,8 +292,9 @@ impl Accounts {
             ),
         };
         let receipt = store.keys().binding_for(
-            b"mailroom/imap-backlog-start/v1",
-            &serde_json::to_vec(&(saved, &plan, &batches)).map_err(failure)?,
+            b"mailroom/imap-backlog-start/v2",
+            &crate::census::binding::bound(|| serde_json::to_vec(&(saved, &plan, &batches)))
+                .map_err(failure)?,
         );
         let id = store
             .keys()
@@ -308,6 +309,7 @@ impl Accounts {
             reverse: vec![],
             undo_receipt: None,
             undo_conflicts: 0,
+            completed_at: None,
         };
         Ok(Preview {
             operation,
@@ -360,12 +362,18 @@ impl Accounts {
             .iter()
             .position(|r| r.id == id)
             .ok_or_else(invalid)?;
-        let binding = self.backlog_binding(account, store, saved)?;
-        if !model::same_binding(&binding, &saved.protocol_backlog.runs[i].plan.binding) {
+        let mut binding = self.backlog_binding(account, store, saved)?;
+        if !model::same_binding(
+            &binding,
+            &saved.protocol_backlog.runs[i].plan.binding,
+            || model::material_v1(saved, store.keys()),
+        ) {
             saved.protocol_backlog.runs[i].status = Status::Conflict;
             save(store, saved)?;
             return Err(invalid());
         }
+        // Reused for every batch, in the form the run was saved with.
+        binding.material = saved.protocol_backlog.runs[i].plan.binding.material.clone();
         if matches!(
             saved.protocol_backlog.runs[i].status,
             Status::Complete | Status::Undone | Status::Conflict
@@ -430,6 +438,7 @@ impl Accounts {
                 if !model::same_binding(
                     &self.backlog_binding_with(account, store, binding.material.clone())?,
                     &saved.protocol_backlog.runs[i].plan.binding,
+                    || None,
                 ) {
                     return Err(invalid());
                 }
@@ -480,6 +489,7 @@ impl Accounts {
         if result.is_err() && run.status == Status::Stopped && !cancel.is_cancelled() {
             run.status = Status::Conflict;
         }
+        run.stamp(self.now());
         save(store, saved)?;
         result
     }
@@ -498,14 +508,18 @@ impl Accounts {
             .iter()
             .position(|r| r.id == id)
             .ok_or_else(invalid)?;
-        if !model::same_binding(&binding, &saved.protocol_backlog.runs[i].plan.binding) {
+        if !model::same_binding(
+            &binding,
+            &saved.protocol_backlog.runs[i].plan.binding,
+            || model::material_v1(saved, store.keys()),
+        ) {
             if saved.protocol_backlog.runs[i].status != Status::Conflict {
                 saved.protocol_backlog.runs[i].status = Status::Conflict;
                 save(store, saved)?;
             }
             return Err(invalid());
         }
-        let before = serde_json::to_vec(&saved.protocol_backlog).map_err(failure)?;
+        let before = saved.protocol_backlog.clone();
         let runtime = self.backlog_runtime(account, store, saved, &binding)?;
         let permit = self
             .backlog_source(account)?
@@ -544,7 +558,8 @@ impl Accounts {
             }
         }
         run.status = model::outcome(run, run.undo_receipt.is_some());
-        if serde_json::to_vec(&saved.protocol_backlog).map_err(failure)? != before {
+        run.stamp(self.now());
+        if saved.protocol_backlog != before {
             save(store, saved)?;
         }
         Ok(())
@@ -564,9 +579,11 @@ impl Accounts {
             .iter()
             .find(|r| r.id == id)
             .ok_or_else(invalid)?;
-        if !model::same_binding(&binding, &run.plan.binding)
-            || run.undo_receipt.is_some()
+        if !model::same_binding(&binding, &run.plan.binding, || {
+            model::material_v1(saved, store.keys())
+        }) || run.undo_receipt.is_some()
             || run.batches.iter().any(|b| b.attempted() && !b.observed())
+            || !crate::backlog::retention::undo_open(run.completed_at, self.now())
         {
             return Err(invalid());
         }
@@ -649,8 +666,11 @@ impl Accounts {
             });
         }
         let receipt = store.keys().binding_for(
-            b"mailroom/imap-backlog-undo/v1",
-            &serde_json::to_vec(&(saved, &binding, &reverse, conflicts)).map_err(failure)?,
+            b"mailroom/imap-backlog-undo/v2",
+            &crate::census::binding::bound(|| {
+                serde_json::to_vec(&(saved, &binding, &reverse, conflicts))
+            })
+            .map_err(failure)?,
         );
         Ok(UndoPreview {
             run: id.into(),
@@ -686,6 +706,7 @@ impl Accounts {
         if run.status != Status::Complete {
             run.status = model::outcome(run, true);
         }
+        run.stamp(self.now());
         save(store, saved)?;
         boundary("move_undo_consumed");
         self.backlog_run(account, store, saved, id, true, cancel, fresh)
@@ -707,7 +728,25 @@ fn observe(
     e.observe(source, destination)
         .map_err(|_| crate::census::folder_provisioning::Failure::Protocol)
 }
+#[cfg(test)]
+thread_local! {
+    /// A measured personal-scale run stops between batches after this time,
+    /// the way Cancel stops it, so one process stays within its time limit and
+    /// the next resumes the remainder.
+    pub(crate) static STOP_BETWEEN_BATCHES: std::cell::RefCell<Option<(std::time::Instant, Cancellation)>> =
+        const { std::cell::RefCell::new(None) };
+}
 pub(crate) fn boundary(name: &str) {
+    #[cfg(test)]
+    if name == "move_between_batches" {
+        STOP_BETWEEN_BATCHES.with(|stop| {
+            if let Some((deadline, cancel)) = stop.borrow().as_ref() {
+                if std::time::Instant::now() > *deadline {
+                    cancel.cancel();
+                }
+            }
+        });
+    }
     #[cfg(test)]
     if let Some(root) = std::env::var_os("MAILROOM_MOVE_FIXTURE") {
         let root = std::path::Path::new(&root);

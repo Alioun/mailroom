@@ -13,10 +13,10 @@ mod store;
 pub use headers::{HEADER_FIELDS, parse_headers};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-pub(crate) use store::MAX_FILE;
 #[cfg(test)]
 pub(crate) use store::io;
 pub use store::{AccountState, CensusKeys, EncryptedStore, LocalSecret};
+pub(crate) use store::{MAX_FILE, SCHEMA};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String")]
@@ -255,7 +255,90 @@ impl PartialEq<Census> for SharedCensus {
 }
 impl Serialize for SharedCensus {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if binding::active() {
+            return serializer.serialize_str(&binding::label(&self.digest()));
+        }
         self.0.serialize(serializer)
+    }
+}
+impl SharedCensus {
+    /// SHA-256 of the census's JSON. Computed once per shared census: every
+    /// copy of a loaded state shares it, and a mutation makes a new one.
+    pub fn digest(&self) -> [u8; 32] {
+        binding::digest(&self.0)
+    }
+}
+
+/// Bindings (receipts, material digests) commit to the whole account state.
+/// Inside `bound`, a shared census serializes as its digest, so a binding
+/// costs the size of the state around the census, and the census is hashed
+/// once per loaded version instead of once per binding.
+pub(crate) mod binding {
+    use super::Census;
+    use sha2::{Digest, Sha256};
+    use std::{
+        cell::Cell,
+        sync::{Arc, Mutex, Weak},
+    };
+
+    thread_local! {
+        static ACTIVE: Cell<bool> = const { Cell::new(false) };
+    }
+    pub(super) fn active() -> bool {
+        ACTIVE.with(Cell::get)
+    }
+    pub(super) fn label(digest: &[u8; 32]) -> String {
+        format!("census-sha256:{}", data_encoding::HEXLOWER.encode(digest))
+    }
+    /// Runs `f` with shared censuses serializing as their digests.
+    pub(crate) fn bound<T>(f: impl FnOnce() -> T) -> T {
+        struct Reset(bool);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                ACTIVE.with(|a| a.set(self.0));
+            }
+        }
+        let _reset = Reset(ACTIVE.with(|a| a.replace(true)));
+        f()
+    }
+
+    struct Hasher(Sha256);
+    impl std::io::Write for Hasher {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A few recent censuses by allocation. The weak reference keeps the
+    /// allocation from being reused while its entry exists, so a live census
+    /// at the same address is the same census.
+    static DIGESTS: Mutex<Vec<(Weak<Census>, [u8; 32])>> = Mutex::new(Vec::new());
+
+    pub(super) fn digest(census: &Arc<Census>) -> [u8; 32] {
+        let mut cache = DIGESTS.lock().expect("census digests");
+        cache.retain(|(weak, _)| weak.strong_count() > 0);
+        if let Some((_, digest)) = cache
+            .iter()
+            .find(|(weak, _)| std::ptr::eq(weak.as_ptr(), Arc::as_ptr(census)))
+        {
+            return *digest;
+        }
+        drop(cache);
+        let was = ACTIVE.with(|a| a.replace(false));
+        let mut hasher = Hasher(Sha256::new());
+        serde_json::to_writer(&mut hasher, &**census).expect("census serializes");
+        ACTIVE.with(|a| a.set(was));
+        let digest: [u8; 32] = hasher.0.finalize().into();
+        let mut cache = DIGESTS.lock().expect("census digests");
+        if cache.len() >= 8 {
+            cache.remove(0);
+        }
+        cache.push((Arc::downgrade(census), digest));
+        digest
     }
 }
 impl<'de> Deserialize<'de> for SharedCensus {

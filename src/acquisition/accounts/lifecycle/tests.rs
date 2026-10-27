@@ -507,7 +507,9 @@ fn unreadable_dependent_store_keeps_the_old_key_and_recovers_only_after_original
     let path = cipher_path(&effects.join("invoice-transport"), &a.id, 0);
     let original = fs::read(&path).unwrap();
     let mut damaged = original.clone();
-    *damaged.last_mut().unwrap() ^= 1;
+    // Inside the base snapshot. Damage that reaches the end of the file is
+    // read as an uncommitted frame tail, and census saves now append frames.
+    damaged[100] ^= 1;
     fs::write(&path, &damaged).unwrap();
     assert!(repo.rotate(&a.id, &effects).is_err());
     assert!(repo.backend.get(&a.local_secret_ref).is_ok());

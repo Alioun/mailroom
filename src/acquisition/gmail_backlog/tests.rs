@@ -552,3 +552,51 @@ fn scale_gmail_label_backlog() {
         Default::default(),
     );
 }
+
+/// Q27 for Gmail label runs: Undo until day 90, then a summary; an
+/// uncertain run is kept whole however old it is.
+#[test]
+fn label_runs_follow_the_ninety_day_undo_window_and_uncertain_runs_stay_whole() {
+    use crate::backlog::retention::WINDOW_SECS;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+    const T0: u64 = 1_800_000_000;
+    let mut f = setup(|_| {});
+    let clock = Arc::new(AtomicU64::new(T0));
+    f.repo.clock = Some(clock.clone());
+    f.confirm(Options::default(), |_| Ok(())).unwrap();
+    let run = f.run();
+    assert_eq!((run.status, run.completed_at), (Status::Complete, Some(T0)));
+    let retain = |f: &Fixture| {
+        let store = f.store();
+        let mut saved = store.load_state().unwrap();
+        f.repo.retain_backlog(&store, &mut saved).unwrap();
+        saved
+    };
+    clock.store(T0 + WINDOW_SECS - 1, Ordering::SeqCst);
+    assert_eq!(retain(&f).gmail_backlog.runs.len(), 1);
+    assert!(f.undo_preview().is_ok());
+    clock.store(T0 + WINDOW_SECS, Ordering::SeqCst);
+    assert!(f.undo_preview().is_err());
+    let compacted = retain(&f).gmail_backlog;
+    assert!(compacted.runs.is_empty());
+    let summary = &compacted.summaries[0];
+    assert_eq!(summary.id, run.id);
+    assert_eq!(summary.messages, run.plan.filing.changes.len());
+    assert_eq!(summary.applied, summary.messages);
+    f.saved().gmail_backlog.validate(&f.account.id).unwrap();
+
+    let mut f = setup(|_| {});
+    f.repo.clock = Some(Arc::new(AtomicU64::new(T0 + 50 * WINDOW_SECS)));
+    f.mode("lost");
+    assert!(f.confirm(personal_only(), |_| Ok(())).is_err());
+    f.mode("");
+    let uncertain = f.run();
+    assert_eq!(uncertain.status, Status::Uncertain);
+    f.repo.clock = Some(Arc::new(AtomicU64::new(T0 + 100 * WINDOW_SECS)));
+    let kept = retain(&f).gmail_backlog;
+    assert!(kept.summaries.is_empty());
+    assert!(kept.runs[0] == uncertain);
+}

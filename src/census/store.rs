@@ -17,6 +17,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+mod delta;
 mod log;
 mod patch;
 
@@ -34,6 +35,9 @@ pub(crate) const MAX_FILE: u64 = 2 * MAX_SNAPSHOT + 4096;
 /// times its base, recovery's resource limits see nearly the same size, and
 /// compaction stays amortized over the frames it replaces.
 const MIN_FRAME_BUDGET: u64 = 64 * 1024;
+/// Schema of new base snapshots. 19 adds Q27 undo retention to the backlog
+/// journals: `completed_at` on runs and compacted `summaries`.
+pub(crate) const SCHEMA: u32 = 19;
 
 pub struct LocalSecret(Zeroizing<Vec<u8>>);
 
@@ -270,19 +274,29 @@ impl AccountState {
     }
 }
 
-/// Every persisted field of `AccountState` except the census and the
-/// revision. A journal frame carries a structural patch for each one that
-/// changed. The exhaustive pattern makes a new field a compile error until it
-/// is listed here.
+/// Every persisted field of `AccountState` except the census, the revision
+/// and the two backlog journals. A journal frame carries a structural patch
+/// for each one that changed, found by comparing serialized bytes. The census
+/// and the backlog journals grow with the mailbox, so `delta` compares them as
+/// typed values instead. The exhaustive pattern makes a new field a compile
+/// error until it is listed here.
 macro_rules! frame_fields {
     ($($field:ident),* $(,)?) => {
         const FRAME_FIELDS: &[&str] = &[$(stringify!($field)),*];
         fn frame_field_bytes(state: &AccountState) -> Result<Vec<Vec<u8>>, CensusError> {
-            let AccountState { census: _, revision: _, $($field),* } = state;
+            let AccountState {
+                census: _,
+                revision: _,
+                protocol_backlog: _,
+                gmail_backlog: _,
+                $($field),*
+            } = state;
             Ok(vec![$(serde_json::to_vec($field).map_err(|_| CensusError::Storage)?),*])
         }
         fn frame_field_value(state: &AccountState, name: &str) -> Result<serde_json::Value, CensusError> {
             match name {
+                "protocol_backlog" => serde_json::to_value(&state.protocol_backlog).map_err(|_| CensusError::Storage),
+                "gmail_backlog" => serde_json::to_value(&state.gmail_backlog).map_err(|_| CensusError::Storage),
                 $(stringify!($field) => serde_json::to_value(&state.$field).map_err(|_| CensusError::Storage),)*
                 _ => Err(CensusError::UnsupportedVersion),
             }
@@ -292,20 +306,33 @@ macro_rules! frame_fields {
             name: &str,
             value: serde_json::Value,
         ) -> Result<(), CensusError> {
+            let invalid = |_| CensusError::Storage;
             match name {
+                "protocol_backlog" => state.protocol_backlog = serde_json::from_value(value).map_err(invalid)?,
+                "gmail_backlog" => state.gmail_backlog = serde_json::from_value(value).map_err(invalid)?,
                 $(stringify!($field) => {
-                    state.$field = serde_json::from_value(value).map_err(|_| CensusError::Storage)?
+                    state.$field = serde_json::from_value(value).map_err(invalid)?
                 })*
                 _ => return Err(CensusError::UnsupportedVersion),
             }
             Ok(())
         }
+        /// Rebuilds the persisted state without reading the file.
+        fn persisted_state(p: &Persisted) -> Result<AccountState, CensusError> {
+            let mut fields = p.fields.iter();
+            Ok(AccountState {
+                census: p.census.clone(),
+                revision: p.revision,
+                protocol_backlog: p.protocol_backlog.clone(),
+                gmail_backlog: p.gmail_backlog.clone(),
+                $($field: serde_json::from_slice(fields.next().ok_or(CensusError::Storage)?)
+                    .map_err(|_| CensusError::Storage)?),*
+            })
+        }
     };
 }
 frame_fields!(
     sieve_placement,
-    protocol_backlog,
-    gmail_backlog,
     folder_provisioning,
     synthetic_folders,
     sieve_transactions,
@@ -330,11 +357,15 @@ struct Frame {
     fields: std::collections::BTreeMap<String, patch::Patch>,
 }
 
+/// The file a store last read or wrote. Change times are included so an
+/// in-place rewrite of the same length is noticed and the file read again.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
     device: u64,
     inode: u64,
     len: u64,
+    modified: i64,
+    changed: i64,
 }
 impl FileIdentity {
     fn of(metadata: &fs::Metadata) -> Self {
@@ -345,6 +376,8 @@ impl FileIdentity {
                 device: metadata.dev(),
                 inode: metadata.ino(),
                 len: metadata.len(),
+                modified: metadata.mtime() * 1_000_000_000 + metadata.mtime_nsec(),
+                changed: metadata.ctime() * 1_000_000_000 + metadata.ctime_nsec(),
             }
         }
         #[cfg(not(unix))]
@@ -357,12 +390,15 @@ impl FileIdentity {
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map_or(0, |d| d.as_nanos() as u64),
                 len: metadata.len(),
+                modified: 0,
+                changed: 0,
             }
         }
     }
 }
 
 /// Where new frames go in a version-2 file.
+#[derive(Clone, Copy)]
 struct Tail {
     base_tag: [u8; 16],
     base_len: u64,
@@ -379,6 +415,25 @@ struct Persisted {
     census: super::SharedCensus,
     /// Serialized frame fields as persisted, in `FRAME_FIELDS` order.
     fields: Vec<Vec<u8>>,
+    protocol_backlog: crate::backlog::protocol::Journal,
+    gmail_backlog: crate::backlog::gmail_journal::Journal,
+}
+impl Persisted {
+    fn of(
+        state: &AccountState,
+        file: FileIdentity,
+        tail: Option<Tail>,
+    ) -> Result<Self, CensusError> {
+        Ok(Self {
+            revision: state.revision,
+            file,
+            tail,
+            census: state.census.clone(),
+            fields: frame_field_bytes(state)?,
+            protocol_backlog: state.protocol_backlog.clone(),
+            gmail_backlog: state.gmail_backlog.clone(),
+        })
+    }
 }
 
 pub struct EncryptedStore {
@@ -507,12 +562,14 @@ impl EncryptedStore {
             return Err(CensusError::AccountMismatch);
         }
         let mut state = if self.path().try_exists().map_err(|_| CensusError::Storage)? {
-            let loaded = self.loaded.get();
-            let state = self.read_state()?;
-            if !loaded {
+            if !self.loaded.get() {
+                self.read_state()?;
                 return Err(CensusError::Storage);
             }
-            state
+            match self.unchanged_state()? {
+                Some(state) => state,
+                None => self.read_state()?,
+            }
         } else {
             AccountState::new(census.clone())
         };
@@ -574,6 +631,22 @@ impl EncryptedStore {
         Ok(())
     }
 
+    /// The state this store last read or wrote, with the reopening
+    /// adjustments, while the file is still that one.
+    fn unchanged_state(&self) -> Result<Option<AccountState>, CensusError> {
+        let metadata = fs::symlink_metadata(self.path()).map_err(|_| CensusError::Storage)?;
+        let persisted = self.persisted.borrow();
+        let Some(p) = persisted
+            .as_ref()
+            .filter(|p| metadata.is_file() && p.file == FileIdentity::of(&metadata))
+        else {
+            return Ok(None);
+        };
+        let mut state = persisted_state(p)?;
+        normalize_interrupted(&mut state);
+        Ok(Some(state))
+    }
+
     /// The revision on disk. Uses the recorded state while the file is the
     /// one this store last read or wrote, and reads the file otherwise.
     fn current_revision(&self) -> Result<u64, CensusError> {
@@ -604,10 +677,8 @@ impl EncryptedStore {
         let Some(tail) = p.tail.as_mut() else {
             return Ok(false);
         };
-        if state.census != p.census {
-            return Ok(false);
-        }
-        self.validate(state, false)?;
+        let census_changed = state.census != p.census;
+        self.validate(state, census_changed)?;
         let fields = frame_field_bytes(state)?;
         let mut changes = std::collections::BTreeMap::new();
         for ((name, now), before) in FRAME_FIELDS.iter().zip(&fields).zip(&p.fields) {
@@ -628,10 +699,39 @@ impl EncryptedStore {
             }
             changes.insert(*name, change);
         }
+        for (name, delta) in [
+            (
+                "protocol_backlog",
+                delta::protocol_journal(&p.protocol_backlog, &state.protocol_backlog)?,
+            ),
+            (
+                "gmail_backlog",
+                delta::gmail_journal(&p.gmail_backlog, &state.gmail_backlog)?,
+            ),
+            (
+                "census",
+                if census_changed {
+                    delta::census(&p.census, &state.census)?
+                } else {
+                    delta::Delta::Same
+                },
+            ),
+        ] {
+            match delta {
+                delta::Delta::Same => (),
+                delta::Delta::Patch(change) => {
+                    changes.insert(name, change);
+                }
+                delta::Delta::Rewrite => return Ok(false),
+            }
+        }
         let plaintext = Zeroizing::new(
             serde_json::to_vec(&serde_json::json!({"revision": next, "fields": changes}))
                 .map_err(|_| CensusError::Storage)?,
         );
+        if plaintext.len() + 16 > log::MAX_FRAME {
+            return Ok(false);
+        }
         let cipher = Aes256Gcm::new_from_slice(self.keys.encryption.as_ref()).expect("AES-256 key");
         let frame = log::encode_frame(
             &cipher,
@@ -662,25 +762,51 @@ impl EncryptedStore {
         }
         file.set_len(tail.valid_end)
             .and_then(|_| file.seek(std::io::SeekFrom::Start(tail.valid_end)))
-            .and_then(|_| file.write_all(&frame))
             .map_err(|_| CensusError::Storage)?;
+        #[cfg(test)]
+        if kill_requested("frame_half") {
+            let _ = file.write_all(&frame[..frame.len() / 2]);
+            let _ = file.sync_all();
+            kill_point("frame_half");
+        }
+        file.write_all(&frame).map_err(|_| CensusError::Storage)?;
         self.sync(&file).map_err(|_| CensusError::Storage)?;
         #[cfg(test)]
         if !self.simulated_provider {
             io::record(|s| s.bytes_written += frame.len() as u64);
         }
+        let written = file.metadata().map_err(|_| CensusError::Storage)?;
+        decoded::appended(
+            &self.path(),
+            &decoded::key(&self.keys),
+            p.file.len,
+            tail.valid_end,
+            &frame,
+            state,
+            next,
+            FileIdentity::of(&written),
+        );
         tail.valid_end += frame.len() as u64;
         tail.next_sequence += 1;
-        p.file = FileIdentity::of(&file.metadata().map_err(|_| CensusError::Storage)?);
+        p.file = FileIdentity::of(&written);
         p.revision = next;
         p.fields = fields;
+        p.census = state.census.clone();
+        p.protocol_backlog = state.protocol_backlog.clone();
+        p.gmail_backlog = state.gmail_backlog.clone();
         Ok(true)
     }
 
     /// Writes the whole state as a new base and atomically replaces the file.
     fn rewrite(&self, state: &AccountState, noclobber: bool) -> Result<(), CensusError> {
         let revision = state.revision;
-        let (staged, tag) = self.stage_base(state)?;
+        self.validate(state, true)?;
+        let snapshot =
+            Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
+        let (staged, tag, bytes) = self.stage_encoded(SCHEMA, &snapshot)?;
+        drop(snapshot);
+        #[cfg(test)]
+        kill_point("base_staged");
         let path = self.path();
         if noclobber {
             staged
@@ -689,23 +815,31 @@ impl EncryptedStore {
         } else {
             staged.persist(&path).map_err(|_| CensusError::Storage)?;
         }
+        #[cfg(test)]
+        kill_point("base_renamed");
         fs::File::open(&self.directory)
             .and_then(|f| self.sync(&f))
             .map_err(|_| CensusError::Storage)?;
         let metadata = fs::symlink_metadata(&path).map_err(|_| CensusError::Storage)?;
         let file = FileIdentity::of(&metadata);
-        self.persisted.replace(Some(Persisted {
-            revision,
-            file,
-            tail: Some(Tail {
-                base_tag: tag,
-                base_len: file.len,
-                valid_end: file.len,
-                next_sequence: 0,
-            }),
-            census: state.census.clone(),
-            fields: frame_field_bytes(state)?,
-        }));
+        debug_assert_eq!(revision, state.revision);
+        let tail = Tail {
+            base_tag: tag,
+            base_len: file.len,
+            valid_end: file.len,
+            next_sequence: 0,
+        };
+        self.persisted
+            .replace(Some(Persisted::of(state, file, Some(tail))?));
+        decoded::put(
+            path,
+            decoded::key(&self.keys),
+            bytes,
+            SCHEMA,
+            state,
+            Some(tail),
+            FileIdentity::of(&metadata),
+        );
         Ok(())
     }
 
@@ -786,6 +920,7 @@ impl EncryptedStore {
         self.stage_base(state).map(|(staged, _)| staged)
     }
 
+    #[cfg(test)]
     fn stage_base(
         &self,
         state: &AccountState,
@@ -793,7 +928,7 @@ impl EncryptedStore {
         self.validate(state, true)?;
         let snapshot =
             Zeroizing::new(serde_json::to_string(state).map_err(|_| CensusError::Storage)?);
-        self.stage_versioned(18, &snapshot)
+        self.stage_versioned(SCHEMA, &snapshot)
     }
 
     #[cfg(test)]
@@ -842,15 +977,26 @@ impl EncryptedStore {
         Ok(temporary)
     }
 
+    #[cfg(test)]
     fn stage_versioned(
         &self,
         version: u32,
         snapshot: &str,
     ) -> Result<(tempfile::NamedTempFile, [u8; 16]), CensusError> {
+        self.stage_encoded(version, snapshot)
+            .map(|(staged, tag, _)| (staged, tag))
+    }
+
+    /// Stages a base and also returns the file's bytes.
+    fn stage_encoded(
+        &self,
+        version: u32,
+        snapshot: &str,
+    ) -> Result<(tempfile::NamedTempFile, [u8; 16], Vec<u8>), CensusError> {
         let sqlite = self.sqlite_image(version, snapshot)?;
         let cipher = Aes256Gcm::new_from_slice(self.keys.encryption.as_ref()).expect("AES-256 key");
         let (bytes, tag) = log::encode_base(&cipher, self.keys.account.as_str(), &sqlite)?;
-        Ok((self.stage_bytes(&bytes)?, tag))
+        Ok((self.stage_bytes(&bytes)?, tag, bytes))
     }
 
     /// Writes a version-1 file, the format older builds saved.
@@ -930,13 +1076,37 @@ impl EncryptedStore {
         {
             return Err(CensusError::Storage);
         }
-        let mut bytes = Zeroizing::new(Vec::new());
+        // Ciphertext, so it is not zeroized: wiping a personal-scale file
+        // byte by byte cost more than reading it.
+        let key = decoded::key(&self.keys);
+        #[cfg(test)]
+        if self.simulated_provider {
+            if let Some((version, state, tail)) =
+                decoded::get_stamped(&path, &key, FileIdentity::of(&metadata))
+            {
+                self.persisted.replace(Some(Persisted::of(
+                    &state,
+                    FileIdentity::of(&metadata),
+                    tail,
+                )?));
+                return Ok((version, state));
+            }
+        }
+        let mut bytes = Vec::new();
         (&mut file)
             .take(MAX_FILE + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| CensusError::Storage)?;
         if bytes.len() as u64 != metadata.len() {
             return Err(CensusError::Storage);
+        }
+        if let Some((version, state, tail)) = decoded::get(&path, &key, &bytes) {
+            self.persisted.replace(Some(Persisted::of(
+                &state,
+                FileIdentity::of(&metadata),
+                tail,
+            )?));
+            return Ok((version, state));
         }
         let cipher = Aes256Gcm::new_from_slice(self.keys.encryption.as_ref()).expect("AES-256 key");
         let (plaintext, decoded) = if bytes.starts_with(log::MAGIC_V2) {
@@ -966,7 +1136,7 @@ impl EncryptedStore {
         } else {
             return Err(CensusError::UnsupportedVersion);
         };
-        drop(bytes);
+        let ciphertext = bytes;
         let mut db = memory_database()?;
         db.deserialize_read_exact("main", plaintext.as_slice(), plaintext.len(), true)
             .map_err(|_| CensusError::Storage)?;
@@ -980,7 +1150,7 @@ impl EncryptedStore {
         let snapshot = Zeroizing::new(snapshot);
         if !matches!(
             version,
-            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18
+            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19
         ) {
             return Err(CensusError::UnsupportedVersion);
         }
@@ -1029,6 +1199,24 @@ impl EncryptedStore {
                 }
             }
             if label_fields(&raw) {
+                return Err(CensusError::UnsupportedVersion);
+            }
+        }
+        if version < 19 {
+            let raw: serde_json::Value =
+                serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?;
+            let retained = |journal: Option<&serde_json::Value>| {
+                journal.is_some_and(|j| {
+                    j.get("summaries")
+                        .is_some_and(|s| s.as_array().is_none_or(|a| !a.is_empty()))
+                        || j.get("runs")
+                            .and_then(|r| r.as_array())
+                            .is_some_and(|runs| {
+                                runs.iter().any(|r| r.get("completed_at").is_some())
+                            })
+                })
+            };
+            if retained(raw.get("protocol_backlog")) || retained(raw.get("gmail_backlog")) {
                 return Err(CensusError::UnsupportedVersion);
             }
         }
@@ -1098,7 +1286,7 @@ impl EncryptedStore {
             return Err(CensusError::UnsupportedVersion);
         }
         let frames = decoded.as_ref().map_or(&[][..], |d| &d.frames[..]);
-        if !frames.is_empty() && version != 18 {
+        if !frames.is_empty() && !matches!(version, 18 | SCHEMA) {
             return Err(CensusError::UnsupportedVersion);
         }
         let mut patched = std::collections::BTreeMap::new();
@@ -1109,6 +1297,10 @@ impl EncryptedStore {
             }
             state.revision = frame.revision;
             for (name, change) in frame.fields {
+                if name == "census" {
+                    delta::apply_census(&mut state.census, change)?;
+                    continue;
+                }
                 let value = match patched.entry(name) {
                     std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
                     std::collections::btree_map::Entry::Vacant(e) => {
@@ -1122,24 +1314,194 @@ impl EncryptedStore {
         for (name, value) in patched {
             apply_frame_field(&mut state, &name, value)?;
         }
+        if version < 19
+            && (!state.protocol_backlog.summaries.is_empty()
+                || !state.gmail_backlog.summaries.is_empty()
+                || state
+                    .protocol_backlog
+                    .runs
+                    .iter()
+                    .any(|r| r.completed_at.is_some())
+                || state
+                    .gmail_backlog
+                    .runs
+                    .iter()
+                    .any(|r| r.completed_at.is_some()))
+        {
+            return Err(CensusError::UnsupportedVersion);
+        }
         self.validate(&state, true)?;
-        self.persisted.replace(Some(Persisted {
-            revision: state.revision,
-            file: FileIdentity::of(&metadata),
-            tail: decoded.filter(|_| version == 18).map(|d| Tail {
-                base_tag: d.base_tag,
-                base_len: d.base_len,
-                valid_end: d.valid_end,
-                next_sequence: d.frames.len() as u64,
-            }),
-            census: state.census.clone(),
-            fields: frame_field_bytes(&state)?,
-        }));
+        // Frames append only to a base of the current schema, so the first
+        // save after an upgrade writes a new base.
+        let tail = decoded.filter(|_| version == SCHEMA).map(|d| Tail {
+            base_tag: d.base_tag,
+            base_len: d.base_len,
+            valid_end: d.valid_end,
+            next_sequence: d.frames.len() as u64,
+        });
+        self.persisted.replace(Some(Persisted::of(
+            &state,
+            FileIdentity::of(&metadata),
+            tail,
+        )?));
+        decoded::put(
+            path,
+            key,
+            ciphertext,
+            version,
+            &state,
+            tail,
+            FileIdentity::of(&metadata),
+        );
         Ok((version, state))
     }
 }
 
 /// Reopening a store never implies a running worker or an unanswered intent.
+/// Recently decoded account files. Every request opens a fresh store and
+/// reads its account file. Decrypting and parsing a personal-scale file takes
+/// seconds, and a fresh census copy would also miss the census digest memo
+/// (`census::binding`). An entry is reused only when the file's bytes equal
+/// the bytes it was decoded from, byte for byte, under the same key, so a
+/// changed, replaced or damaged file is always decoded again. Entries hold
+/// ciphertext and the decoded state, so only a few are kept.
+mod decoded {
+    use super::{AccountState, CensusKeys, Tail};
+    use sha2::{Digest, Sha256};
+    use std::{path::PathBuf, sync::Mutex};
+
+    struct Entry {
+        path: PathBuf,
+        key: [u8; 32],
+        bytes: Vec<u8>,
+        version: u32,
+        state: AccountState,
+        tail: Option<Tail>,
+        stamp: Stamp,
+    }
+    /// Only stores that stand in for a remote server in tests trust the
+    /// file's identity and change times in place of its bytes: their fixture
+    /// rereads its whole mailbox for every protocol command.
+    pub(super) type Stamp = super::FileIdentity;
+    #[cfg(test)]
+    pub(super) fn get_stamped(
+        path: &std::path::Path,
+        key: &[u8; 32],
+        stamp: Stamp,
+    ) -> Option<(u32, AccountState, Option<Tail>)> {
+        let entries = ENTRIES.lock().expect("decoded cache");
+        let entry = entries
+            .iter()
+            .find(|e| e.path == path && e.key == *key && e.stamp == stamp)?;
+        Some((entry.version, entry.state.clone(), entry.tail))
+    }
+    static ENTRIES: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+    #[cfg(not(test))]
+    const CAPACITY: usize = 4;
+    /// Parallel tests share the cache; a larger one keeps an entry a test
+    /// just wrote from being evicted before it reads it back.
+    #[cfg(test)]
+    const CAPACITY: usize = 64;
+
+    pub(super) fn key(keys: &CensusKeys) -> [u8; 32] {
+        Sha256::new()
+            .chain_update(b"mailroom/decoded-cache/v1\0")
+            .chain_update(keys.account.as_str())
+            .chain_update([0])
+            .chain_update(keys.encryption.as_ref())
+            .finalize()
+            .into()
+    }
+    pub(super) fn get(
+        path: &std::path::Path,
+        key: &[u8; 32],
+        bytes: &[u8],
+    ) -> Option<(u32, AccountState, Option<Tail>)> {
+        let mut entries = ENTRIES.lock().expect("decoded cache");
+        let at = entries
+            .iter()
+            .position(|e| e.path == path && e.key == *key && e.bytes == bytes)?;
+        let entry = entries.remove(at);
+        let hit = (entry.version, entry.state.clone(), entry.tail);
+        entries.push(entry);
+        Some(hit)
+    }
+    /// Keeps the entry for a file current after this process appended a
+    /// frame to it. The entry is updated only if it holds exactly the bytes
+    /// the file had before the append, and its new state is the state the
+    /// frame was computed from, which reading the file again reproduces.
+    pub(super) fn appended(
+        path: &std::path::Path,
+        key: &[u8; 32],
+        len_before: u64,
+        valid_end: u64,
+        frame: &[u8],
+        state: &AccountState,
+        revision: u64,
+        stamp: Stamp,
+    ) {
+        let mut entries = ENTRIES.lock().expect("decoded cache");
+        let Some(at) = entries
+            .iter()
+            .position(|e| e.path == path && e.key == *key && e.bytes.len() as u64 == len_before)
+        else {
+            return;
+        };
+        let mut entry = entries.remove(at);
+        let Some(tail) = entry.tail.as_mut() else {
+            return;
+        };
+        entry.bytes.truncate(valid_end as usize);
+        entry.bytes.extend_from_slice(frame);
+        tail.valid_end = valid_end + frame.len() as u64;
+        tail.next_sequence += 1;
+        entry.state = state.clone();
+        entry.state.revision = revision;
+        entry.stamp = stamp;
+        entries.push(entry);
+    }
+    /// Forgets the entry for `path`, so the next read decodes the file.
+    #[cfg(test)]
+    pub(super) fn forget(path: &std::path::Path) {
+        ENTRIES
+            .lock()
+            .expect("decoded cache")
+            .retain(|e| e.path != path);
+    }
+    #[cfg(test)]
+    pub(super) fn holds(path: &std::path::Path) -> bool {
+        ENTRIES
+            .lock()
+            .expect("decoded cache")
+            .iter()
+            .any(|e| e.path == path)
+    }
+    pub(super) fn put(
+        path: PathBuf,
+        key: [u8; 32],
+        bytes: Vec<u8>,
+        version: u32,
+        state: &AccountState,
+        tail: Option<Tail>,
+        stamp: Stamp,
+    ) {
+        let mut entries = ENTRIES.lock().expect("decoded cache");
+        entries.retain(|e| e.path != path);
+        if entries.len() >= CAPACITY {
+            entries.remove(0);
+        }
+        entries.push(Entry {
+            path,
+            key,
+            bytes,
+            version,
+            state: state.clone(),
+            tail,
+            stamp,
+        });
+    }
+}
+
 fn normalize_interrupted(state: &mut AccountState) {
     state.sieve.interrupted();
     state.sieve_transactions.interrupted();
@@ -1342,7 +1704,7 @@ mod tests {
             assert!(loaded.gmail_backlog.runs.is_empty());
             if version > 1 {
                 store.save_state(&mut loaded).unwrap();
-                assert_eq!(store.schema_version().unwrap(), 18);
+                assert_eq!(store.schema_version().unwrap(), crate::census::SCHEMA);
                 assert_eq!(
                     serde_json::to_value(&store.load_state().unwrap().protocol_backlog).unwrap(),
                     serde_json::to_value(&loaded.protocol_backlog).unwrap()
@@ -1453,7 +1815,7 @@ mod tests {
                 .unwrap()
                 .persist(store.path())
                 .unwrap();
-            assert_eq!(store.schema_version().unwrap(), 18);
+            assert_eq!(store.schema_version().unwrap(), crate::census::SCHEMA);
             assert_eq!(
                 serde_json::to_value(store.load_state().unwrap()).unwrap(),
                 serde_json::to_value(loaded).unwrap()
@@ -1511,7 +1873,7 @@ mod tests {
                 crate::rules::proof::Baseline::Previous;
             assert!(crate::rules::workspace::preview(&loaded, &context, store.keys()).is_err());
             store.save_state(&mut loaded).unwrap();
-            assert_eq!(store.schema_version().unwrap(), 18);
+            assert_eq!(store.schema_version().unwrap(), crate::census::SCHEMA);
             assert_eq!(
                 serde_json::to_value(store.load_state().unwrap().exports).unwrap(),
                 expected,
@@ -1575,7 +1937,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 18);
+        assert_eq!(store.schema_version().unwrap(), crate::census::SCHEMA);
         assert_eq!(
             serde_json::to_value(store.load_state().unwrap().exports).unwrap(),
             serde_json::to_value(&saved.exports).unwrap()
@@ -1625,7 +1987,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 18);
+        assert_eq!(store.schema_version().unwrap(), crate::census::SCHEMA);
         assert!(store.load_state().unwrap().folder_provisioning == saved.folder_provisioning);
         let mut bad = saved.clone();
         bad.folder_provisioning.history[0].plan.entries[0]
@@ -1674,7 +2036,7 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
-        assert_eq!(store.schema_version().unwrap(), 18);
+        assert_eq!(store.schema_version().unwrap(), crate::census::SCHEMA);
         assert!(store.load_state().unwrap().sieve_transactions == state.sieve_transactions);
         let mut malformed = state.clone();
         malformed.sieve_transactions.history[0].after.bodies[1]
@@ -1727,7 +2089,7 @@ mod tests {
         let mut reopened = store.load_state().unwrap();
         assert!(reopened.sieve_placement.is_none());
         store.save_state(&mut reopened).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 18);
+        assert_eq!(store.schema_version().unwrap(), crate::census::SCHEMA);
         let mut tampered = state.clone();
         let t = &mut tampered.sieve_transactions.history[0];
         for image in std::iter::once(&mut t.after).chain(t.steps.iter_mut().map(|s| &mut s.after)) {
@@ -1787,7 +2149,7 @@ mod tests {
         let mut reopened = store.load_state().unwrap();
         assert!(reopened.sieve_transactions == legacy.sieve_transactions);
         store.save_state(&mut reopened).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 18);
+        assert_eq!(store.schema_version().unwrap(), crate::census::SCHEMA);
         assert!(store.load_state().unwrap().sieve_transactions == legacy.sieve_transactions);
         for mixed in [
             Counts {
@@ -1858,7 +2220,7 @@ mod tests {
             assert!(state.exports.is_empty());
             assert!(state.proposals.history.is_empty());
             store.save_state(&mut state).unwrap();
-            assert_eq!(store.schema_version().unwrap(), 18);
+            assert_eq!(store.schema_version().unwrap(), crate::census::SCHEMA);
             assert_eq!(store.load().unwrap().acquisition, Default::default());
         }
     }
@@ -1992,6 +2354,25 @@ fn memory_database() -> Result<Connection, CensusError> {
     )
     .map_err(|_| CensusError::Storage)?;
     Ok(db)
+}
+
+/// Test processes started with `MAILROOM_KILL_AT=<point>` kill themselves
+/// with SIGKILL when a save reaches that point, so crash tests land exactly
+/// there instead of at a random moment.
+#[cfg(test)]
+fn kill_requested(point: &str) -> bool {
+    std::env::var("MAILROOM_KILL_AT").is_ok_and(|p| p == point)
+}
+#[cfg(test)]
+fn kill_point(point: &str) {
+    if kill_requested(point) {
+        unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+        // Delivery to a multi-threaded process can lag the call, and this
+        // thread must not write anything more before it lands.
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
 }
 
 /// Per-thread counters of the product store's own I/O, for measurements.

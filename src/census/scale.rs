@@ -193,14 +193,31 @@ pub(crate) fn inflate_store(store: &super::EncryptedStore, gmail: bool) -> serde
     })
 }
 
-/// Runs one measured step and reports its counters and wall time.
+/// CPU time of the calling thread. On a loaded host wall time mostly
+/// measures waiting for a core; this is what the step itself costs.
+pub(crate) fn thread_cpu_ms() -> u64 {
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+    t.tv_sec as u64 * 1000 + t.tv_nsec as u64 / 1_000_000
+}
+
+/// Runs one measured step and reports its counters, wall time, the calling
+/// thread's CPU time and the load average at the end.
 pub(crate) fn measure<T>(operation: &str, extra: serde_json::Value, step: impl FnOnce() -> T) -> T {
     super::io::take();
     let began = std::time::Instant::now();
+    let cpu = thread_cpu_ms();
     let result = step();
     let wall_ms = began.elapsed().as_millis() as u64;
     let mut extra = extra;
     extra["wall_ms"] = wall_ms.into();
+    extra["thread_cpu_ms"] = (thread_cpu_ms() - cpu).into();
+    let mut load = [0f64; 3];
+    unsafe { libc::getloadavg(load.as_mut_ptr(), 3) };
+    extra["load1"] = load[0].into();
     report(operation, extra, super::io::take());
     result
 }
@@ -243,6 +260,22 @@ mod tests {
             report(
                 "store.journal_only_save",
                 serde_json::json!({"round": round}),
+                io::take(),
+            );
+        }
+        for round in 0..5u32 {
+            let folder = state.census.folders.get_mut("Scale/Folder-00").unwrap();
+            for n in 0..25 {
+                let uid = folder.messages.keys().last().unwrap() + 1;
+                folder.live_uids.insert(uid);
+                folder
+                    .messages
+                    .insert(uid, record(2_000_000 + round * 25 + n, uid, false, false));
+            }
+            store.save_state(&mut state).unwrap();
+            report(
+                "store.census_batch_save",
+                serde_json::json!({"round": round, "added_messages": 25}),
                 io::take(),
             );
         }

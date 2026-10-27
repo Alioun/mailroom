@@ -2,9 +2,10 @@ import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdtemp, readFile, writeFile, rename, mkdir, stat, readdir, unlink } from 'node:fs/promises'
-import { createHash, createDecipheriv } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
+import { bundlePath, decodeBundle, isBundleName } from './recovery-bundle.mjs'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const base = 'http://127.0.0.1:4173'
 assert.equal(await fetch(`${base}/api/session`).then(() => true, () => false), false, 'Stop the verified fake server before building')
@@ -84,12 +85,7 @@ async function effectBytes(account) {
   return result
 }
 function authenticate(bytes, secret) {
-  const parts = bytes.toString().split('.')
-  const decipher = createDecipheriv('aes-256-gcm', secret, Buffer.from(parts[2], 'base64url'))
-  decipher.setAAD(Buffer.from(parts[0])); decipher.setAuthTag(Buffer.from(parts[4], 'base64url'))
-  const plain = Buffer.concat([decipher.update(Buffer.from(parts[3], 'base64url')), decipher.final()])
-  const decoded = JSON.parse(plain.toString()); plain.fill(0)
-  return decoded
+  return decodeBundle(bytes, secret)
 }
 async function unrelated() {
   execFileSync(binary, ['--exact', 'acquisition::accounts::recovery::selected::tests::selected_unrelated_fixture_worker'], { cwd: root, env: { ...process.env, MAILROOM_SELECTED_UNRELATED_INSTALLATION: installation }, stdio: 'ignore' })
@@ -149,8 +145,9 @@ try {
   assert.deepEqual(exact.preview.accounts.map(a => a.account), selected)
   assert.deepEqual(exact.preview.excluded_accounts, [unselected])
   for (const a of exact.preview.accounts) assert.deepEqual(a.dependencies, [selected.find(id => id !== a.account)])
-  const bundlePath = join(directory, 'synthetic-recovery/bundles', `${bundle}.jwe`)
-  const bundleBytes = await readFile(bundlePath)
+  const bundleFile = bundlePath(join(directory, 'synthetic-recovery/bundles'), bundle)
+  assert.ok(bundleFile.endsWith('.bundle'), 'New captures are version-3 streamed bundles')
+  const bundleBytes = await readFile(bundleFile)
   const keyPath = join(directory, 'synthetic-recovery/separately-held-fake-recovery-key'), secret = await readFile(keyPath)
   const decoded = authenticate(bundleBytes, secret)
   assert.deepEqual(decoded.manifest, exact.preview)
@@ -180,9 +177,9 @@ try {
     assert.equal((await fetch(`${base}/api/accounts/status`, { headers: { 'X-Mailroom-Token': oldToken } })).status, 403)
     for (const id of selected) assert.deepEqual(await readFile(join(installation, 'data', cipherNames[id])), ciphertext[id])
     assert.deepEqual(await snapshot(unselected), unselectedBefore)
-    assert.ok((await readFile(ledger)).equals(ledgerBytes), 'Source ledger bytes preserved'); assert.deepEqual(await readFile(bundlePath), bundleBytes); assert.ok((await readFile(keyPath)).equals(secret), 'Separate key bytes preserved')
+    assert.ok((await readFile(ledger)).equals(ledgerBytes), 'Source ledger bytes preserved'); assert.deepEqual(await readFile(bundleFile), bundleBytes); assert.ok((await readFile(keyPath)).equals(secret), 'Separate key bytes preserved')
     assert.equal(await readFile(unknown, 'utf8'), 'unknown owner file retained')
-    for (const name of await readdir(join(directory, 'synthetic-recovery/bundles'))) if (name.endsWith('.jwe') || name.startsWith('.selected-') && name !== '.selected-unknown.stage-owner') {
+    for (const name of await readdir(join(directory, 'synthetic-recovery/bundles'))) if (isBundleName(name) || name.startsWith('.selected-') && name !== '.selected-unknown.stage-owner') {
       const c = authenticate(await readFile(join(directory, 'synthetic-recovery/bundles', name)), secret)
       if (c.accounts) for (const a of c.accounts) { a.key.fill(0); if (a.identity) a.identity.fill(0) }
       else { c.key.fill(0); if (c.identity) c.identity.fill(0) }

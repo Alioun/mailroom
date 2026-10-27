@@ -80,6 +80,16 @@ pub struct CompiledArtifact {
 }
 pub const SEMANTICS: &str = "mailroom-sieve-subset-v5";
 
+/// Equal when the persisted forms are equal. Saved plans embed an artifact,
+/// and the store compares plans to find what a save changed.
+impl PartialEq for CompiledArtifact {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity
+            && self.executable == other.executable
+            && serde_json::to_vec(self).ok() == serde_json::to_vec(other).ok()
+    }
+}
+
 impl CompiledArtifact {
     pub fn identity(&self) -> &str {
         &self.identity

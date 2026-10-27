@@ -13,6 +13,10 @@ use std::{
 use zeroize::Zeroizing;
 
 const RESPONSE: usize = 512 * 1024;
+/// Initial byte budget of a session, read and written. Like the deadline,
+/// each completed command adds one response's worth, so a long run of batches
+/// on one session is bounded per command instead of cut off after about 16
+/// MiB, which a run of about 46 MOVE batches of 500 messages reached.
 const TOTAL: usize = 16 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(5);
 /// Each completed command extends the session's overall deadline by this much,
@@ -107,6 +111,7 @@ pub(super) struct Session {
     credit: Duration,
     received: usize,
     written: usize,
+    budget: usize,
     remaining: usize,
     tag: u32,
     code_limit: usize,
@@ -229,6 +234,7 @@ impl Session {
             credit: PROGRESS_CREDIT,
             received: 0,
             written: 0,
+            budget: TOTAL,
             remaining: RESPONSE,
             tag: 0,
             code_limit: 256,
@@ -255,6 +261,7 @@ impl Session {
     /// Records a command's tagged completion, which earns the session more time.
     fn completed(&mut self) {
         self.end += self.credit;
+        self.budget = self.budget.saturating_add(RESPONSE);
     }
     fn check(&self) -> Result<(), Error> {
         let result = guard(&self.cancel, self.end.min(self.command_end));
@@ -274,7 +281,7 @@ impl Session {
     }
     fn byte(&mut self) -> Result<u8, Error> {
         self.check()?;
-        if self.remaining == 0 || self.received >= TOTAL {
+        if self.remaining == 0 || self.received >= self.budget {
             return Err(Error::Limit);
         }
         loop {
@@ -484,7 +491,7 @@ impl Session {
         self.tag = self.tag.checked_add(1).ok_or(Error::Limit)?;
         let tag = format!("F{}", self.tag);
         let bytes = Zeroizing::new([tag.as_bytes(), b" ", command, b"\r\n"].concat());
-        if bytes.len() > TOTAL.saturating_sub(self.written) {
+        if bytes.len() > self.budget.saturating_sub(self.written) {
             return Err(Error::Limit);
         }
         self.written += bytes.len();
@@ -846,5 +853,31 @@ mod write_tests {
                 assert!(started.elapsed() < Duration::from_secs(9));
             }
         }
+    }
+
+    /// A session that has read past its initial byte budget keeps going
+    /// while its commands complete, and stops once completed commands no
+    /// longer cover what it reads.
+    #[test]
+    fn completed_commands_extend_the_byte_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let (_repo, account, fake) =
+            crate::acquisition::folder_provisioning::tests::install(root.path());
+        let password = SecretValue::new(b"invented".to_vec());
+        let mut session = Session::connect(
+            &fake.source.permit(&account.id).unwrap(),
+            &account.login,
+            &password,
+            Cancellation::default(),
+        )
+        .unwrap();
+        session.received = TOTAL + 1;
+        session.budget = TOTAL + 2 * RESPONSE;
+        for _ in 0..3 {
+            session.observe().unwrap();
+        }
+        assert!(session.received > TOTAL && session.budget > TOTAL + 2 * RESPONSE);
+        session.received = session.budget;
+        assert_eq!(session.observe().unwrap_err(), Error::Limit);
     }
 }

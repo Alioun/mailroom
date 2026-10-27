@@ -350,8 +350,9 @@ impl Accounts {
             ),
         };
         let receipt = store.keys().binding_for(
-            b"mailroom/gmail-backlog-start/v1",
-            &serde_json::to_vec(&(saved, &plan, &batches)).map_err(failure)?,
+            b"mailroom/gmail-backlog-start/v2",
+            &crate::census::binding::bound(|| serde_json::to_vec(&(saved, &plan, &batches)))
+                .map_err(failure)?,
         );
         let id = store
             .keys()
@@ -367,6 +368,7 @@ impl Accounts {
                 reverse: vec![],
                 undo_receipt: None,
                 undo_conflicts: 0,
+                completed_at: None,
             },
             receipt,
             saved: saved_proof,
@@ -419,12 +421,16 @@ impl Accounts {
             .iter()
             .position(|r| r.id == id)
             .ok_or_else(invalid)?;
-        let binding = self.gmail_binding(account, store, saved)?;
-        if !same_binding(&binding, &saved.gmail_backlog.runs[i].plan.binding) {
+        let mut binding = self.gmail_binding(account, store, saved)?;
+        if !same_binding(&binding, &saved.gmail_backlog.runs[i].plan.binding, || {
+            model::material_v1(saved, store.keys())
+        }) {
             saved.gmail_backlog.runs[i].status = Status::Conflict;
             save(store, saved)?;
             return Err(invalid());
         }
+        // Reused for every step, in the form the run was saved with.
+        binding.material = saved.gmail_backlog.runs[i].plan.binding.material.clone();
         let run = &saved.gmail_backlog.runs[i];
         if matches!(
             run.status,
@@ -472,6 +478,7 @@ impl Accounts {
                     if !same_binding(
                         &self.gmail_binding_with(account, store, binding.material.clone())?,
                         &saved.gmail_backlog.runs[i].plan.binding,
+                        || None,
                     ) {
                         return Err(invalid());
                     }
@@ -520,6 +527,7 @@ impl Accounts {
         if result.is_err() && run.status == Status::Stopped && !cancel.is_cancelled() {
             run.status = Status::Conflict;
         }
+        run.stamp(self.now());
         save(store, saved)?;
         result
     }
@@ -548,11 +556,13 @@ impl Accounts {
             }
             Ok(())
         };
-        if !same_binding(&binding, &saved.gmail_backlog.runs[i].plan.binding) {
+        if !same_binding(&binding, &saved.gmail_backlog.runs[i].plan.binding, || {
+            model::material_v1(saved, store.keys())
+        }) {
             conflict(saved)?;
             return Err(invalid());
         }
-        let before = serde_json::to_vec(&saved.gmail_backlog).map_err(failure)?;
+        let before = saved.gmail_backlog.clone();
         let runtime = self.gmail_runtime(account, store, saved, &binding)?;
         let mut connection = self.gmail_connect(account, &runtime, cancel)?;
         if !compatible(
@@ -586,7 +596,8 @@ impl Accounts {
         }
         let run = &mut saved.gmail_backlog.runs[i];
         run.status = model::outcome(run, reverse);
-        if serde_json::to_vec(&saved.gmail_backlog).map_err(failure)? != before {
+        run.stamp(self.now());
+        if saved.gmail_backlog != before {
             save(store, saved)?;
         }
         Ok(())
@@ -607,9 +618,11 @@ impl Accounts {
             .iter()
             .find(|r| r.id == id)
             .ok_or_else(invalid)?;
-        if !same_binding(&binding, &run.plan.binding)
-            || run.undo_receipt.is_some()
+        if !same_binding(&binding, &run.plan.binding, || {
+            model::material_v1(saved, store.keys())
+        }) || run.undo_receipt.is_some()
             || run.batches.iter().any(|b| !b.observed())
+            || !crate::backlog::retention::undo_open(run.completed_at, self.now())
         {
             return Err(invalid());
         }
@@ -699,8 +712,11 @@ impl Accounts {
             });
         }
         let receipt = store.keys().binding_for(
-            b"mailroom/gmail-backlog-undo/v1",
-            &serde_json::to_vec(&(saved, &binding, &reverse, conflicts)).map_err(failure)?,
+            b"mailroom/gmail-backlog-undo/v2",
+            &crate::census::binding::bound(|| {
+                serde_json::to_vec(&(saved, &binding, &reverse, conflicts))
+            })
+            .map_err(failure)?,
         );
         Ok(UndoPreview {
             run: id.into(),
@@ -737,6 +753,7 @@ impl Accounts {
         if run.status != Status::Complete {
             run.status = model::outcome(run, true);
         }
+        run.stamp(self.now());
         save(store, saved)?;
         boundary("gmail_undo_consumed");
         self.gmail_run(account, store, saved, id, true, cancel, fresh)

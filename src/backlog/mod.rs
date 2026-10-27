@@ -2,6 +2,7 @@ pub mod gmail_journal;
 pub mod gmail_label;
 pub mod imap_move;
 pub mod protocol;
+pub mod retention;
 mod synthetic;
 pub(crate) use synthetic::SyntheticMailbox;
 
@@ -28,7 +29,7 @@ pub enum Scope {
     Inbox,
     EveryFolder,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Options {
     pub scope: Scope,
@@ -80,7 +81,7 @@ impl Identity {
         })
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Change {
     pub source: Identity,
     pub flags: BTreeSet<String>,
@@ -89,7 +90,7 @@ pub struct Change {
     pub sender: String,
     pub operation: Operation,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
     pub account: String,
     pub provider: Provider,
@@ -111,7 +112,7 @@ pub struct Plan {
     pub stopped_folders: BTreeSet<String>,
     pub diagnostics: Vec<String>,
 }
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Group {
     pub count: usize,
     pub selected: bool,

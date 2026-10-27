@@ -1,4 +1,4 @@
-use super::{Options, Plan, imap_move::*};
+use super::{Options, Plan, imap_move::*, retention};
 use crate::{
     census::{AccountId, AccountState, CensusError, CensusKeys, folder_provisioning::Inventory},
     rules::proof::Proof,
@@ -6,16 +6,21 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const HISTORY: usize = 32;
-pub const BATCHES: usize = 128;
+/// Retained runs with a full per-message journal. Q27 compacts finished runs
+/// 90 days after completion, so this bounds runs started within 90 days.
+pub const HISTORY: usize = 512;
+/// Batches per run: 512,000 messages at the 500-message batch limit.
+pub const BATCHES: usize = 1024;
 pub const LIMITATIONS: &str = "Explicit synthetic loopback MOVE/UIDPLUS source only. Saved workspace evidence is installed separately. Filing ignores predicted copies, read changes and keywords. No COPY fallback, Gmail protocol labels or automatic folder creation. MOVE cannot guard atomically against another client changing flags after the final read. Local locks do not exclude other clients. Undo preserves current flags and assigns new UIDs; it is not snapshot rollback. Missing mapping after possible transmission stays uncertain and cannot be retried. Restored accounts remain held.";
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Journal {
     pub runs: Vec<Run>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub summaries: Vec<retention::Summary>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
     pub account: AccountId,
@@ -24,7 +29,7 @@ pub struct Binding {
     pub workspace: String,
     pub material: String,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SavedPlan {
     pub filing: Plan,
@@ -45,13 +50,13 @@ pub enum Status {
     UndoRunning,
     Undone,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reverse {
     pub forward: usize,
     pub evidence: MoveEvidence,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Run {
     pub id: String,
@@ -64,12 +69,47 @@ pub struct Run {
     pub undo_receipt: Option<String>,
     #[serde(default)]
     pub undo_conflicts: usize,
+    /// When every forward batch was first verified. Undo is offered for 90
+    /// days from here. Runs saved before schema 19 lack it until the first
+    /// save under the new rule stamps them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<u64>,
 }
 impl Run {
     pub fn finished(&self) -> bool {
         (self.status == Status::Undone
             || self.status == Status::Complete && self.undo_receipt.is_none())
             && self.batches.iter().all(|b| !b.attempted() || verified(b))
+    }
+    /// Records the first completion. Called wherever a run's status is set.
+    pub fn stamp(&mut self, now: u64) {
+        if self.completed_at.is_none() && matches!(self.status, Status::Complete | Status::Undone) {
+            self.completed_at = Some(now);
+        }
+    }
+    fn summary(&self, completed_at: u64, now: u64) -> retention::Summary {
+        let count = |entries: &mut dyn Iterator<Item = &MoveEvidence>| {
+            entries
+                .map(|e| {
+                    e.resolutions()
+                        .values()
+                        .filter(|r| matches!(r, Resolution::Verified { .. }))
+                        .count()
+                })
+                .sum()
+        };
+        retention::Summary {
+            id: self.id.clone(),
+            receipt: self.receipt.clone(),
+            status: self.status,
+            completed_at,
+            compacted_at: now,
+            messages: self.plan.filing.changes.len(),
+            batches: self.batches.len(),
+            applied: count(&mut self.batches.iter()),
+            restored: count(&mut self.reverse.iter().map(|r| &r.evidence)),
+            folders: retention::folders(&self.plan.filing.changes),
+        }
     }
 }
 #[derive(Serialize)]
@@ -89,21 +129,48 @@ pub struct UndoPreview {
     pub limitations: &'static str,
 }
 
+/// Digest of the account state a run may rely on: everything except the
+/// revision and the journals the runs themselves write.
 pub fn material(state: &AccountState, keys: &CensusKeys) -> Result<String, String> {
-    let mut value = serde_json::to_value(state).map_err(|_| "Cannot bind material state")?;
-    value.as_object_mut().unwrap().remove("revision");
-    value.as_object_mut().unwrap().remove("protocol_backlog");
-    Ok(keys.binding_for(
-        b"mailroom/imap-backlog-material/v1",
-        &serde_json::to_vec(&value).map_err(|_| "Cannot bind material state")?,
-    ))
+    material_as(state, keys, &["revision", "protocol_backlog"], MATERIAL_V2)
 }
-pub fn same_binding(a: &Binding, b: &Binding) -> bool {
+/// v1 serialized the census whole. v2 binds it by digest. Runs saved with a
+/// v1 material keep being checked against v1.
+pub(crate) const MATERIAL_V1: &[u8] = b"mailroom/imap-backlog-material/v1";
+const MATERIAL_V2: &[u8] = b"mailroom/imap-backlog-material/v2";
+pub(crate) fn material_v1(state: &AccountState, keys: &CensusKeys) -> Option<String> {
+    material_as(state, keys, &["revision", "protocol_backlog"], MATERIAL_V1).ok()
+}
+pub(crate) fn material_as(
+    state: &AccountState,
+    keys: &CensusKeys,
+    excluded: &[&str],
+    purpose: &[u8],
+) -> Result<String, String> {
+    let legacy = !purpose.ends_with(b"/v2");
+    let encode = || -> Result<Vec<u8>, String> {
+        let mut value = serde_json::to_value(state).map_err(|_| "Cannot bind material state")?;
+        for field in excluded {
+            value.as_object_mut().unwrap().remove(*field);
+        }
+        serde_json::to_vec(&value).map_err(|_| "Cannot bind material state".into())
+    };
+    let bytes = if legacy {
+        encode()?
+    } else {
+        crate::census::binding::bound(encode)?
+    };
+    Ok(keys.binding_for(purpose, &bytes))
+}
+/// Whether a freshly computed binding still matches a saved run's. A saved
+/// material that differs from the current form is recomputed in the v1 form
+/// it may have been written in.
+pub fn same_binding(a: &Binding, b: &Binding, v1: impl FnOnce() -> Option<String>) -> bool {
     a.account == b.account
         && a.source == b.source
         && a.authority == b.authority
         && a.workspace == b.workspace
-        && a.material == b.material
+        && (a.material == b.material || v1().is_some_and(|m| m == b.material))
 }
 pub fn verified(e: &MoveEvidence) -> bool {
     e.attempted()
@@ -135,6 +202,37 @@ pub fn outcome(run: &Run, reverse: bool) -> Status {
     }
 }
 impl Journal {
+    /// Applies Q27: stamps finished runs saved before the rule, then replaces
+    /// each finished run whose undo window has closed with its summary.
+    /// Returns whether anything changed, so the caller saves once.
+    pub fn compact(&mut self, now: u64) -> bool {
+        let mut changed = false;
+        for run in &mut self.runs {
+            if run.completed_at.is_none() && run.finished() {
+                run.completed_at = Some(now);
+                changed = true;
+            }
+        }
+        let (expired, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.runs).into_iter().partition(|r| {
+                r.finished()
+                    && r.completed_at
+                        .is_some_and(|c| !retention::undo_open(Some(c), now))
+            });
+        self.runs = kept;
+        for run in expired {
+            self.summaries
+                .push(run.summary(run.completed_at.expect("expired run"), now));
+            changed = true;
+        }
+        changed
+    }
+    pub fn deadlines(&self, now: u64) -> Vec<retention::Deadline> {
+        self.runs
+            .iter()
+            .map(|r| retention::Deadline::of(&r.id, r.completed_at, now))
+            .collect()
+    }
     pub fn interrupted(&mut self) {
         for run in &mut self.runs {
             if matches!(run.status, Status::Running | Status::UndoRunning) {
@@ -152,13 +250,31 @@ impl Journal {
         };
         if self.runs.len() > HISTORY
             || self.runs.iter().filter(|r| !r.finished()).count() > 1
-            || serde_json::to_vec(self).map_err(|_| invalid())?.len() > 4 * 1024 * 1024
+            || self.summaries.len() > retention::SUMMARIES
         {
             return Err(invalid());
         }
         let mut ids = BTreeSet::new();
+        for s in &self.summaries {
+            if !ids.insert(&s.id) || !s.valid() {
+                return Err(invalid());
+            }
+        }
         for r in &self.runs {
+            let changes: std::collections::BTreeMap<_, _> = r
+                .plan
+                .filing
+                .changes
+                .iter()
+                .map(|c| {
+                    (
+                        (c.source.folder.as_str(), c.source.uidvalidity, c.source.uid),
+                        c,
+                    )
+                })
+                .collect();
             if !ids.insert(&r.id)
+                || changes.len() != r.plan.filing.changes.len()
                 || !digest(&r.id)
                 || !digest(&r.receipt)
                 || r.plan.binding.account != *account
@@ -213,15 +329,19 @@ impl Journal {
                         return Err(invalid());
                     }
                     count += 1;
-                    if !r.plan.filing.changes.iter().any(|c| {
-                        c.source.folder == b.command().source().name.decoded
-                            && c.source.uidvalidity == b.command().source().uidvalidity.get()
-                            && c.source.uid == uid.get()
-                            && c.destination == b.command().destination().name.decoded
-                            && c.source.message_id_hash
-                                == b.command().messages()[uid].message_id_hash
-                            && c.flags == b.command().messages()[uid].flags
-                    }) {
+                    if changes
+                        .get(&(
+                            b.command().source().name.decoded.as_str(),
+                            b.command().source().uidvalidity.get(),
+                            uid.get(),
+                        ))
+                        .is_none_or(|c| {
+                            c.destination != b.command().destination().name.decoded
+                                || c.source.message_id_hash
+                                    != b.command().messages()[uid].message_id_hash
+                                || c.flags != b.command().messages()[uid].flags
+                        })
+                    {
                         return Err(invalid());
                     }
                 }
@@ -238,22 +358,21 @@ impl Journal {
                     || b.evidence.command().source() != f.command().destination()
                     || b.evidence.command().destination() != f.command().source()
                     || f.mapping().is_none_or(|m| {
+                        let before: std::collections::BTreeMap<_, _> =
+                            m.pairs().iter().map(|(b, a)| (a, b)).collect();
                         b.evidence
                             .command()
                             .messages()
                             .iter()
                             .any(|(uid, current)| {
-                                m.pairs()
-                                    .iter()
-                                    .find(|(_, mapped)| *mapped == uid)
-                                    .is_none_or(|(uid_before, _)| {
-                                        let original = &f.command().messages()[uid_before];
-                                        resolutions[uid_before]
-                                            != (Resolution::Verified { destination: *uid })
-                                            || original.message_id_hash != current.message_id_hash
-                                            || original.size != current.size
-                                            || original.internal_date != current.internal_date
-                                    })
+                                before.get(uid).is_none_or(|uid_before| {
+                                    let original = &f.command().messages()[uid_before];
+                                    resolutions[uid_before]
+                                        != (Resolution::Verified { destination: *uid })
+                                        || original.message_id_hash != current.message_id_hash
+                                        || original.size != current.size
+                                        || original.internal_date != current.internal_date
+                                })
                             })
                     })
                 {

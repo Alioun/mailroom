@@ -3,6 +3,7 @@ use super::{
     gmail_label::{INBOX, LabelBatch, Outcome, StepKind},
     imap_move::Purpose,
     protocol::{SavedPlan, Status},
+    retention,
 };
 use crate::{
     census::{AccountId, AccountState, CensusError, CensusKeys},
@@ -11,28 +12,59 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const HISTORY: usize = 32;
-pub const BATCHES: usize = 128;
+pub const HISTORY: usize = super::protocol::HISTORY;
+pub const BATCHES: usize = super::protocol::BATCHES;
 pub const SEMANTICS: &str = "gmail-label-readback/v1";
 pub const LIMITATIONS: &str = "Explicit synthetic loopback Gmail X-GM-EXT-1 source only. Saved workspace evidence is installed separately. Execution resolves each message by X-GM-MSGID under the discovered All Mail UIDVALIDITY, adds the destination label, reads it back, then separately removes only Inbox and reads back. It never replaces the label set, changes flags or Seen, expunges, or creates labels. Gmail offers no conditional label store, so another client can change labels or flags after the final read. Local locks do not exclude other clients. A label store whose acknowledgment is lost stays uncertain and is never retried. Undo reverses only this run's applied label deltas and keeps later labels and flags; it is not snapshot rollback. Google label semantics are unverified fixture assumptions. Restored accounts remain held.";
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Journal {
     pub runs: Vec<Run>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub summaries: Vec<retention::Summary>,
 }
 impl Journal {
     pub fn is_empty(&self) -> bool {
-        self.runs.is_empty()
+        self.runs.is_empty() && self.summaries.is_empty()
+    }
+    /// Q27 retention, as for MOVE runs in `protocol::Journal::compact`.
+    pub fn compact(&mut self, now: u64) -> bool {
+        let mut changed = false;
+        for run in &mut self.runs {
+            if run.completed_at.is_none() && run.finished() {
+                run.completed_at = Some(now);
+                changed = true;
+            }
+        }
+        let (expired, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.runs).into_iter().partition(|r| {
+                r.finished()
+                    && r.completed_at
+                        .is_some_and(|c| !retention::undo_open(Some(c), now))
+            });
+        self.runs = kept;
+        for run in expired {
+            self.summaries
+                .push(run.summary(run.completed_at.expect("expired run"), now));
+            changed = true;
+        }
+        changed
+    }
+    pub fn deadlines(&self, now: u64) -> Vec<retention::Deadline> {
+        self.runs
+            .iter()
+            .map(|r| retention::Deadline::of(&r.id, r.completed_at, now))
+            .collect()
     }
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reverse {
     pub forward: usize,
     pub batch: LabelBatch,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Run {
     pub id: String,
@@ -44,8 +76,37 @@ pub struct Run {
     pub reverse: Vec<Reverse>,
     pub undo_receipt: Option<String>,
     pub undo_conflicts: usize,
+    /// See `protocol::Run::completed_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<u64>,
 }
 impl Run {
+    pub fn stamp(&mut self, now: u64) {
+        if self.completed_at.is_none() && matches!(self.status, Status::Complete | Status::Undone) {
+            self.completed_at = Some(now);
+        }
+    }
+    fn summary(&self, completed_at: u64, now: u64) -> retention::Summary {
+        let count = |entries: Vec<&LabelBatch>| {
+            entries
+                .iter()
+                .filter(|b| b.verified())
+                .map(|b| b.intent().messages().len())
+                .sum()
+        };
+        retention::Summary {
+            id: self.id.clone(),
+            receipt: self.receipt.clone(),
+            status: self.status,
+            completed_at,
+            compacted_at: now,
+            messages: self.plan.filing.changes.len(),
+            batches: self.batches.len(),
+            applied: count(self.entries(false)),
+            restored: count(self.entries(true)),
+            folders: retention::folders(&self.plan.filing.changes),
+        }
+    }
     /// Complete, or undone with no forward effect left unknown. Observed
     /// conflicts that Undo has addressed no longer block a new run.
     pub fn finished(&self) -> bool {
@@ -114,15 +175,14 @@ pub fn outcomes(journal: &Journal) -> serde_json::Value {
         .into()
 }
 
+const EXCLUDED: &[&str] = &["revision", "protocol_backlog", "gmail_backlog"];
+pub(crate) const MATERIAL_V1: &[u8] = b"mailroom/gmail-backlog-material/v1";
+/// See `protocol::material`.
 pub fn material(state: &AccountState, keys: &CensusKeys) -> Result<String, String> {
-    let mut value = serde_json::to_value(state).map_err(|_| "Cannot bind material state")?;
-    for field in ["revision", "protocol_backlog", "gmail_backlog"] {
-        value.as_object_mut().unwrap().remove(field);
-    }
-    Ok(keys.binding_for(
-        b"mailroom/gmail-backlog-material/v1",
-        &serde_json::to_vec(&value).map_err(|_| "Cannot bind material state")?,
-    ))
+    super::protocol::material_as(state, keys, EXCLUDED, b"mailroom/gmail-backlog-material/v2")
+}
+pub(crate) fn material_v1(state: &AccountState, keys: &CensusKeys) -> Option<String> {
+    super::protocol::material_as(state, keys, EXCLUDED, MATERIAL_V1).ok()
 }
 
 pub fn outcome(run: &Run, reverse: bool) -> Status {
@@ -167,11 +227,16 @@ impl Journal {
         let invalid = || CensusError::Storage;
         if self.runs.len() > HISTORY
             || self.runs.iter().filter(|r| !r.finished()).count() > 1
-            || serde_json::to_vec(self).map_err(|_| invalid())?.len() > 4 * 1024 * 1024
+            || self.summaries.len() > retention::SUMMARIES
         {
             return Err(invalid());
         }
         let mut ids = BTreeSet::new();
+        for s in &self.summaries {
+            if !ids.insert(&s.id) || !s.valid() {
+                return Err(invalid());
+            }
+        }
         for r in &self.runs {
             if !ids.insert(&r.id) || !valid_run(r, account) {
                 return Err(invalid());
@@ -215,6 +280,19 @@ fn valid_run(r: &Run, account: &AccountId) -> bool {
     {
         return false;
     }
+    let changes: std::collections::BTreeMap<_, _> = filing
+        .changes
+        .iter()
+        .map(|c| {
+            (
+                (c.source.folder.as_str(), c.source.uidvalidity, c.source.uid),
+                c,
+            )
+        })
+        .collect();
+    if changes.len() != filing.changes.len() {
+        return false;
+    }
     let mut members = BTreeSet::new();
     let mut gmail_ids = BTreeSet::new();
     let mut count = 0;
@@ -254,21 +332,25 @@ fn valid_run(r: &Run, account: &AccountId) -> bool {
                 .filter(|l| l.eq_ignore_ascii_case(INBOX))
                 .cloned()
                 .collect();
-            if !filing.changes.iter().any(|c| {
-                c.source.folder == i.context().name.decoded
-                    && c.source.uidvalidity == i.context().uidvalidity.get()
-                    && c.source.uid == uid.get()
-                    && c.source.gmail_id.as_deref() == Some(m.gmail_id.as_str())
-                    && c.source.message_id_hash == m.message_id_hash
-                    && c.flags == m.flags
-                    && c.original_labels == m.labels
-                    && c.destination == *label
-                    && c.operation
-                        == Operation::Gmail {
-                            add: add.clone(),
-                            remove: remove.clone(),
-                        }
-            }) {
+            if !changes
+                .get(&(
+                    i.context().name.decoded.as_str(),
+                    i.context().uidvalidity.get(),
+                    uid.get(),
+                ))
+                .is_some_and(|c| {
+                    c.source.gmail_id.as_deref() == Some(m.gmail_id.as_str())
+                        && c.source.message_id_hash == m.message_id_hash
+                        && c.flags == m.flags
+                        && c.original_labels == m.labels
+                        && c.destination == *label
+                        && c.operation
+                            == Operation::Gmail {
+                                add: add.clone(),
+                                remove: remove.clone(),
+                            }
+                })
+            {
                 return false;
             }
         }

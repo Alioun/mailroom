@@ -76,7 +76,7 @@ fn schema_ten_protocol_and_proposal_sieve_facts_round_trip_with_single_account_r
     let before = state(&repo, &account);
     assert!(before.census.acquisition.is_protocol());
     let (manifest, bundle) = capture(&repo, &account, root.path());
-    assert_eq!(manifest.state_schema, 18);
+    assert_eq!(manifest.state_schema, crate::census::SCHEMA);
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let preview = fresh.restore_preview(&bundle, &secret()).unwrap();
@@ -132,7 +132,7 @@ fn capture(repo: &Accounts, a: &Account, root: &Path) -> (Manifest, PathBuf) {
     let id = repo
         .capture(&preview, &secret(), &root.join("bundles"), |_| Ok(()))
         .unwrap();
-    (preview, root.join("bundles").join(format!("{id}.jwe")))
+    (preview, bundle_file(&root.join("bundles"), &id).unwrap())
 }
 fn state(repo: &Accounts, a: &Account) -> AccountState {
     repo.store(a).unwrap().load_state().unwrap()
@@ -224,14 +224,30 @@ fn tampering_wrong_secret_truncation_unknown_schema_and_paths_reject_without_cha
     let (root, repo, a) = fixture();
     let (_, bundle) = capture(&repo, &a, root.path());
     let bytes = fs::read(&bundle).unwrap();
-    assert!(open(&bytes, &SecretValue::new(vec![4; 32])).is_err());
-    for cut in [0, 10, bytes.len() - 1] {
-        assert!(open(&bytes[..cut], &secret()).is_err());
+    assert!(bytes.starts_with(stream::MAGIC));
+    assert!(open(&bundle, &SecretValue::new(vec![4; 32])).is_err());
+    let altered = root.path().join("altered");
+    fs::create_dir_all(&altered).unwrap();
+    let write = |name: &str, bytes: &[u8]| {
+        let path = altered.join(name);
+        fs::write(&path, bytes).unwrap();
+        path
+    };
+    for cut in [0, 10, bytes.len() / 2, bytes.len() - 1] {
+        assert!(
+            open(&write("cut", &bytes[..cut]), &secret()).is_err(),
+            "{cut}"
+        );
     }
-    let mut corrupt = bytes.clone();
-    let n = corrupt.len() - 7;
-    corrupt[n] ^= 1;
-    assert!(open(&corrupt, &secret()).is_err());
+    assert!(open(&write("extended", &[&bytes[..], b"x"].concat()), &secret()).is_err());
+    for at in [bytes.len() - 7, bytes.len() / 2, stream::MAGIC.len() + 20] {
+        let mut corrupt = bytes.clone();
+        corrupt[at] ^= 1;
+        assert!(
+            open(&write("corrupt", &corrupt), &secret()).is_err(),
+            "{at}"
+        );
+    }
     for attack in [
         "schema",
         "path",
@@ -241,7 +257,7 @@ fn tampering_wrong_secret_truncation_unknown_schema_and_paths_reject_without_cha
         "ciphertext",
         "inventory",
     ] {
-        let mut c = open(&bytes, &secret()).unwrap();
+        let (mut c, _) = open(&bundle, &secret()).unwrap();
         match attack {
             "schema" => c.manifest.state_schema = 999,
             "path" => c.manifest.resources[0].resource = "../../outside".into(),
@@ -252,19 +268,71 @@ fn tampering_wrong_secret_truncation_unknown_schema_and_paths_reject_without_cha
             }),
             "key" => c.key.0[0] ^= 1,
             "ciphertext" => {
-                c.ciphertext[0] ^= 1;
-                c.manifest.resources = inventory(&c.account, &c.ciphertext).unwrap();
+                let path = c.resource.path().to_path_buf();
+                let mut file = fs::read(&path).unwrap();
+                file[100] ^= 1;
+                fs::write(&path, &file).unwrap();
+                c.manifest.resources =
+                    inventory(&c.account, &stream::file_digest(&path).unwrap()).unwrap();
             }
             "inventory" => c.manifest.key_material.clear(),
             _ => c.manifest.account = AccountId::new("other-account").unwrap(),
         }
-        assert!(
-            open(&seal(&c, &secret()).unwrap(), &secret()).is_err(),
-            "{attack}"
-        );
+        let body = Body::Single {
+            captured: c.header(),
+        };
+        let resealed = reseal(&altered, &secret(), &body, &[c.resource.path()]);
+        assert!(open(&resealed, &secret()).is_err(), "{attack}");
+        let legacy = write("legacy.jwe", &seal_legacy(&c.legacy(), &secret()));
+        assert!(open(&legacy, &secret()).is_err(), "legacy {attack}");
     }
+    let (c, _) = open(&bundle, &secret()).unwrap();
+    let foreign = Body::Single {
+        captured: c.header(),
+    };
+    let swapped = reseal(
+        &altered,
+        &secret(),
+        &foreign,
+        &[c.resource.path(), c.resource.path()],
+    );
+    assert!(
+        open(&swapped, &secret()).is_err(),
+        "an extra file is refused"
+    );
     assert!(repo.restore_preview(&bundle, &secret()).is_err());
     assert_eq!(fs::read(bundle).unwrap(), bytes);
+}
+
+/// Bundles written by earlier builds, one JWE with the account file inline,
+/// restore exactly as before into a fresh installation, held.
+#[test]
+fn version_two_jwe_bundles_still_restore_exactly() {
+    let (root, repo, a) = fixture();
+    let before = state(&repo, &a);
+    let raw = fs::read(repo.store(&a).unwrap().path()).unwrap();
+    let (_, bundle) = capture(&repo, &a, root.path());
+    let (c, _) = open(&bundle, &secret()).unwrap();
+    let legacy = seal_legacy(&c.legacy(), &secret());
+    let directory = root.path().join("legacy");
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join(format!("{}.jwe", digest(&legacy)));
+    fs::write(&path, &legacy).unwrap();
+    let fresh_root = tempfile::tempdir().unwrap();
+    let fresh = persistent_accounts(fresh_root.path());
+    let preview = fresh.restore_preview(&path, &secret()).unwrap();
+    assert_eq!(preview.bundle, digest(&legacy));
+    fresh
+        .restore(&path, &secret(), &preview, |_| Ok(()))
+        .unwrap();
+    let restored = fresh.load(&a.id).unwrap();
+    let store = fresh.store(&restored).unwrap();
+    assert_eq!(fs::read(store.path()).unwrap(), raw);
+    assert!(store.recovery_pending(), "restored accounts stay held");
+    assert_eq!(
+        serde_json::to_value(store.load_state().unwrap().protocol_backlog).unwrap(),
+        serde_json::to_value(before.protocol_backlog).unwrap()
+    );
 }
 #[test]
 fn stale_capture_and_no_clobber_preserve_source_and_existing_bundle() {
@@ -401,7 +469,7 @@ fn partial_bundle_publication_and_oversized_input_preserve_usable_copies_and_sou
     let (_, usable) = capture(&repo, &a, root.path());
     let usable_bytes = fs::read(&usable).unwrap();
     let source = fs::read(repo.store(&a).unwrap().path()).unwrap();
-    for phase in ["recovery_staged#2", "recovery_bundle_published"] {
+    for phase in ["recovery_staged", "recovery_bundle_published"] {
         let (preview, _) = repo.capture_preview(&a.id, 1792915201).unwrap();
         lifecycle::FAIL.with(|f| *f.borrow_mut() = (Some(phase.into()), 0));
         assert!(
@@ -418,8 +486,8 @@ fn partial_bundle_publication_and_oversized_input_preserve_usable_copies_and_sou
         assert_eq!(fs::read(repo.store(&a).unwrap().path()).unwrap(), source);
         for entry in fs::read_dir(root.path().join("bundles")).unwrap() {
             let path = entry.unwrap().path();
-            assert_eq!(path.extension().unwrap(), "jwe");
-            assert!(open(&fs::read(path).unwrap(), &secret()).is_ok());
+            assert_eq!(path.extension().unwrap(), stream::EXTENSION);
+            assert!(open(&path, &secret()).is_ok());
         }
     }
     let oversized = root.path().join("oversized.jwe");
@@ -527,7 +595,7 @@ fn folder_journal_restores_held_without_reverting_later_independent_topology() {
     );
     let before = state(&repo, &account);
     let (manifest, bundle) = capture(&repo, &account, root.path());
-    assert_eq!(manifest.state_schema, 18);
+    assert_eq!(manifest.state_schema, crate::census::SCHEMA);
     let effects = crate::acquisition::sieve_transaction::tests::independent_effects(
         root.path(),
         &repo.store(&account).unwrap(),
@@ -588,7 +656,7 @@ fn schema_fourteen_delivery_round_trips_complete_state_without_recovering_author
         crate::acquisition::workspace_authority::envelope_tests::install(root.path());
     let before = state(&repo, &account);
     let (manifest, bundle) = capture(&repo, &account, root.path());
-    assert_eq!(manifest.state_schema, 18);
+    assert_eq!(manifest.state_schema, crate::census::SCHEMA);
     let fresh_root = tempfile::tempdir().unwrap();
     let mut fresh = persistent_accounts(fresh_root.path());
     let preview = fresh.restore_preview(&bundle, &secret()).unwrap();
@@ -622,33 +690,61 @@ fn schema_fourteen_delivery_round_trips_complete_state_without_recovering_author
     );
 }
 
+/// Captures a personal-scale account into a streamed bundle and restores it
+/// into a fresh installation whose key, data and metadata were lost.
 #[test]
 #[ignore = "personal-scale measurement; run explicitly"]
 fn scale_recovery_capture() {
     use crate::census::scale;
-    let root = tempfile::tempdir().unwrap();
-    let (repo, account, _fake) = crate::acquisition::sieve_transaction::tests::install(root.path());
-    crate::acquisition::sieve_transaction::tests::commit_fixture_transaction(&repo, &account);
-    let setup = scale::inflate_store(&repo.store(&account).unwrap(), false);
+    let (root, repo, a) = fixture();
+    let setup = scale::inflate_store(&repo.store(&a).unwrap(), false);
     scale::report("recovery.setup", setup, Default::default());
+    let raw = fs::read(repo.store(&a).unwrap().path()).unwrap();
+    let before = encoded(&state(&repo, &a)).unwrap();
     let preview = scale::measure("recovery.capture_preview", serde_json::json!({}), || {
-        repo.capture_preview(&account.id, 1792915200)
+        repo.capture_preview(&a.id, 1792915200)
     });
-    let result = match preview {
-        Ok((preview, _)) => scale::measure("recovery.capture", serde_json::json!({}), || {
-            repo.capture(
-                &preview,
-                &secret(),
-                &root.path().join("bundles"),
-                |_| Ok(()),
-            )
-        })
-        .map(|_| ()),
-        Err(e) => Err(e),
-    };
+    let (preview, _) = preview.unwrap();
+    let id = scale::measure("recovery.capture", serde_json::json!({}), || {
+        repo.capture(
+            &preview,
+            &secret(),
+            &root.path().join("bundles"),
+            |_| Ok(()),
+        )
+    })
+    .unwrap();
+    let bundle = bundle_file(&root.path().join("bundles"), &id).unwrap();
     scale::report(
-        "recovery.result",
-        serde_json::json!({"result": format!("{result:?}")}),
+        "recovery.bundle",
+        serde_json::json!({"bundle_bytes": fs::metadata(&bundle).unwrap().len(), "account_file_bytes": raw.len()}),
         Default::default(),
     );
+    drop(repo);
+    for lost in ["fake-credentials", "data", "config"] {
+        fs::rename(
+            root.path().join(lost),
+            root.path().join(format!("lost-{lost}")),
+        )
+        .unwrap();
+    }
+    let fresh = persistent_accounts(root.path());
+    let restore = scale::measure("recovery.restore_preview", serde_json::json!({}), || {
+        fresh.restore_preview(&bundle, &secret())
+    })
+    .unwrap();
+    scale::measure("recovery.restore", serde_json::json!({}), || {
+        fresh.restore(&bundle, &secret(), &restore, |_| Ok(()))
+    })
+    .unwrap();
+    let restored = fresh.load(&a.id).unwrap();
+    let store = fresh.store(&restored).unwrap();
+    let exact = fs::read(store.path()).unwrap() == raw;
+    let same_state = encoded(&store.load_state().unwrap()).unwrap().as_slice() == before.as_slice();
+    scale::report(
+        "recovery.result",
+        serde_json::json!({"exact_file": exact, "same_state": same_state, "held": store.recovery_pending()}),
+        Default::default(),
+    );
+    assert!(exact && same_state && store.recovery_pending());
 }

@@ -28,11 +28,17 @@ pub(crate) struct SelectedManifest {
     pub ledger: LedgerSelection,
     pub limitations: String,
 }
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SelectedCaptured {
     manifest: SelectedManifest,
     accounts: Vec<Captured>,
+    ledger: Option<SecretBytes>,
+}
+/// A selected capture inside a version-2 JWE bundle, files inline.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacySelected {
+    manifest: SelectedManifest,
+    accounts: Vec<LegacyCaptured>,
     ledger: Option<SecretBytes>,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,32 +123,81 @@ fn raw_ledger(guard: Option<&LockedLedger<'_>>) -> Result<Option<Vec<u8>>, Acqui
         .transpose()
         .map(Option::flatten)
 }
-fn selected_open(bytes: &[u8], secret: &SecretValue) -> Result<SelectedCaptured, AcquisitionError> {
-    let plain = open_plain(bytes, secret)?;
-    let captured: SelectedCaptured = match serde_json::from_slice(&plain) {
-        Ok(c) => c,
-        Err(_) => {
-            let legacy: Captured =
-                serde_json::from_slice(&plain).map_err(|_| AcquisitionError::InvalidInput)?;
-            validate_captured(&legacy)?;
-            SelectedCaptured {
-                manifest: SelectedManifest {
-                    version: 2,
-                    captured_at: legacy.manifest.captured_at,
-                    accounts: vec![legacy.manifest.clone()],
-                    excluded_accounts: vec![],
-                    ledger: LedgerSelection::Excluded {
-                        source_version: None,
-                    },
-                    limitations: SELECTED_LIMITATIONS.into(),
-                },
-                accounts: vec![legacy],
-                ledger: None,
+/// A single-account capture as a selection of one, with no ledger.
+fn single_as_selected(captured: Captured) -> SelectedCaptured {
+    SelectedCaptured {
+        manifest: SelectedManifest {
+            version: 2,
+            captured_at: captured.manifest.captured_at,
+            accounts: vec![captured.manifest.clone()],
+            excluded_accounts: vec![],
+            ledger: LedgerSelection::Excluded {
+                source_version: None,
+            },
+            limitations: SELECTED_LIMITATIONS.into(),
+        },
+        accounts: vec![captured],
+        ledger: None,
+    }
+}
+/// Opens a bundle of any version, single or selected, staging its account
+/// files, and returns the authenticated selection and bundle identity.
+fn selected_open(
+    bundle: &Path,
+    secret: &SecretValue,
+) -> Result<(SelectedCaptured, String), AcquisitionError> {
+    let (captured, id) = if stream::Reader::is_stream(bundle)? {
+        let (mut reader, body) = stream::Reader::open::<Body>(bundle, secret, MAX_STREAM)?;
+        let captured = match body {
+            Body::Single { captured } => {
+                let captured = stage_streamed(captured, &mut reader)?;
+                validate_captured(&captured)?;
+                single_as_selected(captured)
             }
-        }
+            Body::Selected {
+                manifest,
+                accounts,
+                ledger,
+            } => {
+                if accounts.len() > MAX_ACCOUNTS {
+                    return Err(AcquisitionError::InvalidInput);
+                }
+                SelectedCaptured {
+                    manifest,
+                    accounts: accounts
+                        .into_iter()
+                        .map(|a| stage_streamed(a, &mut reader))
+                        .collect::<Result<_, _>>()?,
+                    ledger,
+                }
+            }
+        };
+        (captured, reader.finish()?)
+    } else {
+        let bytes = read_bounded(bundle, MAX_BUNDLE)?;
+        let plain = open_plain(&bytes, secret)?;
+        let captured = match serde_json::from_slice::<LegacySelected>(&plain) {
+            Ok(c) => SelectedCaptured {
+                manifest: c.manifest,
+                accounts: c
+                    .accounts
+                    .into_iter()
+                    .map(stage_legacy)
+                    .collect::<Result<_, _>>()?,
+                ledger: c.ledger,
+            },
+            Err(_) => {
+                let legacy: LegacyCaptured =
+                    serde_json::from_slice(&plain).map_err(|_| AcquisitionError::InvalidInput)?;
+                let legacy = stage_legacy(legacy)?;
+                validate_captured(&legacy)?;
+                single_as_selected(legacy)
+            }
+        };
+        (captured, digest(&bytes))
     };
     validate_selected(&captured)?;
-    Ok(captured)
+    Ok((captured, id))
 }
 fn validate_selected(c: &SelectedCaptured) -> Result<(), AcquisitionError> {
     let m = &c.manifest;
@@ -339,35 +394,38 @@ impl Accounts {
             &selected,
             digest(&encoded(&bindings)?),
         )?)?;
-        let bytes = seal(&captured, secret)?;
-        selected_open(&bytes, secret)?;
-        // Recheck the installed authority under its guard at the final publication boundary.
-        let guard = ledger_lock(ledger)?;
-        let raw = raw_ledger(guard.as_ref())?;
-        let current = match &captured.ledger {
-            Some(_) => ledger_inventory(raw.as_deref().ok_or(AcquisitionError::InvalidInput)?)?,
-            None => LedgerSelection::Excluded {
-                source_version: raw.as_deref().map(digest),
-            },
+        let body = Body::Selected {
+            manifest: captured.manifest.clone(),
+            accounts: captured.accounts.iter().map(Captured::header).collect(),
+            ledger: captured.ledger.clone(),
         };
-        if current != preview.ledger {
-            return Err(AcquisitionError::InvalidInput);
-        }
-        let id = digest(&bytes);
-        private_directory(directory)?;
-        let mut stage = tempfile::Builder::new()
-            .prefix(&format!(".selected-{id}.stage-"))
-            .tempfile_in(directory)
-            .map_err(|_| AcquisitionError::Storage)?;
-        stage
-            .write_all(&bytes)
-            .and_then(|_| stage.as_file().sync_all())
-            .map_err(|_| AcquisitionError::Storage)?;
-        boundary("selected_capture_staged")?;
-        stage
-            .persist_noclobber(directory.join(format!("{id}.jwe")))
-            .map_err(|_| AcquisitionError::Storage)?;
-        sync_dir(directory)?;
+        let accounts: Vec<_> = captured.accounts.iter().collect();
+        let id = write_bundle(
+            directory,
+            ".selected-stage-",
+            secret,
+            &body,
+            &accounts,
+            "selected_capture_staged",
+            |staged| {
+                let (_, id) = selected_open(staged, secret)?;
+                // Recheck the installed authority under its guard at the final publication boundary.
+                let guard = ledger_lock(ledger)?;
+                let raw = raw_ledger(guard.as_ref())?;
+                let current = match &captured.ledger {
+                    Some(_) => {
+                        ledger_inventory(raw.as_deref().ok_or(AcquisitionError::InvalidInput)?)?
+                    }
+                    None => LedgerSelection::Excluded {
+                        source_version: raw.as_deref().map(digest),
+                    },
+                };
+                if current != preview.ledger {
+                    return Err(AcquisitionError::InvalidInput);
+                }
+                Ok(id)
+            },
+        )?;
         boundary("selected_capture_published")?;
         boundary("selected_capture_before_ack")?;
         Ok(id)
@@ -405,12 +463,12 @@ impl Accounts {
     fn selected_preview(
         &self,
         captured: &SelectedCaptured,
-        bytes: &[u8],
+        bundle: &str,
         target: LedgerTarget,
     ) -> SelectedRestorePreview {
         SelectedRestorePreview {
             manifest: captured.manifest.clone(),
-            bundle: digest(bytes),
+            bundle: bundle.into(),
             target: self.paths.config.to_string_lossy().into_owned(),
             accounts_absent: true,
             ledger_target: target,
@@ -457,8 +515,7 @@ impl Accounts {
         restore_ledger: bool,
         ledger: Option<&InstalledLedger>,
     ) -> Result<SelectedRestorePreview, AcquisitionError> {
-        let bytes = read_bounded(bundle, MAX_BUNDLE)?;
-        let captured = selected_open(&bytes, secret)?;
+        let (captured, id) = selected_open(bundle, secret)?;
         self.selected_validate_accounts(&captured)?;
         let _installation = self.lock_installation()?;
         let _leases = self.selected_locks(&ids(&captured.manifest))?;
@@ -467,7 +524,7 @@ impl Accounts {
         }
         let guard = ledger_lock(ledger)?;
         let target = self.selected_target(&captured, restore_ledger, guard.as_ref())?;
-        Ok(self.selected_preview(&captured, &bytes, target))
+        Ok(self.selected_preview(&captured, &id, target))
     }
     pub(crate) fn selected_restore(
         &self,
@@ -477,8 +534,7 @@ impl Accounts {
         ledger: Option<&InstalledLedger>,
         authorize: impl FnOnce(crate::confirmation::Plan) -> Result<(), AcquisitionError>,
     ) -> Result<Vec<Restored>, AcquisitionError> {
-        let bytes = read_bounded(bundle, MAX_BUNDLE)?;
-        let captured = selected_open(&bytes, secret)?;
+        let (captured, id) = selected_open(bundle, secret)?;
         self.selected_validate_accounts(&captured)?;
         let _installation = self.lock_installation()?;
         let _leases = self.selected_locks(&ids(&captured.manifest))?;
@@ -491,7 +547,7 @@ impl Accounts {
             !matches!(preview.ledger_target, LedgerTarget::PreserveCurrent { .. }),
             guard.as_ref(),
         )?;
-        if self.selected_preview(&captured, &bytes, target) != *preview {
+        if self.selected_preview(&captured, &id, target) != *preview {
             return Err(AcquisitionError::InvalidInput);
         }
         authorize(selected_restore_plan(preview)?)?;
@@ -500,18 +556,7 @@ impl Accounts {
             authority: nonce(),
             preview: preview.clone(),
         };
-        let stage = self
-            .paths
-            .config
-            .join("recovery")
-            .join(format!("{}.jwe", preview.bundle));
-        if stage.exists() {
-            if read_bounded(&stage, MAX_BUNDLE)? != bytes {
-                return Err(AcquisitionError::Storage);
-            }
-        } else {
-            publish_new(&stage, &bytes)?;
-        }
+        self.stage_bundle(bundle, &preview.bundle)?;
         write_json(&self.selected_marker(), &tx)?;
         boundary("selected_restore_intent")?;
         self.finish_selected(captured, &tx, guard.as_ref())
@@ -533,18 +578,10 @@ impl Accounts {
         {
             return Err(AcquisitionError::InvalidInput);
         }
-        let bytes = read_bounded(
-            &self
-                .paths
-                .config
-                .join("recovery")
-                .join(format!("{}.jwe", tx.preview.bundle)),
-            MAX_BUNDLE,
-        )?;
-        if digest(&bytes) != tx.preview.bundle {
+        let (captured, bundle) = selected_open(&self.staged_bundle(&tx.preview.bundle)?, secret)?;
+        if bundle != tx.preview.bundle {
             return Err(AcquisitionError::Authentication);
         }
-        let captured = selected_open(&bytes, secret)?;
         if captured.manifest != tx.preview.manifest
             || !tx.preview.accounts_absent
             || tx.preview.consequences != SELECTED_LIMITATIONS
@@ -617,7 +654,7 @@ impl Accounts {
             {
                 return Err(AcquisitionError::InvalidInput);
             }
-            if path_present(&path)? && read_bounded(&path, 8 * 1024 * 1024)? != c.ciphertext {
+            if path_present(&path)? && !c.resource.matches(&path, &c.manifest)? {
                 return Err(AcquisitionError::InvalidInput);
             }
             for (reference, expected) in [
@@ -680,7 +717,7 @@ impl Accounts {
             }
             let path = cipher_path(&self.paths.data, &a.id, a.generation);
             if !path.exists() {
-                publish_new(&path, &c.ciphertext)?;
+                c.resource.publish(&path)?;
             }
             boundary("selected_restore_data")?;
             if index == 1 {

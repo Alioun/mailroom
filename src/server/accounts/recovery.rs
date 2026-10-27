@@ -45,10 +45,7 @@ pub(in crate::server) enum Request {
     },
 }
 fn bundle_path(root: &Path, id: &str) -> Result<PathBuf, AcquisitionError> {
-    if !recovery::valid_digest(id) {
-        return Err(AcquisitionError::InvalidInput);
-    }
-    Ok(root.join("bundles").join(format!("{id}.jwe")))
+    recovery::bundle_file(&root.join("bundles"), id)
 }
 fn fake_secret(root: &Path, create: bool) -> Result<SecretValue, AcquisitionError> {
     use rand::RngCore;

@@ -11,7 +11,8 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 pub const HISTORY_LIMIT: usize = 8;
-const RECEIPT_VERSION: &str = "mailroom/local-sieve-download/v1";
+/// v2 binds the census by its digest (`census::binding`).
+const RECEIPT_VERSION: &str = "mailroom/local-sieve-download/v2";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -203,7 +204,7 @@ pub fn preview(
         None
     };
     let artifact = compile_input(input, state, context)?;
-    let proof = proof::prove(
+    let proof = proof::prove_shared(
         artifact,
         &state.census,
         input.as_of,
@@ -212,15 +213,17 @@ pub fn preview(
         baseline,
     )?;
     let payload = zeroize::Zeroizing::new(
-        serde_json::to_vec(&(
-            RECEIPT_VERSION,
-            SEMANTICS,
-            context,
-            state,
-            &proof,
-            proof.artifact.executable().as_bytes(),
-            "rules.sieve",
-        ))
+        crate::census::binding::bound(|| {
+            serde_json::to_vec(&(
+                RECEIPT_VERSION,
+                SEMANTICS,
+                context,
+                state,
+                &proof,
+                proof.artifact.executable().as_bytes(),
+                "rules.sieve",
+            ))
+        })
         .map_err(|_| "Cannot bind proof")?,
     );
     let receipt = keys.binding_for(RECEIPT_VERSION.as_bytes(), &payload);

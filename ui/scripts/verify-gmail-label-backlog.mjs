@@ -3,6 +3,13 @@ import { writeFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { chromium } from 'playwright'
 import { fixture, root, base } from '../../scripts/gmail-backlog-fixture.mjs'
+
+async function undoDeadline(panel, german) {
+  const line = panel.locator('.undo-deadline').first()
+  await line.getByText(german ? /^Rückgängigmachen möglich bis .+\.$/ : /^Undo available until .+\.$/).waitFor()
+  const until = Number(await line.getAttribute('data-undo-until'))
+  assert.ok(Math.abs(until - (Date.now() / 1000 + 90 * 86400)) < 86400, 'Undo deadline is 90 days after completion')
+}
 const f = await fixture()
 const artifacts = join(root, '.audit/gmail-label-backlog-browser', new Date().toISOString().replace(/[:.]/g, '-'))
 await mkdir(artifacts, { recursive: true })
@@ -74,6 +81,7 @@ try {
   await panel.getByRole('button', { name: 'Sort Gmail backlog', exact: true }).click()
   await panel.locator('.run-state').getByText('complete', { exact: true }).waitFor()
   let o = await f.observe()
+  await undoDeadline(panel, false)
   assert.deepEqual(Object.keys(o.inbox.messages).sort(), ['1004', '1008'])
   assert.deepEqual(labels(o, '1002'), ['Andere', 'Privat/Studio'])
   await panel.locator('[data-gmail-run] details summary').click()
@@ -83,12 +91,14 @@ try {
   await reconcile()
   await panel.locator('.run-state').getByText('complete', { exact: true }).waitFor()
   await f.observe('flag:1001')
+  await undoDeadline(panel, true)
   await panel.getByRole('button', { name: 'Bedingtes Rückgängigmachen prüfen', exact: true }).click()
   const undoApproval = panel.getByRole('checkbox', { name: 'Ich bestätige: Posteingang wiederherstellen und nur die von diesem Ablauf hinzugefügten Labels entfernen', exact: true })
   assert.equal(await undoApproval.isChecked(), false)
   await undoApproval.check()
   await panel.getByRole('button', { name: 'Geeignete Labeländerungen rückgängig machen', exact: true }).click()
   await panel.locator('.run-state').getByText('undone', { exact: true }).waitFor()
+  await panel.locator('.undo-deadline').getByText(/^Rückgängig gemacht\. Das Journal bleibt bis .+ erhalten und wird dann durch eine Zusammenfassung ersetzt\.$/).waitFor()
   o = await f.observe()
   assert.deepEqual(labels(o, '1001'), ['\\Inbox'])
   assert.ok(o.all_mail.messages['1001'].flags.includes('\\Flagged'))

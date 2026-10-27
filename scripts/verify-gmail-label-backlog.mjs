@@ -94,7 +94,7 @@ try {
     assert.deepEqual(after.mailboxes, before.mailboxes)
     assert.equal(after.unrelated, before.unrelated)
     assert.equal(after.forbidden, null)
-    assert.equal(after.schema, 18)
+    assert.equal(after.schema, 19)
     const status = await f.command('status')
     assert.equal(status.journal.runs[0].status, 'complete')
     assert.ok(Object.values(status.outcomes[status.journal.runs[0].id].forward).flat().every(step => Object.values(step).every(o => o === 'verified')))
@@ -289,7 +289,7 @@ try {
       const accounts = selected ? [f.account, peer].sort() : [f.account]
       const offer = await recovery(selected ? { action: 'selected_capture_preview', accounts, include_ledger: true } : { action: 'capture_preview', account: f.account })
       const manifests = selected ? offer.preview.accounts : [offer.preview]
-      assert.ok(manifests.every(m => m.state_schema === 18))
+      assert.ok(manifests.every(m => m.state_schema === 19))
       assert.equal(manifests.find(m => m.account === f.account).resources.find(r => r.resource === 'local_encrypted_state').sha256, before.ciphertext)
       const captured = await recovery({ action: selected ? 'selected_capture' : 'capture', preview: offer.preview, receipt: offer.receipt })
       await undo()
@@ -316,7 +316,7 @@ try {
       await f.stop('SIGKILL'); await f.start()
       assert.deepEqual((await f.command('status')).journal, before.journal)
       assert.deepEqual(wires(await f.observe()), wires(later))
-      await record(`populated-${selected ? 'selected' : 'single'}-schema18-gmail-restoration`, { installation, accounts })
+      await record(`populated-${selected ? 'selected' : 'single'}-schema19-gmail-restoration`, { installation, accounts })
       await f.close()
     }
   }

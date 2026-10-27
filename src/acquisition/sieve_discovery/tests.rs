@@ -39,7 +39,7 @@ fn encrypted_actual_discovery_refresh_failures_reopen_and_exact_aggregate_preser
         .unwrap();
     let store = repo.store(&account).unwrap();
     let state = store.load_state().unwrap();
-    assert_eq!(store.schema_version().unwrap(), 18);
+    assert_eq!(store.schema_version().unwrap(), crate::census::SCHEMA);
     let baseline = state.sieve.last_successful.clone().unwrap();
     assert!(baseline.bodies[0].bytes == PRIVATE_SCRIPT);
     assert!(
@@ -635,7 +635,9 @@ fn successful_large_baseline_never_prunes_to_fit_recovery_resource_limit() {
     );
     let before = std::fs::read(store.path()).unwrap();
     drop(store);
-    assert!(repo.capture_preview(&account.id, 1792915200).is_err());
+    // Streamed recovery bundles hold the whole account, so the capture
+    // succeeds instead of being refused, and neither prunes the baseline.
+    assert!(repo.capture_preview(&account.id, 1792915200).is_ok());
     let store = repo.store(&account).unwrap();
     assert!(std::fs::read(store.path()).unwrap() == before);
     assert_eq!(store.load_state().unwrap().sieve, saved.sieve);

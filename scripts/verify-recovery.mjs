@@ -2,9 +2,10 @@ import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdtemp, readFile, writeFile, rename, mkdir, stat, readdir } from 'node:fs/promises'
-import { createHash, createDecipheriv } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
+import { bundlePath, decodeBundle } from './recovery-bundle.mjs'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const base = 'http://127.0.0.1:4173'
 assert.equal(await fetch(`${base}/api/session`).then(() => true, () => false), false, 'Stop the verified fake server before building')
@@ -125,14 +126,12 @@ try {
   const captured = await recovery({ action: 'capture', preview: offer.preview, receipt: offer.receipt })
   await recovery({ action: 'capture', preview: offer.preview, receipt: offer.receipt }, 422)
   const bundle = captured.bundle
-  const bundleBytes = await readFile(join(directory, 'synthetic-recovery/bundles', `${bundle}.jwe`))
-  const parts = bundleBytes.toString().split('.')
+  const bundleFile = bundlePath(join(directory, 'synthetic-recovery/bundles'), bundle)
+  assert.ok(bundleFile.endsWith('.bundle'), 'New captures are version-3 streamed bundles')
+  const bundleBytes = await readFile(bundleFile)
   const key = await readFile(join(directory, 'synthetic-recovery/separately-held-fake-recovery-key'))
-  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(parts[2], 'base64url'))
-  decipher.setAAD(Buffer.from(parts[0])); decipher.setAuthTag(Buffer.from(parts[4], 'base64url'))
-  const plain = Buffer.concat([decipher.update(Buffer.from(parts[3], 'base64url')), decipher.final()])
+  const decoded = decodeBundle(bundleBytes, key)
   key.fill(0)
-  const decoded = JSON.parse(plain.toString()); plain.fill(0)
   assert.deepEqual(decoded.manifest, offer.preview)
   assert.deepEqual(Buffer.from(decoded.ciphertext), originalCipher)
   assert.equal(decoded.key.length, 32)
@@ -212,7 +211,7 @@ try {
   try {
     await recovery({ action: 'capture_preview', account }, 422)
     assert.equal(await stat(separateKey).then(() => true, () => false), false)
-    assert.deepEqual(await readFile(join(directory, 'synthetic-recovery/bundles', `${bundle}.jwe`)), bundleBytes)
+    assert.deepEqual(await readFile(bundleFile), bundleBytes)
   } finally { await rename(preservedKey, separateKey) }
   checks.push('Missing separate fake recovery key denies capture without generating a replacement or changing the captured bundle')
   const retained = { pid: server.pid, binary, binary_sha256, directory, installation, account, bundle, base, branch: execFileSync('git', ['branch', '--show-current'], { cwd: root, encoding: 'utf8' }).trim(), head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim() }

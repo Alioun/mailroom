@@ -36,7 +36,7 @@ pub enum Baseline {
     Current,
     Previous,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Proof {
     pub source: &'static str,
     pub semantics: &'static str,
@@ -53,7 +53,7 @@ pub struct Proof {
     pub warnings: Vec<String>,
     pub runtime_cross_check: &'static str,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Counts {
     pub messages: usize,
     pub filed: usize,
@@ -62,7 +62,7 @@ pub struct Counts {
     pub copied_messages: usize,
     pub review: usize,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Decision {
     pub id: String,
     pub message_id_hash: Option<String>,
@@ -80,30 +80,30 @@ pub struct Decision {
     pub observed_flags: Option<BTreeSet<String>>,
     pub delivery_tags: Vec<TagDecision>,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct TagDecision {
     pub rule: String,
     pub status: &'static str,
     pub reason: &'static str,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct CopyDecision {
     pub rule: String,
     pub recipient: String,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct CopyEligibility {
     pub rule: String,
     pub status: &'static str,
     pub reason: &'static str,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct FolderDiff {
     pub id: String,
     pub before: BTreeSet<String>,
     pub after: String,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct RuleCount {
     pub id: String,
     pub matched: usize,
@@ -112,7 +112,7 @@ pub struct RuleCount {
     pub zero_match: bool,
     pub fully_shadowed: bool,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct PinResult {
     pub account: String,
     pub message_id_hash: String,
@@ -201,21 +201,28 @@ pub(super) fn view<'a>(artifact: &CompiledArtifact, m: &InputMessage<'a>) -> Mes
     }
 }
 
+type Candidates = BTreeMap<String, (usize, BTreeMap<String, usize>)>;
+struct Execution {
+    decisions: Vec<Decision>,
+    candidates: Candidates,
+    /// Candidates of the messages marked in `window`, as a separate pass over
+    /// only those messages would count them. Valid only while no copy entered
+    /// duplicate state, since that state would differ in such a pass.
+    window_candidates: Candidates,
+    duplicate_state_used: bool,
+}
 fn execute(
     artifact: &CompiledArtifact,
     input: &[InputMessage<'_>],
-) -> Result<
-    (
-        Vec<Decision>,
-        BTreeMap<String, (usize, BTreeMap<String, usize>)>,
-    ),
-    String,
-> {
+    window: Option<&[bool]>,
+) -> Result<Execution, String> {
     let statements = artifact.statements()?;
     let mut duplicates = BTreeSet::new();
     let mut decisions = Vec::new();
-    let mut candidates: BTreeMap<String, (usize, BTreeMap<String, usize>)> = BTreeMap::new();
-    for m in input {
+    let mut candidates = Candidates::new();
+    let mut window_candidates = Candidates::new();
+    for (index, m) in input.iter().enumerate() {
+        let in_window = window.is_some_and(|w| w[index]);
         let h = &m.record.headers;
         let installed = match &artifact.context().recipient_evidence {
             super::EvidenceSource::SyntheticEnvelope { source } => Some(source),
@@ -268,12 +275,19 @@ fn execute(
                 {
                     continue;
                 }
-                let row = candidates.entry(s.id.clone()).or_default();
-                row.0 += 1;
-                if let Some(date) =
-                    timestamp(m.record).and_then(|t| DateTime::<Utc>::from_timestamp(t, 0))
+                let month = timestamp(m.record)
+                    .and_then(|t| DateTime::<Utc>::from_timestamp(t, 0))
+                    .map(|date| date.format("%Y-%m").to_string());
+                for (map, counted) in [(&mut candidates, true), (&mut window_candidates, in_window)]
                 {
-                    *row.1.entry(date.format("%Y-%m").to_string()).or_default() += 1;
+                    if !counted {
+                        continue;
+                    }
+                    let row = map.entry(s.id.clone()).or_default();
+                    row.0 += 1;
+                    if let Some(month) = &month {
+                        *row.1.entry(month.clone()).or_default() += 1;
+                    }
                 }
             }
         }
@@ -414,7 +428,50 @@ fn execute(
         duplicates.extend(pending);
         decisions.push(d);
     }
-    Ok((decisions, candidates))
+    Ok(Execution {
+        decisions,
+        candidates,
+        window_candidates,
+        duplicate_state_used: !duplicates.is_empty(),
+    })
+}
+
+/// `prove` over a loaded census, remembered for the exact inputs: the census
+/// digest and the serialized artifact, date, pins and baselines. A preview and
+/// the confirmation that repeats it then evaluate a large census once.
+pub fn prove_shared(
+    artifact: CompiledArtifact,
+    census: &crate::census::SharedCensus,
+    as_of: i64,
+    pins: &[Pin],
+    baseline: Baseline,
+    previous: Option<&CompiledArtifact>,
+) -> Result<Proof, String> {
+    use sha2::{Digest, Sha256};
+    use std::sync::{Arc, Mutex};
+    static PROOFS: Mutex<Vec<([u8; 32], Arc<Proof>)>> = Mutex::new(Vec::new());
+    let inputs = serde_json::to_vec(&(&artifact, as_of, pins, baseline, previous))
+        .map_err(|_| "Cannot key proof inputs")?;
+    let key: [u8; 32] = Sha256::new()
+        .chain_update(census.digest())
+        .chain_update(&inputs)
+        .finalize()
+        .into();
+    if let Some((_, proof)) = PROOFS
+        .lock()
+        .expect("proofs")
+        .iter()
+        .find(|(k, _)| *k == key)
+    {
+        return Ok((**proof).clone());
+    }
+    let proof = prove(artifact, census, as_of, pins, baseline, previous)?;
+    let mut cache = PROOFS.lock().expect("proofs");
+    if cache.len() >= 2 {
+        cache.remove(0);
+    }
+    cache.push((key, Arc::new(proof.clone())));
+    Ok(proof)
 }
 
 pub fn prove(
@@ -445,26 +502,53 @@ pub fn prove(
         }
     }
     let input = messages(census, artifact.context().engine == Engine::GmailBacklog);
-    let (decisions, _) = execute(&artifact, &input)?;
-    let window_input: Vec<_> = input
+    let in_window: Vec<bool> = input
         .iter()
-        .filter(|m| {
+        .map(|m| {
             timestamp(m.record).is_some_and(|t| {
                 t <= as_of
                     && DateTime::<Utc>::from_timestamp(t, 0)
                         .is_some_and(|d| months.contains(&d.format("%Y-%m").to_string()))
             })
         })
-        .map(|m| InputMessage {
-            id: m.id.clone(),
-            record: m.record,
-            folders: m.folders.clone(),
-            sent: m.sent,
+        .collect();
+    let full = execute(&artifact, &input, Some(&in_window))?;
+    let decisions = full.decisions;
+    // Candidate diagnostics use the same compiled tests; selected counts use displayed decisions.
+    // A separate pass over the window, in the input's order, evaluates every
+    // message as the full pass did unless copies entered duplicate state.
+    // (Running it on another core was slower: both passes contend for the
+    // allocator.)
+    let candidates = if full.duplicate_state_used {
+        let window_input: Vec<_> = input
+            .iter()
+            .zip(&in_window)
+            .filter(|(_, w)| **w)
+            .map(|(m, _)| InputMessage {
+                id: m.id.clone(),
+                record: m.record,
+                folders: m.folders.clone(),
+                sent: m.sent,
+            })
+            .collect();
+        execute(&artifact, &window_input, None)?.candidates
+    } else {
+        full.window_candidates
+    };
+    let window_ids: BTreeSet<_> = input
+        .iter()
+        .zip(&in_window)
+        .filter(|(_, w)| **w)
+        .map(|(m, _)| &m.id)
+        .collect();
+    let months_by_id: BTreeMap<&String, String> = input
+        .iter()
+        .filter_map(|m| {
+            timestamp(m.record)
+                .and_then(|t| DateTime::<Utc>::from_timestamp(t, 0))
+                .map(|d| (&m.id, d.format("%Y-%m").to_string()))
         })
         .collect();
-    // Candidate diagnostics use the same compiled tests; selected counts use displayed decisions.
-    let (_, candidates) = execute(&artifact, &window_input)?;
-    let window_ids: BTreeSet<_> = window_input.iter().map(|m| &m.id).collect();
     let rules = artifact
         .effective()
         .iter()
@@ -485,13 +569,8 @@ pub fn prove(
                 .collect();
             let mut monthly: BTreeMap<_, _> = months.iter().map(|m| (m.clone(), 0)).collect();
             for d in &selected {
-                if let Some(m) = input
-                    .iter()
-                    .find(|m| m.id == d.id)
-                    .and_then(|m| timestamp(m.record))
-                    .and_then(|t| DateTime::<Utc>::from_timestamp(t, 0))
-                {
-                    *monthly.get_mut(&m.format("%Y-%m").to_string()).unwrap() += 1;
+                if let Some(month) = months_by_id.get(&d.id) {
+                    *monthly.get_mut(month).unwrap() += 1;
                 }
             }
             let count = candidates.get(&r.id).map(|r| r.0).unwrap_or(0);
@@ -577,7 +656,7 @@ pub fn prove(
         warnings.push("Some census pins are stale".into());
     }
     let previous_decisions = match (baseline, previous) {
-        (Baseline::Previous, Some(previous)) => Some(execute(previous, &input)?.0),
+        (Baseline::Previous, Some(previous)) => Some(execute(previous, &input, None)?.decisions),
         (Baseline::Previous, None) => {
             return Err("Previous comparison needs a previous compiled configuration".into());
         }
@@ -635,4 +714,63 @@ pub fn prove(
         warnings,
         runtime_cross_check: "Not run by this proof. Run scripts/verify-sieve.sh on synthetic artifacts. This does not establish provider behavior.",
     })
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    /// Window candidates counted during the full pass equal a separate pass
+    /// over only the window's messages, with and without copies entering
+    /// duplicate state, for windows that hold all, some and none of them.
+    #[test]
+    fn window_candidates_from_the_full_pass_equal_a_separate_window_pass() {
+        let mut input: crate::engine::PreviewInput =
+            serde_json::from_str(include_str!("../../examples/sample.json")).unwrap();
+        let census = crate::engine::synthetic_census(&input).unwrap();
+        let messages = messages(&census, false);
+        let with_forwards = crate::engine::artifact(&input.documents, &input.context).unwrap();
+        let cut = input.documents.override_yaml.find("forwards:").unwrap();
+        input.documents.override_yaml.truncate(cut);
+        let without = crate::engine::artifact(&input.documents, &input.context).unwrap();
+        let mut seen_copies = false;
+        let mut compared = 0;
+        for (artifact, every) in [&with_forwards, &without]
+            .into_iter()
+            .flat_map(|a| [1, 2, 3, usize::MAX].map(|e| (a, e)))
+        {
+            let window: Vec<bool> = (0..messages.len()).map(|i| i % every == 0).collect();
+            let full = execute(&artifact, &messages, Some(&window)).unwrap();
+            let only: Vec<_> = messages
+                .iter()
+                .zip(&window)
+                .filter(|(_, w)| **w)
+                .map(|(m, _)| InputMessage {
+                    id: m.id.clone(),
+                    record: m.record,
+                    folders: m.folders.clone(),
+                    sent: m.sent,
+                })
+                .collect();
+            let separate = execute(&artifact, &only, None).unwrap();
+            seen_copies |= full.duplicate_state_used;
+            if !full.duplicate_state_used {
+                assert_eq!(full.window_candidates, separate.candidates, "every {every}");
+                assert!(full.candidates.values().map(|c| c.0).sum::<usize>() > 0);
+                compared += 1;
+            }
+        }
+        assert!(seen_copies, "the sample's forwards enter duplicate state");
+        assert_eq!(compared, 4, "every window of the artifact without forwards");
+        let proof = prove(
+            with_forwards,
+            &census,
+            input.as_of,
+            &input.pins,
+            input.baseline,
+            None,
+        )
+        .unwrap();
+        assert!(proof.rules.iter().any(|r| r.candidates > 0));
+    }
 }

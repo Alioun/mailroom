@@ -14,8 +14,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// Bound on a version-1 or version-2 bundle, which is one JWE in memory.
+/// New bundles are version 3 (`stream`) and hold account files of any size.
 const MAX_BUNDLE: u64 = 24 * 1024 * 1024;
 const MAX_PLAIN: usize = 16 * 1024 * 1024;
+/// Bound on a version-3 bundle: up to eight account files of the store's
+/// largest size, plus the encrypted header and chunk framing.
+const MAX_STREAM: u64 = 8 * (crate::census::MAX_FILE + crate::census::MAX_FILE / 64) + (8 << 20);
 const HEADER: &[u8] = br#"{"alg":"dir","enc":"A256GCM","typ":"mailroom-recovery+jwe","v":1}"#;
 pub(crate) const LIMITATIONS: &str = "Only the captured local account is restored. Provider passwords, external mailbox/transport effects and shared authoritative addresses.yaml are excluded. Cross-account dependencies may be unavailable. Later mail effects survive. Fresh provider evidence and reconciliation are required. No blind retry, automatic undo or daily readiness.";
 
@@ -62,18 +67,111 @@ pub(crate) struct Manifest {
     pub excluded: Vec<String>,
     pub limitations: String,
 }
+/// A captured account. Its encrypted account file is `resource`: the live
+/// file while capturing, or a decrypted copy staged in a private directory
+/// after a bundle was opened.
+struct Captured {
+    manifest: Manifest,
+    account: Account,
+    key: SecretBytes,
+    identity: Option<SecretBytes>,
+    resource: Resource,
+}
+/// Everything of a capture except its account file, as a bundle header.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Captured {
+struct CapturedHeader {
+    manifest: Manifest,
+    account: Account,
+    key: SecretBytes,
+    identity: Option<SecretBytes>,
+}
+/// A capture inside a version-1 or version-2 JWE bundle, file inline.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyCaptured {
     manifest: Manifest,
     account: Account,
     key: SecretBytes,
     identity: Option<SecretBytes>,
     ciphertext: Vec<u8>,
 }
+/// The header of a version-3 bundle. Its account files follow in order.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Body {
+    Single {
+        captured: CapturedHeader,
+    },
+    Selected {
+        manifest: selected::SelectedManifest,
+        accounts: Vec<CapturedHeader>,
+        ledger: Option<SecretBytes>,
+    },
+}
+pub(super) enum Resource {
+    Live(PathBuf),
+    Staged {
+        _directory: std::sync::Arc<tempfile::TempDir>,
+        path: PathBuf,
+        digest: (u64, String),
+    },
+}
+impl Resource {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Live(path) | Self::Staged { path, .. } => path,
+        }
+    }
+    /// Copies the staged file to `target`, never replacing a file there.
+    fn publish(&self, target: &Path) -> Result<(), AcquisitionError> {
+        let Self::Staged { path, digest, .. } = self else {
+            return Err(AcquisitionError::Storage);
+        };
+        let dir = target.parent().ok_or(AcquisitionError::Storage)?;
+        private_directory(dir)?;
+        let mut file = tempfile::Builder::new()
+            .prefix(".recovery-stage-")
+            .tempfile_in(dir)
+            .map_err(|_| AcquisitionError::Storage)?;
+        let mut source = fs::File::open(path).map_err(|_| AcquisitionError::Storage)?;
+        std::io::copy(&mut source, file.as_file_mut())
+            .and_then(|_| file.as_file().sync_all())
+            .map_err(|_| AcquisitionError::Storage)?;
+        if stream::file_digest(file.path())? != *digest {
+            return Err(AcquisitionError::Storage);
+        }
+        boundary("recovery_staged")?;
+        file.persist_noclobber(target)
+            .map_err(|_| AcquisitionError::Storage)?;
+        sync_dir(dir)
+    }
+    /// Whether the file at `path` holds exactly the captured bytes.
+    fn matches(&self, path: &Path, manifest: &Manifest) -> Result<bool, AcquisitionError> {
+        let (bytes, sha256) = stream::file_digest(path)?;
+        Ok(manifest.resources.iter().any(|r| {
+            r.resource == "local_encrypted_state" && r.bytes == bytes && r.sha256 == sha256
+        }))
+    }
+}
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
 struct SecretBytes(#[serde(with = "secret_bytes")] Zeroizing<Vec<u8>>);
+impl Clone for SecretBytes {
+    fn clone(&self) -> Self {
+        Self(Zeroizing::new(self.0.to_vec()))
+    }
+}
+impl Captured {
+    fn header(&self) -> CapturedHeader {
+        CapturedHeader {
+            manifest: self.manifest.clone(),
+            account: self.account.clone(),
+            key: self.key.clone(),
+            identity: self.identity.clone(),
+        }
+    }
+}
 mod secret_bytes {
     use super::*;
     pub fn serialize<S: serde::Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
@@ -131,20 +229,43 @@ fn publish_new(path: &Path, bytes: &[u8]) -> Result<(), AcquisitionError> {
         .map_err(|_| AcquisitionError::Storage)?;
     sync_dir(dir)
 }
-fn seal(captured: &impl Serialize, secret: &SecretValue) -> Result<Vec<u8>, AcquisitionError> {
-    if secret.bytes().len() != 32 {
-        return Err(AcquisitionError::InvalidInput);
+/// Writes a version-3 bundle into `directory`, verifies it by opening it
+/// again, and publishes it under its identity without replacing a file.
+fn write_bundle(
+    directory: &Path,
+    prefix: &str,
+    secret: &SecretValue,
+    body: &Body,
+    captured: &[&Captured],
+    staged_boundary: &str,
+    verify: impl FnOnce(&Path) -> Result<String, AcquisitionError>,
+) -> Result<String, AcquisitionError> {
+    private_directory(directory)?;
+    let mut writer = stream::Writer::create(directory, prefix, secret, body)?;
+    for c in captured {
+        let mut file = fs::File::open(c.resource.path()).map_err(|_| AcquisitionError::Storage)?;
+        let (bytes, sha256) = writer.file(&mut file)?;
+        if inventory(&c.account, &(bytes, sha256))? != c.manifest.resources {
+            return Err(AcquisitionError::InvalidInput);
+        }
     }
-    let plain = encoded(captured)?;
-    if plain.len() > MAX_PLAIN {
-        return Err(AcquisitionError::InvalidInput);
+    let (staged, id) = writer.finish()?;
+    if verify(staged.path())? != id {
+        return Err(AcquisitionError::Storage);
     }
+    stream::publish(staged, directory, &id, staged_boundary)?;
+    Ok(id)
+}
+/// Writes a version-1 or version-2 JWE bundle as earlier builds did, so
+/// tests prove those bundles stay readable.
+#[cfg(test)]
+fn seal_legacy(captured: &impl Serialize, secret: &SecretValue) -> Vec<u8> {
+    let plain = encoded(captured).unwrap();
     let header = B64.encode(HEADER);
     let mut iv = [0u8; 12];
     OsRng.fill_bytes(&mut iv);
-    let cipher =
-        Aes256Gcm::new_from_slice(secret.bytes()).map_err(|_| AcquisitionError::InvalidInput)?;
-    let encrypted = cipher
+    let encrypted = Aes256Gcm::new_from_slice(secret.bytes())
+        .unwrap()
         .encrypt(
             Nonce::from_slice(&iv),
             Payload {
@@ -152,16 +273,42 @@ fn seal(captured: &impl Serialize, secret: &SecretValue) -> Result<Vec<u8>, Acqu
                 aad: header.as_bytes(),
             },
         )
-        .map_err(|_| AcquisitionError::Storage)?;
+        .unwrap();
     let (body, tag) = encrypted.split_at(encrypted.len() - 16);
-    Ok(format!(
+    format!(
         "{header}..{}.{}.{}",
         B64.encode(&iv),
         B64.encode(body),
         B64.encode(tag)
     )
-    .into_bytes())
+    .into_bytes()
 }
+#[cfg(test)]
+impl Captured {
+    fn legacy(&self) -> LegacyCaptured {
+        LegacyCaptured {
+            manifest: self.manifest.clone(),
+            account: self.account.clone(),
+            key: self.key.clone(),
+            identity: self.identity.clone(),
+            ciphertext: fs::read(self.resource.path()).unwrap(),
+        }
+    }
+}
+/// Writes a version-3 bundle without the capture checks, for tampering tests.
+#[cfg(test)]
+fn reseal(directory: &Path, secret: &SecretValue, body: &Body, files: &[&Path]) -> PathBuf {
+    private_directory(directory).unwrap();
+    let mut writer = stream::Writer::create(directory, ".test-", secret, body).unwrap();
+    for path in files {
+        writer.file(&mut fs::File::open(path).unwrap()).unwrap();
+    }
+    let (staged, id) = writer.finish().unwrap();
+    let path = directory.join(format!("{id}.{}", stream::EXTENSION));
+    staged.persist(&path).unwrap();
+    path
+}
+/// The decrypted JWE payload of a version-1 or version-2 bundle.
 fn open_plain(bytes: &[u8], secret: &SecretValue) -> Result<Zeroizing<Vec<u8>>, AcquisitionError> {
     if bytes.len() as u64 > MAX_BUNDLE || secret.bytes().len() != 32 {
         return Err(AcquisitionError::InvalidInput);
@@ -206,27 +353,119 @@ fn open_plain(bytes: &[u8], secret: &SecretValue) -> Result<Zeroizing<Vec<u8>>, 
     }
     Ok(plain)
 }
-fn open(bytes: &[u8], secret: &SecretValue) -> Result<Captured, AcquisitionError> {
-    let captured: Captured = serde_json::from_slice(&open_plain(bytes, secret)?)
-        .map_err(|_| AcquisitionError::InvalidInput)?;
+/// A private temporary directory that holds a bundle's decrypted account
+/// file while it is authenticated, and until it is published or dropped.
+/// The file is still encrypted under the account's own key.
+fn staging(account: &AccountId) -> Result<tempfile::TempDir, AcquisitionError> {
+    tempfile::Builder::new()
+        .prefix(&format!("mailroom-{}.recovery-", account.as_str()))
+        .tempdir()
+        .map_err(|_| AcquisitionError::Storage)
+}
+fn stage_file(
+    header: CapturedHeader,
+    write: impl FnOnce(&mut fs::File) -> Result<(u64, String), AcquisitionError>,
+) -> Result<Captured, AcquisitionError> {
+    let directory = staging(&header.account.id)?;
+    let path = cipher_path(
+        directory.path(),
+        &header.account.id,
+        header.account.generation,
+    );
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path).map_err(|_| AcquisitionError::Storage)?;
+    let digest = write(&mut file)?;
+    file.sync_all().map_err(|_| AcquisitionError::Storage)?;
+    Ok(Captured {
+        manifest: header.manifest,
+        account: header.account,
+        key: header.key,
+        identity: header.identity,
+        resource: Resource::Staged {
+            _directory: std::sync::Arc::new(directory),
+            path,
+            digest,
+        },
+    })
+}
+fn stage_legacy(legacy: LegacyCaptured) -> Result<Captured, AcquisitionError> {
+    let LegacyCaptured {
+        manifest,
+        account,
+        key,
+        identity,
+        ciphertext,
+    } = legacy;
+    if ciphertext.len() > 8 * 1024 * 1024 {
+        return Err(AcquisitionError::InvalidInput);
+    }
+    let header = CapturedHeader {
+        manifest,
+        account,
+        key,
+        identity,
+    };
+    stage_file(header, |file| {
+        file.write_all(&ciphertext)
+            .map_err(|_| AcquisitionError::Storage)?;
+        Ok((ciphertext.len() as u64, digest(&ciphertext)))
+    })
+}
+fn stage_streamed(
+    header: CapturedHeader,
+    reader: &mut stream::Reader,
+) -> Result<Captured, AcquisitionError> {
+    stage_file(header, |file| {
+        let mut out = std::io::BufWriter::new(file);
+        let digest = reader.file(&mut out, crate::census::MAX_FILE)?;
+        out.flush().map_err(|_| AcquisitionError::Storage)?;
+        Ok(digest)
+    })
+}
+/// Opens a single-account bundle of any version and returns the
+/// authenticated capture, its account file staged, and the bundle identity.
+fn open(bundle: &Path, secret: &SecretValue) -> Result<(Captured, String), AcquisitionError> {
+    let (captured, id) = if stream::Reader::is_stream(bundle)? {
+        let (mut reader, body) = stream::Reader::open::<Body>(bundle, secret, MAX_STREAM)?;
+        let Body::Single { captured } = body else {
+            return Err(AcquisitionError::InvalidInput);
+        };
+        let captured = stage_streamed(captured, &mut reader)?;
+        (captured, reader.finish()?)
+    } else {
+        let bytes = read_bounded(bundle, MAX_BUNDLE)?;
+        let legacy: LegacyCaptured = serde_json::from_slice(&open_plain(&bytes, secret)?)
+            .map_err(|_| AcquisitionError::InvalidInput)?;
+        (stage_legacy(legacy)?, digest(&bytes))
+    };
     validate_captured(&captured)?;
-    Ok(captured)
+    Ok((captured, id))
 }
 fn validate_captured(captured: &Captured) -> Result<(), AcquisitionError> {
     let m = &captured.manifest;
+    let digest = &match &captured.resource {
+        Resource::Staged { digest, .. } => digest.clone(),
+        Resource::Live(path) => stream::file_digest(path)?,
+    };
     if m.version != 1
-        || !(1..=18).contains(&m.state_schema)
+        || !(1..=crate::census::SCHEMA).contains(&m.state_schema)
         || m.account != captured.account.id
         || m.provider != captured.account.provider
         || m.login != captured.account.login
         || m.generation != captured.account.generation
-        || m.resources != inventory(&captured.account, &captured.ciphertext)?
+        || m.resources != inventory(&captured.account, digest)?
         || m.key_material != key_inventory(&captured.account)
         || encoded(&captured.account)?.len() > 4096
         || captured.account.login.is_empty()
         || captured.account.login.len() > 320
         || captured.account.login.chars().any(char::is_control)
-        || captured.ciphertext.len() > 8 * 1024 * 1024
+        || digest.0 > crate::census::MAX_FILE
         || captured.key.0.len() != 32
         || captured.identity.as_ref().is_some_and(|i| i.0.len() != 128)
         || captured.account.identity_ref.is_some() != captured.identity.is_some()
@@ -237,7 +476,11 @@ fn validate_captured(captured: &Captured) -> Result<(), AcquisitionError> {
     {
         return Err(AcquisitionError::InvalidInput);
     }
-    authenticate_resource(captured)
+    match captured.resource {
+        Resource::Staged { .. } => authenticate_resource(captured),
+        // Loaded and authenticated under the account's lock while capturing.
+        Resource::Live(_) => Ok(()),
+    }
 }
 fn exclusions() -> Vec<String> {
     [
@@ -276,15 +519,17 @@ fn authenticate_resource(captured: &Captured) -> Result<(), AcquisitionError> {
         }
         _ => return Err(AcquisitionError::InvalidInput),
     };
-    let isolated = tempfile::Builder::new()
-        .prefix(&format!(
-            "mailroom-{}.recovery-auth-",
-            captured.account.id.as_str()
-        ))
-        .tempdir()
-        .map_err(|_| AcquisitionError::Storage)?;
-    let store = EncryptedStore::new(isolated.path().to_path_buf(), keys)?;
-    publish_new(&store.path(), &captured.ciphertext)?;
+    let staged = captured.resource.path();
+    let store = EncryptedStore::new(
+        staged
+            .parent()
+            .ok_or(AcquisitionError::Storage)?
+            .to_path_buf(),
+        keys,
+    )?;
+    if store.path() != staged {
+        return Err(AcquisitionError::InvalidInput);
+    }
     let saved = store.load_state()?;
     if store.schema_version()? != captured.manifest.state_schema
         || saved.revision != captured.manifest.revision
@@ -302,7 +547,7 @@ fn authenticate_resource(captured: &Captured) -> Result<(), AcquisitionError> {
     }
     Ok(())
 }
-fn inventory(account: &Account, ciphertext: &[u8]) -> Result<Vec<Inventory>, AcquisitionError> {
+fn inventory(account: &Account, file: &(u64, String)) -> Result<Vec<Inventory>, AcquisitionError> {
     let metadata = encoded(account)?;
     Ok(vec![
         Inventory {
@@ -312,8 +557,8 @@ fn inventory(account: &Account, ciphertext: &[u8]) -> Result<Vec<Inventory>, Acq
         },
         Inventory {
             resource: "local_encrypted_state".into(),
-            bytes: ciphertext.len() as u64,
-            sha256: digest(ciphertext),
+            bytes: file.0,
+            sha256: file.1.clone(),
         },
     ])
 }
@@ -328,7 +573,10 @@ impl Accounts {
         let account = self.load_metadata(id)?;
         let store = self.open_store(&account, &self.paths.data, 0)?;
         let saved = store.load_state()?;
-        let ciphertext = read_bounded(&store.path(), 8 * 1024 * 1024)?;
+        let file = stream::file_digest(&store.path())?;
+        if file.0 > crate::census::MAX_FILE {
+            return Err(AcquisitionError::Storage);
+        }
         let key = SecretBytes(Zeroizing::new(
             self.backend
                 .get(&account.local_secret_ref)?
@@ -360,7 +608,7 @@ impl Accounts {
             login: account.login.clone(),
             generation: account.generation,
             revision: saved.revision,
-            resources: inventory(&account, &ciphertext)?,
+            resources: inventory(&account, &file)?,
             key_material: key_inventory(&account),
             dependencies,
             shared_state: "excluded_preserve_current".into(),
@@ -373,7 +621,7 @@ impl Accounts {
                 account,
                 key,
                 identity,
-                ciphertext,
+                resource: Resource::Live(store.path()),
             },
             store,
         ))
@@ -413,10 +661,17 @@ impl Accounts {
             preview,
             receipt,
         )?)?;
-        let bytes = seal(&captured, secret)?;
-        open(&bytes, secret)?;
-        let id = digest(&bytes);
-        publish_new(&directory.join(format!("{id}.jwe")), &bytes)?;
+        let id = write_bundle(
+            directory,
+            ".recovery-stage-",
+            secret,
+            &Body::Single {
+                captured: captured.header(),
+            },
+            &[&captured],
+            "recovery_staged",
+            |staged| open(staged, secret).map(|(_, id)| id),
+        )?;
         boundary("recovery_bundle_published")?;
         Ok(id)
     }
@@ -425,14 +680,13 @@ impl Accounts {
         bundle: &Path,
         secret: &SecretValue,
     ) -> Result<RestorePreview, AcquisitionError> {
-        let bytes = read_bounded(bundle, MAX_BUNDLE)?;
-        let captured = open(&bytes, secret)?;
+        let (captured, id) = open(bundle, secret)?;
         self.validate_account(&captured.account, &captured.manifest.account)?;
         let _lease = self.lock_account(&captured.manifest.account)?;
         self.absent(&captured.account)?;
         Ok(RestorePreview {
             manifest: captured.manifest,
-            bundle: digest(&bytes),
+            bundle: id,
             target: self.paths.config.to_string_lossy().into_owned(),
             account_absent: true,
             shared_state: "excluded_preserve_current".into(),
@@ -469,14 +723,13 @@ impl Accounts {
         authorize: impl FnOnce(crate::confirmation::Plan) -> Result<(), AcquisitionError>,
     ) -> Result<Restored, AcquisitionError> {
         let _installation = self.lock_installation()?;
-        let bytes = read_bounded(bundle, MAX_BUNDLE)?;
-        let captured = open(&bytes, secret)?;
+        let (captured, id) = open(bundle, secret)?;
         let _lease = self.lock_account(&captured.account.id)?;
         self.validate_account(&captured.account, &captured.manifest.account)?;
         self.absent(&captured.account)?;
         let current = RestorePreview {
             manifest: captured.manifest.clone(),
-            bundle: digest(&bytes),
+            bundle: id,
             target: self.paths.config.to_string_lossy().into_owned(),
             account_absent: true,
             shared_state: "excluded_preserve_current".into(),
@@ -492,22 +745,48 @@ impl Accounts {
             authority: nonce(),
             preview: current,
         };
-        let staged = self
-            .paths
-            .config
-            .join("recovery")
-            .join(format!("{}.jwe", tx.bundle));
-        if staged.exists() {
-            if read_bounded(&staged, MAX_BUNDLE)? != bytes {
-                return Err(AcquisitionError::Storage);
-            }
-        } else {
-            publish_new(&staged, &bytes)?;
-        }
+        self.stage_bundle(bundle, &tx.bundle)?;
         let marker = self.restore_marker(&captured.account.id);
         write_json(&marker, &tx)?;
         boundary("restore_intent")?;
         self.finish_restore(captured, &tx)
+    }
+    /// Where an authenticated bundle is kept while its restore may resume.
+    fn staged_bundle(&self, id: &str) -> Result<PathBuf, AcquisitionError> {
+        bundle_file(&self.paths.config.join("recovery"), id)
+    }
+    /// Copies `bundle` beside the restore marker, or checks an existing copy.
+    fn stage_bundle(&self, bundle: &Path, id: &str) -> Result<(), AcquisitionError> {
+        let directory = self.paths.config.join("recovery");
+        if let Ok(existing) = self.staged_bundle(id) {
+            return if stream::file_digest(&existing)?.1 == id {
+                Ok(())
+            } else {
+                Err(AcquisitionError::Storage)
+            };
+        }
+        private_directory(&directory)?;
+        let extension = if stream::Reader::is_stream(bundle)? {
+            stream::EXTENSION
+        } else {
+            "jwe"
+        };
+        let mut staged = tempfile::Builder::new()
+            .prefix(".recovery-stage-")
+            .tempfile_in(&directory)
+            .map_err(|_| AcquisitionError::Storage)?;
+        let mut source = fs::File::open(bundle).map_err(|_| AcquisitionError::Storage)?;
+        std::io::copy(&mut source, staged.as_file_mut())
+            .and_then(|_| staged.as_file().sync_all())
+            .map_err(|_| AcquisitionError::Storage)?;
+        if stream::file_digest(staged.path())?.1 != id {
+            return Err(AcquisitionError::Storage);
+        }
+        boundary("recovery_staged")?;
+        staged
+            .persist_noclobber(directory.join(format!("{id}.{extension}")))
+            .map_err(|_| AcquisitionError::Storage)?;
+        sync_dir(&directory)
     }
     fn restore_marker(&self, id: &AccountId) -> PathBuf {
         self.paths
@@ -534,18 +813,10 @@ impl Accounts {
         {
             return Err(AcquisitionError::InvalidInput);
         }
-        let bytes = read_bounded(
-            &self
-                .paths
-                .config
-                .join("recovery")
-                .join(format!("{}.jwe", tx.bundle)),
-            MAX_BUNDLE,
-        )?;
-        if digest(&bytes) != tx.bundle {
+        let (captured, bundle) = open(&self.staged_bundle(&tx.bundle)?, secret)?;
+        if bundle != tx.bundle {
             return Err(AcquisitionError::Authentication);
         }
-        let captured = open(&bytes, secret)?;
         if captured.manifest != tx.preview.manifest {
             return Err(AcquisitionError::InvalidInput);
         }
@@ -578,11 +849,14 @@ impl Accounts {
         boundary("restore_authenticated")?;
         let locked = self.open_store(a, &self.paths.data, 0)?;
         if locked.path().exists() {
-            if read_bounded(&locked.path(), 8 * 1024 * 1024)? != captured.ciphertext {
+            if !captured
+                .resource
+                .matches(&locked.path(), &captured.manifest)?
+            {
                 return Err(AcquisitionError::Storage);
             }
         } else {
-            publish_new(&locked.path(), &captured.ciphertext)?;
+            captured.resource.publish(&locked.path())?;
         }
         locked.load_state()?;
         boundary("restore_data")?;
@@ -628,6 +902,17 @@ impl Accounts {
         )
     }
 }
+/// The bundle `id` in `directory`: a version-3 `.bundle` or an older `.jwe`.
+pub(crate) fn bundle_file(directory: &Path, id: &str) -> Result<PathBuf, AcquisitionError> {
+    if !valid_digest(id) {
+        return Err(AcquisitionError::InvalidInput);
+    }
+    [stream::EXTENSION, "jwe"]
+        .iter()
+        .map(|extension| directory.join(format!("{id}.{extension}")))
+        .find(|path| path.is_file())
+        .ok_or(AcquisitionError::Storage)
+}
 pub(crate) fn valid_digest(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
@@ -664,3 +949,4 @@ pub(crate) fn restore_plan(
 mod tests;
 
 pub(crate) mod selected;
+mod stream;

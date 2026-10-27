@@ -63,7 +63,7 @@ Options are parsed before any backend opens. A missing value, a repeated option 
 
 Setup has a freeze step and three phases. The owner types every command from the approval record.
 
-1. **Freeze.** The approval record names a commit and a tree digest: the SHA-256 of the sorted per-file SHA-256 list of `git archive <commit>`, without `ui/dist`. The block below runs only system tools. Git runs as the owner with a cleared environment and `--no-replace-objects`, so replacement objects cannot swap the archived bytes. Root then checks that `/usr/local/share/mailroom` and every directory above it is a root-owned directory without group or other write and without ACLs, creating it if absent. It extracts into a fresh `mktemp -d` directory there, without owners, ACLs, extended attributes or flags from the archive. It refuses anything but plain files and directories, compares the digest with `/usr/bin/shasum` before anything from the tree runs, and publishes by rename to `setup-<commit>`, which must not exist yet. Any refusal removes the fresh directory.
+1. **Freeze.** The approval record names a commit and a tree digest: the SHA-256 of the sorted per-file SHA-256 list of `git archive <commit>`, without `ui/dist`. The block below runs only system tools. Git runs as the owner with a cleared environment and `--no-replace-objects`, so replacement objects cannot swap the archived bytes. Root then checks that `/usr/local/share/mailroom` and every directory above it is a root-owned directory without group or other write and without ACLs, creating it if absent. It extracts into a fresh `mktemp -d` directory there, without owners, ACLs, extended attributes or flags from the archive. It refuses anything but plain files and directories, compares the digest with `/usr/bin/shasum` before anything from the tree runs, and publishes by rename to `setup-<commit>`, which must not exist yet. Every listing, scan and digest stage must exit 0: the block runs with `pipefail`, captures each listing before inspecting it, and refuses on any failed command even when its output looks right. Any refusal removes the fresh directory.
 2. **Build, as the owner.** Owner decision Q28, answered on 2026-10-27, reads: "The owner explicitly accepts, for this build step only, that any program running as the owner, agents included, could alter the binaries or their build inputs before they are signed and pinned. This is a deliberate waiver of the secrets.md frozen-copy requirement for the build step; it is not a waiver for anything else." The build is therefore not protected. It runs the Homebrew Rust and npm, Node and Xcode toolchains as installed, from a copy of the frozen tree in a fresh `/private/tmp/mailroom-build.*` directory, with a cleared environment, a fresh `CARGO_HOME` and npm cache, and fresh empty npm user and global configuration files. It signs both binaries ad hoc with the hardened runtime and prints the mailroom cdhash, the helper cdhash, the UI digest and the install command.
 3. **Install, as root.** Nothing from the build directory runs as root. `tar` copies the three outputs into a fresh root-only staging directory without following links or reading special files. The install refuses anything but plain files and directories, and refuses copies whose `codesign --verify` cdhash or UI digest differs from the values the owner typed from the build output. It writes `pins` as a new file and renames the directory into `/usr/local/libexec/mailroom`. An existing installation is moved aside, never written into or followed.
 4. **Keychain stages, as the owner.** The phase refuses an installation that is not root-owned, has ACLs, symlinks or special files, or does not match its pins. It verifies `mailroom` with `codesign` against its cdhash before every launch and accepts from each command exactly one known result with its expected exit code. It reads the expected references from the account metadata with `plutil`. `refs` must list exactly those, `legacy` names outside them are dropped and counted, and a `status` class must be the reference's own. It settles each account, migrates legacy passwords, enrolls missing passwords and checks the prompt at every password read.
@@ -76,7 +76,8 @@ COMMIT=<approved commit from the approval record>
 DIGEST=<approved tree digest from the approval record>
 /usr/bin/env -i /usr/bin/git --no-replace-objects -C "$HOME/projects/mailroom" archive --format=tar "$COMMIT" \
 | /usr/bin/sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p -c '
-set -eu
+set -euo pipefail
+nl=$(printf "\nx"); nl=${nl%x}
 commit=$1 digest=$2 share=/usr/local/share/mailroom me=$(/usr/bin/id -u)
 refuse() { echo "refused: $1" >&2; exit 1; }
 trusted() {
@@ -84,7 +85,8 @@ trusted() {
   stat=$(/usr/bin/stat -f "%u %Lp" "$1") || return 1
   case "${stat%% *}" in 0|"$me") ;; *) return 1 ;; esac
   [ $(( 8#${stat##* } & 8#022 )) -eq 0 ] || return 1
-  [ "$(/bin/ls -lde "$1" 2>/dev/null | /usr/bin/wc -l)" -eq 1 ]
+  listing=$(/bin/ls -lde "$1") || return 1
+  case "$listing" in *"$nl"*) return 1 ;; esac
 }
 dir=$(/usr/bin/dirname "$share")
 while :; do trusted "$dir" || refuse "$dir"; [ "$dir" = / ] && break; dir=$(/usr/bin/dirname "$dir"); done
@@ -96,9 +98,10 @@ fresh=$(/usr/bin/mktemp -d "$share/.incoming.XXXXXX")
 trap "/bin/rm -rf \"$fresh\"" EXIT
 /usr/bin/tar -x -f - -C "$fresh" --no-same-owner --no-acls --no-xattrs --no-fflags --no-mac-metadata
 /bin/chmod -R go-w "$fresh"
-[ -z "$(/usr/bin/find "$fresh" ! -type f ! -type d -print)" ] || refuse "not plain files"
+odd=$(/usr/bin/find "$fresh" ! -type f ! -type d -print) || refuse "plain-entry scan"
+[ -z "$odd" ] || refuse "not plain files"
 actual=$(cd "$fresh" && LC_ALL=C /usr/bin/find . -type f ! -path "./ui/dist/*" -print0 | LC_ALL=C /usr/bin/sort -z \
-  | /usr/bin/xargs -0 /usr/bin/shasum -a 256 | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-64)
+  | /usr/bin/xargs -0 /usr/bin/shasum -a 256 | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-64) || refuse "digest scan"
 [ "$actual" = "$digest" ] || refuse "digest"
 /bin/chmod 755 "$fresh"
 /bin/mv "$fresh" "$final"

@@ -276,9 +276,9 @@ head_commit=$(git -C "$repo" rev-parse HEAD)
 mkdir "$work/expected"; git -C "$repo" archive --format=tar "$head_commit" | tar -x -C "$work/expected"
 head_digest=$(bash -c 'source "$1"; tree_digest "$2"' _ "$tree_script" "$work/expected")
 freeze() {
-  local base="$1" source="$2" commit="$3" digest="$4"
+  local base="$1" source="$2" commit="$3" digest="$4" fault="${5:-s#^##}"
   sed -e 's#/usr/bin/sudo ##' -e "s#/usr/local/share/mailroom#$base/share/mailroom#g" -e "s#\"\$HOME/projects/mailroom\"#\"$source\"#" \
-    -e "s#^COMMIT=.*#COMMIT=$commit#" -e "s#^DIGEST=.*#DIGEST=$digest#" "$block" >"$base/freeze-run.sh"
+    -e "s#^COMMIT=.*#COMMIT=$commit#" -e "s#^DIGEST=.*#DIGEST=$digest#" -e "$fault" "$block" >"$base/freeze-run.sh"
   bash "$base/freeze-run.sh" >"$base/freeze.out" 2>&1
 }
 fresh_base() { rm -rf "${work:?}/$1"; mkdir -p "$work/$1/share"; chmod 755 "$work/$1" "$work/$1/share"; echo "$work/$1"; }
@@ -295,6 +295,21 @@ base=$(fresh_base freeze_link); mkdir -m 755 "$base/elsewhere"; ln -s "$base/els
 ! freeze "$base" "$repo" "$head_commit" "$head_digest" && [[ -z "$(ls -A "$base/elsewhere")" ]] || fail "a symlinked destination refuses"; ok
 base=$(fresh_base freeze_shared); chmod 777 "$base/share"
 ! freeze "$base" "$repo" "$head_commit" "$head_digest" || fail "a writable ancestor refuses"; ok
+# Each stand-in runs the real tool, so its output looks right, then exits 1. The block must
+# refuse on the status alone and leave nothing behind.
+mkdir "$work/faults"
+for tool in /bin/ls /usr/bin/find /usr/bin/sort; do
+  printf '#!/bin/sh\n%s "$@"\nexit 1\n' "$tool" >"$work/faults/$(basename "$tool")"
+done
+chmod 755 "$work/faults"/*
+for fault in "ls:s#/bin/ls -lde#$work/faults/ls -lde#" \
+  "find:s#(/usr/bin/find \"\$fresh\"#($work/faults/find \"\$fresh\"#" \
+  "sort:s#/usr/bin/sort -z#$work/faults/sort -z#"; do
+  name=${fault%%:*}; base=$(fresh_base "freeze_fault_$name")
+  freeze "$base" "$repo" "$head_commit" "$head_digest" "${fault#*:}" && fail "a failed $name stage freezes"
+  grep -q "$work/faults/$name" "$base/freeze-run.sh" || fail "the $name fault was injected"
+  [[ -z "$(ls -A "$base/share/mailroom" 2>/dev/null)" ]] || fail "a failed $name stage leaves nothing behind"; ok
+done
 # A replacement object swaps the setup script under the same commit name. Git honours it
 # by default; the bootstrap does not.
 clone="$work/clone"; git clone -q --no-local "$repo" "$clone"; git -C "$clone" checkout -q "$head_commit"
@@ -305,6 +320,24 @@ git -C "$clone" archive --format=tar "$head_commit" | tar -xO scripts/setup-maco
   || fail "the replacement object fixture changes plain git archive output"; ok
 base=$(fresh_base freeze_replaced); freeze "$base" "$clone" "$head_commit" "$head_digest" || fail "the bootstrap ignores replacement objects: $(cat "$base/freeze.out")"; ok
 ! grep -q "^echo replaced$" "$base/share/mailroom/setup-$head_commit/scripts/setup-macos-protection.sh" || fail "replaced bytes were frozen"; ok
+
+# The driver stops the whole process group on silence and on SIGTERM, so tools a
+# phase started never outlive it, even ones that ignore the hangup a closed terminal sends.
+for how in silence term; do
+  root="$work/driver_$how"; mkdir -p "$root"; : >"$root/answers"
+  marker="$((RANDOM + 1000)).$RANDOM"
+  printf 'trap "" HUP\n/bin/sleep %s &\n/bin/sleep %s\n' "$marker" "$marker" >"$root/driver.sh"
+  if [[ $how == silence ]]; then
+    /usr/bin/python3 -I "$repo/scripts/drive-wizard.py" "$root/driver.sh" "$root/transcript" "$root/answers" 1 || true
+  else
+    /usr/bin/python3 -I "$repo/scripts/drive-wizard.py" "$root/driver.sh" "$root/transcript" "$root/answers" 600 &
+    driver=$!
+    for _ in $(seq 50); do pgrep -f "sleep $marker" >/dev/null && break; /bin/sleep 0.1; done
+    kill -TERM "$driver"; wait "$driver" || true
+  fi
+  for _ in $(seq 20); do pgrep -f "sleep $marker" >/dev/null || break; /bin/sleep 0.1; done
+  ! pgrep -f "sleep $marker" >/dev/null || fail "a $how stop leaves a descendant running"; ok
+done
 
 # Entry checks on the real file: only the exact launch command passes.
 script="$repo/scripts/setup-macos-protection.sh"

@@ -3,8 +3,9 @@
 Usage: python3 -I drive-wizard.py DRIVER TRANSCRIPT ANSWERS [SILENCE_SECONDS]
 
 ANSWERS holds "prompt<TAB>answer" lines. Each prompt is answered once it appears after the
-last answer. The child is killed after SILENCE_SECONDS without output (default 20). The
-exit code is the child's.
+last answer. After SILENCE_SECONDS without output (default 20), or on SIGTERM, the
+driver kills the child's whole process group, which pty.fork makes a session of its own,
+so build tools the child started stop with it. The exit code is the child's.
 """
 import os
 import pty
@@ -19,11 +20,21 @@ rules = [(prompt.encode(), answer) for prompt, answer in rules] + [(b"Ready to s
 pid, fd = pty.fork()
 if pid == 0:
     os.execv("/bin/bash", ["/bin/bash", driver])
+
+
+def stop(*_):
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+signal.signal(signal.SIGTERM, lambda *_: (stop(), os.waitpid(pid, 0), os._exit(3)))
 seen, answered = b"", 0
 while True:
     ready, _, _ = select.select([fd], [], [], silence)
     if not ready:
-        os.kill(pid, signal.SIGKILL)
+        stop()
         break
     try:
         chunk = os.read(fd, 4096)
@@ -38,5 +49,6 @@ while True:
             os.write(fd, (answer + "\n").encode())
             break
 _, status = os.waitpid(pid, 0)
+stop()
 open(transcript, "wb").write(seen)
 sys.exit(os.waitstatus_to_exitcode(status))

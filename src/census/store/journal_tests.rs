@@ -328,7 +328,6 @@ fn actual_kill_during_frame_and_base_writes_keeps_a_committed_state() {
             .insert(format!("padding-{i:05}"), i);
     }
     store.save_state(&mut state).unwrap();
-    let seeded = state.revision;
     drop(store);
     let mut rewrites_seen = 0;
     for round in 0..10u64 {
@@ -342,15 +341,23 @@ fn actual_kill_during_frame_and_base_writes_keeps_a_committed_state() {
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(
-            1_500 + round * 337 % 1_000,
-        ));
+        let progress = dir.path().join("progress");
+        let before = fs::read_to_string(&progress).ok();
+        let started = std::time::Instant::now();
+        while fs::read_to_string(&progress).ok() == before {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(120),
+                "worker never saved"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200 + round * 337 % 1_000));
         child.kill().unwrap();
         child.wait().unwrap();
         let reported: u64 = fs::read_to_string(dir.path().join("progress"))
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(seeded);
+            .unwrap_or(0);
         let stages = fs::read_dir(dir.path())
             .unwrap()
             .filter(|e| {

@@ -352,7 +352,7 @@ stop_incomplete() {
 # root-owned directory and swap it into place.
 build_as_root() {
   local frozen="$1" work="$2" home="$2/home"
-  local build=(/usr/bin/env -i PATH="$(/usr/bin/dirname "$RUSTC"):/usr/bin:/bin" HOME="$home" CARGO_HOME="$work/cargo-home"
+  local build=(/usr/bin/env -i PATH="/usr/bin:/bin:$(/usr/bin/dirname "$RUSTC")" HOME="$home" CARGO_HOME="$work/cargo-home"
     RUSTC="$RUSTC" CARGO_TARGET_DIR="$work/target" NPM_CONFIG_USERCONFIG=/dev/null NPM_CONFIG_GLOBALCONFIG=/dev/null
     NPM_CONFIG_CACHE="$work/npm-cache" NPM_CONFIG_UPDATE_NOTIFIER=false)
   /bin/mkdir -m 700 "$home" "$work/cargo-home" "$work/npm-cache" || return 1

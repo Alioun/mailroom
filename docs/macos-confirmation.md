@@ -21,11 +21,24 @@ Items use the generic-password service `mailroom-protected-v1` and legacy access
 - Mailbox passwords trust no application, so macOS asks the person at every read.
 - Census and identity keys trust exactly this binary's cdhash, because every store open reads them.
 
-Before every read, mailroom reads the item's access lists and checks each one that grants more than encryption. Passwords must trust no application. Keys must trust exactly the requirement `cdhash H"<own cdhash>"`, checked against the kernel's cdhash of the running process. Anything else is refused without reading: an "Always Allow" grant, an added application, several applications, any application allowed, or a change list that trusts someone. Changing an access list needs a person, because `SecKeychainItemSetAccess` waits for the system dialog. Production use additionally requires the hardened runtime, which blocks debugger attachment and injected libraries, and a zero core-file limit, which `main` sets and verifies first.
+Before every read, mailroom reads the item's access-list entries and applies one policy, a pure function tested on every edited shape.
+- Encryption-only entries are ignored.
+- Every other entry must keep the prompt selector the item was created with.
+- The change-ACL entry must trust nobody.
+- The reading entries must agree with one another.
+- For a password, the reading entries must trust no application. For a key, they must trust exactly `cdhash H"<own cdhash>"`, checked against the kernel's cdhash of the running process.
 
-Same-user processes can still delete items or create look-alike items. Access lists cannot prevent that. A deleted item fails closed. A look-alike key cannot decrypt existing stores. Items are created, never overwritten.
+Anything else is refused without reading: an "Always Allow" grant, an added application, several applications, any application allowed, or an edited prompt selector. Changing an access list needs a person, because `SecKeychainItemSetAccess` waits for the system dialog. Production use also requires the hardened runtime, which blocks debugger attachment and injected libraries, and a zero core-file limit, which `main` sets and verifies first.
 
-A key trusting exactly one other binary is reported as `other_binary`, which is what a rebuilt mailroom sees. `mailroom keychain retrust <ref>` moves it after the person allows one read. It stages a copy in `<ref>-retrust`, so a rerun after an interruption finishes the move.
+Same-user processes can still delete items or plant items whose access list names this binary. Access lists cannot prevent either. The item's creator and value are not authenticated by the Keychain. Here is what this means:
+
+- **Deletion.** A deleted item makes the account unavailable. That loses availability, not secrecy.
+- **Planted password.** A planted password item is read only after a person approves. Mailroom then logs in with it, which fails against the provider.
+- **Planted key, existing state.** A planted key on an account with existing encrypted state does not decrypt that state, so the account refuses to open.
+- **Planted key, replaced state.** If the attacker also replaces the user-writable account state with ciphertext under the planted key, mailroom accepts both. Later data for that account would then be encrypted under a key the attacker knows. Mailroom cannot detect this, because neither the Keychain nor the account files are outside same-user control.
+- **Moves and copies.** `migrate` and `retrust` move or copy a key only after it opens the owning account's existing authenticated state (`check-store`). A planted legacy or staged key is therefore never published. An account with no saved state yet cannot be checked, and its keys are not moved.
+
+A key trusting exactly one other binary is reported as `other_binary`, which is what a rebuilt mailroom sees. `mailroom keychain retrust <ref>` moves it after the person allows one read and the store check passes. It stages a copy in `<ref>-retrust`, so a rerun after an interruption finishes the move or cleans a leftover copy.
 
 Legacy items from the earlier `keyring` service `mailroom` are listed by name only. `migrate` copies one, then reads the protected copy back and compares it inside the binary. `retire-legacy` deletes an original only when the protected item passes the access check and holds the same value.
 
@@ -35,26 +48,43 @@ The hardened binary prints only fixed records (`status=…`, `outcome=…`, `ref
 
 ```sh
 mailroom keychain refs | legacy
-mailroom keychain status | probe | enroll | migrate | retire-legacy | retrust <ref>
+mailroom keychain status | probe | check-store | enroll | migrate | retire-legacy | retrust <ref>
 mailroom native-check
 ```
 
-`enroll` reads the password twice from the controlling terminal with echo off and never from a pipe. `--keychain <file>` names an explicit keychain for tests. It must exist, and it may not be the login keychain, a system keychain or any keychain on the search list.
+Options are parsed before any backend opens. A missing value, a repeated option or an unknown option prints `status=usage`. `enroll` reads the password twice from the controlling terminal with echo off and never from a pipe.
+
+`--keychain <file>` names an explicit keychain for tests. It must be an existing file owned by the user in a directory nobody else can write, outside the system and user keychain folders, and off the search list. The opened keychain must resolve to the same file. Search-list errors refuse, and nothing ever falls back to the default keychain.
 
 ## Owner setup
 
-The owner runs setup only from a root-owned copy of the approved commit:
+The chain of trust runs from the approval record to the installed bytes:
+
+1. The approval record names a commit and a tree digest. The owner freezes that commit into a root-owned copy with commands typed from the record. ACLs are stripped, and nothing in the checkout is trusted.
+2. The owner starts the root phase with an absolute command:
+   - `env -i` clears the environment, and `/bin/bash -p` ignores `BASH_ENV` and imported functions.
+   - The script refuses any other exported variable or PATH.
+   - It refuses a copy that is not root-owned at every level, has an ACL or symlink, or has another digest.
+3. The root phase builds as root:
+   - The build runs from a copy of the frozen tree in a fresh directory under `/var/root`, which no same-user process can write.
+   - It uses an allowlisted environment: a fresh `HOME` and `CARGO_HOME`, npm user and global config set to `/dev/null`, and fixed tool paths.
+   - It refuses `.cargo`, `.npmrc` or `.config` above the build directory.
+   - Crates come from `cargo fetch --locked`, verified against `Cargo.lock` checksums. npm packages come from `npm ci`, verified against `package-lock.json` integrity hashes.
+4. It signs the outputs with the hardened runtime and installs them into a freshly created root-owned directory. An existing installation is moved aside, never written into or followed. The new directory is then renamed into place, and `pins` is a new file in it.
+5. The owner phase runs as the owner with the same kind of launch command. It refuses an installation that is not root-owned, has ACLs or symlinks, or does not match its pins. It verifies `mailroom` with `codesign` against its cdhash before every launch. It accepts from each command exactly one known result with its expected exit code.
 
 ```sh
 COMMIT=<approved commit from the approval record>
-sudo mkdir -p /usr/local/share/mailroom/setup-$COMMIT
-git -C ~/projects/mailroom archive --format=tar "$COMMIT" | sudo tar -x -C /usr/local/share/mailroom/setup-$COMMIT
-sudo chown -R root:wheel /usr/local/share/mailroom
-sudo chmod -R go-w /usr/local/share/mailroom
-/usr/local/share/mailroom/setup-$COMMIT/scripts/setup-macos-protection.sh
+sudo /bin/mkdir -p /usr/local/share/mailroom/setup-$COMMIT
+/usr/bin/git -C ~/projects/mailroom archive --format=tar "$COMMIT" | sudo /usr/bin/tar -x -C /usr/local/share/mailroom/setup-$COMMIT
+sudo /usr/sbin/chown -R root:wheel /usr/local/share/mailroom
+sudo /bin/chmod -R -N /usr/local/share/mailroom
+sudo /bin/chmod -R go-w /usr/local/share/mailroom
+sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p /usr/local/share/mailroom/setup-$COMMIT/scripts/setup-macos-protection.sh install "$USER"
+/usr/bin/env -i HOME="$HOME" TERM="$TERM" PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p /usr/local/share/mailroom/setup-$COMMIT/scripts/setup-macos-protection.sh
 ```
 
-The wizard refuses a copy that is not root-owned at every level or whose tree digest differs from the one the owner types from the approval record. It builds in a private temporary directory and installs `mailroom` and `mailroom-confirm` root-owned in `/usr/local/libexec/mailroom`. It runs them only after `codesign --verify` against their exact cdhash, and it reduces their output to fixed records. Each stage must report its expected result, or the wizard stops with "Setup incomplete" and keeps its records in `~/.config/mailroom/native-setup-records`. Daily use runs `/usr/local/libexec/mailroom/mailroom`.
+Daily use runs `/usr/local/libexec/mailroom/mailroom`, which serves the root-owned UI copy installed beside it. Each phase stops with "Setup incomplete" on any unexpected result and keeps fixed records.
 
 ## Verification
 
@@ -64,11 +94,12 @@ cargo test --locked
 bash scripts/verify-setup-macos-protection.sh
 ```
 
-The Rust tests run the Keychain code in process, and the real owner commands of a hardened signed copy, against throwaway keychains they create and delete. They never touch the login keychain. A test cannot click a real dialog, so the visible prompts, per-access approval, retrust and migration of real items remain owner checks.
+The Rust tests run the Keychain code in process, and the real owner commands of a hardened signed copy, against throwaway keychains they create and delete. They never touch the login keychain. The wizard test drives both phases' stage logic with fake tools in a tree owned by the test user. A test cannot click a real dialog or run sudo, so the visible prompts, per-access approval, retrust, migration of real items and the root build remain owner checks.
 
-## Residual exposure
+## Residual exposure the owner accepts
 
-- Security framework and Foundation keep their own copies of values they read or store, which mailroom cannot wipe.
-- So do the Swift JSON decoder and kernel pipe buffers for the confirmation challenge.
-- Mailroom wipes its own buffers.
-- The build toolchains (Xcode, cargo, npm) are user-writable and trusted as installed.
+- **Toolchains.** The root phase shows the SHA-256 of each tool and asks the owner to accept them. These are the Homebrew Rust toolchain, `node`, npm's CLI, Xcode through `xcode-select` and `codesign`. Homebrew's files are writable by the owner account, so a same-user process could have altered them before the build. Running them as root during the build does not make them more trustworthy than they were.
+- **Package install scripts.** npm runs install scripts from lock-pinned packages.
+- **Framework copies.** Security framework, Foundation and CryptoKit keep copies of values they handle, which mailroom cannot wipe.
+- **Decoder and pipe copies.** The Swift JSON decoder's intermediate copies and kernel pipe buffers hold the one-exchange confirmation challenge. The helper wipes the envelope buffers it owns. Mailroom wipes its own read and enrollment buffers, and its writes borrow the caller's buffer.
+- **Mailbox-change dialogs** show the operation and the exact plan receipt, not every folder or message. The person relies on the browser preview for those targets.

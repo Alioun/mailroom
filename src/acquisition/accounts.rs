@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+pub(crate) mod keychain;
 pub mod lifecycle;
 pub(crate) mod recovery;
 use super::AcquisitionError;
@@ -38,17 +40,17 @@ pub trait CredentialBackend: Send + Sync {
 }
 
 pub struct OsCredentials;
+/// Every access goes through the pinned Keychain helper. Without one, every access is refused.
 #[cfg(target_os = "macos")]
 impl CredentialBackend for OsCredentials {
-    // Ordinary keyring access does not establish application trust or per-access consent.
-    fn get(&self, _: &str) -> Result<SecretValue, AcquisitionError> {
-        Err(AcquisitionError::Credentials)
+    fn get(&self, reference: &str) -> Result<SecretValue, AcquisitionError> {
+        keychain::installed()?.get(reference)
     }
-    fn put(&self, _: &str, _: &SecretValue) -> Result<(), AcquisitionError> {
-        Err(AcquisitionError::Credentials)
+    fn put(&self, reference: &str, value: &SecretValue) -> Result<(), AcquisitionError> {
+        keychain::installed()?.put(reference, value)
     }
-    fn delete(&self, _: &str) -> Result<(), AcquisitionError> {
-        Err(AcquisitionError::Credentials)
+    fn delete(&self, reference: &str) -> Result<(), AcquisitionError> {
+        keychain::installed()?.delete(reference)
     }
 }
 #[cfg(not(target_os = "macos"))]

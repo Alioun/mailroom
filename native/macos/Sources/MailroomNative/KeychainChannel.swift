@@ -49,5 +49,7 @@ public func serve(_ input: Data) throws -> Data {
         (status, protection) = keychain.protection(reference: request.reference)
     }
     let tag = channelTag(challenge: request.challenge, op: request.op, reference: request.reference, status: status, protection: protection, secret: secret)
-    return try JSONEncoder().encode(KeychainResponse(status: status, secret: secret, protection: protection, authentication: tag))
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = .withoutEscapingSlashes
+    return try encoder.encode(KeychainResponse(status: status, secret: secret, protection: protection, authentication: tag))
 }

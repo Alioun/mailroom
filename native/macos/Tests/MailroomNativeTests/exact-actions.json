@@ -56,6 +56,15 @@
     "destination": null
    },
    "display": "Apply synthetic \"one_click\" for subscription sub-2, account invented-account, received at alias@example.test, host none. Payload SHA-256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb. Success unknown."
+  },
+  {
+   "action": {
+    "purpose": "mailbox_change",
+    "account": "invented-account",
+    "operation": "Create the previewed folders",
+    "plan_receipt": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+   },
+   "display": "Create the previewed folders for account invented-account. Exact previewed plan receipt dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd. Mailbox changes reach the provider."
   }
  ],
  "outcome": {

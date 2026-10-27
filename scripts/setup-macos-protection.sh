@@ -209,53 +209,136 @@ finish() {
 # ──────────────────────────────────────────────────────────────────────────
 
 run_wizard() {
-TOTAL_STAGES=5
+TOTAL_STAGES=6
+local repo swift codesign cargo python helpers pins config confirm keychain arch
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+swift="${MAILROOM_SWIFT:-xcrun swift}"
+codesign="${MAILROOM_CODESIGN:-/usr/bin/codesign}"
+cargo="${MAILROOM_CARGO:-cargo}"
+python="${MAILROOM_PYTHON:-/usr/bin/python3}"
+helpers="${MAILROOM_HELPERS:-$HOME/Library/Application Support/mailroom/helpers}"
+pins="${MAILROOM_PINS:-$HOME/.config/mailroom/native-pins.env}"
+config="${MAILROOM_CONFIG:-$HOME/.config/mailroom}"
+local build="${MAILROOM_NATIVE_BUILD:-$repo/native/macos/.build/release}"
+confirm="$helpers/mailroom-confirm"
+keychain="$helpers/mailroom-keychain"
+arch="$(uname -m)"
 if [[ "${1:-}" == "--plan" ]]; then
   printf '%s\n' \
-    '1. Choose exact application and helper signing requirements. No identity is preselected.' \
-    '2. Build, sign and install only after executable continuity and the private launch channel are implemented.' \
-    '3. Verify the exact action, cancellation, substitution rejection and single-use behavior on this Mac.' \
-    '4. Provision application-specific Keychain trust and verify approval on every access before private credential entry.' \
-    '5. Prepare encrypted captured-state recovery outside this Mac, with its secret held separately.' \
-    'HOLD: this build cannot provision or enable native invocation, Keychain access, credential entry or recovery.'
+    "1. Build both Swift helpers, install them in $helpers and ad-hoc sign them with the hardened runtime." \
+    "2. Record their cdhashes in $pins and build mailroom with those pins." \
+    '3. Approve one invented action in the native prompt, then cancel a second one.' \
+    '4. Copy legacy keyring items into protected items. The originals stay until you retire them.' \
+    '5. Type any missing mailbox password into the helper'"'"'s hidden prompt.' \
+    '6. Check that every password read asks you, and that a denied read returns nothing.'
   return 0
 fi
 if [[ $# -ne 0 || ! -t 0 ]]; then
-  printf '%s\n' 'Use --plan for a safe noninteractive preview.' >&2
+  printf '%s\n' 'Run this in a terminal. Use --plan for a noninteractive preview.' >&2
   return 2
 fi
-ENV_FILE=/dev/null
-banner "macOS protection acceptance prerequisites"
-stage "Choose the trusted identities"
-say "Choose exact signed application and helper requirements through your own signing setup."
-say "Values remain in memory. This script writes no configuration."
-open_url "https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/RequirementLang/RequirementLang.html"
-ask APPLICATION_REQUIREMENT "Exact trusted application requirement:"
-ask HELPER_REQUIREMENT "Exact trusted helper requirement:"
-[[ -n "$APPLICATION_REQUIREMENT" && -n "$HELPER_REQUIREMENT" ]] || return 1
-stage "Establish executable continuity before installation"
-say "Native launch is denied in this build. Static path verification cannot prevent replacement before launch."
-say "Complete and independently verify a protected executable and private IPC design before signing or installing it."
-say "Never enable invocation by adding a flag or accepting an arbitrary valid signature."
-pause "Record this unmet prerequisite in your private acceptance record."
-stage "Verify action-naming consent on this Mac"
-say "After the implementation is complete, check the exact target, sending identity and content digest in the OS prompt."
-say "Test cancellation, failure, modified helper, wrong signer, substituted executable, stale state and replay."
-say "Each rejected case must produce no effect. Native consent never authorizes provider writes."
-pause "Record these unperformed native acceptance checks."
-stage "Protect credentials before entry"
-open_url "https://developer.apple.com/documentation/security/restricting-keychain-item-accessibility"
-say "Provision only the owner-selected signed application's access group and per-access user presence."
-say "Verify a different application is refused, cancellation reads nothing and every access requires approval."
-say "Private credential entry must use the future protected adapter through hidden terminal input or a private pipe."
-say "This wizard does not request or store passwords. Ordinary keyring get/put is insufficient."
-pause "Record that real credential entry remains blocked."
-stage "Prepare later encrypted recovery"
-say "Q23 requires an encrypted bundle kept outside this Mac and its secret stored separately."
-say "Choose the location yourself. Scheduling, retention, provider and escrow are undecided."
-say "No recovery bundle is created here. Later mail effects require reconciliation, never blind replay."
-warn "Protection acceptance is incomplete. No installation, trust change, credential entry or write authority was granted."
-return 1
+ENV_FILE="$pins"
+banner "Mailroom native confirmation and Keychain setup"
+
+stage "Build and sign the helpers"
+say "This builds the two Swift helpers from this checkout and signs them ad hoc."
+say "Their exact code identity (cdhash) becomes the only identity mailroom will launch."
+note "Helpers go to: $helpers"
+confirm "Build and install the helpers now?" || return 1
+(cd "$repo/native/macos" && $swift build -c release) >/dev/null
+mkdir -p "$helpers" && chmod 700 "$helpers"
+local name cdhash
+for name in mailroom-confirm mailroom-keychain; do
+  install -m 700 "$build/$name" "$helpers/$name"
+  "$codesign" -s - -f -o runtime --identifier "org.mailroom.${name#mailroom-}" "$helpers/$name" >/dev/null 2>&1
+  cdhash="$("$codesign" -d -vvv --arch "$arch" "$helpers/$name" 2>&1 | sed -n 's/^CDHash=//p')"
+  [[ "$cdhash" =~ ^[0-9a-f]{40}$ ]] || { warn "no cdhash for $name"; return 1; }
+  say "$name cdhash $cdhash"
+  if [[ "$name" == mailroom-confirm ]]; then
+    mkdir -p "$(dirname "$pins")"
+    write_env MAILROOM_CONFIRM_HELPER "$confirm"
+    write_env MAILROOM_CONFIRM_HELPER_CDHASH "$cdhash"
+  else
+    write_env MAILROOM_KEYCHAIN_HELPER "$keychain"
+    write_env MAILROOM_KEYCHAIN_HELPER_CDHASH "$cdhash"
+  fi
+done
+note "Rerunning this stage after a rebuild changes the cdhash. Protected local keys then need stage 4 again."
+
+stage "Build mailroom with the pins"
+say "The pins are compiled into the binary. Changing a helper file afterwards makes mailroom refuse it."
+confirm "Build the pinned release binary now?" || return 1
+(cd "$repo" && env MAILROOM_CONFIRM_HELPER="$MAILROOM_CONFIRM_HELPER" MAILROOM_CONFIRM_HELPER_CDHASH="$MAILROOM_CONFIRM_HELPER_CDHASH" \
+  MAILROOM_KEYCHAIN_HELPER="$MAILROOM_KEYCHAIN_HELPER" MAILROOM_KEYCHAIN_HELPER_CDHASH="$MAILROOM_KEYCHAIN_HELPER_CDHASH" \
+  $cargo build --release --locked) >/dev/null
+say "Built $repo/target/release/mailroom with both pins."
+
+stage "See the native confirmation"
+say "A dialog names an invented invoice send to nobody@example.invalid. Nothing is sent."
+step "First: read the dialog, click Approve, then authenticate."
+local outcome
+outcome="$("$python" -I "$repo/scripts/native-confirm-check.py" "$confirm" || true)"
+say "Result: $outcome (expected outcome=approved)"
+step "Second: click Cancel in the dialog."
+outcome="$("$python" -I "$repo/scripts/native-confirm-check.py" "$confirm" || true)"
+say "Result: $outcome (expected outcome=cancelled)"
+pause "Note both results in your acceptance record, then press Enter."
+
+stage "Migrate legacy keyring items"
+local legacy reference
+legacy="$("$keychain" legacy || true)"
+if [[ -z "$legacy" ]]; then
+  say "No legacy items under the keyring service \"mailroom\"."
+else
+  say "Legacy items found (names only):"
+  while IFS= read -r reference <&3; do step "$reference"; done 3<<<"$legacy"
+  say "macOS asks you to allow the helper to read each original once. Click Allow, never Always Allow."
+  if confirm "Copy each into a protected item now?"; then
+    while IFS= read -r reference <&3; do
+      say "$reference: $("$keychain" migrate "$reference" </dev/tty || true)"
+      say "$reference: $("$keychain" status "$reference" || true)"
+    done 3<<<"$legacy"
+  fi
+  if confirm_no "Delete the legacy originals now? Keep them until mailroom has worked for a while."; then
+    while IFS= read -r reference <&3; do
+      say "$reference: $("$keychain" retire-legacy "$reference" || true)"
+    done 3<<<"$legacy"
+  fi
+fi
+
+stage "Enter missing mailbox passwords"
+local refs
+refs="$("$python" -I -c 'import json,pathlib,sys
+for p in sorted(pathlib.Path(sys.argv[1]).glob("*.json")):
+    r = json.loads(p.read_text()).get("password_ref")
+    if isinstance(r, str): print(r)' "$config" 2>/dev/null || true)"
+if [[ -z "$refs" ]]; then
+  say "No saved accounts in $config. Add accounts through mailroom; it stores passwords itself."
+else
+  while IFS= read -r reference <&3; do
+    if "$keychain" status "$reference" >/dev/null 2>&1; then
+      say "$reference is already protected."
+    elif confirm "Type the password for $reference into the helper's hidden prompt now?"; then
+      say "The helper reads it straight from this terminal. It is never echoed, stored in a file or passed as an argument."
+      say "$reference: $("$keychain" enroll "$reference" </dev/tty || true)"
+    fi
+  done 3<<<"$refs"
+fi
+
+stage "Check the prompt at every access"
+if [[ -z "$refs" ]]; then
+  say "No saved accounts to check yet. Rerun this wizard after adding one."
+else
+  while IFS= read -r reference <&3; do
+    step "$reference: click Deny in the dialog that appears."
+    say "Result: $("$keychain" probe "$reference" || true) (expected status=denied)"
+    step "$reference: now click Allow, never Always Allow."
+    say "Result: $("$keychain" probe "$reference" || true) (expected status=ok)"
+    say "Protection: $("$keychain" status "$reference" || true) (expected protection=every_access)"
+  done 3<<<"$refs"
+fi
+pause "Record these results, then press Enter."
+finish
 }
 
 run_wizard "$@"; exit

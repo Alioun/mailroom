@@ -350,6 +350,12 @@ fn execute(
                 if !confirmed || other_effects_pending(&saved) {
                     return Err(AcquisitionError::InvalidInput);
                 }
+                mailbox_consent(
+                    state,
+                    &account.id,
+                    "Apply the previewed Gmail label changes",
+                    receipt,
+                )?;
                 repo.gmail_confirm(
                     &account,
                     &store,
@@ -379,6 +385,12 @@ fn execute(
                 if !confirmed {
                     return Err(AcquisitionError::InvalidInput);
                 }
+                mailbox_consent(
+                    state,
+                    &account.id,
+                    "Undo the previewed Gmail label changes",
+                    receipt,
+                )?;
                 repo.gmail_undo(&account, &store, &mut saved, run, receipt, cancel, fresh)?;
             }
             Action::ResumeUndo { run } => {
@@ -408,6 +420,12 @@ fn execute(
             if !confirmed || other_effects_pending(&saved) {
                 return Err(AcquisitionError::InvalidInput);
             }
+            mailbox_consent(
+                state,
+                &account.id,
+                "Move the previewed backlog messages",
+                receipt,
+            )?;
             repo.backlog_confirm(
                 &account,
                 &store,
@@ -437,6 +455,12 @@ fn execute(
             if !confirmed {
                 return Err(AcquisitionError::InvalidInput);
             }
+            mailbox_consent(
+                state,
+                &account.id,
+                "Undo the previewed backlog moves",
+                receipt,
+            )?;
             repo.backlog_undo(&account, &store, &mut saved, run, receipt, cancel, fresh)?;
         }
         Action::ResumeUndo { run } => {

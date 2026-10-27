@@ -328,6 +328,7 @@ fn actual_kill_during_frame_and_base_writes_keeps_a_committed_state() {
             .insert(format!("padding-{i:05}"), i);
     }
     store.save_state(&mut state).unwrap();
+    let seeded = state.revision;
     drop(store);
     let mut rewrites_seen = 0;
     for round in 0..10u64 {
@@ -349,7 +350,7 @@ fn actual_kill_during_frame_and_base_writes_keeps_a_committed_state() {
         let reported: u64 = fs::read_to_string(dir.path().join("progress"))
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+            .unwrap_or(seeded);
         let stages = fs::read_dir(dir.path())
             .unwrap()
             .filter(|e| {

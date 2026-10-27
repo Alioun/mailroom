@@ -51,7 +51,7 @@ node ui/scripts/verify-rules.mjs
 
 The Sieve check builds an isolated image and runs check-sieve and Pigeonhole against synthetic artifacts. It starts no global service and mounts no credentials or personal directories. Its runtime container has no network access.
 
-See [Exact-action confirmation](docs/macos-confirmation.md) for the synthetic single-use boundary, compile-only Swift helper and denied native prerequisites. Inspect the deferred owner setup with `bash scripts/setup-macos-protection.sh --plan`.
+See [Native confirmation and protected Keychain credentials](docs/macos-confirmation.md) for the pinned Swift helpers, the single-use confirmation boundary and Keychain protection. The owner runs `bash scripts/setup-macos-protection.sh`; `--plan` previews it.
 
 ## Encrypted recovery development
 

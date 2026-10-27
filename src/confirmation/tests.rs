@@ -283,6 +283,11 @@ fn display_and_authentication_match_the_swift_helper_fixture() {
             effect: "Success unknown.".into(),
             destination: None,
         },
+        ExactAction::MailboxChange {
+            account: "invented-account".into(),
+            operation: "Create the previewed folders".into(),
+            plan_receipt: "d".repeat(64),
+        },
     ];
     let cases = fixture["actions"].as_array().unwrap();
     assert_eq!(cases.len(), actions.len());

@@ -132,6 +132,7 @@ fn execute(
             if !confirmed {
                 return Err(AcquisitionError::InvalidInput);
             }
+            mailbox_consent(&state, &account.id, "Create the previewed folders", receipt)?;
             repo.folder_confirm(&account, &store, &mut saved, receipt, cancel, |s| {
                 ledger_fresh(s, guard.as_ref())
             })?;

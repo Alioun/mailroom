@@ -64,6 +64,32 @@ struct Job {
     #[serde(skip)]
     cancel: Cancellation,
 }
+/// Asks a person through the confirmation boundary before a previewed mailbox change runs.
+/// The repository then recomputes the plan and requires this exact receipt.
+fn mailbox_consent(
+    state: &AppState,
+    account: &AccountId,
+    operation: &str,
+    receipt: &str,
+) -> Result<(), AcquisitionError> {
+    let plan = crate::confirmation::Plan {
+        actions: vec![crate::confirmation::ExactAction::MailboxChange {
+            account: account.as_str().into(),
+            operation: operation.into(),
+            plan_receipt: receipt.into(),
+        }],
+        exact_receipt: receipt.into(),
+    };
+    let mut boundary = state.accounts.confirmations.lock().expect("confirmations");
+    let (handle, _) = boundary
+        .offer(plan.clone())
+        .map_err(|_| AcquisitionError::InvalidInput)?;
+    boundary
+        .confirm(&handle, &plan, || Ok(plan.clone()))
+        .map(|_| ())
+        .map_err(|_| AcquisitionError::InvalidInput)
+}
+
 impl AccountController {
     pub fn new(synthetic: bool) -> Self {
         let source = if synthetic {

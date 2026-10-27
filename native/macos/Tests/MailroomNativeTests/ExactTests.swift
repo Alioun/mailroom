@@ -65,7 +65,7 @@ func request(_ fixture: Fixture, _ edit: (inout [String: Any]) -> Void = { _ in 
 final class ExactTests: XCTestCase {
     func testDisplayMatchesTheRustCoreForEveryPurpose() throws {
         let fixture = try Fixture.load()
-        XCTAssertEqual(fixture.actions.count, 4)
+        XCTAssertEqual(fixture.actions.count, 5)
         for item in fixture.actions {
             let action = try JSONDecoder().decode(ExactAction.self, from: item.action.data())
             XCTAssertEqual(try action.display(), item.display)

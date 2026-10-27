@@ -43,6 +43,11 @@ pub(crate) enum ExactAction {
         content_digest: String,
         source_digest: String,
     },
+    MailboxChange {
+        account: String,
+        operation: String,
+        plan_receipt: String,
+    },
     SubscriptionAction {
         account: String,
         revision: u64,
@@ -88,6 +93,7 @@ fn display(actions: &[ExactAction]) -> String {
         ExactAction::Recovery {account, operation, manifest_digest, consequences} => format!("{operation} for account {account}. Exact recovery plan SHA-256 {manifest_digest}. {consequences}"),
         ExactAction::InvoiceSend {account, target_name, target, sending_identity, content_digest, ..} => format!("Send this invoice for account {account} to {target_name} <{target}> from {sending_identity}. Exact content SHA-256 {content_digest}. No Undo."),
         ExactAction::UnsubscribeLocalMail {account, target, sending_identity, receiving_identity, subject, content_digest, ..} => format!("Send this unsubscribe message for account {account} to {target} from {sending_identity}, received at {receiving_identity}. Subject {subject}. Exact content SHA-256 {content_digest}. Success unknown. No Undo."),
+        ExactAction::MailboxChange {account, operation, plan_receipt} => format!("{operation} for account {account}. Exact previewed plan receipt {plan_receipt}. Mailbox changes reach the provider."),
         ExactAction::SubscriptionAction {account, subscription, method, receiving_identity, host, content_digest, effect, ..} => format!("Apply synthetic {} for subscription {subscription}, account {account}, received at {receiving_identity}, host {}. Payload SHA-256 {content_digest}. {effect}", serde_json::to_string(method).expect("Method encoding"), host.as_deref().unwrap_or("none")),
     }).collect::<Vec<_>>().join("\n")
 }

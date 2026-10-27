@@ -16,6 +16,11 @@ func owner(_ arguments: [String]) -> Int32 {
         let (status, protection) = keychain.protection(reference: reference)
         print("status=\(status.rawValue) protection=\(protection?.rawValue ?? "unexpected") expected=\(Protection(reference: reference).rawValue)")
         return status == .ok && protection == Protection(reference: reference) ? 0 : 1
+    case ("probe", 2) where validReference(reference):
+        var (status, value) = keychain.get(reference: reference)
+        if value != nil { value!.resetBytes(in: 0..<value!.count) }
+        print("status=\(status.rawValue)")
+        return status == .ok ? 0 : 1
     case ("enroll", 2) where validReference(reference):
         guard isatty(STDIN_FILENO) == 1, var first = hidden("Password for \(reference): ") else { return 1 }
         defer { first.resetBytes(in: 0..<first.count) }

@@ -186,6 +186,12 @@ fn execute(
                 Action::RemovalConfirm { .. } => R::Removal,
                 _ => R::Deploy,
             };
+            let operation = match kind {
+                R::Compensation(_) => "Apply the previewed Sieve compensation",
+                R::Removal => "Remove the previewed Sieve script",
+                _ => "Upload and activate the previewed Sieve script",
+            };
+            mailbox_consent(&state, &account.id, operation, receipt)?;
             repo.transaction_confirm(&account, &store, &mut saved, kind, receipt, cancel, |s| {
                 ledger_fresh(s, guard.as_ref())
             })?;

@@ -22,6 +22,7 @@ public struct ExactAction: Decodable, Sendable {
     let method: String?
     let host: String?
     let effect: String?
+    let plan_receipt: String?
 
     func required(_ value: String?) throws -> String {
         guard let value else { throw Denied() }
@@ -37,6 +38,8 @@ public struct ExactAction: Decodable, Sendable {
             return "Send this invoice for account \(account) to \(try required(target_name)) <\(try required(target))> from \(try required(sending_identity)). Exact content SHA-256 \(try required(content_digest)). No Undo."
         case "unsubscribe_local_mail":
             return "Send this unsubscribe message for account \(account) to \(try required(target)) from \(try required(sending_identity)), received at \(try required(receiving_identity)). Subject \(try required(subject)). Exact content SHA-256 \(try required(content_digest)). Success unknown. No Undo."
+        case "mailbox_change":
+            return "\(try required(operation)) for account \(account). Exact previewed plan receipt \(try required(plan_receipt)). Mailbox changes reach the provider."
         case "subscription_action":
             let method = try required(method)
             guard method.allSatisfy({ $0.isASCII && ($0.isLowercase || $0 == "_") }) else { throw Denied() }

@@ -70,7 +70,7 @@ try {
   assert.equal((await response).status(), 200)
   await region.getByText('Local lifecycle change saved. Account previews were cleared.', { exact: true }).waitFor()
   assert.equal(JSON.parse(await readFile(join(retained.directory, 'config', `${account}.json`), 'utf8')).password_ref, before.password_ref)
-  await interrupt('rotate_primary', { action: 'rotate', account, confirmed: true })
+  await interrupt('metadata', { action: 'rotate', account, confirmed: true })
   await page.reload()
   await page.getByRole('radio', { name: 'Deutsch', exact: true }).click()
   await page.getByRole('button', { name: 'Gespeicherte Konten laden', exact: true }).click()

@@ -155,9 +155,15 @@ try {
     assert.deepEqual(await snapshot(account), baseline, 'Every selected generation is still decryptable before recovery')
     await post('open', { account }, 422)
     await lifecycle({ action: 'recover', account }); await lifecycle({ action: 'recover', account })
-    assert.equal((await metadata(account)).generation, old.generation + 1)
+    // Unpublished rotations roll back; published ones finish under the keys their data authenticates.
+    const published = phase === 'metadata' || phase === 'rotate_retire_data'
+    assert.equal((await metadata(account)).generation, published ? old.generation + 1 : old.generation)
     assert.deepEqual(await snapshot(account), baseline)
     assert.deepEqual(await snapshot(comparison), unrelated)
+    if (!published) {
+      results.push({ check: `SIGKILL ${phase}, unpublished rotation rolled back, four-store preservation`, pass: true }); await persistResults()
+      continue
+    }
     await post('proof/download', { account, receipt: outstanding.receipt, confirmed: true }, 422)
     await command('invoices', 'send', { selection, target, receipt: invoicePlan.receipt, confirmation_action: invoicePlan.plan.confirmation_action }, 422)
     await command('unsubscribe', 'confirm', { input: unsubscribeInput, receipt: unsubscribePlan.receipt, confirmation_action: unsubscribePlan.confirmation_action, mail_confirmation_action: unsubscribePlan.local_mail_confirmation }, 422)

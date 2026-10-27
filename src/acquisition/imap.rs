@@ -1328,6 +1328,7 @@ pub(super) fn record(
     Ok(record)
 }
 
+pub(crate) mod original;
 #[cfg(test)]
 pub(crate) mod tests;
 

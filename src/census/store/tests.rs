@@ -521,6 +521,7 @@ fn v4_migration_defaults_unsubscribe_and_flag_coverage_without_inventing_authori
             source_ids: vec!["opaque-source".into()],
             http_status: None,
             success: "unknown".into(),
+            smtp: None,
         });
     store.save_state(&mut migrated).unwrap();
     let census = store.load().unwrap();
@@ -568,5 +569,67 @@ fn v6_migration_preserves_ledger_and_histories_without_winddown_approval() {
     assert_eq!(
         store.load_state().unwrap().ledger.source_version,
         "v6-authoritative-projection"
+    );
+}
+
+#[test]
+fn schema_21_files_stay_readable_and_refuse_send_adapter_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = AccountId::new("send-adapters-migration").unwrap();
+    let store = EncryptedStore::new(
+        dir.path().into(),
+        CensusKeys::derive(&LocalSecret::random(), &id),
+    )
+    .unwrap();
+    store.save(&Census::new(id)).unwrap();
+    let mut state = store.load_state().unwrap();
+    state.synthetic_uid_next.insert("fixture".into(), 9);
+    let plain = serde_json::to_string(&state).unwrap();
+    store
+        .stage_snapshot(21, &plain)
+        .unwrap()
+        .persist(store.path())
+        .unwrap();
+    let migrated = store.load_state().unwrap();
+    assert_eq!(migrated.synthetic_uid_next["fixture"], 9);
+    assert!(migrated.invoices.sends.is_empty() && migrated.unsubscribe.history.is_empty());
+    let mut entry: serde_json::Value = serde_json::json!({
+        "id": "e", "subscription": "s", "sender_key": "news@example.test", "method": "local_mail",
+        "time": 1792886400, "status": "submitted", "host": "example.test", "payload_digest": "d",
+        "source_ids": [], "http_status": null, "success": "unknown",
+        "smtp": {"kind": "accepted", "code": 250, "enhanced": "2.0.0"}
+    });
+    let mut with_entry = serde_json::to_value(&state).unwrap();
+    with_entry["unsubscribe"]["history"] = serde_json::json!([entry.clone()]);
+    store
+        .stage_snapshot(21, &with_entry.to_string())
+        .unwrap()
+        .persist(store.path())
+        .unwrap();
+    assert!(matches!(
+        store.load_state(),
+        Err(CensusError::UnsupportedVersion)
+    ));
+    store
+        .stage_snapshot(22, &with_entry.to_string())
+        .unwrap()
+        .persist(store.path())
+        .unwrap();
+    let current = store.load_state().unwrap();
+    assert_eq!(
+        current.unsubscribe.history[0].status,
+        crate::unsubscribe::Status::Submitted
+    );
+    entry["status"] = "kept".into();
+    entry.as_object_mut().unwrap().remove("smtp");
+    with_entry["unsubscribe"]["history"] = serde_json::json!([entry]);
+    store
+        .stage_snapshot(21, &with_entry.to_string())
+        .unwrap()
+        .persist(store.path())
+        .unwrap();
+    assert!(
+        store.load_state().is_ok(),
+        "older records keep their meaning"
     );
 }

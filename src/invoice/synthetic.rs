@@ -98,6 +98,7 @@ pub(crate) fn initialize_synthetic(state: &mut AccountState) -> bool {
                 message_id_hash: m.headers.message_id_hash.clone(),
                 original,
                 evidence,
+                acquired: false,
             },
         );
     }

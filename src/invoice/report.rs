@@ -51,13 +51,50 @@ fn evidence_reasons(e: &ContentEvidence) -> Vec<String> {
     }
 }
 
+/// Part content types of every acquired original that still matches its census record.
+fn mime_evidence(state: &AccountState, provider: Provider, synthetic: bool) -> proof::MimeEvidence {
+    let mut evidence = proof::MimeEvidence::new();
+    for (name, f) in &state.census.folders {
+        for m in f.messages.values() {
+            let Some(source) = state
+                .invoices
+                .sources
+                .get(&format!("{name}/{}/{}", f.uidvalidity, m.uid))
+                .filter(|s| {
+                    (synthetic || s.acquired) && s.message_id_hash == m.headers.message_id_hash
+                })
+            else {
+                continue;
+            };
+            let ContentEvidence::Known { attachments, .. } = &source.evidence else {
+                continue;
+            };
+            let id = match (provider, &m.gmail_message_id) {
+                (Provider::Gmail, Some(id)) => format!("gmail/{id}"),
+                _ => source.id.clone(),
+            };
+            evidence.insert(
+                id,
+                std::iter::once("text/plain".to_owned())
+                    .chain(
+                        attachments
+                            .iter()
+                            .map(|a| a.media_type.to_ascii_lowercase()),
+                    )
+                    .collect(),
+            );
+        }
+    }
+    evidence
+}
+
 pub(crate) fn report(
     state: &AccountState,
     provider: Provider,
     synthetic: bool,
     keys: &CensusKeys,
 ) -> Result<Report, String> {
-    let mut report = Report { version: String::new(), semantics: SEMANTICS.into(), revision: state.revision, artifact: None, complete: state.census.acquisition_state == ScanState::Complete, count: 0, eligible_business: 0, unresolved: 0, rows: vec![], warnings: vec!["Prediction and prepared Sieve download do not establish handoff. Real handoff and Qonto acceptance remain unknown.".into(), "Target approval, sender restrictions, encryption, provider recipient provenance and MIME capabilities require independent evidence.".into(), "Keyword automatic copies remain omitted in full. A header census cannot establish attachment absence, link-only content or ZUGFeRD.".into()] };
+    let mut report = Report { version: String::new(), semantics: SEMANTICS.into(), revision: state.revision, artifact: None, complete: state.census.acquisition_state == ScanState::Complete, count: 0, eligible_business: 0, unresolved: 0, rows: vec![], warnings: vec!["Prediction and prepared Sieve download do not establish handoff. Real handoff and Qonto acceptance remain unknown.".into(), "Target approval, sender restrictions, encryption, provider recipient provenance and MIME capabilities require independent evidence.".into(), "Keyword automatic copies need the engine's Sieve mime extension and a PDF/XML part. Proof predicts them only for messages whose original was acquired; for the rest the copy stays unknown. A header census cannot establish attachment absence, link-only content or ZUGFeRD.".into()] };
     if let Some(w) = &state.workspace {
         let mut context = EngineContext::local(
             state.census.account.as_str().into(),
@@ -76,6 +113,7 @@ pub(crate) fn report(
                 "relational",
                 "comparator-i;ascii-numeric",
                 "imap4flags",
+                "mime",
             ]
             .into_iter()
             .map(String::from)
@@ -93,13 +131,14 @@ pub(crate) fn report(
             &w.input.documents.preset_yaml,
             &w.input.documents.override_yaml,
         )?;
-        let proof = proof::prove(
+        let proof = proof::prove_with_evidence(
             artifact,
             &state.census,
             w.input.as_of,
             &w.input.pins,
             Baseline::Current,
             None,
+            &mime_evidence(state, provider, synthetic),
         )?;
         for d in proof.decisions {
             let location = state.census.folders.iter().find_map(|(name, f)| {
@@ -120,7 +159,9 @@ pub(crate) fn report(
                     .invoices
                     .sources
                     .get(&format!("{name}/{}/{}", f.uidvalidity, m.uid))
-                    .filter(|s| synthetic && s.message_id_hash == m.headers.message_id_hash)
+                    .filter(|s| {
+                        (synthetic || s.acquired) && s.message_id_hash == m.headers.message_id_hash
+                    })
             });
             let evidence = source.map_or(ContentEvidence::Unknown, |s| s.evidence.clone());
             if !keywords(&d.subject) && source.is_none() {
@@ -148,24 +189,26 @@ pub(crate) fn report(
             if role == "personal_or_unfiltered" {
                 continue;
             }
-            let handoff = if state.invoices.sends.iter().any(|s| {
+            let send = state.invoices.sends.iter().rev().find(|s| {
                 s.plan.selection == d.id
-                    && s.status == Status::Completed
                     && source == Some(&s.plan.source)
-                    && config
+                    && s.status != Status::NotSent
+            });
+            let handoff = match send.map(|s| (&s.status, &s.plan.mode)) {
+                Some((Status::Completed, SendMode::SyntheticTransport))
+                    if config
                         .targets
                         .values()
-                        .any(|t| t.address.eq_ignore_ascii_case(&s.plan.target))
-            }) {
-                "synthetic_handoff"
-            } else if state.invoices.sends.iter().any(|s| {
-                s.plan.selection == d.id
-                    && source == Some(&s.plan.source)
-                    && s.status != Status::Completed
-            }) {
-                "uncertain_synthetic_submission"
-            } else {
-                "real_handoff_unknown"
+                        .any(|t| t.address.eq_ignore_ascii_case(&send.unwrap().plan.target)) =>
+                {
+                    "synthetic_handoff"
+                }
+                Some((Status::Completed, SendMode::SyntheticTransport)) => "real_handoff_unknown",
+                Some((Status::Completed, SendMode::Smtp)) => "smtp_accepted",
+                Some((Status::HandedOff, _)) => "mail_app_handoff",
+                Some((_, SendMode::SyntheticTransport)) => "uncertain_synthetic_submission",
+                Some((Status::Intent | Status::Uncertain, _)) => "uncertain_submission",
+                _ => "real_handoff_unknown",
             };
             let mut reasons = evidence_reasons(&evidence);
             if keywords(&d.subject) {
@@ -209,7 +252,7 @@ pub(crate) fn report(
                     ..
                 }
             ) || matches!(&evidence, ContentEvidence::Known { attachments, .. } if !attachments.is_empty() && !supported(attachments));
-            if handoff != "synthetic_handoff" || possible_unusable {
+            if !matches!(handoff, "synthetic_handoff" | "smtp_accepted") || possible_unusable {
                 if business {
                     report.eligible_business += 1;
                 } else {

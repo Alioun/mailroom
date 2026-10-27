@@ -98,6 +98,16 @@ impl BoundPost {
     pub(crate) fn host(&self) -> &str {
         &self.endpoint.host
     }
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn addresses(&self) -> &[IpAddr] {
+        &self.addresses
+    }
+    /// The origin-form request target: path and query, never logged.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn target(&self) -> Zeroizing<String> {
+        let uri: axum::http::Uri = self.endpoint.uri.parse().expect("parsed at construction");
+        Zeroizing::new(uri.path_and_query().map_or("/", |p| p.as_str()).to_owned())
+    }
     pub(crate) fn request_digest(&self) -> String {
         super::digest(self.endpoint.uri.as_bytes())
     }
@@ -180,6 +190,40 @@ impl Mail {
             &serde_json::to_vec(&(&self.to, &self.from, &self.subject, self.body.as_str()))
                 .expect("mail encoding"),
         )
+    }
+    /// The message SMTP submits: the previewed target, sender, subject and body
+    /// with fixed framing derived from them and the confirmation time `time`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn message(&self, time: i64) -> Option<Zeroizing<Vec<u8>>> {
+        let date = chrono::DateTime::from_timestamp(time, 0)?.to_rfc2822();
+        let subject = if self.subject.is_ascii() {
+            self.subject.clone()
+        } else {
+            format!(
+                "=?UTF-8?B?{}?=",
+                data_encoding::BASE64.encode(self.subject.as_bytes())
+            )
+        };
+        let domain = self.from.rsplit_once('@')?.1;
+        let id = &self.digest()[..32];
+        let mut body = self
+            .body
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\n', "\r\n");
+        if !body.ends_with("\r\n") {
+            body.push_str("\r\n");
+        }
+        let body = Zeroizing::new(body);
+        Some(Zeroizing::new(
+            format!(
+                "From: <{}>\r\nTo: <{}>\r\nSubject: {subject}\r\nDate: {date}\r\nMessage-ID: <{id}.{time}@{domain}>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{}",
+                self.from,
+                self.to,
+                body.as_str()
+            )
+            .into_bytes(),
+        ))
     }
 }
 fn decode(raw: &str) -> Result<String, String> {

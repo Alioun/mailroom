@@ -23,6 +23,8 @@ pub enum Test {
         value: String,
     },
     Duplicate(String),
+    /// Whether the message or any MIME part declares exactly this content type.
+    MimeType(String),
     Envelope {
         part: String,
         mode: String,
@@ -70,6 +72,8 @@ impl Truth {
 pub struct MessageView<'a> {
     pub headers: &'a HeaderRecord,
     pub envelope: Option<&'a str>,
+    /// Lowercase content types of every MIME part, when the message's structure is known.
+    pub media_types: Option<&'a BTreeSet<String>>,
 }
 
 pub fn quote(value: &str) -> String {
@@ -117,6 +121,18 @@ impl Test {
             Self::Duplicate(handle) => {
                 format!("duplicate :header \"message-id\" :handle {}", quote(handle))
             }
+            Self::MimeType(value) => format!(
+                "header :mime :anychild :contenttype :is :comparator \"i;ascii-casemap\" \"content-type\" {}",
+                quote(value)
+            ),
+        }
+    }
+    pub fn uses_mime(&self) -> bool {
+        match self {
+            Self::MimeType(_) => true,
+            Self::All(t) | Self::Any(t) => t.iter().any(Self::uses_mime),
+            Self::Not(t) => t.uses_mime(),
+            _ => false,
         }
     }
     pub fn evaluate(&self, message: &MessageView<'_>, duplicates: &BTreeSet<String>) -> Truth {
@@ -146,6 +162,12 @@ impl Test {
                 };
             }
             Self::Not(t) => return t.evaluate(message, duplicates).not(),
+            Self::MimeType(value) => {
+                return match message.media_types {
+                    Some(types) => Truth::from_bool(types.contains(&value.to_ascii_lowercase())),
+                    None => Truth::Unknown,
+                };
+            }
             Self::Envelope { part, mode, value } => {
                 return match message.envelope {
                     Some(recipient) => Truth::from_bool(compare(
@@ -442,6 +464,16 @@ impl Parser {
                 self.expect(":handle")?;
                 Test::Duplicate(self.string()?)
             }
+            "header" if self.peek() == Some(":mime") => {
+                for tag in [":mime", ":anychild", ":contenttype", ":is"] {
+                    self.expect(tag)?;
+                }
+                self.comparator("i;ascii-casemap")?;
+                if self.string()? != "content-type" {
+                    return Err("Unsupported MIME header".into());
+                }
+                Test::MimeType(self.string()?)
+            }
             "header" => {
                 let mode = self.mode()?;
                 self.comparator("i;ascii-casemap")?;
@@ -502,11 +534,55 @@ impl Parser {
 mod tests {
     use super::*;
     #[test]
+    fn mime_content_type_tests_round_trip_and_unknown_structure_stays_unknown() {
+        let test = Test::MimeType("application/pdf".into());
+        let text = format!(
+            "require [\"mime\"];\n#@ forward.keywords\nif {} {{ keep; }}",
+            test.render()
+        );
+        let parsed = parse(&text).unwrap();
+        assert!(matches!(&parsed[0].test, Test::MimeType(t) if t == "application/pdf"));
+        let headers = crate::census::parse_headers(
+            b"From: a@example.test\r\n\r\n",
+            crate::census::Direction::Received,
+        )
+        .unwrap();
+        let types: BTreeSet<String> = ["text/plain".into(), "application/pdf".into()].into();
+        let none = BTreeSet::new();
+        for (media_types, expected) in [
+            (None, Truth::Unknown),
+            (Some(&types), Truth::Match),
+            (Some(&none), Truth::NoMatch),
+        ] {
+            let view = MessageView {
+                headers: &headers,
+                envelope: None,
+                media_types,
+            };
+            assert_eq!(parsed[0].test.evaluate(&view, &BTreeSet::new()), expected);
+            assert_eq!(
+                Test::Not(Box::new(parsed[0].test.clone())).evaluate(&view, &BTreeSet::new()),
+                expected.not()
+            );
+        }
+        for other in [
+            "header :mime :anychild :type :is :comparator \"i;ascii-casemap\" \"content-type\" \"application\"",
+            "header :mime :contenttype :is :comparator \"i;ascii-casemap\" \"content-type\" \"application/pdf\"",
+            "header :mime :anychild :contenttype :is :comparator \"i;ascii-casemap\" \"content-disposition\" \"attachment\"",
+        ] {
+            assert!(
+                parse(&format!("#@ x\nif {other} {{ keep; }}")).is_err(),
+                "{other}"
+            );
+        }
+    }
+    #[test]
     fn parsed_compound_envelope_unknown_never_becomes_positive_negation() {
         let headers = crate::census::parse_headers(b"From: invented@example.test\r\nTo: route@business.test\r\nDelivered-To: route@business.test\r\n\r\n",crate::census::Direction::Received).unwrap();
         let view = MessageView {
             headers: &headers,
             envelope: None,
+            media_types: None,
         };
         let e = "envelope :all :is :comparator \"i;ascii-casemap\" \"to\" \"route@business.test\"";
         for (test, expected) in [

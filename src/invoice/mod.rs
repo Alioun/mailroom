@@ -1,3 +1,4 @@
+mod adapters;
 mod report;
 mod synthetic;
 #[cfg(test)]
@@ -7,6 +8,8 @@ use crate::{
     census::{AccountState, CensusKeys},
     rules,
 };
+#[allow(unused_imports)]
+pub(crate) use adapters::{hand_off, record_handoff, record_original, submit_smtp};
 pub(crate) use report::report;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -15,6 +18,8 @@ use subtle::ConstantTimeEq;
 pub(crate) use synthetic::{SyntheticTransport, boundary, initialize_synthetic};
 
 pub const SEMANTICS: &str = "invoice-evidence-exact-send-v1";
+/// The sending identity of the bundled synthetic fixture.
+pub(crate) const SYNTHETIC_SENDER: &str = "synthetic-approved-sender@example.test";
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Aggregate {
@@ -58,6 +63,9 @@ pub struct Source {
     pub message_id_hash: Option<String>,
     pub original: String,
     pub evidence: ContentEvidence,
+    /// Read from the provider by original-message acquisition, not a bundled fixture.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub acquired: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -80,6 +88,10 @@ pub struct Plan {
 pub enum SendMode {
     SyntheticTransport,
     NativeForwardPreparationOnly,
+    /// SMTP submission of the exact original through the account's server.
+    Smtp,
+    /// The mail app opens the original for forwarding; the person sends it.
+    MailAppHandoff,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,6 +100,16 @@ pub enum Status {
     Intent,
     Uncertain,
     Completed,
+    /// Certainly not submitted; a new send needs a new preview and confirmation.
+    NotSent,
+    /// Opened in the mail app. Whether the person sent it is unknown.
+    HandedOff,
+}
+impl Status {
+    /// Whether this send is finished and no longer blocks other work.
+    pub fn settled(&self) -> bool {
+        matches!(self, Self::Completed | Self::NotSent | Self::HandedOff)
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -95,6 +117,9 @@ pub struct Send {
     pub id: String,
     pub plan: Plan,
     pub status: Status,
+    /// The SMTP server's answer, reply codes only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smtp: Option<crate::send::smtp::Outcome>,
 }
 #[derive(Serialize)]
 pub struct Row {
@@ -158,10 +183,18 @@ pub(crate) fn preview(
     selection: &str,
     target_name: &str,
     synthetic: bool,
-    fallback: bool,
+    mode: SendMode,
+    sending_address: &str,
 ) -> Result<Preview, String> {
-    if !synthetic {
+    let fixture_mode = matches!(
+        mode,
+        SendMode::SyntheticTransport | SendMode::NativeForwardPreparationOnly
+    );
+    if fixture_mode && !synthetic {
         return Err("No original-message/native/SMTP adapter installed".into());
+    }
+    if !rules::config::mailbox(sending_address) {
+        return Err("Invalid sending address".into());
     }
     let report = report(state, provider, synthetic, keys)?;
     if !report.complete
@@ -195,6 +228,7 @@ pub(crate) fn preview(
         .invoices
         .sources
         .get(&source_id)
+        .filter(|s| synthetic || s.acquired)
         .ok_or("Original content unavailable")?
         .clone();
     let folder = state
@@ -227,16 +261,15 @@ pub(crate) fn preview(
         content_digest,
         target_name: target_name.into(),
         target: target.address.clone(),
-        sending_address: "synthetic-approved-sender@example.test".into(),
+        sending_address: sending_address.into(),
         semantics: SEMANTICS.into(),
-        confirmation_action:
-            "Send exactly this invoice to this target from this sending address (synthetic only)"
-                .into(),
-        mode: if fallback {
-            SendMode::NativeForwardPreparationOnly
-        } else {
-            SendMode::SyntheticTransport
-        },
+        confirmation_action: match mode {
+            SendMode::Smtp => "Send exactly this invoice to this target from this sending address",
+            SendMode::MailAppHandoff => "Open this invoice for forwarding to this target in Mail",
+            _ => "Send exactly this invoice to this target from this sending address (synthetic only)",
+        }
+        .into(),
+        mode,
     };
     let receipt = keys.binding_for(
         b"mailroom/invoice-send-confirm/v1",
@@ -259,8 +292,10 @@ pub(crate) fn record_intent(
 ) -> Result<String, String> {
     {
         let receipt = consent.receipt();
-        if preview.plan.mode != SendMode::SyntheticTransport
-            || action != preview.plan.confirmation_action
+        if !matches!(
+            preview.plan.mode,
+            SendMode::SyntheticTransport | SendMode::Smtp
+        ) || action != preview.plan.confirmation_action
             || receipt.len() != 64
             || preview
                 .receipt
@@ -271,23 +306,41 @@ pub(crate) fn record_intent(
         {
             return Err("Exact synthetic action confirmation rejected".into());
         }
-        if state
-            .invoices
-            .sends
-            .iter()
-            .any(|s| s.status != Status::Completed)
-            || state.invoices.sends.len() >= 64
-        {
-            return Err("Recover pending invoice operation first".into());
-        }
-        let id = preview.receipt;
-        state.invoices.sends.push(Send {
-            id: id.clone(),
-            plan: preview.plan,
-            status: Status::Intent,
-        });
-        Ok(id)
+        push_intent(state, preview)
     }
+}
+
+pub(super) fn push_intent(state: &mut AccountState, preview: Preview) -> Result<String, String> {
+    if state.invoices.sends.iter().any(|s| !s.status.settled())
+        || state.invoices.sends.len() >= 64
+        || state.invoices.sends.iter().any(|s| s.id == preview.receipt)
+    {
+        return Err("Recover pending invoice operation first".into());
+    }
+    let id = preview.receipt;
+    state.invoices.sends.push(Send {
+        id: id.clone(),
+        plan: preview.plan,
+        status: Status::Intent,
+        smtp: None,
+    });
+    Ok(id)
+}
+
+/// What the mail app is asked to open for `plan`.
+pub(crate) fn handoff_request(plan: &Plan) -> Option<crate::send::handoff::Request> {
+    Some(crate::send::handoff::Request::ForwardOriginal {
+        message_id: message_id(&plan.source.original)?,
+        target: plan.target.clone(),
+    })
+}
+
+pub(super) fn message_id(original: &str) -> Option<String> {
+    use mailparse::MailHeaderMap;
+    let (headers, _) = mailparse::parse_headers(original.as_bytes()).ok()?;
+    let value = headers.get_first_value("Message-ID")?;
+    let id = value.trim().strip_prefix('<')?.strip_suffix('>')?;
+    (!id.is_empty() && !id.contains(['<', '>'])).then(|| id.to_owned())
 }
 
 pub(crate) fn observe(

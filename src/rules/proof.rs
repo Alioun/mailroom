@@ -7,7 +7,11 @@ use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const SEMANTICS: &str = "parsed-emitted-sieve-subset-v5";
+pub const SEMANTICS: &str = "parsed-emitted-sieve-subset-v6";
+
+/// Lowercase MIME part content types per proof message ID, from acquired originals.
+/// A message without an entry has unknown structure.
+pub type MimeEvidence = BTreeMap<String, BTreeSet<String>>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -125,6 +129,7 @@ pub(super) struct InputMessage<'a> {
     pub(super) record: &'a MessageRecord,
     pub(super) folders: BTreeSet<String>,
     sent: bool,
+    media_types: Option<&'a BTreeSet<String>>,
 }
 
 pub(super) fn messages(census: &Census, gmail: bool) -> Vec<InputMessage<'_>> {
@@ -142,6 +147,7 @@ pub(super) fn messages(census: &Census, gmail: bool) -> Vec<InputMessage<'_>> {
                 record: m,
                 folders: BTreeSet::new(),
                 sent: false,
+                media_types: None,
             });
             entry.sent |= m.headers.direction == Direction::Sent;
             if gmail {
@@ -198,7 +204,38 @@ pub(super) fn view<'a>(artifact: &CompiledArtifact, m: &InputMessage<'a>) -> Mes
     MessageView {
         headers: &m.record.headers,
         envelope: m.record.delivery.resolve(installed, &binding).0,
+        media_types: m.media_types,
     }
+}
+
+/// Whether `test` is unknown only because the message's MIME structure is unknown:
+/// assuming any known structure decides it.
+fn attachment_unknown(
+    test: &super::sieve::Test,
+    view: &MessageView<'_>,
+    duplicates: &BTreeSet<String>,
+) -> bool {
+    if view.media_types.is_some()
+        || !test.uses_mime()
+        || test.evaluate(view, duplicates) != Truth::Unknown
+    {
+        return false;
+    }
+    let none = BTreeSet::new();
+    let every: BTreeSet<String> = super::program::SUPPORTED_INVOICE_TYPES
+        .iter()
+        .map(|t| t.to_string())
+        .collect();
+    [&none, &every].into_iter().all(|types| {
+        test.evaluate(
+            &MessageView {
+                headers: view.headers,
+                envelope: view.envelope,
+                media_types: Some(types),
+            },
+            duplicates,
+        ) != Truth::Unknown
+    })
 }
 
 type Candidates = BTreeMap<String, (usize, BTreeMap<String, usize>)>;
@@ -236,6 +273,7 @@ fn execute(
         let view = MessageView {
             headers: h,
             envelope,
+            media_types: m.media_types,
         };
         let review = statements
             .iter()
@@ -308,6 +346,11 @@ fn execute(
                 ("unknown", "Message-ID evidence is missing; no copy")
             } else if statement.is_some_and(|s| s.test.evaluate(&view, &duplicates).matched()) {
                 ("eligible", "Compiled forward matches with duplicate guard")
+            } else if statement.is_some_and(|s| attachment_unknown(&s.test, &view, &duplicates)) {
+                (
+                    "unknown",
+                    "MIME structure is unknown; the engine decides from the delivered message",
+                )
             } else {
                 (
                     "ineligible",
@@ -323,6 +366,14 @@ fn execute(
         let mut pending = Vec::new();
         'script: for s in &statements {
             let truth = s.test.evaluate(&view, &duplicates);
+            // Copies never change filing, so a copy that only MIME structure leaves open
+            // predicts no copy without holding the message.
+            if truth == Truth::Unknown
+                && s.actions.iter().all(|a| matches!(a, Action::Copy(_)))
+                && attachment_unknown(&s.test, &view, &duplicates)
+            {
+                continue;
+            }
             if truth == Truth::Unknown {
                 if review {
                     d.matched_rule = Some("system.role_safety".into());
@@ -482,6 +533,27 @@ pub fn prove(
     baseline: Baseline,
     previous: Option<&CompiledArtifact>,
 ) -> Result<Proof, String> {
+    prove_with_evidence(
+        artifact,
+        census,
+        as_of,
+        pins,
+        baseline,
+        previous,
+        &MimeEvidence::new(),
+    )
+}
+
+/// `prove` with the MIME structure known for some messages.
+pub fn prove_with_evidence(
+    artifact: CompiledArtifact,
+    census: &Census,
+    as_of: i64,
+    pins: &[Pin],
+    baseline: Baseline,
+    previous: Option<&CompiledArtifact>,
+    evidence: &MimeEvidence,
+) -> Result<Proof, String> {
     if artifact.context().account != census.account.as_str() {
         return Err("Compiled account does not match census".into());
     }
@@ -501,7 +573,10 @@ pub fn prove(
             return Err("Previous artifact has a different account or engine".into());
         }
     }
-    let input = messages(census, artifact.context().engine == Engine::GmailBacklog);
+    let mut input = messages(census, artifact.context().engine == Engine::GmailBacklog);
+    for m in &mut input {
+        m.media_types = evidence.get(&m.id);
+    }
     let in_window: Vec<bool> = input
         .iter()
         .map(|m| {
@@ -529,6 +604,7 @@ pub fn prove(
                 record: m.record,
                 folders: m.folders.clone(),
                 sent: m.sent,
+                media_types: m.media_types,
             })
             .collect();
         execute(&artifact, &window_input, None)?.candidates
@@ -750,6 +826,7 @@ mod window_tests {
                     record: m.record,
                     folders: m.folders.clone(),
                     sent: m.sent,
+                    media_types: m.media_types,
                 })
                 .collect();
             let separate = execute(&artifact, &only, None).unwrap();

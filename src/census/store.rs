@@ -38,8 +38,10 @@ const MIN_FRAME_BUDGET: u64 = 64 * 1024;
 /// Schema of new base snapshots. 19 adds Q27 undo retention to the backlog
 /// journals: `completed_at` on runs and compacted `summaries`. 20 adds each
 /// census folder's `highestmodseq`. 21 adds Gmail `label_provisioning` and
-/// `closed` on backlog runs.
-pub(crate) const SCHEMA: u32 = 21;
+/// `closed` on backlog runs. 22 adds acquired invoice originals, SMTP and
+/// mail-app send records and their statuses, and SMTP outcomes on unsubscribe
+/// history.
+pub(crate) const SCHEMA: u32 = 22;
 
 pub struct LocalSecret(Zeroizing<Vec<u8>>);
 
@@ -1352,6 +1354,9 @@ impl EncryptedStore {
         for (name, value) in patched {
             apply_frame_field(&mut state, &name, value)?;
         }
+        if version < 22 && uses_send_adapters(&state) {
+            return Err(CensusError::UnsupportedVersion);
+        }
         if version < 21
             && (!state.label_provisioning.is_empty()
                 || state
@@ -1567,6 +1572,32 @@ mod decoded {
             stamp,
         });
     }
+}
+
+/// Whether `state` holds anything only schema 22 can express.
+fn uses_send_adapters(state: &AccountState) -> bool {
+    use crate::{invoice, unsubscribe};
+    state.invoices.sources.values().any(|s| s.acquired)
+        || state.invoices.sends.iter().any(|s| {
+            s.smtp.is_some()
+                || matches!(
+                    s.status,
+                    invoice::Status::NotSent | invoice::Status::HandedOff
+                )
+                || matches!(
+                    s.plan.mode,
+                    invoice::SendMode::Smtp | invoice::SendMode::MailAppHandoff
+                )
+        })
+        || state.unsubscribe.history.iter().any(|e| {
+            e.smtp.is_some()
+                || matches!(
+                    e.status,
+                    unsubscribe::Status::NotSent
+                        | unsubscribe::Status::Submitted
+                        | unsubscribe::Status::HandedOff
+                )
+        })
 }
 
 fn normalize_interrupted(state: &mut AccountState) {

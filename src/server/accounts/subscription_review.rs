@@ -287,7 +287,7 @@ pub(in crate::server) async fn handle(
                 let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| "Invalid clock")?.as_secs() as i64;
                 let mut intents=Vec::new();
                 for r in &mut reviews {
-                    if r.saved.invoices.sends.iter().any(|s|s.status!=crate::invoice::Status::Completed) || r.saved.backlog.iter().any(|b|!matches!(b.status,crate::backlog::Status::Completed|crate::backlog::Status::Failed)) {return Err("Reconcile pending account work first".into());}
+                    if r.saved.invoices.sends.iter().any(|s| !s.status.settled()) || r.saved.backlog.iter().any(|b|!matches!(b.status,crate::backlog::Status::Completed|crate::backlog::Status::Failed)) {return Err("Reconcile pending account work first".into());}
                     let ids=unsubscribe::confirm(&mut r.saved,&r.preview,&r.preview.receipt,r.preview.confirmation_action,mail_confirmation_action.as_deref(),now)?;
                     intents.push(ids);
                 }

@@ -58,7 +58,7 @@ pub(in crate::server) async fn handle(
                 return Ok(json!(preview));
             },
             Action::Confirm { input, receipt, confirmation_action, mail_confirmation_action } => {
-                if saved.invoices.sends.iter().any(|s| s.status != crate::invoice::Status::Completed) || saved.backlog.iter().any(|r| !matches!(r.status, crate::backlog::Status::Completed | crate::backlog::Status::Failed)) { return Err("Reconcile pending invoice/backlog work first".into()); }
+                if saved.invoices.sends.iter().any(|s| !s.status.settled()) || saved.backlog.iter().any(|r| !matches!(r.status, crate::backlog::Status::Completed | crate::backlog::Status::Failed)) { return Err("Reconcile pending invoice/backlog work first".into()); }
                 let preview = unsubscribe::preview(&saved, account.provider, store.keys(), &input, installed.as_ref())?;
                 if confirmation_action != preview.confirmation_action || preview.local_mail_confirmation.is_some_and(|a| mail_confirmation_action.as_deref() != Some(a)) { return Err("Action changed".into()); }
                 let current = unsubscribe::confirmation_plan(&preview);

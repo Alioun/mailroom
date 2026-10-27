@@ -847,3 +847,248 @@ fn mute_pin_conflicts_block_confirmation_and_from_fallback_excludes_unseen_lists
     assert!(confirm(&mut state, &p, &p.receipt, CONFIRM, None, 1792886400).is_err());
     assert!(state.unsubscribe.mutes.is_empty());
 }
+
+mod adapters {
+    use super::*;
+    use crate::send::{
+        handoff::Recorder,
+        smtp::{
+            Login, Outcome, Timeouts,
+            tests::{DUMMY, Dummy, Fake, Mode},
+        },
+    };
+    use std::{sync::atomic::AtomicUsize, time::Duration};
+
+    const URI: &str = "https://shop.example/remove?token=synthetic-private-token";
+    const MAILTO: &str = "mailto:leave@shop.example?subject=unsubscribe&body=synthetic-mail-token";
+
+    fn confirmed(
+        state: &mut AccountState,
+        store: &EncryptedStore,
+        installed: &InstalledSynthetic,
+        method: Method,
+    ) -> (String, String) {
+        let input = review(state, store.keys(), installed, method);
+        let p = preview(
+            state,
+            Provider::MailboxOrg,
+            store.keys(),
+            &input,
+            Some(installed),
+        )
+        .unwrap();
+        let recipient = p.actions[0].recipient.clone();
+        let ids = confirm(
+            state,
+            &p,
+            &p.receipt.clone(),
+            p.confirmation_action,
+            p.local_mail_confirmation,
+            1792886400,
+        )
+        .unwrap();
+        store.save_state(state).unwrap();
+        (ids[0].clone(), recipient)
+    }
+    fn saved(store: &EncryptedStore, id: &str) -> Entry {
+        store
+            .load_state()
+            .unwrap()
+            .unsubscribe
+            .history
+            .into_iter()
+            .find(|e| e.id == id)
+            .unwrap()
+    }
+
+    #[test]
+    fn one_click_posts_through_the_native_adapter_and_logs_status_and_host_only() {
+        use super::super::one_click::tests::{PUBLIC, fake, network};
+        for (reply, delay, status, http) in [
+            (
+                "HTTP/1.1 200 OK\r\n\r\n",
+                Duration::ZERO,
+                Status::HttpObserved,
+                Some(200),
+            ),
+            (
+                "HTTP/1.1 302 Found\r\nLocation: https://10.0.0.1/\r\n\r\n",
+                Duration::ZERO,
+                Status::HttpObserved,
+                Some(302),
+            ),
+            (
+                "HTTP/1.1 200 OK\r\n\r\n",
+                Duration::from_millis(1500),
+                Status::Uncertain,
+                None,
+            ),
+        ] {
+            let (_dir, store, mut state, installed) = fixture();
+            let (id, _) = confirmed(&mut state, &store, &installed, Method::OneClick);
+            assert_eq!(
+                saved(&store, &id).status,
+                Status::Uncertain,
+                "a saved intent reloads as uncertain"
+            );
+            let server = fake(reply, delay);
+            let net = network(&[("shop.example", &[PUBLIC])], &[(PUBLIC, server.address)]);
+            assert!(
+                post_one_click(
+                    &mut state,
+                    &id,
+                    "https://shop.example/remove?token=changed",
+                    &net,
+                    &server.identity.connector(),
+                    Duration::from_millis(500)
+                )
+                .is_err()
+            );
+            post_one_click(
+                &mut state,
+                &id,
+                URI,
+                &net,
+                &server.identity.connector(),
+                Duration::from_millis(500),
+            )
+            .unwrap();
+            store.save_state(&mut state).unwrap();
+            assert!(
+                post_one_click(
+                    &mut state,
+                    &id,
+                    URI,
+                    &net,
+                    &server.identity.connector(),
+                    Duration::from_millis(500)
+                )
+                .is_err(),
+                "never repeated"
+            );
+            let entry = saved(&store, &id);
+            assert_eq!(
+                (entry.status, entry.http_status, entry.host.as_deref()),
+                (status, http, Some("shop.example"))
+            );
+            assert_eq!(server.requests.lock().unwrap().len(), 1);
+            let history =
+                serde_json::to_string(&store.load_state().unwrap().unsubscribe.history).unwrap();
+            assert!(
+                !history.contains("synthetic-private-token") && !history.contains("/remove"),
+                "full URI never logged"
+            );
+        }
+        let (_dir, store, mut state, installed) = fixture();
+        let (id, _) = confirmed(&mut state, &store, &installed, Method::OneClick);
+        let net = network(&[("shop.example", &["10.1.2.3"])], &[]);
+        post_one_click(
+            &mut state,
+            &id,
+            URI,
+            &net,
+            &crate::fake_tls::identity("shop.example").connector(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(
+            state.unsubscribe.history.last().unwrap().status,
+            Status::NotSent
+        );
+    }
+
+    #[test]
+    fn local_unsubscribe_mail_goes_through_smtp_from_the_receiving_address() {
+        for (mode, expected) in [
+            (Mode::Accept, Status::Submitted),
+            (Mode::DropAfterData, Status::Uncertain),
+            (Mode::RcptReject, Status::NotSent),
+        ] {
+            let (_dir, store, mut state, installed) = fixture();
+            let (id, recipient) = confirmed(&mut state, &store, &installed, Method::LocalMail);
+            let fake = Fake::start(mode, true);
+            let backend = Dummy(AtomicUsize::new(0));
+            let login = Login {
+                user: "books@work.example.test",
+                backend: &backend,
+                reference: "account-password-ref",
+            };
+            let timeouts = Timeouts {
+                command: Duration::from_secs(5),
+                final_reply: Duration::from_millis(500),
+            };
+            submit_local_mail(
+                &mut state,
+                &id,
+                MAILTO,
+                &recipient,
+                &fake.server(true),
+                &login,
+                timeouts,
+            )
+            .unwrap();
+            store.save_state(&mut state).unwrap();
+            assert!(
+                submit_local_mail(
+                    &mut state,
+                    &id,
+                    MAILTO,
+                    &recipient,
+                    &fake.server(true),
+                    &login,
+                    timeouts
+                )
+                .is_err()
+            );
+            let seen = fake.finish();
+            let entry = saved(&store, &id);
+            assert_eq!(entry.status, expected, "{mode:?}");
+            if mode == Mode::Accept {
+                assert_eq!(
+                    entry.smtp,
+                    Some(Outcome::Accepted {
+                        code: 250,
+                        enhanced: Some("2.0.0".into())
+                    })
+                );
+                let message = String::from_utf8(seen.message.unwrap()).unwrap();
+                assert!(message.starts_with(&format!(
+                    "From: <{recipient}>\r\nTo: <leave@shop.example>\r\nSubject: unsubscribe\r\n"
+                )));
+                assert!(message.ends_with("\r\n\r\nsynthetic-mail-token\r\n"));
+                assert!(seen.commands.contains(&format!("MAIL FROM:<{recipient}>")));
+            }
+            assert!(
+                !serde_json::to_string(&store.load_state().unwrap())
+                    .unwrap()
+                    .contains(DUMMY)
+            );
+        }
+    }
+
+    #[test]
+    fn mailto_handoff_launches_the_exact_link_and_records_handed_off() {
+        let (_dir, store, mut state, installed) = fixture();
+        let (id, recipient) = confirmed(&mut state, &store, &installed, Method::MailAppPreparation);
+        assert_eq!(saved(&store, &id).status, Status::Prepared);
+        let recorder = Recorder::default();
+        assert!(
+            hand_off_mailto(
+                &mut state,
+                &id,
+                "mailto:other@shop.example",
+                &recipient,
+                &recorder
+            )
+            .is_err()
+        );
+        hand_off_mailto(&mut state, &id, MAILTO, &recipient, &recorder).unwrap();
+        store.save_state(&mut state).unwrap();
+        assert_eq!(saved(&store, &id).status, Status::HandedOff);
+        let launched = recorder.0.lock().unwrap();
+        assert_eq!(launched.len(), 1);
+        assert!(
+            matches!(&launched[0], crate::send::handoff::Request::OpenMailto { uri, host } if uri.as_str() == MAILTO && host == "shop.example")
+        );
+    }
+}

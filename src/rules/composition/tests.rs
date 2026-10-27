@@ -217,6 +217,7 @@ fn foreign_rules_win_by_order_and_unmodeled_tests_stay_undetermined() {
     let view = MessageView {
         headers: &headers,
         envelope: None,
+        media_types: None,
     };
     let outcome = |source: &str| {
         let script = parse(source).unwrap();

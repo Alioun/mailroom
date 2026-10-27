@@ -231,11 +231,7 @@ fn other_effects_pending(saved: &crate::census::AccountState) -> bool {
             e.status,
             crate::unsubscribe::Status::Intent | crate::unsubscribe::Status::Uncertain
         )
-    }) || saved
-        .invoices
-        .sends
-        .iter()
-        .any(|s| s.status != crate::invoice::Status::Completed)
+    }) || saved.invoices.sends.iter().any(|s| !s.status.settled())
 }
 fn execute(
     state: &Arc<AppState>,

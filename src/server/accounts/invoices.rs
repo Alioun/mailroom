@@ -59,23 +59,23 @@ pub(in crate::server) async fn handle(
         match request.command {
             Action::Open => {},
             Action::Preview { selection, target } => {
-                let mut preview = invoice::preview(&saved, account.provider, store.keys(), &selection, &target, synthetic, false)?;
+                let mut preview = invoice::preview(&saved, account.provider, store.keys(), &selection, &target, synthetic, invoice::SendMode::SyntheticTransport, invoice::SYNTHETIC_SENDER)?;
                 let (handle, request) = state.accounts.confirmations.lock().expect("confirmations").offer(invoice::confirmation_plan(&preview))?;
                 preview.receipt = handle;
                 preview.confirmation = Some(request);
                 return Ok(json!(preview));
             },
-            Action::PrepareMailApp { selection, target } => return invoice::preview(&saved, account.provider, store.keys(), &selection, &target, synthetic, true).map(|p| json!({"preview":p,"status":"preparation_only", "limitation":"No native forward-original integration or OS dialog is installed. Nothing launched. Original MIME and target are retained in this protected preview; no blank mailto compose is substituted."})),
+            Action::PrepareMailApp { selection, target } => return invoice::preview(&saved, account.provider, store.keys(), &selection, &target, synthetic, invoice::SendMode::NativeForwardPreparationOnly, invoice::SYNTHETIC_SENDER).map(|p| json!({"handoff_request":invoice::handoff_request(&p.plan),"preview":p,"status":"preparation_only", "limitation":"No native forward-original integration or OS dialog is installed. Nothing launched. Original MIME and target are retained in this protected preview; no blank mailto compose is substituted."})),
             Action::Send { selection, target, receipt, confirmation_action } => {
                 if saved.backlog.iter().any(|r| !matches!(r.status, crate::backlog::Status::Completed | crate::backlog::Status::Failed)) { return Err("Finish the backlog operation first".into()); }
                 if saved.unsubscribe.history.iter().any(|e| matches!(e.status, crate::unsubscribe::Status::Intent | crate::unsubscribe::Status::Uncertain)) { return Err("Reconcile pending unsubscribe intent first".into()); }
-                let preview = invoice::preview(&saved, account.provider, store.keys(), &selection, &target, synthetic, false)?;
+                let preview = invoice::preview(&saved, account.provider, store.keys(), &selection, &target, synthetic, invoice::SendMode::SyntheticTransport, invoice::SYNTHETIC_SENDER)?;
                 if confirmation_action != preview.plan.confirmation_action { return Err("Action changed".into()); }
                 let current = invoice::confirmation_plan(&preview);
                 let consent = state.accounts.confirmations.lock().expect("confirmations").confirm(&receipt, &current, || {
                     let latest = store.load_state().map_err(|_| "Revalidate invoice state")?;
                     ledger_fresh(&latest, ledger_guard.as_ref())?;
-                    invoice::preview(&latest, account.provider, store.keys(), &selection, &target, synthetic, false).map(|p| invoice::confirmation_plan(&p))
+                    invoice::preview(&latest, account.provider, store.keys(), &selection, &target, synthetic, invoice::SendMode::SyntheticTransport, invoice::SYNTHETIC_SENDER).map(|p| invoice::confirmation_plan(&p))
                 })?;
                 let id = invoice::record_intent(&mut saved, preview, &consent, &confirmation_action)?;
                 store.save_state(&mut saved).map_err(|e| e.to_string())?;

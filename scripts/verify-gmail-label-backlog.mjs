@@ -94,7 +94,7 @@ try {
     assert.deepEqual(after.mailboxes, before.mailboxes)
     assert.equal(after.unrelated, before.unrelated)
     assert.equal(after.forbidden, null)
-    assert.equal(after.schema, 21)
+    assert.equal(after.schema, 22)
     const status = await f.command('status')
     assert.equal(status.journal.runs[0].status, 'complete')
     assert.ok(Object.values(status.outcomes[status.journal.runs[0].id].forward).flat().every(step => Object.values(step).every(o => o === 'verified')))
@@ -297,7 +297,7 @@ try {
     assert.deepEqual(created.mailboxes.filter(m => !before.mailboxes.includes(m)), ['Geschäftlich', 'Geschäftlich/Studio'])
     assert.equal(created.wires.length, 0, 'creating labels stores no message labels')
     assert.equal(created.unrelated, before.unrelated)
-    assert.equal(created.schema, 21)
+    assert.equal(created.schema, 22)
     assert.equal(await worker('label_confirm', { options, receipt: p.receipt, confirmed: true }), 'failed', 'an approval is used once')
     await f.command('label_preview', { options }, 422)
     const revision = (await f.observe()).revision
@@ -472,7 +472,7 @@ try {
       const accounts = selected ? [f.account, peer].sort() : [f.account]
       const offer = await recovery(selected ? { action: 'selected_capture_preview', accounts, include_ledger: true } : { action: 'capture_preview', account: f.account })
       const manifests = selected ? offer.preview.accounts : [offer.preview]
-      assert.ok(manifests.every(m => m.state_schema === 21))
+      assert.ok(manifests.every(m => m.state_schema === 22))
       assert.equal(manifests.find(m => m.account === f.account).resources.find(r => r.resource === 'local_encrypted_state').sha256, before.ciphertext)
       const captured = await recovery({ action: selected ? 'selected_capture' : 'capture', preview: offer.preview, receipt: offer.receipt })
       await undo()

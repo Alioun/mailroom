@@ -78,7 +78,9 @@ pub struct CompiledArtifact {
     omissions: Vec<Omission>,
     folders: BTreeSet<String>,
 }
-pub const SEMANTICS: &str = "mailroom-sieve-subset-v5";
+pub const SEMANTICS: &str = "mailroom-sieve-subset-v6";
+/// Content types that count as invoice document evidence for keyword forwards.
+pub const SUPPORTED_INVOICE_TYPES: [&str; 3] = ["application/pdf", "application/xml", "text/xml"];
 
 /// Equal when the persisted forms are equal. Saved plans embed an artifact,
 /// and the store compares plans to find what a save changed.
@@ -562,7 +564,17 @@ pub fn compile(
                 {
                     return Err("Invalid invoice keywords".into());
                 }
-                Test::False
+                all(vec![
+                    any(words
+                        .iter()
+                        .map(|w| header("subject", "contains", w))
+                        .collect()),
+                    not(bulk()),
+                    any(SUPPORTED_INVOICE_TYPES
+                        .iter()
+                        .map(|t| Test::MimeType((*t).into()))
+                        .collect()),
+                ])
             }
         };
         if !f.enabled || !scoped(&f.accounts, context) {
@@ -570,9 +582,11 @@ pub fn compile(
         }
         let reason = if context.engine == Engine::GmailBacklog {
             Some("Gmail backlog has no invoice forward")
-        } else if matches!(f.trigger, ForwardTrigger::Keywords { .. }) {
+        } else if matches!(f.trigger, ForwardTrigger::Keywords { .. })
+            && !context.capabilities.contains("mime")
+        {
             Some(
-                "Keyword forward requires nonbulk mail and PDF/XML attachment evidence. Header census has no attachment evidence; whole rule omitted",
+                "Keyword forward requires the Sieve mime extension to test for a PDF/XML part; the engine does not advertise it; whole rule omitted",
             )
         } else if !["copy", "duplicate"]
             .iter()
@@ -694,6 +708,9 @@ pub fn compile(
         .any(|s| s.actions.iter().any(|a| matches!(a, Action::Copy(_))))
     {
         extensions.extend(["copy".into(), "duplicate".into()]);
+    }
+    if statements.iter().any(|s| s.test.uses_mime()) {
+        extensions.insert("mime".into());
     }
     if statements.iter().any(|s| {
         s.actions

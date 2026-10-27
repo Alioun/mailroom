@@ -3,10 +3,13 @@ pub mod backlog;
 pub mod census;
 pub(crate) mod confirmation;
 pub mod engine;
+#[cfg(test)]
+mod fake_tls;
 mod file_lock;
 pub mod invoice;
 pub mod ledger;
 pub(crate) mod native;
+pub(crate) mod original;
 #[cfg(target_os = "macos")]
 pub mod owner;
 
@@ -16,6 +19,7 @@ pub fn disable_core_dumps() -> bool {
 }
 pub mod policy;
 pub mod rules;
+pub(crate) mod send;
 pub mod server;
 pub mod unsubscribe;
 pub mod winddown;

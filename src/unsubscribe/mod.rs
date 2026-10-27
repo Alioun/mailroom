@@ -1,5 +1,7 @@
+mod adapters;
 mod candidates;
 mod mute;
+pub(crate) mod one_click;
 mod safety;
 mod synthetic;
 #[cfg(test)]
@@ -8,6 +10,8 @@ use crate::{
     acquisition::Provider,
     census::{AccountState, CensusKeys},
 };
+#[allow(unused_imports)]
+pub(crate) use adapters::{hand_off_mailto, post_one_click, submit_local_mail};
 pub(crate) use candidates::{report, source};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -49,6 +53,12 @@ pub enum Status {
     Kept,
     Muted,
     MuteRemoved,
+    /// Certainly nothing was sent.
+    NotSent,
+    /// The SMTP server accepted the unsubscribe message.
+    Submitted,
+    /// Opened in the mail app; whether the person sent it is unknown.
+    HandedOff,
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -64,6 +74,9 @@ pub struct Entry {
     pub source_ids: Vec<String>,
     pub http_status: Option<u16>,
     pub success: String,
+    /// The SMTP server's answer to a local unsubscribe message, reply codes only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smtp: Option<crate::send::smtp::Outcome>,
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -400,6 +413,7 @@ pub(crate) fn confirm(
             source_ids: a.source_ids.clone(),
             http_status: None,
             success: "unknown".into(),
+            smtp: None,
         });
         ids.push(id);
     }

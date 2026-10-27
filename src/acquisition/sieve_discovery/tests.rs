@@ -271,6 +271,7 @@ pub(crate) fn seed(state: &mut AccountState, keys: &crate::census::CensusKeys) {
         id: "retained-send".into(),
         plan: plan.clone(),
         status: invoice::Status::Completed,
+        smtp: None,
     });
     state
         .invoices
@@ -288,6 +289,7 @@ pub(crate) fn seed(state: &mut AccountState, keys: &crate::census::CensusKeys) {
         source_ids: vec!["invented-source".into()],
         http_status: None,
         success: "local retention".into(),
+        smtp: None,
     });
     state.unsubscribe.synthetic_acknowledgments.insert(
         "independent-unsubscribe".into(),

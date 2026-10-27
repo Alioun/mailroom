@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fixture, root } from './imap-backlog-fixture.mjs'
 
@@ -7,6 +7,14 @@ const f = await fixture()
 const options = { scope: 'inbox', protect_flagged: true, selected: null }
 const checks = []
 const wires = async () => (await readFile(join(f.directory, 'move-wire-exact.jsonl'), 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(JSON.parse)
+// Each fault must fail the preview for its own reason. The test build logs the
+// MOVE session's error code; the oversized literal fails in the read-only
+// session, which logs none, so its reason shows in how soon it fails.
+const failures = async () => (await Promise.all((await readdir(f.directory)).filter(n => n.startsWith('application-')).map(n => readFile(join(f.directory, n), 'utf8')))).join('').match(/^backlog\.failure=\w+$/gm) ?? []
+const reason = { malformed_greeting: 'Protocol', referral: 'UnknownCode', authentication_failed: 'Authentication', read_only: 'Unsupported', slow_greeting: 'Deadline' }
+// The fake trickles its greeting over 15 s, 1.5 times the installed source's
+// 10 s greeting deadline, so only that deadline can end the preview sooner.
+const slowGreeting = 15_000
 async function record(name) {
   checks.push({ name, directory: f.directory, passed: true })
   await writeFile(join(root, '.audit/imap-backlog-workflow-fault-results.json'), JSON.stringify({ checks }, null, 2))
@@ -16,7 +24,16 @@ try {
     await f.start(true); await f.savedWorkspace()
     const before = await f.observe()
     await writeFile(join(f.directory, 'move-mode'), mode)
+    const started = Date.now()
     await f.command('preview', { options }, 422)
+    const elapsed = Date.now() - started
+    if (mode === 'oversized_literal') {
+      // The fake streams a 64 MiB literal and never hangs up, so only the
+      // read-only session's own limit ends this before its 15 s idle deadline.
+      assert.deepEqual(await failures(), [])
+      assert.ok(elapsed < 10_000, `oversized literal ended after ${elapsed} ms`)
+    } else assert.deepEqual(await failures(), [`backlog.failure=${reason[mode]}`])
+    if (mode === 'slow_greeting') assert.ok(elapsed < slowGreeting, `slow greeting ended after ${elapsed} ms`)
     const after = await f.observe()
     assert.equal(after.primary, before.primary)
     assert.deepEqual(after.folders, before.folders)

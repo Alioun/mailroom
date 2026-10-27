@@ -24,6 +24,14 @@ use std::{
 
 const HEADER: &[u8] = b"From: updates@studio.example.com\r\nTo: owner@home.example.test\r\nDelivered-To: owner@home.example.test\r\nSubject: Release notes\r\nMessage-ID: <identical@example.test>\r\nDate: Sat, 24 Oct 2026 00:00:00 +0000\r\n\r\n";
 
+/// How long the `slow_greeting` fake takes to trickle out its greeting, one
+/// byte at a time. It must outlast the longest greeting deadline any fixture
+/// source installs, which is the installed source's command timeout, or the
+/// greeting completes and the fault case tests nothing.
+const SLOW_GREETING: Duration = Duration::from_millis(
+    crate::acquisition::fixture_peer::FIXTURE_COMMAND_TIMEOUT.as_millis() as u64 * 3 / 2,
+);
+
 struct EvidenceRoot(Option<tempfile::TempDir>);
 impl EvidenceRoot {
     fn new() -> Self {
@@ -320,10 +328,11 @@ fn serve(
         _ => b"* OK synthetic MOVE fixture\r\n".as_slice(),
     };
     if mode == "slow_greeting" {
+        let pace = SLOW_GREETING / u32::try_from(greeting.len()).unwrap();
         for byte in greeting {
             io.get_mut().write_all(&[*byte])?;
             io.get_mut().flush()?;
-            thread::sleep(Duration::from_millis(250));
+            thread::sleep(pace);
         }
     } else {
         io.get_mut().write_all(greeting)?;
@@ -481,9 +490,30 @@ fn serve(
                 }
                 _ if command.starts_with("UID FETCH ") => {
                     if mode == "oversized_literal" {
-                        io.get_mut()
-                            .write_all(b"* 1 FETCH (UID 4 BODY[HEADER] {524289}\r\n")?;
-                        io.get_mut().flush()?;
+                        // Larger than every response limit of both client
+                        // sessions, sent rather than announced, and never
+                        // finished: the fake holds the connection until the
+                        // client hangs up. A fake that hung up after the size
+                        // would let any client pass on end of stream, and a
+                        // client that read the whole literal would wait out
+                        // its idle deadline, so only a refusal at the
+                        // client's own limit fails the preview promptly.
+                        let size = 64 * 1024 * 1024;
+                        io.get_mut().write_all(
+                            format!("* 1 FETCH (UID 4 BODY[HEADER] {{{size}}}\r\n").as_bytes(),
+                        )?;
+                        let chunk = [b'x'; 64 * 1024];
+                        for _ in 0..size / chunk.len() {
+                            if io
+                                .get_mut()
+                                .write_all(&chunk)
+                                .and_then(|()| io.get_mut().flush())
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Peer::until_closed(&mut io);
                         return Ok(());
                     }
                     let set = command[10..].split_once(' ').unwrap().0;
@@ -1344,6 +1374,44 @@ fn malformed_slow_or_referred_greetings_and_failed_authentication_do_not_retry()
         );
         assert!(!root.path().join("move-wire-observations").exists());
     }
+}
+
+/// The installed source that the HTTP fixture and its verifiers use has the
+/// longest greeting deadline of any fixture source. A greeting trickled out
+/// byte by byte still ends the connection at that deadline, before the
+/// greeting completes and before any LOGIN.
+#[test]
+fn slow_greeting_ends_at_the_installed_sources_greeting_deadline() {
+    let root = EvidenceRoot::new();
+    let (mut repo, account, fake) = setup(root.path());
+    fake.install(&mut repo);
+    std::fs::write(root.path().join("move-mode"), "slow_greeting").unwrap();
+    let source = repo.backlog_source.clone().unwrap();
+    let permit = source
+        .permit(
+            &account.id,
+            account.provider,
+            &account.login,
+            &source.authority,
+        )
+        .unwrap();
+    let started = std::time::Instant::now();
+    let result = Connection::connect(
+        &permit,
+        &SecretValue::new(b"invented".to_vec()),
+        Cancellation::default(),
+    );
+    assert!(matches!(result, Err(Error::Deadline)));
+    assert!(started.elapsed() < SLOW_GREETING);
+    let (_, state) = external(&repo, &account.id, root.path());
+    assert!(
+        !state
+            .synthetic_folders
+            .unwrap()
+            .commands
+            .iter()
+            .any(|c| c == "LOGIN")
+    );
 }
 
 #[test]

@@ -56,6 +56,53 @@ struct Account {
     paths: AccountPaths,
     account: crate::acquisition::Account,
 }
+impl Account {
+    fn id(&self) -> &str {
+        self.account.id.as_str()
+    }
+    fn key(&self) -> String {
+        self.account.key_references()[0].to_owned()
+    }
+    fn identity(&self) -> String {
+        format!("{}-identity", self.id())
+    }
+    fn settle(&self) -> Result<&'static str, &'static str> {
+        settle(&self.keychain, &self.paths, self.id(), false)
+    }
+    fn adopt(&self) -> Result<&'static str, &'static str> {
+        settle(&self.keychain, &self.paths, self.id(), true)
+    }
+    fn verify(&self) -> StoreCheck {
+        verify(&self.paths, &self.reloaded(), self.keychain.clone())
+    }
+    fn reloaded(&self) -> crate::acquisition::Account {
+        Accounts::new(self.paths.clone(), Arc::new(Refusing))
+            .load(&self.account.id)
+            .unwrap()
+    }
+    fn opens(&self) -> bool {
+        Accounts::new(self.paths.clone(), self.keychain.clone())
+            .store(&self.reloaded())
+            .and_then(|s| s.load_state().map_err(Into::into))
+            .is_ok()
+    }
+    fn read(&self, reference: &str) -> Zeroizing<Vec<u8>> {
+        self.keychain.read(reference).unwrap()
+    }
+    /// Moves a current key somewhere an earlier build or an interruption could leave it.
+    fn leave(&self, reference: &str, place: &str, value: &[u8]) {
+        if self.keychain.status(reference) != Status::Missing {
+            assert_eq!(self.keychain.remove(reference), Status::Ok);
+        }
+        let created = match place {
+            "current" => self.keychain.create(reference, value),
+            "staged" => self.keychain.create_staged_for_test(reference, value),
+            "legacy" => self.keychain.create_legacy_for_test(reference, value),
+            _ => self.keychain.create_earlier_for_test(reference, value),
+        };
+        assert_eq!(created, Status::Ok);
+    }
+}
 fn account() -> Account {
     let throwaway = Throwaway::new();
     let root = throwaway.dir.path().join("accounts");
@@ -72,6 +119,7 @@ fn account() -> Account {
     let store = repo.store(&account).unwrap();
     let mut state = store.load_state().unwrap();
     store.save_state(&mut state).unwrap();
+    drop(store);
     Account {
         _throwaway: throwaway,
         keychain,
@@ -79,107 +127,187 @@ fn account() -> Account {
         account,
     }
 }
+/// An account rotated once, so it has a generation key and a separate identity key.
+fn rotated() -> Account {
+    let mut a = account();
+    let repo = Accounts::new(a.paths.clone(), a.keychain.clone());
+    repo.rotate(&a.account.id, &a.paths.data.join("effects"))
+        .unwrap();
+    a.account = a.reloaded();
+    assert_eq!(a.key(), format!("{}-key-g1", a.id()));
+    assert_eq!(a.verify(), StoreCheck::Verified);
+    a
+}
+/// 128 bytes, the length of identity material, carrying a findable dummy.
+fn planted_identity() -> Zeroizing<Vec<u8>> {
+    let mut value = dummy();
+    value.resize(128, b'x');
+    value
+}
 
 #[test]
 fn a_planted_key_fails_against_the_accounts_authenticated_state() {
     let a = account();
-    let reference = a.account.local_secret_ref_for_test().to_owned();
-    let genuine = a.keychain.read(&reference).unwrap();
-    assert_eq!(
-        check_store(&a.keychain, &a.paths, &reference, &genuine),
-        StoreCheck::Verified
-    );
-    assert_eq!(
-        check_store(&a.keychain, &a.paths, &reference, &dummy()),
-        StoreCheck::Mismatch
-    );
-    assert_eq!(
-        check_store(&a.keychain, &a.paths, "other-census-key", &genuine),
-        StoreCheck::NoAccount
-    );
-
-    assert_eq!(a.keychain.remove(&reference), Status::Ok);
-    assert_eq!(
-        a.keychain.create(&reference, &dummy()),
-        Status::Ok,
-        "a same-user process plants a look-alike"
-    );
-    let verify = |value: &[u8]| {
-        check_store(&a.keychain, &a.paths, &reference, value) == StoreCheck::Verified
+    let reference = a.key();
+    let genuine = a.read(&reference);
+    let with = |value: &[u8]| {
+        verify(
+            &a.paths,
+            &a.account,
+            Arc::new(Values(vec![(
+                reference.clone(),
+                Zeroizing::new(value.to_vec()),
+            )])),
+        )
     };
-    assert!(
-        !verify(&a.keychain.read(&reference).unwrap()),
+    assert_eq!(with(&genuine), StoreCheck::Verified);
+    assert_eq!(with(&dummy()), StoreCheck::Mismatch);
+
+    a.leave(&reference, "current", &dummy());
+    assert_eq!(
+        a.verify(),
+        StoreCheck::Mismatch,
         "check-store reports the planted key"
     );
     assert!(
-        Accounts::new(a.paths.clone(), a.keychain.clone())
-            .store(&a.account)
-            .and_then(|s| s.load_state().map_err(Into::into))
-            .is_err(),
+        !a.opens(),
         "the account refuses to open under the planted key"
     );
 }
 
 #[test]
-fn a_planted_staged_copy_is_never_promoted() {
-    let a = account();
-    let reference = a.account.local_secret_ref_for_test().to_owned();
-    let verify = |value: &[u8]| {
-        check_store(&a.keychain, &a.paths, &reference, value) == StoreCheck::Verified
-    };
-    let genuine = a.keychain.read(&reference).unwrap();
-    assert_eq!(a.keychain.remove(&reference), Status::Ok);
+fn a_planted_identity_fails_against_its_commitment_and_is_never_published() {
+    let a = rotated();
+    let identity = a.identity();
+    let genuine = a.read(&identity);
+    assert!(a.opens());
+
+    a.leave(&identity, "current", &planted_identity());
     assert_eq!(
-        a.keychain.create_staged_for_test(&reference, &dummy()),
-        Status::Ok
+        a.verify(),
+        StoreCheck::Mismatch,
+        "status=verified is refused"
     );
-    assert_eq!(
-        a.keychain.retrust(&reference, &verify),
-        Err(Status::Unverified)
+    assert!(
+        !a.opens(),
+        "the unchanged state opens only with the committed identity"
     );
+    assert_eq!(a.settle(), Err("mismatch"));
+
+    a.leave(&identity, "staged", &planted_identity());
+    assert_eq!(a.settle(), Err("mismatch"));
     assert_eq!(
-        a.keychain.status(&reference),
+        a.keychain.status(&identity),
         Status::Missing,
         "nothing was published"
     );
-    assert_eq!(a.keychain.remove_staged_for_test(&reference), Status::Ok);
+
+    assert_eq!(a.keychain.remove_staged_for_test(&identity), Status::Ok);
+    a.leave(&identity, "staged", &genuine);
     assert_eq!(
-        a.keychain.create_staged_for_test(&reference, &genuine),
-        Status::Ok
-    );
-    assert_eq!(
-        a.keychain.retrust(&reference, &verify),
-        Ok(Status::Ok),
+        a.settle(),
+        Ok("settled"),
         "the genuine staged copy recovers"
     );
-    assert_eq!(
-        a.keychain.read(&reference).unwrap().as_slice(),
-        genuine.as_slice()
-    );
+    assert_eq!(a.read(&identity).as_slice(), genuine.as_slice());
+    assert!(a.opens());
 }
 
 #[test]
-fn a_planted_legacy_key_is_never_migrated() {
+fn every_key_of_an_account_moves_as_one_verified_set() {
+    let a = rotated();
+    let (key, identity) = (a.key(), a.identity());
+    let (key_value, identity_value) = (a.read(&key), a.read(&identity));
+
+    a.leave(&key, "legacy", &key_value);
+    a.leave(&identity, "staged", &identity_value);
+    assert!(!a.opens(), "neither key is where this build reads it");
+    assert_eq!(a.settle(), Ok("settled"));
+    assert_eq!(a.read(&key).as_slice(), key_value.as_slice());
+    assert_eq!(a.read(&identity).as_slice(), identity_value.as_slice());
+    assert!(a.opens());
+    assert_eq!(a.settle(), Ok("unchanged"), "a rerun converges");
+
+    a.leave(&identity, "staged", &identity_value);
+    assert_eq!(
+        a.settle(),
+        Ok("settled"),
+        "a companion left staged is recovered"
+    );
+
+    a.leave(&key, "earlier", &key_value);
+    a.leave(&identity, "earlier", &identity_value);
+    assert_eq!(
+        a.settle(),
+        Err("denied"),
+        "reading an earlier build's keys needs a person"
+    );
+    for reference in [&key, &identity] {
+        assert_eq!(
+            a.keychain.status(reference),
+            Status::OtherBinary,
+            "nothing moved"
+        );
+    }
+}
+
+#[test]
+fn a_planted_legacy_or_staged_key_is_never_published() {
     let a = account();
-    let reference = a.account.local_secret_ref_for_test().to_owned();
-    let verify = |value: &[u8]| {
-        check_store(&a.keychain, &a.paths, &reference, value) == StoreCheck::Verified
-    };
-    let genuine = a.keychain.read(&reference).unwrap();
-    assert_eq!(a.keychain.remove(&reference), Status::Ok);
-    assert_eq!(
-        a.keychain.create_legacy_for_test(&reference, &dummy()),
-        Status::Ok
-    );
-    assert_eq!(
-        a.keychain.migrate(&reference, &verify),
-        Err(Migration::Protected(Status::Unverified))
-    );
+    let reference = a.key();
+    let genuine = a.read(&reference);
+    a.leave(&reference, "legacy", &dummy());
+    assert_eq!(a.settle(), Err("mismatch"));
     assert_eq!(a.keychain.status(&reference), Status::Missing);
     assert_eq!(a.keychain.remove_legacy_for_test(&reference), Status::Ok);
-    assert_eq!(
-        a.keychain.create_legacy_for_test(&reference, &genuine),
-        Status::Ok
+
+    a.leave(&reference, "staged", &dummy());
+    assert_eq!(a.settle(), Err("mismatch"));
+    assert_eq!(a.keychain.status(&reference), Status::Missing);
+    assert_eq!(a.keychain.remove_staged_for_test(&reference), Status::Ok);
+
+    a.leave(&reference, "legacy", &genuine);
+    assert_eq!(a.settle(), Ok("settled"));
+    assert_eq!(a.verify(), StoreCheck::Verified);
+}
+
+#[test]
+fn an_identity_saved_before_commitments_needs_the_owner_to_adopt_it() {
+    let a = rotated();
+    let metadata = a.paths.config.join(format!("{}.json", a.id()));
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&metadata).unwrap()).unwrap();
+    assert!(
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("identity_commitment")
+            .is_some()
     );
-    assert_eq!(a.keychain.migrate(&reference, &verify), Ok(Status::Ok));
+    std::fs::write(&metadata, serde_json::to_vec(&saved).unwrap()).unwrap();
+
+    assert!(!a.opens(), "an uncommitted identity does not open");
+    assert_eq!(a.verify(), StoreCheck::Uncommitted);
+    assert_eq!(a.settle(), Err("uncommitted"));
+
+    let key = a.key();
+    let genuine = a.read(&key);
+    a.leave(&key, "current", &dummy());
+    assert_eq!(
+        a.adopt(),
+        Err("mismatch"),
+        "adoption still needs the genuine encryption key"
+    );
+    assert!(a.reloaded().uncommitted());
+
+    a.leave(&key, "current", &genuine);
+    assert_eq!(a.adopt(), Ok("unchanged"));
+    assert!(!a.reloaded().uncommitted());
+    assert!(a.opens());
+    assert_eq!(a.verify(), StoreCheck::Verified);
+    assert_eq!(
+        a.adopt(),
+        Err("refused"),
+        "a committed identity is never adopted again"
+    );
 }

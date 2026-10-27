@@ -331,9 +331,7 @@ sys.stdout.buffer.write(seen)
         self.dir.path().join("accounts")
     }
 
-    /// Creates a real account whose secrets live in memory, then returns its reference
-    /// and the genuine census key, as an earlier `keyring` build would have stored them.
-    fn account(&self, login: &str) -> (String, Vec<u8>) {
+    fn repo(&self) -> (Accounts, Arc<Memory>) {
         let config = self.config();
         let backend = Arc::new(Memory::default());
         let repo = Accounts::new(
@@ -343,6 +341,13 @@ sys.stdout.buffer.write(seen)
             },
             backend.clone(),
         );
+        (repo, backend)
+    }
+
+    /// Creates a real account whose secrets live in memory, then returns its id, its key
+    /// reference and the genuine key, as an earlier `keyring` build would have stored them.
+    fn account(&self, login: &str) -> (String, String, Vec<u8>) {
+        let (repo, backend) = self.repo();
         let password = SecretValue::new(b"nk-dummy-secret-account".to_vec());
         let account = repo
             .create(Provider::MailboxOrg, login.into(), &password)
@@ -352,7 +357,31 @@ sys.stdout.buffer.write(seen)
         store.save_state(&mut state).unwrap();
         let reference = format!("{}-census-key", account.id.as_str());
         let value = backend.0.lock().unwrap()[&reference].clone();
-        (reference, value)
+        (account.id.as_str().to_owned(), reference, value)
+    }
+
+    /// As `account`, rotated once: its generation key and its separate identity key.
+    fn rotated(&self, login: &str) -> (String, [(String, Vec<u8>); 2]) {
+        let (repo, backend) = self.repo();
+        let password = SecretValue::new(b"nk-dummy-secret-account".to_vec());
+        let account = repo
+            .create(Provider::MailboxOrg, login.into(), &password)
+            .unwrap();
+        let store = repo.store(&account).unwrap();
+        let mut state = store.load_state().unwrap();
+        store.save_state(&mut state).unwrap();
+        drop(store);
+        repo.rotate(&account.id, &self.config().join("effects"))
+            .unwrap();
+        let id = account.id.as_str().to_owned();
+        let values = backend.0.lock().unwrap();
+        let key = format!("{id}-key-g1");
+        let identity = format!("{id}-identity");
+        let pair = [
+            (key.clone(), values[&key].clone()),
+            (identity.clone(), values[&identity].clone()),
+        ];
+        (id, pair)
     }
 
     fn assert_no_plaintext(&self) {
@@ -383,8 +412,8 @@ sys.stdout.buffer.write(seen)
 #[test]
 fn migration_retirement_and_their_failures_through_the_real_binary() {
     let mut s = Setup::new();
-    let (a, a_key) = s.account("a@example.test");
-    let (b, b_key) = s.account("b@example.test");
+    let (a_id, a, a_key) = s.account("a@example.test");
+    let (b_id, b, b_key) = s.account("b@example.test");
     let (x, other_value) = (s.dummy(), s.dummy());
     let binary = s.binary.clone();
     let other = s.other.clone();
@@ -396,10 +425,15 @@ fn migration_retirement_and_their_failures_through_the_real_binary() {
     s.add("mailroom", "p-census-key", &x, &[&binary]);
     let listed = s.run(&["keychain", "legacy"]);
     assert_eq!(listed.lines().count(), 6, "five names and the status");
-    assert_eq!(s.run(&["keychain", "migrate", &a]), "status=migrated");
     assert_eq!(
         s.run(&["keychain", "migrate", &a]),
-        "status=matched",
+        "status=refused",
+        "keys move only with their whole account"
+    );
+    assert_eq!(s.run(&["keychain", "settle", &a_id]), "status=settled");
+    assert_eq!(
+        s.run(&["keychain", "settle", &a_id]),
+        "status=unchanged",
         "a rerun after an interruption converges"
     );
     assert_eq!(
@@ -425,32 +459,25 @@ fn migration_retirement_and_their_failures_through_the_real_binary() {
     );
 
     assert_eq!(
-        s.run(&["keychain", "migrate", &b]),
+        s.run(&["keychain", "settle", &b_id]),
         "status=mismatch",
-        "a planted protected key collides"
+        "a planted protected key does not open the account"
     );
     assert_eq!(s.run(&["keychain", "retire-legacy", &b]), "status=mismatch");
-    assert_eq!(
-        s.run(&["keychain", "check-store", &b]),
-        "status=mismatch",
-        "the planted key does not open the account"
-    );
+    assert_eq!(s.run(&["keychain", "check-store", &b]), "status=mismatch");
 
     assert_eq!(
-        s.run(&["keychain", "migrate", "d-census-key"]),
-        "status=legacy_denied"
+        s.run(&["keychain", "settle", "d"]),
+        "status=no_account",
+        "a key no saved account names never moves"
     );
-    assert_eq!(
-        s.run(&["keychain", "migrate", "p-census-key"]),
-        "status=protected_unverified",
-        "a planted legacy key with no account"
-    );
+    assert_eq!(s.run(&["keychain", "settle", "p"]), "status=no_account");
     assert_eq!(
         s.run(&["keychain", "status", "p-census-key"]),
         "status=missing class=pinned_self"
     );
     assert_eq!(
-        s.run(&["keychain", "migrate", "z-census-key"]),
+        s.run(&["keychain", "migrate", "z-password"]),
         "status=legacy_missing"
     );
     assert_eq!(
@@ -464,18 +491,22 @@ fn migration_retirement_and_their_failures_through_the_real_binary() {
 #[test]
 fn a_planted_staged_copy_is_refused_and_a_genuine_one_recovers() {
     let mut s = Setup::new();
-    let (a, a_key) = s.account("a@example.test");
+    let (a_id, a, _) = s.account("a@example.test");
     let planted = s.dummy();
     let binary = s.binary.clone();
-    let staged = format!("{a}-retrust");
-    s.add("mailroom-protected-v1", &staged, &planted, &[&binary]);
-    assert_eq!(s.run(&["keychain", "retrust", &a]), "status=unverified");
+    s.add(
+        "mailroom-protected-v1",
+        &format!("{a}-retrust"),
+        &planted,
+        &[&binary],
+    );
+    assert_eq!(s.run(&["keychain", "settle", &a_id]), "status=mismatch");
     assert_eq!(
         s.run(&["keychain", "status", &a]),
         "status=missing class=pinned_self",
         "nothing was published"
     );
-    let (b, b_key) = s.account("b@example.test");
+    let (b_id, b, b_key) = s.account("b@example.test");
     s.add(
         "mailroom-protected-v1",
         &format!("{b}-retrust"),
@@ -483,12 +514,12 @@ fn a_planted_staged_copy_is_refused_and_a_genuine_one_recovers() {
         &[&binary],
     );
     assert_eq!(
-        s.run(&["keychain", "retrust", &b]),
-        "status=retrusted",
+        s.run(&["keychain", "settle", &b_id]),
+        "status=settled",
         "an interrupted move finishes"
     );
     assert_eq!(s.run(&["keychain", "check-store", &b]), "status=verified");
-    assert_eq!(s.run(&["keychain", "retrust", &b]), "status=unchanged");
+    assert_eq!(s.run(&["keychain", "settle", &b_id]), "status=unchanged");
     s.add(
         "mailroom-protected-v1",
         &format!("{b}-retrust"),
@@ -496,15 +527,124 @@ fn a_planted_staged_copy_is_refused_and_a_genuine_one_recovers() {
         &[&binary],
     );
     assert_eq!(
-        s.run(&["keychain", "retrust", &b]),
-        "status=unchanged",
+        s.run(&["keychain", "settle", &b_id]),
+        "status=settled",
         "a leftover equal copy is cleaned"
     );
     assert_eq!(
         s.run(&["keychain", "status", &format!("{b}-retrust")]),
         "status=missing class=every_access"
     );
-    let _ = a_key;
+    s.assert_no_plaintext();
+}
+
+#[test]
+fn a_rotated_account_moves_both_keys_as_one_set_and_refuses_a_planted_identity() {
+    let mut s = Setup::new();
+    let binary = s.binary.clone();
+    let other = s.other.clone();
+    let mut planted = s.dummy().into_bytes();
+    planted.resize(128, b'x');
+
+    let (r, [(key, key_value), (identity, _)]) = s.rotated("r@example.test");
+    s.add("mailroom", &key, &key_value, &[&binary]);
+    s.add(
+        "mailroom-protected-v1",
+        &format!("{identity}-retrust"),
+        &planted,
+        &[&binary],
+    );
+    assert_eq!(
+        s.run(&["keychain", "settle", &r]),
+        "status=mismatch",
+        "a planted 128-byte identity fails the commitment against unchanged state"
+    );
+    for reference in [&key, &identity] {
+        assert_eq!(
+            s.run(&["keychain", "status", reference]),
+            "status=missing class=pinned_self",
+            "nothing was published"
+        );
+    }
+
+    let (c, [(c_key, c_key_value), (c_identity, _)]) = s.rotated("c@example.test");
+    s.add("mailroom-protected-v1", &c_key, &c_key_value, &[&binary]);
+    s.add("mailroom-protected-v1", &c_identity, &planted, &[&binary]);
+    assert_eq!(
+        s.run(&["keychain", "check-store", &c_identity]),
+        "status=mismatch",
+        "check-store never verifies a planted identity"
+    );
+    assert_eq!(s.run(&["keychain", "settle", &c]), "status=mismatch");
+
+    let (g, [(g_key, g_key_value), (g_identity, g_identity_value)]) = s.rotated("g@example.test");
+    s.add("mailroom", &g_key, &g_key_value, &[&binary]);
+    s.add(
+        "mailroom-protected-v1",
+        &format!("{g_identity}-retrust"),
+        &g_identity_value,
+        &[&binary],
+    );
+    assert_eq!(
+        s.run(&["keychain", "settle", &g]),
+        "status=settled",
+        "a legacy key and a staged identity move together"
+    );
+    assert_eq!(
+        s.run(&["keychain", "check-store", &g_identity]),
+        "status=verified"
+    );
+    assert_eq!(s.run(&["keychain", "settle", &g]), "status=unchanged");
+
+    let (e, [(e_key, e_key_value), (e_identity, e_identity_value)]) = s.rotated("e@example.test");
+    s.add("mailroom-protected-v1", &e_key, &e_key_value, &[&other]);
+    s.add(
+        "mailroom-protected-v1",
+        &e_identity,
+        &e_identity_value,
+        &[&other],
+    );
+    assert_eq!(
+        s.run(&["keychain", "settle", &e]),
+        "status=denied",
+        "reading an earlier build's keys needs a person"
+    );
+    for reference in [&e_key, &e_identity] {
+        assert_eq!(
+            s.run(&["keychain", "status", reference]),
+            "status=other_binary class=pinned_self",
+            "nothing moved or deleted"
+        );
+    }
+
+    let (u, [(u_key, u_key_value), (u_identity, u_identity_value)]) = s.rotated("u@example.test");
+    let metadata = s.config().join(format!("{u}.json"));
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
+    saved
+        .as_object_mut()
+        .unwrap()
+        .remove("identity_commitment")
+        .unwrap();
+    fs::write(&metadata, serde_json::to_vec(&saved).unwrap()).unwrap();
+    s.add("mailroom-protected-v1", &u_key, &u_key_value, &[&binary]);
+    s.add(
+        "mailroom-protected-v1",
+        &u_identity,
+        &u_identity_value,
+        &[&binary],
+    );
+    assert_eq!(s.run(&["keychain", "settle", &u]), "status=uncommitted");
+    assert_eq!(
+        s.run(&["keychain", "check-store", &u_key]),
+        "status=uncommitted"
+    );
+    assert_eq!(s.run(&["keychain", "adopt", &u]), "status=unchanged");
+    assert_eq!(
+        s.run(&["keychain", "check-store", &u_key]),
+        "status=verified"
+    );
+    assert_eq!(s.run(&["keychain", "adopt", &u]), "status=refused");
     s.assert_no_plaintext();
 }
 
@@ -524,9 +664,9 @@ fn an_earlier_build_is_detected_and_its_keys_need_a_person_to_move() {
         "status=other_binary"
     );
     assert_eq!(
-        s.run(&["keychain", "retrust", "e-census-key"]),
-        "status=denied",
-        "reading an earlier build's key needs a person"
+        s.run(&["keychain", "settle", "e"]),
+        "status=no_account",
+        "a key moves only with a saved account"
     );
     assert_eq!(
         s.run(&["keychain", "status", "e-census-key"]),

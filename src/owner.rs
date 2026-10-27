@@ -3,8 +3,9 @@
 //! error detail is ever printed, and nothing is written to stderr.
 use crate::acquisition::{
     Account, AccountPaths, Accounts, AcquisitionError, CredentialBackend, SecretValue,
-    keychain::{self, Class, Keychain, Migration, Status},
+    keychain::{self, Class, Gathered, Keychain, Migration, Status},
 };
+use crate::census::AccountId;
 use std::{path::PathBuf, sync::Arc};
 use zeroize::Zeroizing;
 
@@ -106,17 +107,18 @@ pub fn run(arguments: &[String]) -> u8 {
     }
 }
 
-/// What a candidate key value does to the account that owns the reference.
+/// What a set of key values does to the account they belong to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StoreCheck {
-    /// The value opens the account's existing authenticated state.
+    /// The values open the account's existing authenticated state, and the identity
+    /// bytes, if any, match the commitment saved under its encryption key.
     Verified,
-    /// The account's state does not decrypt under the value.
+    /// The state does not decrypt, or the identity bytes do not match the commitment.
     Mismatch,
-    /// The account has no saved state to authenticate the value against.
+    /// The account has no saved state to authenticate the values against.
     NoState,
-    /// No saved account uses this reference.
-    NoAccount,
+    /// The account's identity predates commitments, so nothing can authenticate it.
+    Uncommitted,
 }
 impl StoreCheck {
     fn code(self) -> &'static str {
@@ -124,24 +126,29 @@ impl StoreCheck {
             Self::Verified => "verified",
             Self::Mismatch => "mismatch",
             Self::NoState => "no_state",
-            Self::NoAccount => "no_account",
+            Self::Uncommitted => "uncommitted",
         }
     }
 }
 
-/// Answers `get` for one reference with a candidate value and every other from Keychain.
-struct Candidate {
-    keychain: Arc<Keychain>,
-    reference: String,
-    value: Zeroizing<Vec<u8>>,
+/// Answers `get` with fixed key values and nothing else.
+struct Values(Vec<(String, Zeroizing<Vec<u8>>)>);
+impl Values {
+    fn of(keys: &[Gathered]) -> Arc<Self> {
+        Arc::new(Self(
+            keys.iter()
+                .map(|k| (k.reference.clone(), Zeroizing::new(k.value.to_vec())))
+                .collect(),
+        ))
+    }
 }
-impl CredentialBackend for Candidate {
+impl CredentialBackend for Values {
     fn get(&self, reference: &str) -> Result<SecretValue, AcquisitionError> {
-        if reference == self.reference {
-            Ok(SecretValue::new(self.value.to_vec()))
-        } else {
-            self.keychain.get(reference)
-        }
+        self.0
+            .iter()
+            .find(|(r, _)| r == reference)
+            .map(|(_, v)| SecretValue::new(v.to_vec()))
+            .ok_or(AcquisitionError::CredentialMissing)
     }
     fn put(&self, _: &str, _: &SecretValue) -> Result<(), AcquisitionError> {
         Err(AcquisitionError::Credentials)
@@ -160,23 +167,23 @@ fn owner_of(paths: &AccountPaths, reference: &str) -> Option<Account> {
         .find(|a| a.credential_references().contains(&reference))
 }
 
-/// Opens the owning account's encrypted state with `value` in place of `reference`.
-pub(crate) fn check_store(
-    keychain: &Arc<Keychain>,
+fn account(paths: &AccountPaths, id: &str) -> Option<Account> {
+    let id = AccountId::new(id).ok()?;
+    Accounts::new(paths.clone(), Arc::new(Refusing))
+        .load(&id)
+        .ok()
+}
+
+/// Opens the account's saved state with `keys` answering for all of its keys at once.
+pub(crate) fn verify(
     paths: &AccountPaths,
-    reference: &str,
-    value: &[u8],
+    account: &Account,
+    keys: Arc<dyn CredentialBackend>,
 ) -> StoreCheck {
-    let Some(account) = owner_of(paths, reference) else {
-        return StoreCheck::NoAccount;
-    };
-    let backend = Candidate {
-        keychain: keychain.clone(),
-        reference: reference.into(),
-        value: Zeroizing::new(value.to_vec()),
-    };
-    let repo = Accounts::new(paths.clone(), Arc::new(backend));
-    let Ok(store) = repo.store(&account) else {
+    if account.uncommitted() {
+        return StoreCheck::Uncommitted;
+    }
+    let Ok(store) = Accounts::new(paths.clone(), keys).store(account) else {
         return StoreCheck::Mismatch;
     };
     if !store.path().exists() {
@@ -188,17 +195,56 @@ pub(crate) fn check_store(
     }
 }
 
+/// Moves every key of one account to this build, or none. Each key is gathered from
+/// wherever it is, the whole set is checked against the account's saved state and
+/// identity commitment, and only then is each key settled. `adopt` first commits an
+/// account whose identity predates commitments to the identity bytes found now.
+pub(crate) fn settle(
+    keychain: &Arc<Keychain>,
+    paths: &AccountPaths,
+    id: &str,
+    adopt: bool,
+) -> Result<&'static str, &'static str> {
+    let mut account = account(paths, id).ok_or("no_account")?;
+    if adopt != account.uncommitted() {
+        return Err(if adopt { "refused" } else { "uncommitted" });
+    }
+    let keys = account
+        .key_references()
+        .into_iter()
+        .map(|reference| keychain.gather(reference))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Status::code)?;
+    if adopt {
+        let repo = Accounts::new(paths.clone(), Values::of(&keys));
+        match repo.adopt_identity(&account.id) {
+            Ok(true) => {}
+            Ok(false) => return Err("no_state"),
+            Err(_) => return Err("mismatch"),
+        }
+        account = repo.load(&account.id).map_err(|_| "failed")?;
+    }
+    let moves = keys.iter().any(Gathered::moves);
+    match (verify(paths, &account, Values::of(&keys)), moves) {
+        (StoreCheck::Verified, true) => {}
+        (StoreCheck::Verified | StoreCheck::NoState, false) => return Ok("unchanged"),
+        (checked, _) => return Err(checked.code()),
+    }
+    for key in &keys {
+        keychain.settle(key).map_err(Status::code)?;
+    }
+    match verify(paths, &account, keychain.clone()) {
+        StoreCheck::Verified => Ok("settled"),
+        _ => Err("failed"),
+    }
+}
+
 fn item(
     keychain: &Arc<Keychain>,
     paths: Option<AccountPaths>,
     command: &str,
     reference: &str,
 ) -> u8 {
-    let verify = |value: &[u8]| {
-        paths
-            .as_ref()
-            .is_some_and(|p| check_store(keychain, p, reference, value) == StoreCheck::Verified)
-    };
     match command {
         "status" => {
             let observed = keychain.status(reference);
@@ -219,19 +265,34 @@ fn item(
             if Class::of(reference) != Class::PinnedSelf {
                 return status("refused", false);
             }
-            let Some(paths) = &paths else {
+            let Some((paths, account)) = paths
+                .as_ref()
+                .and_then(|p| owner_of(p, reference).map(|a| (p, a)))
+            else {
                 return status("no_account", false);
             };
-            match keychain.read(reference) {
-                Ok(value) => {
-                    let checked = check_store(keychain, paths, reference, &value);
-                    status(checked.code(), checked == StoreCheck::Verified)
+            let mut keys = Vec::new();
+            for key in account.key_references() {
+                match keychain.read(key) {
+                    Ok(value) => keys.push((key.to_owned(), value)),
+                    Err(observed) => return status(observed.code(), false),
                 }
-                Err(observed) => status(observed.code(), false),
+            }
+            let checked = verify(paths, &account, Arc::new(Values(keys)));
+            status(checked.code(), checked == StoreCheck::Verified)
+        }
+        "settle" | "adopt" => {
+            let settled = match &paths {
+                Some(paths) => settle(keychain, paths, reference, command == "adopt"),
+                None => Err("no_account"),
+            };
+            match settled {
+                Ok(code) => status(code, true),
+                Err(code) => status(code, false),
             }
         }
         "enroll" => enroll(keychain, reference),
-        "migrate" => match keychain.migrate(reference, &verify) {
+        "migrate" => match keychain.migrate(reference) {
             Ok(Status::Ok) => status("migrated", true),
             Ok(_) => status("matched", true),
             Err(failure) => migration(failure),
@@ -240,17 +301,13 @@ fn item(
             Ok(()) => status("retired", true),
             Err(failure) => migration(failure),
         },
-        "retrust" => match keychain.retrust(reference, &verify) {
-            Ok(Status::Ok) => status("retrusted", true),
-            Ok(_) => status("unchanged", true),
-            Err(observed) => status(observed.code(), false),
-        },
         _ => status("usage", false),
     }
 }
 
 fn migration(failure: Migration) -> u8 {
     match failure {
+        Migration::Refused => status("refused", false),
         Migration::Mismatch => status("mismatch", false),
         Migration::Legacy(observed) => status(&format!("legacy_{}", observed.code()), false),
         Migration::Protected(observed) => status(&format!("protected_{}", observed.code()), false),

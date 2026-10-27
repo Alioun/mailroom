@@ -111,13 +111,22 @@ pub struct Account {
     connection: ConnectionState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     restored: Option<recovery::Restored>,
+    /// Binds the identity item to the encryption key; see `CensusKeys::identity_commitment`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity_commitment: Option<String>,
 }
 
 impl Account {
-    /// Keychain references this account owns. Names only; never values.
-    #[cfg(all(test, target_os = "macos"))]
-    pub(crate) fn local_secret_ref_for_test(&self) -> &str {
-        &self.local_secret_ref
+    /// Identity bytes saved before identity commitments existed. Such an account does not
+    /// open until the owner adopts its identity.
+    pub(crate) fn uncommitted(&self) -> bool {
+        self.identity_ref.is_some() && self.identity_commitment.is_none()
+    }
+    /// The references of keys pinned to this binary: the local secret and any identity.
+    pub(crate) fn key_references(&self) -> Vec<&str> {
+        let mut references = vec![self.local_secret_ref.as_str()];
+        references.extend(self.identity_ref.as_deref());
+        references
     }
     pub(crate) fn credential_references(&self) -> Vec<&str> {
         let mut references = vec![self.password_ref.as_str(), self.local_secret_ref.as_str()];

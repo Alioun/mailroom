@@ -200,6 +200,13 @@ impl Accounts {
                 .is_some_and(|r| r != &format!("{prefix}-identity"))
             || (a.generation > 0 && a.identity_ref.is_none())
             || a.generation > 10000
+            || a.identity_commitment.as_ref().is_some_and(|c| {
+                a.identity_ref.is_none()
+                    || c.len() != 64
+                    || !c
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
         {
             return Err(AcquisitionError::InvalidInput);
         }
@@ -227,10 +234,11 @@ impl Accounts {
             self.store_keys(a, kind)?,
         )?)
     }
-    fn store_keys(&self, a: &Account, kind: usize) -> Result<CensusKeys, AcquisitionError> {
+    /// The account's keys before the identity commitment is checked.
+    fn uncommitted_keys(&self, a: &Account) -> Result<CensusKeys, AcquisitionError> {
         let value = self.backend.get(&a.local_secret_ref)?;
         let secret = LocalSecret::from_bytes(value.bytes().to_vec())?;
-        let mut keys = match &a.identity_ref {
+        Ok(match &a.identity_ref {
             Some(reference) => CensusKeys::rotated(
                 &secret,
                 &a.id,
@@ -238,7 +246,15 @@ impl Accounts {
                 a.generation,
             )?,
             None => CensusKeys::derive(&secret, &a.id),
-        };
+        })
+    }
+    /// Identity bytes open a store only with the commitment saved beside them. An account
+    /// whose identity predates commitments stays closed until the owner adopts it.
+    fn store_keys(&self, a: &Account, kind: usize) -> Result<CensusKeys, AcquisitionError> {
+        let mut keys = self.uncommitted_keys(a)?;
+        if a.identity_ref.is_some() && !keys.commits_to(a.identity_commitment.as_deref()) {
+            return Err(AcquisitionError::Credentials);
+        }
         if kind == 0 {
             if let Some(restored) = &a.restored {
                 keys.recovery_authority(&restored.authority);
@@ -296,6 +312,7 @@ impl Accounts {
             identity_ref: None,
             connection: ConnectionState::Unverified,
             restored: None,
+            identity_commitment: None,
             id,
             provider,
             login,
@@ -538,6 +555,15 @@ impl Accounts {
             .ok_or(AcquisitionError::Storage)?;
         after.local_secret_ref = format!("{}-key-g{}", id.as_str(), after.generation);
         after.identity_ref = Some(format!("{}-identity", id.as_str()));
+        let mut key = Zeroizing::new(vec![0; 32]);
+        OsRng.fill_bytes(&mut key);
+        after.identity_commitment = CensusKeys::rotated(
+            &LocalSecret::from_bytes(key.to_vec())?,
+            id,
+            &identity,
+            after.generation,
+        )?
+        .identity_commitment();
         self.record(
             id,
             &Intent::Rotating {
@@ -556,11 +582,29 @@ impl Accounts {
             )?;
         }
         boundary("rotate_identity")?;
-        let mut key = Zeroizing::new(vec![0; 32]);
-        OsRng.fill_bytes(&mut key);
         self.put_new(&after.local_secret_ref, &SecretValue::new(key.to_vec()))?;
         boundary("rotate_key")?;
         self.finish_rotation(&before, &after, effects, &present, stores)
+    }
+    /// Commits an account whose identity predates commitments to its current identity
+    /// bytes. The saved state authenticates the encryption key; nothing authenticates
+    /// those identity bytes, so the owner chooses to trust them. Returns false, adopting
+    /// nothing, when the account has no saved state to authenticate its encryption key.
+    pub(crate) fn adopt_identity(&self, id: &AccountId) -> Result<bool, AcquisitionError> {
+        let _lease = self.lock_account(id)?;
+        self.require_ready(id)?;
+        let mut a = self.load_metadata(id)?;
+        if a.identity_ref.is_none() || a.identity_commitment.is_some() {
+            return Err(AcquisitionError::InvalidInput);
+        }
+        let store = EncryptedStore::new(self.paths.data.clone(), self.uncommitted_keys(&a)?)?;
+        if !store.path().exists() {
+            return Ok(false);
+        }
+        store.load_state()?;
+        a.identity_commitment = store.keys().identity_commitment();
+        self.publish(&a)?;
+        Ok(true)
     }
     fn finish_rotation(
         &self,

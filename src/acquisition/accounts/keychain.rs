@@ -16,7 +16,7 @@ use core_foundation::{
     string::{CFString, CFStringRef},
 };
 use std::{
-    ffi::{CString, c_char, c_void},
+    ffi::{CString, c_char, c_int, c_void},
     path::{Path, PathBuf},
 };
 use subtle::ConstantTimeEq;
@@ -82,6 +82,17 @@ unsafe extern "C" {
     ) -> OSStatus;
 }
 
+unsafe extern "C" {
+    fn acl_get_link_np(path: *const c_char, kind: c_int) -> *mut c_void;
+    fn acl_get_entry(acl: *mut c_void, which: c_int, entry: *mut *mut c_void) -> c_int;
+    fn acl_get_tag_type(entry: *mut c_void, tag: *mut c_int) -> c_int;
+    fn acl_free(object: *mut c_void) -> c_int;
+}
+const ACL_TYPE_EXTENDED: c_int = 0x100;
+const ACL_FIRST_ENTRY: c_int = 0;
+const ACL_NEXT_ENTRY: c_int = -1;
+const ACL_EXTENDED_DENY: c_int = 2;
+
 pub(crate) const SERVICE: &str = "mailroom-protected-v1";
 pub(crate) const LEGACY_SERVICE: &str = "mailroom";
 
@@ -96,8 +107,6 @@ pub(crate) enum Status {
     Changed,
     /// A key item trusts exactly one other binary, such as an earlier mailroom build.
     OtherBinary,
-    /// A key value that does not open the account's existing encrypted state.
-    Unverified,
     Failed,
 }
 impl Status {
@@ -109,7 +118,6 @@ impl Status {
             Self::Denied => "denied",
             Self::Changed => "changed",
             Self::OtherBinary => "other_binary",
-            Self::Unverified => "unverified",
             Self::Failed => "failed",
         }
     }
@@ -315,7 +323,7 @@ fn search_list_paths() -> Result<Vec<PathBuf>, Status> {
     let mut paths = Vec::new();
     for keychain in list.iter() {
         let path = keychain_path(keychain.as_CFTypeRef() as *mut c_void)?;
-        paths.push(path.canonicalize().unwrap_or(path));
+        paths.push(path.canonicalize().map_err(|_| Status::Failed)?);
     }
     if paths.is_empty() {
         return Err(Status::Failed);
@@ -344,23 +352,69 @@ fn account_home() -> Result<PathBuf, Status> {
     Ok(PathBuf::from(home.to_str().map_err(|_| Status::Failed)?))
 }
 
-/// An explicit keychain file for tests. It must be an existing regular file owned by this
-/// user in a directory nobody else can write, outside the system and user keychain
-/// folders and off the search list. The opened keychain must resolve to the same file.
-/// Any doubt refuses; nothing ever falls back to the default keychain.
+/// Whether `path` itself carries an ACL entry that grants anything. Deny entries only take
+/// rights away, like the one macOS puts on home folders. An unreadable ACL counts as a grant.
+fn acl_grants(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(text) = CString::new(path.as_os_str().as_bytes()) else {
+        return true;
+    };
+    let acl = unsafe { acl_get_link_np(text.as_ptr(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        return std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT);
+    }
+    let mut grants = false;
+    let mut entry = std::ptr::null_mut();
+    let mut which = ACL_FIRST_ENTRY;
+    while unsafe { acl_get_entry(acl, which, &mut entry) } == 0 {
+        let mut tag = 0;
+        if unsafe { acl_get_tag_type(entry, &mut tag) } != 0 || tag != ACL_EXTENDED_DENY {
+            grants = true;
+            break;
+        }
+        which = ACL_NEXT_ENTRY;
+    }
+    unsafe { acl_free(acl) };
+    grants
+}
+
+/// Opens `path` without following a final symlink and reads its metadata from the open
+/// descriptor, so the identity checked is the file that was opened.
+fn opened_metadata(path: &Path) -> Result<std::fs::Metadata, Status> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .and_then(|file| file.metadata())
+        .map_err(|_| Status::Failed)
+}
+
+/// An explicit keychain file for tests. It must be an existing regular file with one link,
+/// owned by this user in a directory nobody else can write. Every directory above it must
+/// belong to this user or root, without group or other write and without granting ACLs.
+/// It must lie outside the system and user keychain folders and off the search list, and
+/// the keychain Security opens must report the same file. Security opens keychains by
+/// path, at open and again at later use, so these checks bind the path, not a handle; a
+/// process running as this user can still swap the file afterwards. Any doubt refuses, and
+/// nothing ever falls back to the default keychain.
 pub(crate) fn explicit(path: &Path) -> Result<Keychain, Status> {
     use std::os::unix::fs::MetadataExt;
     if !path.is_absolute() {
         return Err(Status::Failed);
     }
     let canonical = path.canonicalize().map_err(|_| Status::Failed)?;
-    let meta = std::fs::symlink_metadata(&canonical).map_err(|_| Status::Failed)?;
+    let meta = opened_metadata(&canonical)?;
     let parent = std::fs::symlink_metadata(canonical.parent().ok_or(Status::Failed)?)
         .map_err(|_| Status::Failed)?;
     let uid = unsafe { libc::getuid() };
     let private = |m: &std::fs::Metadata| m.uid() == uid && m.mode() & 0o022 == 0;
-    let home = account_home()?;
-    let home = home.canonicalize().unwrap_or(home);
+    let guarded = canonical.ancestors().skip(1).all(|directory| {
+        std::fs::symlink_metadata(directory)
+            .is_ok_and(|m| m.is_dir() && (m.uid() == uid || m.uid() == 0) && m.mode() & 0o022 == 0)
+            && !acl_grants(directory)
+    });
+    let home = account_home()?.canonicalize().map_err(|_| Status::Failed)?;
     let protected = [
         PathBuf::from("/Library"),
         PathBuf::from("/System"),
@@ -371,8 +425,11 @@ pub(crate) fn explicit(path: &Path) -> Result<Keychain, Status> {
     .any(|root| canonical.starts_with(root));
     let listed = search_list_paths()?;
     if !meta.is_file()
+        || meta.nlink() != 1
         || !private(&meta)
         || !private(&parent)
+        || !guarded
+        || acl_grants(&canonical)
         || protected
         || listed.contains(&canonical)
     {
@@ -386,9 +443,9 @@ pub(crate) fn explicit(path: &Path) -> Result<Keychain, Status> {
     }
     let keychain = unsafe { CFType::wrap_under_create_rule(keychain as CFTypeRef) };
     let opened = keychain_path(keychain.as_CFTypeRef() as *mut c_void)?;
-    let again = std::fs::symlink_metadata(&opened).map_err(|_| Status::Failed)?;
+    let again = opened_metadata(&opened)?;
     if opened.canonicalize().map_err(|_| Status::Failed)? != canonical
-        || (again.dev(), again.ino()) != (meta.dev(), meta.ino())
+        || (again.dev(), again.ino(), again.nlink()) != (meta.dev(), meta.ino(), 1)
         || search_list_paths()?.contains(&canonical)
     {
         return Err(Status::Failed);
@@ -725,15 +782,14 @@ impl Keychain {
         self.data(&self.item(LEGACY_SERVICE, reference)?)
     }
 
-    /// Copies a legacy value into a protected item, then proves the protected item holds it.
-    /// A key is copied only when `verify` shows it opens the account's existing state, since
-    /// anyone can plant a legacy item. Returns `Ok` when created and `Exists` when an equal
-    /// item was already there.
-    pub(crate) fn migrate(&self, reference: &str, verify: Verify) -> Result<Status, Migration> {
-        let legacy = self.legacy_read(reference).map_err(Migration::Legacy)?;
-        if Class::of(reference) == Class::PinnedSelf && !verify(&legacy) {
-            return Err(Migration::Protected(Status::Unverified));
+    /// Copies a legacy password into a protected item, then proves the protected item holds
+    /// it. Keys move only with their whole account, through `gather` and `settle`. Returns
+    /// `Ok` when created and `Exists` when an equal item was already there.
+    pub(crate) fn migrate(&self, reference: &str) -> Result<Status, Migration> {
+        if Class::of(reference) != Class::EveryAccess {
+            return Err(Migration::Refused);
         }
+        let legacy = self.legacy_read(reference).map_err(Migration::Legacy)?;
         let outcome = match self.status(reference) {
             Status::Missing => match self.create(reference, &legacy) {
                 Status::Ok => Status::Ok,
@@ -764,79 +820,88 @@ impl Keychain {
         }
     }
 
-    /// Moves a key item that trusts another binary, such as an earlier mailroom build, to
-    /// this binary. Reading the old item needs a person. The value is staged in a second
-    /// pinned item first, so an interruption at any step leaves a readable copy and a
-    /// rerun finishes. Anyone can plant an item trusting this binary, so a value is moved
-    /// only when `verify` shows it opens the account's existing state. Returns `Ok` when
-    /// moved and `Exists` when nothing needed moving.
-    pub(crate) fn retrust(&self, reference: &str, verify: Verify) -> Result<Status, Status> {
+    /// Finds one key's value wherever an earlier build or an interrupted move left it, and
+    /// changes nothing. Reading an earlier build's item needs a person. Nothing here says
+    /// the value is genuine: anyone can plant an item, so the caller checks the account's
+    /// whole set against its saved state before `settle` moves any of it.
+    pub(crate) fn gather(&self, reference: &str) -> Result<Gathered, Status> {
         if !valid_reference(reference) || Class::of(reference) != Class::PinnedSelf {
             return Err(Status::Failed);
         }
-        let staged = format!("{reference}-retrust");
-        match self.status(reference) {
-            Status::Ok => {
-                if self.status_as(&staged, Class::PinnedSelf) != Status::Missing {
-                    let current = self.read(reference)?;
-                    let copy = self.read_as(&staged, Class::PinnedSelf)?;
-                    if !equal(&current, &copy) {
-                        return Err(Status::Changed);
-                    }
-                    self.removed(&staged)?;
+        let staged_reference = staged(reference);
+        let staged = match self.status_as(&staged_reference, Class::PinnedSelf) {
+            Status::Ok => Some(self.read_as(&staged_reference, Class::PinnedSelf)?),
+            Status::Missing => None,
+            status => return Err(status),
+        };
+        let (origin, value) = match (self.status(reference), staged) {
+            (Status::Ok, staged) => {
+                let value = self.read(reference)?;
+                if staged.as_ref().is_some_and(|copy| !equal(copy, &value)) {
+                    return Err(Status::Changed);
                 }
-                Ok(Status::Exists)
+                let origin = match staged {
+                    Some(_) => Origin::CurrentAndStaged,
+                    None => Origin::Current,
+                };
+                (origin, value)
             }
-            Status::Missing => {
-                let value = self.read_as(&staged, Class::PinnedSelf)?;
-                if !verify(&value) {
-                    return Err(Status::Unverified);
-                }
-                self.publish(reference, &staged, &value)
-            }
-            Status::OtherBinary => {
+            (Status::OtherBinary, _) => {
                 let item = self.item(SERVICE, reference)?;
                 let value = self.data(&item)?;
-                if !verify(&value) {
-                    return Err(Status::Unverified);
-                }
-                let kept = match self.status_as(&staged, Class::PinnedSelf) {
-                    Status::Missing => false,
-                    Status::Ok => equal(&self.read_as(&staged, Class::PinnedSelf)?, &value),
-                    _ => false,
-                };
-                if !kept {
-                    self.removed(&staged)?;
-                    match self.create_as(&staged, Class::PinnedSelf, &value) {
-                        Status::Ok => {}
-                        status => return Err(status),
-                    }
-                }
-                if !equal(&self.read_as(&staged, Class::PinnedSelf)?, &value) {
-                    return Err(Status::Failed);
-                }
+                (Origin::Earlier(item), value)
+            }
+            (Status::Missing, Some(value)) => (Origin::Staged, value),
+            (Status::Missing, None) => (Origin::Legacy, self.legacy_read(reference)?),
+            (status, _) => return Err(status),
+        };
+        Ok(Gathered {
+            reference: reference.to_owned(),
+            origin,
+            value,
+        })
+    }
+
+    /// Leaves one verified key as a current item trusting this binary. A move from an
+    /// earlier build goes through a staged copy, so a rerun after an interruption at any
+    /// step gathers the key again from where it was left.
+    pub(crate) fn settle(&self, key: &Gathered) -> Result<(), Status> {
+        let staged = staged(&key.reference);
+        match &key.origin {
+            Origin::Current => Ok(()),
+            Origin::CurrentAndStaged => self.removed(&staged),
+            Origin::Staged => self.publish(&key.reference, &staged, &key.value),
+            Origin::Legacy => self.created(&key.reference, Class::PinnedSelf, &key.value),
+            Origin::Earlier(item) => {
+                self.removed(&staged)?;
+                self.created(&staged, Class::PinnedSelf, &key.value)?;
                 match Status::of(unsafe {
                     SecKeychainItemDelete(item.as_CFTypeRef() as SecKeychainItemRef)
                 }) {
                     Status::Ok => {}
                     status => return Err(status),
                 }
-                self.publish(reference, &staged, &value)
+                self.publish(&key.reference, &staged, &key.value)
             }
-            status => Err(status),
         }
     }
 
-    fn publish(&self, reference: &str, staged: &str, value: &[u8]) -> Result<Status, Status> {
-        match self.create(reference, value) {
+    fn publish(&self, reference: &str, staged: &str, value: &[u8]) -> Result<(), Status> {
+        self.created(reference, Class::PinnedSelf, value)?;
+        self.removed(staged)
+    }
+
+    /// Creates an item and proves it reads back as `value`.
+    fn created(&self, reference: &str, class: Class, value: &[u8]) -> Result<(), Status> {
+        match self.create_as(reference, class, value) {
             Status::Ok => {}
             status => return Err(status),
         }
-        if !equal(&self.read(reference)?, value) {
-            return Err(Status::Failed);
+        if equal(&self.read_as(reference, class)?, value) {
+            Ok(())
+        } else {
+            Err(Status::Failed)
         }
-        self.removed(staged)?;
-        Ok(Status::Ok)
     }
 
     fn removed(&self, reference: &str) -> Result<(), Status> {
@@ -847,13 +912,45 @@ impl Keychain {
     }
 }
 
+/// The staged copy a move from an earlier build passes through.
+fn staged(reference: &str) -> String {
+    format!("{reference}-retrust")
+}
+
+/// Where `gather` found a key.
+#[derive(Debug)]
+pub(crate) enum Origin {
+    /// The protected item trusts this binary.
+    Current,
+    /// As `Current`, with an equal staged copy left by an interrupted move.
+    CurrentAndStaged,
+    /// Only the staged copy of an interrupted move is left.
+    Staged,
+    /// The protected item trusts an earlier build; a person allowed one read of it.
+    Earlier(CFType),
+    /// Only the legacy `keyring` item exists.
+    Legacy,
+}
+
+/// One key's value and where it was found. Its value is not yet verified.
+pub(crate) struct Gathered {
+    pub reference: String,
+    pub origin: Origin,
+    pub value: Zeroizing<Vec<u8>>,
+}
+impl Gathered {
+    pub(crate) fn moves(&self) -> bool {
+        !matches!(self.origin, Origin::Current)
+    }
+}
+
 #[cfg(test)]
 impl Keychain {
     pub(crate) fn create_staged_for_test(&self, reference: &str, value: &[u8]) -> Status {
-        self.create_as(&format!("{reference}-retrust"), Class::PinnedSelf, value)
+        self.create_as(&staged(reference), Class::PinnedSelf, value)
     }
     pub(crate) fn remove_staged_for_test(&self, reference: &str) -> Status {
-        self.remove(&format!("{reference}-retrust"))
+        self.remove(&staged(reference))
     }
     pub(crate) fn create_legacy_for_test(&self, reference: &str, value: &[u8]) -> Status {
         let own = match own_application() {
@@ -868,19 +965,28 @@ impl Keychain {
             value,
         )
     }
+    /// A key item as an earlier build left it: trusting exactly one other binary.
+    pub(crate) fn create_earlier_for_test(&self, reference: &str, value: &[u8]) -> Status {
+        let path = CString::new(crate::native::tests::fake_helper().to_str().unwrap()).unwrap();
+        let mut application = std::ptr::null_mut();
+        if unsafe { SecTrustedApplicationCreateFromPath(path.as_ptr(), &mut application) } != 0 {
+            return Status::Failed;
+        }
+        let other = unsafe { CFType::wrap_under_create_rule(application as CFTypeRef) };
+        self.add(SERVICE, reference, &CFArray::from_CFTypes(&[other]), value)
+    }
     pub(crate) fn remove_legacy_for_test(&self, reference: &str) -> Status {
         self.remove_in(LEGACY_SERVICE, reference)
     }
 }
-
-/// Whether a candidate key value opens the account's existing encrypted state.
-pub(crate) type Verify<'a> = &'a dyn Fn(&[u8]) -> bool;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Migration {
     Legacy(Status),
     Protected(Status),
     Mismatch,
+    /// Keys move only with their whole account.
+    Refused,
 }
 
 impl CredentialBackend for Keychain {

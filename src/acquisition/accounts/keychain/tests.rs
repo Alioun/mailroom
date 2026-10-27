@@ -224,8 +224,9 @@ fn a_key_trusting_another_binary_is_reported_and_never_read_silently() {
         Some(Status::OtherBinary)
     );
     assert_eq!(
-        keychain.retrust("acct-census-key", &|_| true).err(),
-        Some(Status::Denied)
+        keychain.gather("acct-census-key").err(),
+        Some(Status::Denied),
+        "reading an earlier build's key needs a person"
     );
     assert_eq!(
         keychain.status("acct-census-key"),
@@ -235,52 +236,74 @@ fn a_key_trusting_another_binary_is_reported_and_never_read_silently() {
     assert_eq!(keychain.status("acct-census-key-retrust"), Status::Missing);
 }
 
+fn gathered(keychain: &Keychain, reference: &str) -> (String, Zeroizing<Vec<u8>>) {
+    let key = keychain.gather(reference).unwrap();
+    let origin = format!("{:?}", key.origin);
+    keychain.settle(&key).unwrap();
+    (origin, key.value)
+}
+
 #[test]
-fn an_interrupted_retrust_finishes_from_its_staged_copy() {
+fn every_place_a_key_can_be_left_settles_into_one_current_item() {
     let throwaway = Throwaway::new();
     let keychain = throwaway.keychain();
     let value = dummy();
     assert_eq!(
-        keychain.create_as("acct-identity-retrust", Class::PinnedSelf, &value),
+        keychain.create_staged_for_test("acct-identity", &value),
         Status::Ok
     );
-    assert_eq!(keychain.retrust("acct-identity", &|_| true), Ok(Status::Ok));
+    let (origin, found) = gathered(&keychain, "acct-identity");
+    assert_eq!(
+        (origin.as_str(), found.as_slice()),
+        ("Staged", value.as_slice())
+    );
     assert_eq!(
         keychain.read("acct-identity").unwrap().as_slice(),
+        value.as_slice(),
+        "an interrupted move finishes from its staged copy"
+    );
+    assert_eq!(
+        keychain.status_as("acct-identity-retrust", Class::PinnedSelf),
+        Status::Missing
+    );
+    assert!(
+        !keychain.gather("acct-identity").unwrap().moves(),
+        "a rerun converges"
+    );
+
+    assert_eq!(
+        keychain.create_staged_for_test("acct-identity", &value),
+        Status::Ok
+    );
+    assert_eq!(gathered(&keychain, "acct-identity").0, "CurrentAndStaged");
+    assert_eq!(
+        keychain.status_as("acct-identity-retrust", Class::PinnedSelf),
+        Status::Missing,
+        "an equal leftover copy is removed"
+    );
+    assert_eq!(
+        keychain.create_staged_for_test("acct-identity", &dummy()),
+        Status::Ok
+    );
+    assert_eq!(
+        keychain.gather("acct-identity").err(),
+        Some(Status::Changed)
+    );
+
+    legacy(&keychain, "acct-key-g1", &value, &[own()]);
+    assert_eq!(gathered(&keychain, "acct-key-g1").0, "Legacy");
+    assert_eq!(
+        keychain.read("acct-key-g1").unwrap().as_slice(),
         value.as_slice()
     );
     assert_eq!(
-        keychain.status_as("acct-identity-retrust", Class::PinnedSelf),
-        Status::Missing
+        keychain.legacy_references().unwrap(),
+        vec!["acct-key-g1".to_owned()],
+        "the legacy original stays until it is retired"
     );
-    assert_eq!(
-        keychain.retrust("acct-identity", &|_| true),
-        Ok(Status::Exists)
-    );
-    assert_eq!(
-        keychain.create_as("acct-identity-retrust", Class::PinnedSelf, &value),
-        Status::Ok
-    );
-    assert_eq!(
-        keychain.retrust("acct-identity", &|_| true),
-        Ok(Status::Exists)
-    );
-    assert_eq!(
-        keychain.status_as("acct-identity-retrust", Class::PinnedSelf),
-        Status::Missing
-    );
-    assert_eq!(
-        keychain.create_as("acct-identity-retrust", Class::PinnedSelf, &dummy()),
-        Status::Ok
-    );
-    assert_eq!(
-        keychain.retrust("acct-identity", &|_| true),
-        Err(Status::Changed)
-    );
-    assert_eq!(
-        keychain.retrust("acct-password", &|_| true),
-        Err(Status::Failed)
-    );
+    assert_eq!(keychain.gather("acct-key-g2").err(), Some(Status::Missing));
+    assert_eq!(keychain.gather("acct-password").err(), Some(Status::Failed));
+    assert_no_plaintext(throwaway.dir.path(), &value);
 }
 
 fn legacy(keychain: &Keychain, reference: &str, value: &[u8], trusted: &[CFType]) {
@@ -291,7 +314,7 @@ fn legacy(keychain: &Keychain, reference: &str, value: &[u8], trusted: &[CFType]
 }
 
 #[test]
-fn migration_proves_the_copy_and_retirement_needs_an_equal_protected_value() {
+fn migration_moves_passwords_only_and_retirement_needs_an_equal_protected_value() {
     let throwaway = Throwaway::new();
     let keychain = throwaway.keychain();
     let value = dummy();
@@ -300,11 +323,13 @@ fn migration_proves_the_copy_and_retirement_needs_an_equal_protected_value() {
         keychain.legacy_references().unwrap(),
         vec!["a-census-key".to_owned()]
     );
-    assert_eq!(keychain.migrate("a-census-key", &|_| true), Ok(Status::Ok));
     assert_eq!(
-        keychain.migrate("a-census-key", &|_| true),
-        Ok(Status::Exists)
+        keychain.migrate("a-census-key"),
+        Err(Migration::Refused),
+        "keys move only with their whole account"
     );
+    assert_eq!(keychain.status("a-census-key"), Status::Missing);
+    gathered(&keychain, "a-census-key");
     assert_eq!(keychain.retire_legacy("a-census-key"), Ok(()));
     assert!(keychain.legacy_references().unwrap().is_empty());
     assert_eq!(
@@ -314,10 +339,6 @@ fn migration_proves_the_copy_and_retirement_needs_an_equal_protected_value() {
 
     assert_eq!(keychain.create("b-census-key", &dummy()), Status::Ok);
     legacy(&keychain, "b-census-key", &value, &[own()]);
-    assert_eq!(
-        keychain.migrate("b-census-key", &|_| true),
-        Err(Migration::Mismatch)
-    );
     assert_eq!(
         keychain.retire_legacy("b-census-key"),
         Err(Migration::Mismatch)
@@ -329,15 +350,12 @@ fn migration_proves_the_copy_and_retirement_needs_an_equal_protected_value() {
     );
 
     legacy(&keychain, "c-census-key", &value, &[other()]);
-    assert_eq!(
-        keychain.migrate("c-census-key", &|_| true),
-        Err(Migration::Legacy(Status::Denied))
-    );
+    assert_eq!(keychain.gather("c-census-key").err(), Some(Status::Denied));
     assert_eq!(keychain.status("c-census-key"), Status::Missing);
 
     legacy(&keychain, "d-password", &value, &[own()]);
     assert_eq!(
-        keychain.migrate("d-password", &|_| true),
+        keychain.migrate("d-password"),
         Err(Migration::Protected(Status::Denied))
     );
     assert_eq!(keychain.status("d-password"), Status::Ok);
@@ -357,16 +375,13 @@ fn migration_proves_the_copy_and_retirement_needs_an_equal_protected_value() {
         Status::Ok
     );
     legacy(&keychain, "e-census-key", &value, &[own()]);
-    assert_eq!(
-        keychain.migrate("e-census-key", &|_| true),
-        Err(Migration::Protected(Status::OtherBinary))
-    );
+    assert_eq!(keychain.gather("e-census-key").err(), Some(Status::Denied));
     assert_eq!(
         keychain.retire_legacy("e-census-key"),
         Err(Migration::Protected(Status::OtherBinary))
     );
     assert_eq!(
-        keychain.migrate("f-census-key", &|_| true),
+        keychain.migrate("f-password"),
         Err(Migration::Legacy(Status::Missing))
     );
     assert_no_plaintext(throwaway.dir.path(), &value);
@@ -387,6 +402,56 @@ fn explicit_keychains_never_open_the_login_or_system_keychains() {
     let link = throwaway.dir.path().join("link.keychain-db");
     std::os::unix::fs::symlink(home.join("Library/Keychains/login.keychain-db"), &link).unwrap();
     assert!(explicit(&link).is_err(), "a symlink to the login keychain");
+}
+
+fn chmod(arguments: &[&str], path: &Path) {
+    let status = std::process::Command::new("/bin/chmod")
+        .args(arguments)
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn explicit_keychains_refuse_second_links_and_granting_acls() {
+    let throwaway = Throwaway::new();
+    let me = std::process::Command::new("/usr/bin/id")
+        .arg("-un")
+        .output()
+        .unwrap();
+    let me = String::from_utf8(me.stdout).unwrap();
+    let me = me.trim();
+    assert!(explicit(&throwaway.path).is_ok());
+
+    let alias = throwaway.dir.path().join("alias.keychain-db");
+    fs::hard_link(&throwaway.path, &alias).unwrap();
+    assert!(
+        explicit(&throwaway.path).is_err(),
+        "a file with a second link"
+    );
+    assert!(explicit(&alias).is_err(), "the second link itself");
+    fs::remove_file(&alias).unwrap();
+
+    let directory = throwaway.dir.path();
+    chmod(&["+a", &format!("user:{me} allow add_file")], directory);
+    assert!(
+        explicit(&throwaway.path).is_err(),
+        "an ACL granting writes above the file"
+    );
+    chmod(&["-N"], directory);
+    chmod(&["+a", &format!("user:{me} allow write")], &throwaway.path);
+    assert!(
+        explicit(&throwaway.path).is_err(),
+        "an ACL granting writes on the file"
+    );
+    chmod(&["-N"], &throwaway.path);
+    chmod(&["+a", "everyone deny delete"], directory);
+    assert!(
+        explicit(&throwaway.path).is_ok(),
+        "a deny entry grants nothing"
+    );
+    chmod(&["-N"], directory);
 }
 
 #[test]

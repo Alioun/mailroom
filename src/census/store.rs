@@ -121,6 +121,30 @@ impl CensusKeys {
         keys.generation = generation;
         Ok(keys)
     }
+    /// A commitment to all 128 identity bytes under the encryption key. The saved state
+    /// authenticates the encryption key, so a stored commitment authenticates identity
+    /// bytes that the state itself never checks. Accounts without identity have none.
+    pub(crate) fn identity_commitment(&self) -> Option<String> {
+        let identity = self.identity.as_ref()?;
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.encryption.as_ref())
+            .expect("valid HMAC key");
+        mac.update(b"mailroom/identity-commitment/v1\0");
+        mac.update(self.account.as_str().as_bytes());
+        mac.update(b"\0");
+        mac.update(&self.generation.to_be_bytes());
+        mac.update(identity);
+        Some(data_encoding::HEXLOWER.encode(&mac.finalize().into_bytes()))
+    }
+    /// Whether these keys carry identity bytes matching the stored commitment.
+    pub(crate) fn commits_to(&self, stored: Option<&str>) -> bool {
+        match (self.identity_commitment(), stored) {
+            (Some(actual), Some(stored)) => bool::from(subtle::ConstantTimeEq::ct_eq(
+                actual.as_bytes(),
+                stored.as_bytes(),
+            )),
+            _ => false,
+        }
+    }
     pub(crate) fn recovery_authority(&mut self, authority: &str) {
         self.recovery_authority = Some(authority.to_owned());
     }

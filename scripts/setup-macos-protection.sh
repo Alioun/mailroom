@@ -625,7 +625,7 @@ local legacy="$REFS" dropped="$DROPPED"
 
 stage "Move each account's keys from an earlier build"
 say "Click Allow (never Always Allow) if macOS asks to let this build read a key once."
-say "Each account's keys move together, and only after they open its saved data."
+say "Each account's keys are checked together against its saved data before any key moves."
 while read -r id <&3; do
   [[ -n "$id" ]] || continue
   mailroom keychain settle "$id"

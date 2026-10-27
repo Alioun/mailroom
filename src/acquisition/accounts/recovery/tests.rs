@@ -750,8 +750,11 @@ fn scale_recovery_capture() {
 }
 
 /// A rotated account captured before identity commitments, or a bundle whose identity no
-/// longer matches its commitment, is refused before any key is imported. A restore left
-/// pending with such a bundle refuses on resume and keeps its marker and staged copy.
+/// longer matches its commitment, is refused before any key is imported. The
+/// commitment-free capture is otherwise consistent: its manifest inventory is recomputed
+/// for the metadata without the commitment, and its preview and pending marker are its own.
+/// A restore left pending by an earlier build, with keys already imported, refuses on
+/// resume and keeps those keys, the marker and the staged bundle.
 #[test]
 fn rotated_bundles_without_a_matching_identity_commitment_are_refused_before_import() {
     let (root, repo, a) = fixture();
@@ -768,25 +771,39 @@ fn rotated_bundles_without_a_matching_identity_commitment_are_refused_before_imp
         fs::write(&path, &sealed).unwrap();
         (path, sealed)
     };
+    let resource = stream::file_digest(c.resource.path()).unwrap();
     let mut uncommitted = c.legacy();
     uncommitted.account.identity_commitment = None;
+    uncommitted.manifest.resources = inventory(&uncommitted.account, &resource).unwrap();
+    assert!(
+        uncommitted.manifest.resources != c.manifest.resources,
+        "the inventory follows the metadata"
+    );
     let mut planted = c.legacy();
     planted.identity = Some(SecretBytes(Zeroizing::new(vec![0x5a; 128])));
-    let (committed, _) = write(&c.legacy());
+    let identity_ref = a.identity_ref.clone().unwrap();
 
     for (case, captured) in [("uncommitted", uncommitted), ("planted identity", planted)] {
         let (path, sealed) = write(&captured);
+        let id = digest(&sealed);
         let fresh_root = tempfile::tempdir().unwrap();
         let fresh = persistent_accounts(fresh_root.path());
+        let preview = RestorePreview {
+            manifest: captured.manifest.clone(),
+            bundle: id.clone(),
+            target: fresh.paths.config.to_string_lossy().into_owned(),
+            account_absent: true,
+            shared_state: "excluded_preserve_current".into(),
+            consequences: LIMITATIONS.into(),
+        };
         assert!(fresh.restore_preview(&path, &secret()).is_err(), "{case}");
-        let preview = fresh.restore_preview(&committed, &secret()).unwrap();
         assert!(
             fresh
                 .restore(&path, &secret(), &preview, |_| Ok(()))
                 .is_err(),
             "{case}"
         );
-        for reference in [&a.local_secret_ref, a.identity_ref.as_ref().unwrap()] {
+        for reference in [&a.local_secret_ref, &identity_ref, &a.password_ref] {
             assert_eq!(
                 fresh.backend.get(reference).err(),
                 Some(AcquisitionError::CredentialMissing),
@@ -801,29 +818,52 @@ fn rotated_bundles_without_a_matching_identity_commitment_are_refused_before_imp
             "{case}: the source bundle is kept"
         );
 
-        // As if an earlier build had staged the bundle and written its marker.
-        let id = digest(&sealed);
+        // As an earlier build left it: bundle staged, marker written, keys imported.
         fresh.stage_bundle(&path, &id).unwrap();
-        let mut pending = preview.clone();
-        pending.bundle = id.clone();
         let tx = Transaction {
             version: 1,
-            bundle: id,
+            bundle: id.clone(),
             authority: nonce(),
-            preview: pending,
+            preview,
         };
         write_json(&fresh.restore_marker(&a.id), &tx).unwrap();
+        fresh
+            .put_exact(&a.local_secret_ref, &captured.key.0)
+            .unwrap();
+        fresh
+            .put_exact(&identity_ref, &captured.identity.as_ref().unwrap().0)
+            .unwrap();
         assert!(fresh.resume_restore(&a.id, &secret()).is_err(), "{case}");
         assert!(
             fresh.restore_marker(&a.id).exists(),
             "{case}: the marker is kept"
         );
         assert_eq!(
-            fresh.backend.get(&a.local_secret_ref).err(),
+            fs::read(fresh.staged_bundle(&id).unwrap()).unwrap(),
+            sealed,
+            "{case}: the staged bundle is kept"
+        );
+        assert!(
+            !fresh.metadata_path(&a.id).exists(),
+            "{case}: nothing is installed"
+        );
+        assert_eq!(
+            fresh.backend.get(&a.local_secret_ref).unwrap().bytes(),
+            &captured.key.0[..],
+            "{case}: imported keys are kept"
+        );
+        assert_eq!(
+            fresh.backend.get(&identity_ref).unwrap().bytes(),
+            &captured.identity.as_ref().unwrap().0[..],
+            "{case}"
+        );
+        assert_eq!(
+            fresh.backend.get(&a.password_ref).err(),
             Some(AcquisitionError::CredentialMissing),
-            "{case}: resuming imports nothing"
+            "{case}: resuming adds no key"
         );
     }
+    let (committed, _) = write(&c.legacy());
     let fresh_root = tempfile::tempdir().unwrap();
     let fresh = persistent_accounts(fresh_root.path());
     let preview = fresh.restore_preview(&committed, &secret()).unwrap();

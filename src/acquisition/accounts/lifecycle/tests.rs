@@ -497,7 +497,7 @@ fn lifecycle_snapshot_worker() {
 }
 
 #[test]
-fn unreadable_dependent_store_keeps_the_old_key_and_recovers_only_after_original_bytes_return() {
+fn unreadable_dependent_store_keeps_the_old_key_rolls_back_and_rotates_once_bytes_return() {
     let root = tempfile::tempdir().unwrap();
     let repo = persistent_accounts(root.path());
     let a = account(&repo);
@@ -515,12 +515,22 @@ fn unreadable_dependent_store_keeps_the_old_key_and_recovers_only_after_original
     assert!(repo.backend.get(&a.local_secret_ref).is_ok());
     assert_eq!(repo.load_metadata(&a.id).unwrap().generation, 0);
     assert_eq!(fs::read(&path).unwrap(), damaged);
-    assert!(repo.recover(&a.id, &effects).is_err());
+    repo.recover(&a.id, &effects).unwrap();
+    assert!(
+        !repo.intent_path(&a.id).exists(),
+        "the unpublished rotation is undone"
+    );
     assert!(repo.backend.get(&a.local_secret_ref).is_ok());
+    assert_eq!(repo.load_metadata(&a.id).unwrap().generation, 0);
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        damaged,
+        "rolling back reads and writes no earlier data"
+    );
     fs::write(&path, &original).unwrap();
     drop(repo);
     let repo = persistent_accounts(root.path());
-    repo.recover(&a.id, &effects).unwrap();
+    repo.rotate(&a.id, &effects).unwrap();
     let current = repo.load(&a.id).unwrap();
     let after = snapshots(&repo, &current, &effects);
     for (i, (before, after)) in baseline.iter().zip(after).enumerate() {
@@ -747,82 +757,184 @@ fn strip_commitments(repo: &Accounts, id: &AccountId, roles: &[&str]) {
     strip(repo.metadata_path(id), &[String::new()]);
 }
 
+/// Every persisted rotation phase with its recovery rule from the receipt's state table.
+const ROTATION_PHASES: [(&str, bool); 14] = [
+    ("intent", false),
+    ("rotate_identity", false),
+    ("rotate_key", false),
+    ("rotate_primary", false),
+    ("rotate_mailbox", false),
+    ("rotate_invoice", false),
+    ("rotate_unsubscribe", false),
+    ("metadata", true),
+    ("rotate_verified", true),
+    ("rotate_retire_data", true),
+    ("rotate_retire_data#2", true),
+    ("rotate_retire_data#3", true),
+    ("rotate_retire_data#4", true),
+    ("rotate_retire_key", true),
+];
+
+fn plant(repo: &Accounts, reference: &str) {
+    repo.backend.delete(reference).unwrap();
+    repo.backend
+        .put(reference, &SecretValue::new(vec![0x5a; 32]))
+        .unwrap();
+}
+
 #[test]
-fn a_rotation_recorded_before_commitments_recovers_only_from_authenticated_identity() {
-    for (phase, recovers) in [
-        ("rotate_key", true),
-        ("rotate_primary", true),
-        ("rotate_unsubscribe", true),
+fn rotation_recovery_follows_the_state_table_and_never_uses_an_unauthenticated_next_key() {
+    for (phase, published) in ROTATION_PHASES {
+        for variant in [
+            "genuine",
+            "pre_commitment",
+            "metadata_only",
+            "planted",
+            "pre_commitment_planted",
+        ] {
+            let case = format!("{phase} {variant}");
+            let root = tempfile::tempdir().unwrap();
+            let repo = persistent_accounts(root.path());
+            let a = account(&repo);
+            let effects = root.path().join("mailboxes");
+            populate(&repo, &a, &effects);
+            let placeholder = repo
+                .store(&a)
+                .unwrap()
+                .keys()
+                .placeholder("sender", "a@example.test");
+            let earlier_path = cipher_path(&repo.paths.data, &a.id, 0);
+            let later_path = cipher_path(&repo.paths.data, &a.id, 1);
+            let earlier = fs::read(&earlier_path).unwrap();
+            let next_key = format!("{}-key-g1", a.id.as_str());
+            let identity = format!("{}-identity", a.id.as_str());
+            fail(Some(phase));
+            assert!(repo.rotate(&a.id, &effects).is_err(), "{case}");
+            fail(None);
+            match variant {
+                "pre_commitment" | "pre_commitment_planted" => {
+                    strip_commitments(&repo, &a.id, &["after"])
+                }
+                "metadata_only" => strip_commitments(&repo, &a.id, &[]),
+                _ => {}
+            }
+            if variant.ends_with("planted") {
+                plant(&repo, &next_key);
+            }
+            let later = fs::read(&later_path).ok();
+            let earlier_now = fs::read(&earlier_path).ok();
+            drop(repo);
+            let repo = persistent_accounts(root.path());
+            let repairs = matches!(variant, "pre_commitment" | "metadata_only");
+            let forward = published
+                && (variant == "genuine"
+                    || (repairs && matches!(phase, "metadata" | "rotate_verified")));
+            if published && repairs && forward {
+                fail(Some("metadata"));
+                assert!(
+                    repo.recover(&a.id, &effects).is_err(),
+                    "{case}: repair interrupted"
+                );
+                fail(None);
+            }
+            let outcome = repo.recover(&a.id, &effects);
+            if !published {
+                outcome.unwrap_or_else(|e| panic!("{case}: {e}"));
+                let current = repo.load(&a.id).unwrap();
+                assert_eq!(current.generation, 0, "{case}: rolled back");
+                assert!(!repo.intent_path(&a.id).exists(), "{case}");
+                assert_eq!(
+                    fs::read(&earlier_path).unwrap(),
+                    earlier,
+                    "{case}: earlier data untouched"
+                );
+                for dir in repo.directories(&effects) {
+                    assert!(
+                        !cipher_path(&dir, &a.id, 1).exists(),
+                        "{case}: next-generation data removed"
+                    );
+                }
+                for reference in [&next_key, &identity] {
+                    assert_eq!(
+                        repo.backend.get(reference).err(),
+                        Some(AcquisitionError::CredentialMissing),
+                        "{case}: the next key and new identity are deleted"
+                    );
+                }
+                let s = repo.store(&current).unwrap();
+                assert_eq!(
+                    s.keys().placeholder("sender", "a@example.test"),
+                    placeholder,
+                    "{case}"
+                );
+            } else if forward {
+                outcome.unwrap_or_else(|e| panic!("{case}: {e}"));
+                repo.recover(&a.id, &effects).unwrap();
+                let current = repo.load(&a.id).unwrap();
+                assert_eq!(current.generation, 1, "{case}");
+                assert!(!current.uncommitted(), "{case}: committed");
+                let s = repo.store(&current).unwrap();
+                assert_eq!(
+                    s.keys().placeholder("sender", "a@example.test"),
+                    placeholder,
+                    "{case}"
+                );
+            } else {
+                assert!(outcome.is_err(), "{case}: refused");
+                assert!(
+                    repo.intent_path(&a.id).exists(),
+                    "{case}: the intent is kept"
+                );
+                assert_eq!(
+                    fs::read(&later_path).ok(),
+                    later,
+                    "{case}: next-generation data unchanged"
+                );
+                assert_eq!(
+                    fs::read(&earlier_path).ok(),
+                    earlier_now,
+                    "{case}: earlier data unchanged"
+                );
+                assert!(
+                    repo.backend.get(&identity).is_ok(),
+                    "{case}: the identity is kept"
+                );
+                if variant.ends_with("planted") {
+                    let planted = repo.backend.get(&next_key).unwrap();
+                    assert_eq!(planted.bytes(), &[0x5a; 32][..], "{case}");
+                }
+            }
+        }
+    }
+
+    // A second rotation: the earlier account already has an identity, which rollback keeps.
+    for (phase, published) in [
+        ("rotate_key", false),
+        ("rotate_primary", false),
         ("metadata", true),
-        ("rotate_verified", true),
-        ("rotate_retire_data", false),
-        ("rotate_retire_key", false),
     ] {
         let root = tempfile::tempdir().unwrap();
         let repo = persistent_accounts(root.path());
         let a = account(&repo);
         let effects = root.path().join("mailboxes");
         populate(&repo, &a, &effects);
-        let placeholder = repo
-            .store(&a)
-            .unwrap()
-            .keys()
-            .placeholder("sender", "a@example.test");
+        repo.rotate(&a.id, &effects).unwrap();
+        let identity = format!("{}-identity", a.id.as_str());
         fail(Some(phase));
-        assert!(repo.rotate(&a.id, &effects).is_err(), "{phase}");
+        assert!(repo.rotate(&a.id, &effects).is_err());
         fail(None);
-        strip_commitments(&repo, &a.id, &["after"]);
-        drop(repo);
-        let repo = persistent_accounts(root.path());
+        strip_commitments(&repo, &a.id, &["before", "after"]);
+        plant(&repo, &format!("{}-key-g2", a.id.as_str()));
         let outcome = repo.recover(&a.id, &effects);
-        assert_eq!(outcome.is_ok(), recovers, "{phase}");
-        if recovers {
-            let current = repo.load(&a.id).unwrap();
-            assert_eq!(current.generation, 1, "{phase}");
-            assert!(!current.uncommitted(), "{phase}: the commitment is saved");
-            let s = repo.store(&current).unwrap();
-            assert_eq!(
-                s.keys().placeholder("sender", "a@example.test"),
-                placeholder,
-                "{phase}"
-            );
+        assert_eq!(outcome.is_ok(), !published, "{phase}");
+        assert!(
+            repo.backend.get(&identity).is_ok(),
+            "{phase}: the earlier identity is kept"
+        );
+        if published {
+            assert!(repo.intent_path(&a.id).exists(), "{phase}");
         } else {
-            assert!(
-                repo.intent_path(&a.id).exists(),
-                "{phase}: the intent is kept"
-            );
-            let current = repo.load(&a.id).unwrap();
-            for reference in [
-                &current.local_secret_ref,
-                current.identity_ref.as_ref().unwrap(),
-            ] {
-                assert!(
-                    repo.backend.get(reference).is_ok(),
-                    "{phase}: keys are kept"
-                );
-            }
-            assert!(
-                cipher_path(&repo.paths.data, &a.id, 1).exists(),
-                "{phase}: data is kept"
-            );
+            assert_eq!(repo.load(&a.id).unwrap().generation, 1, "{phase}");
         }
     }
-
-    // An account already rotated before commitments has no authenticated identity at all.
-    let root = tempfile::tempdir().unwrap();
-    let repo = persistent_accounts(root.path());
-    let a = account(&repo);
-    let effects = root.path().join("mailboxes");
-    populate(&repo, &a, &effects);
-    repo.rotate(&a.id, &effects).unwrap();
-    fail(Some("rotate_primary"));
-    assert!(repo.rotate(&a.id, &effects).is_err());
-    fail(None);
-    strip_commitments(&repo, &a.id, &["before", "after"]);
-    assert!(repo.recover(&a.id, &effects).is_err());
-    assert!(repo.intent_path(&a.id).exists(), "the intent is kept");
-    assert!(
-        cipher_path(&repo.paths.data, &a.id, 1).exists(),
-        "earlier data is kept"
-    );
 }

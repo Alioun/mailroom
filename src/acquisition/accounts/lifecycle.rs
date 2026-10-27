@@ -251,10 +251,17 @@ impl Accounts {
     /// Identity bytes open a store only with the commitment saved beside them. An account
     /// whose identity predates commitments stays closed until the owner adopts it.
     fn store_keys(&self, a: &Account, kind: usize) -> Result<CensusKeys, AcquisitionError> {
-        let mut keys = self.uncommitted_keys(a)?;
+        let keys = self.uncommitted_keys(a)?;
         if a.identity_ref.is_some() && !keys.commits_to(a.identity_commitment.as_deref()) {
             return Err(AcquisitionError::Credentials);
         }
+        Self::kind_keys(a, keys, kind)
+    }
+    fn kind_keys(
+        a: &Account,
+        mut keys: CensusKeys,
+        kind: usize,
+    ) -> Result<CensusKeys, AcquisitionError> {
         if kind == 0 {
             if let Some(restored) = &a.restored {
                 keys.recovery_authority(&restored.authority);
@@ -745,62 +752,77 @@ impl Accounts {
                 stores,
             }) => {
                 let current = self.load_metadata(id)?;
-                if current.generation == before.generation
-                    && matches!(
-                        self.backend.get(&after.local_secret_ref),
-                        Err(AcquisitionError::CredentialMissing)
-                    )
-                {
-                    // No staged ciphertext can exist before its key. Roll back the empty rotation.
-                    for dir in self.directories(effects) {
-                        if cipher_path(&dir, id, after.generation).exists() {
-                            return Err(AcquisitionError::Storage);
-                        }
-                    }
-                    if before.identity_ref.is_none() {
-                        self.backend.delete(
-                            after
-                                .identity_ref
-                                .as_ref()
-                                .ok_or(AcquisitionError::Storage)?,
-                        )?;
-                    }
-                    return self.clear_intent(id);
+                if current.generation == before.generation {
+                    return self.roll_back_rotation(&before, &after, effects);
                 }
-                let (current, after) = if after.uncommitted() {
-                    let after = self.commit_rotation(&before, after, &stores)?;
-                    if current.generation == after.generation {
-                        self.publish(&after)?;
-                        (after.clone(), after)
-                    } else {
-                        (current, after)
-                    }
+                if current.generation != after.generation
+                    || current.local_secret_ref != after.local_secret_ref
+                    || current.identity_ref != after.identity_ref
+                {
+                    return Err(AcquisitionError::Storage);
+                }
+                let after = if current.uncommitted() {
+                    self.repair_published_rotation(&before, current)?
                 } else {
-                    (current, after)
+                    current
                 };
-                let locked = self.lock_stores(&current, effects)?;
+                let locked = self.lock_stores(&after, effects)?;
                 self.finish_rotation(&before, &after, effects, &stores, locked)
             }
         }
     }
-    /// A rotation recorded before identity commitments carries none. When the account had
-    /// no identity before rotating, its identity bytes derive from the earlier key, which
-    /// the earlier saved state authenticates, so the commitment is computed, not trusted.
-    /// Every other such rotation is refused, and its intent, keys and files stay as they are.
-    fn commit_rotation(
+    /// Recovery of a rotation whose metadata still selects the earlier generation. The
+    /// earlier ciphertexts and key are intact, so the rotation is undone, and no
+    /// next-generation key is ever trusted: one planted in the meantime is deleted with it.
+    fn roll_back_rotation(
         &self,
         before: &Account,
-        mut after: Account,
-        stores: &[usize],
+        after: &Account,
+        effects: &Path,
+    ) -> Result<(), AcquisitionError> {
+        for dir in self.directories(effects) {
+            remove_file(&cipher_path(&dir, &after.id, after.generation))?;
+            for path in attributable_staging(&dir, &after.id)? {
+                remove_file(&path)?;
+            }
+        }
+        boundary("rollback_data")?;
+        self.backend.delete(&after.local_secret_ref)?;
+        if before.identity_ref.is_none() {
+            self.backend.delete(
+                after
+                    .identity_ref
+                    .as_ref()
+                    .ok_or(AcquisitionError::Storage)?,
+            )?;
+        }
+        boundary("rollback_keys")?;
+        self.clear_intent(&after.id)
+    }
+    /// Metadata published by a rotation from before identity commitments carries none. It
+    /// is repaired only from authenticated material: the earlier key, authenticated by the
+    /// earlier primary state; the identity, equal to the bytes derived from that key; and
+    /// the next key, under which the published primary state equals the earlier snapshot.
+    /// The commitment is saved in one metadata write. Anything else is refused, with the
+    /// intent, keys and files kept.
+    fn repair_published_rotation(
+        &self,
+        before: &Account,
+        mut current: Account,
     ) -> Result<Account, AcquisitionError> {
         if before.identity_ref.is_some() {
             return Err(AcquisitionError::Credentials);
         }
         let earlier = self.open_store(before, &self.paths.data, 0)?;
-        earlier.load_state()?;
+        let mut snapshot = earlier.load_state()?;
+        snapshot.revision = snapshot
+            .revision
+            .checked_add(1)
+            .ok_or(AcquisitionError::Storage)?;
         let identity = Zeroizing::new(earlier.keys().identity_material());
+        drop(earlier);
         let stored = self.backend.get(
-            after
+            current
                 .identity_ref
                 .as_ref()
                 .ok_or(AcquisitionError::Storage)?,
@@ -811,23 +833,16 @@ impl Accounts {
         )) {
             return Err(AcquisitionError::Credentials);
         }
-        let key = self.backend.get(&after.local_secret_ref)?;
-        after.identity_commitment = CensusKeys::rotated(
-            &LocalSecret::from_bytes(key.bytes().to_vec())?,
-            &after.id,
-            &identity,
-            after.generation,
-        )?
-        .identity_commitment();
-        self.record(
-            &after.id,
-            &Intent::Rotating {
-                before: before.clone(),
-                after: after.clone(),
-                stores: stores.to_vec(),
-            },
+        let later = EncryptedStore::new(
+            self.paths.data.clone(),
+            Self::kind_keys(&current, self.uncommitted_keys(&current)?, 0)?,
         )?;
-        Ok(after)
+        if serde_json::to_vec(&later.load_state()?).ok() != serde_json::to_vec(&snapshot).ok() {
+            return Err(AcquisitionError::Credentials);
+        }
+        current.identity_commitment = later.keys().identity_commitment();
+        self.publish(&current)?;
+        Ok(current)
     }
 }
 fn valid_nonce(value: &str) -> bool {

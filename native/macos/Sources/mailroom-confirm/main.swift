@@ -34,12 +34,12 @@ do {
     try requirePrivatePipes()
     var input = try readRequest()
     defer { input.resetBytes(in: 0..<input.count) }
-    let envelope = try JSONDecoder().decode(Envelope.self, from: input)
-    var challenge = envelope.challenge
-    defer { challenge.resetBytes(in: 0..<challenge.count) }
+    var envelope = try JSONDecoder().decode(Envelope.self, from: input)
+    defer { envelope.wipe() }
     let request = try validate(request: envelope.request)
     let approved = await ask(request)
-    write(try outcome(request: envelope.request, id: request.request_id, outcome: approved ? .approved : .cancelled, challenge: challenge))
+    let answer = try outcome(request: envelope.request, id: request.request_id, outcome: approved ? .approved : .cancelled, challenge: envelope.challenge)
+    write(answer)
 } catch {
     // No parser data, challenge or OS error text leaves the helper.
     exit(1)

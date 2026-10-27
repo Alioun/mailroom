@@ -111,6 +111,13 @@ public func outcome(request bytes: Data, id: String, outcome: Outcome, challenge
 }
 
 public struct Envelope: Decodable {
-    public let request: Data
-    public let challenge: Data
+    public var request: Data
+    public var challenge: Data
+
+    /// Overwrites both buffers in place. Call it once no other copy is alive, so the
+    /// buffers are uniquely owned and copy-on-write cannot redirect the reset.
+    public mutating func wipe() {
+        challenge.withUnsafeMutableBytes { $0.initializeMemory(as: UInt8.self, repeating: 0) }
+        request.withUnsafeMutableBytes { $0.initializeMemory(as: UInt8.self, repeating: 0) }
+    }
 }

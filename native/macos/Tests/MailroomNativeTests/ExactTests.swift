@@ -108,4 +108,11 @@ final class ExactTests: XCTestCase {
         XCTAssertEqual(limit.rlim_cur, 0)
         XCTAssertEqual(limit.rlim_max, 0)
     }
+
+    func testEnvelopeWipeOverwritesItsOwnBuffers() throws {
+        var envelope = try JSONDecoder().decode(Envelope.self, from: Data(#"{"request":"AAEC","challenge":"AwQF"}"#.utf8))
+        envelope.wipe()
+        XCTAssertEqual(envelope.challenge, Data(count: 3))
+        XCTAssertEqual(envelope.request, Data(count: 3))
+    }
 }

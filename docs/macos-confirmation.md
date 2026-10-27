@@ -1,34 +1,42 @@
-# Exact-action confirmation
+# Native confirmation and protected Keychain credentials on macOS
 
-The invoice and subscription review routes use expiring server-owned requests for synthetic confirmation. The UI displays the action derived from the request. Each request names the account, purpose, revision, target, applicable sending and receiving identities, source and content digests. The full existing generation-bound HMAC receipt remains part of the internal binding.
+Two small Swift helpers in `native/macos` do the macOS work. `mailroom-confirm` shows one exact action and returns a signed answer. `mailroom-keychain` performs one Keychain operation. Mailroom launches either only when the running process has the code identity pinned into the mailroom binary at build time.
 
-The public `receipt` is an opaque random request identity. It is valid for at most five minutes and one attempted confirmation. Requests disappear on process replacement. Refresh the preview after a restart or a rejected confirmation. A browser checkbox or action string alone grants no authority.
+## Exact-action requests
 
-The shared boundary verifies an explicitly installed helper identity, location and owner before requesting consent. It rejects substitution, cancellation, failed or malformed outcomes and unauthenticated responses. It reloads the encrypted state, checks the current ledger source and recomputes the exact plan after consent. Relevant application and store locks remain held through admission. Noncooperating filesystem edits remain outside the existing advisory-lock guarantee.
+Invoice sends, unsubscribe sends, subscription actions, recovery, and the consequential mailbox changes (folder creation, Sieve upload, activation, removal and compensation, backlog moves and Gmail label changes, and their undo) all pass through one confirmation boundary. The server derives each request from its own plan. A request names the account, purpose, target, sending and receiving identities, revisions and content digest. Its public receipt is a random single-use identity valid for five minutes. Mailbox changes name the operation and the exact preview receipt, which is a keyed hash of the full previewed plan, so the native dialog shows that receipt rather than every folder or message.
 
-The boundary returns an internal consumed-consent capability. The route still needs its original purpose-specific receipt and durable journal admission. Intent is saved before a simulated effect, and observation is saved afterward. Process replacement leaves interrupted effects uncertain until reconciliation. Neither native consent nor a fresh preview permits automatic retry. Sends and external unsubscribes have no mailbox-style Undo.
+After a person approves, the boundary checks the answer's HMAC under a fresh 32-byte challenge, reloads state and recomputes the plan. Only an unchanged plan yields the internal consent capability. A cancelled, failed, malformed, unauthenticated, replayed, expired or changed confirmation denies. Intent is saved before an effect and observation afterwards. An interrupted send stays uncertain until reconciled. A native yes never authorizes a retry.
 
-## Native status
+The synthetic fixture server uses an in-process backend that approves and labels its requests `synthetic`. Production builds use the native backend. A build without a pinned helper issues no request. Production provider writes remain denied before any helper access, independently of confirmation.
 
-Native execution is unavailable. The Rust native backend denies without starting a process. The Swift source compiles, but its trusted application and helper requirements are absent. Static signature checking followed by an ordinary path-based spawn does not prevent replacement between checking and execution. A protected executable and authenticated launch channel must be established before any native invocation can be enabled.
+## Launch and channel
 
-The helper source uses LocalAuthentication with a structured action-naming reason and a fresh context. It checks expected running identities and returns an authenticated request-bound outcome through pipes. Compilation does not prove actual prompt visibility, signing, installation, application trust, private-channel integrity or Keychain behavior. See [Apple API findings](macos-confirmation-research.md) for evidence and limits.
+macOS refuses to execute an already-open descriptor (`/dev/fd/N` returns EACCES), so mailroom checks the started process instead. It rejects symlinks, non-regular files, and files or parent directories that other users can write. It then starts the helper suspended with `posix_spawn`, a fixed argv, an empty environment, stdin and stdout pipes, `/dev/null` as stderr and every other descriptor closed. It reads the kernel's cdhash and code-signing flags for that process (`csops`) and resumes it only when the cdhash matches the pin and the hardened runtime, kill and hard flags are set. A file replaced at any moment before the spawn produces a different cdhash and is killed before it runs.
 
-The macOS production credential adapter also denies before keyring access. Synthetic credential replacement, creation, forgetting and rotation continue through the existing injected lifecycle backend. No encrypted stores, selected generations, stable identity references or journals were migrated by this change.
+The request and challenge travel only over the private pipes. Another local process cannot answer in the helper's place, because the answer must carry an HMAC under a challenge it never sees. The Developer ID requirement is a typed slot (`Pin::DeveloperIdRequirement`) that this build refuses.
 
-Invoice mail-app forwarding and unsubscribe browser or mail-app copy cards remain preparation only. Nothing launches or sends through them. The interface labels all fake outcomes as synthetic. Provider writes stay independently denied.
+## Keychain items
 
-## Compile and inspect the owner setup plan
+Items use the generic-password service `mailroom-protected-v1`. The helper creates each item with an explicit access list.
 
-Run these commands from the checkout:
+- Mailbox passwords trust no application, so macOS asks the person at every read. A read that cannot ask returns nothing. This is the per-access requirement for the assisted workflow.
+- Local census keys and identity keys trust only the helper's own cdhash, because every store open reads them. Any other binary, a rebuilt helper included, triggers a system prompt.
+
+Items are created, never overwritten. Deletion is idempotent. Secrets reach the helper only through its stdin pipe, come back only in an authenticated reply, are zeroized after use and never appear in argv, logs, errors or files. Errors are fixed codes.
+
+Legacy items from the earlier `keyring` service `mailroom` are detected by name only. Migration copies each into a protected item when the owner runs it. Originals stay until the owner retires them.
+
+## Owner setup
+
+Run `bash scripts/setup-macos-protection.sh` in a terminal. `--plan` previews it. The wizard builds and signs both helpers, records their cdhashes in `~/.config/mailroom/native-pins.env`, builds mailroom with the pins, shows an invented confirmation to approve and one to cancel, migrates legacy items, takes any missing mailbox password through the helper's hidden terminal prompt and checks the prompt at every password read. `bash scripts/verify-setup-macos-protection.sh` drives it against fake tools.
+
+## Verification
 
 ```sh
-mkdir -p .audit
-swiftc -parse-as-library native/macos/ConfirmationHelper.swift -o .audit/macos-confirmation-helper
-bash -n scripts/setup-macos-protection.sh
-bash scripts/setup-macos-protection.sh --plan
+(cd native/macos && swift test)
+cargo test --locked
+bash scripts/verify-setup-macos-protection.sh
 ```
 
-Do not invoke the compiled helper for synthetic verification. The owner-run wizard is a prerequisite walkthrough. Its planning mode has no side effects. The interactive path writes no configuration and cannot install helpers, enter credentials or enable invocation. It ends with an explicit incomplete-acceptance status.
-
-The owner must choose exact trusted signing requirements. Future implementation and acceptance must establish protected launch, real prompt cancellation and replay behavior, application-specific Keychain trust and approval on every access before private credential entry. The later encrypted-recovery feature needs a bundle outside the Mac and a separately held secret. This walkthrough creates neither and chooses no storage provider, schedule, retention or escrow policy.
+The Swift tests and the Rust Keychain tests create a throwaway keychain in a temporary directory and delete it. They never touch the login keychain or the search list. A test cannot click a real dialog, so the visible native prompt, per-access approval and migration of real items remain owner checks.

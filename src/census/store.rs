@@ -36,8 +36,9 @@ pub(crate) const MAX_FILE: u64 = 2 * MAX_SNAPSHOT + 4096;
 /// compaction stays amortized over the frames it replaces.
 const MIN_FRAME_BUDGET: u64 = 64 * 1024;
 /// Schema of new base snapshots. 19 adds Q27 undo retention to the backlog
-/// journals: `completed_at` on runs and compacted `summaries`.
-pub(crate) const SCHEMA: u32 = 19;
+/// journals: `completed_at` on runs and compacted `summaries`. 20 adds each
+/// census folder's `highestmodseq`.
+pub(crate) const SCHEMA: u32 = 20;
 
 pub struct LocalSecret(Zeroizing<Vec<u8>>);
 
@@ -633,6 +634,9 @@ impl EncryptedStore {
 
     /// The state this store last read or wrote, with the reopening
     /// adjustments, while the file is still that one.
+    /// The persisted state, without reading the file, while the file is the
+    /// one this store last read or wrote. Its census is left as persisted:
+    /// the only caller replaces it.
     fn unchanged_state(&self) -> Result<Option<AccountState>, CensusError> {
         let metadata = fs::symlink_metadata(self.path()).map_err(|_| CensusError::Storage)?;
         let persisted = self.persisted.borrow();
@@ -643,7 +647,7 @@ impl EncryptedStore {
             return Ok(None);
         };
         let mut state = persisted_state(p)?;
-        normalize_interrupted(&mut state);
+        normalize_journals(&mut state);
         Ok(Some(state))
     }
 
@@ -1148,10 +1152,7 @@ impl EncryptedStore {
             )
             .map_err(|_| CensusError::Storage)?;
         let snapshot = Zeroizing::new(snapshot);
-        if !matches!(
-            version,
-            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19
-        ) {
+        if !(1..=SCHEMA).contains(&version) {
             return Err(CensusError::UnsupportedVersion);
         }
         if account != self.keys.account.as_str() {
@@ -1286,7 +1287,7 @@ impl EncryptedStore {
             return Err(CensusError::UnsupportedVersion);
         }
         let frames = decoded.as_ref().map_or(&[][..], |d| &d.frames[..]);
-        if !frames.is_empty() && !matches!(version, 18 | SCHEMA) {
+        if !frames.is_empty() && !matches!(version, 18 | 19 | SCHEMA) {
             return Err(CensusError::UnsupportedVersion);
         }
         let mut patched = std::collections::BTreeMap::new();
@@ -1313,6 +1314,15 @@ impl EncryptedStore {
         }
         for (name, value) in patched {
             apply_frame_field(&mut state, &name, value)?;
+        }
+        if version < 20
+            && state
+                .census
+                .folders
+                .values()
+                .any(|f| f.highestmodseq.is_some())
+        {
+            return Err(CensusError::UnsupportedVersion);
         }
         if version < 19
             && (!state.protocol_backlog.summaries.is_empty()
@@ -1358,6 +1368,14 @@ impl EncryptedStore {
 }
 
 /// Reopening a store never implies a running worker or an unanswered intent.
+fn normalize_journals(state: &mut AccountState) {
+    state.sieve.interrupted();
+    state.sieve_transactions.interrupted();
+    state.folder_provisioning.interrupted();
+    state.protocol_backlog.interrupted();
+    state.gmail_backlog.interrupted();
+}
+
 /// Recently decoded account files. Every request opens a fresh store and
 /// reads its account file. Decrypting and parsing a personal-scale file takes
 /// seconds, and a fresh census copy would also miss the census digest memo
@@ -1503,11 +1521,7 @@ mod decoded {
 }
 
 fn normalize_interrupted(state: &mut AccountState) {
-    state.sieve.interrupted();
-    state.sieve_transactions.interrupted();
-    state.folder_provisioning.interrupted();
-    state.protocol_backlog.interrupted();
-    state.gmail_backlog.interrupted();
+    normalize_journals(state);
     // An interrupted scan can resume, but reopening cannot imply a running worker.
     // Only a running census is touched, so an idle one stays shared with
     // the store's record and compares in constant time.

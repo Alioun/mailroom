@@ -495,3 +495,82 @@ fn cached_reads_equal_fresh_decoding_after_every_kind_of_save() {
     store.save_state(&mut state).unwrap();
     check(&store, "after truncating the torn tail");
 }
+
+/// Schema 20 adds each folder's HIGHESTMODSEQ. A schema-19 file, frames
+/// included, stays readable and its next save writes a schema-20 base;
+/// older schemas never carry a mod-sequence, in the base or after frames.
+#[test]
+fn schema_twenty_adds_folder_modseqs_and_earlier_files_stay_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, state) = seeded(dir.path(), 300);
+    let snapshot = serde_json::to_string(&state).unwrap();
+    for version in [2, 18, 19] {
+        store
+            .stage_snapshot(version, &snapshot)
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        let mut loaded = store.load_state().unwrap();
+        assert!(bytes(&loaded) == bytes(&state), "schema {version}");
+        journal_change(&mut loaded, version);
+        store.save_state(&mut loaded).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA, "schema {version}");
+    }
+    let mut marked = state.clone();
+    marked
+        .census
+        .folders
+        .values_mut()
+        .next()
+        .unwrap()
+        .highestmodseq = Some(7);
+    for version in [2, 18, 19] {
+        store
+            .stage_snapshot(version, &serde_json::to_string(&marked).unwrap())
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        assert!(
+            matches!(store.load_state(), Err(CensusError::UnsupportedVersion)),
+            "schema {version} base"
+        );
+    }
+    // A schema-19 base that a frame gives a mod-sequence.
+    for (modseq, readable) in [(None, true), (Some(9), false)] {
+        store
+            .stage_snapshot(19, &snapshot)
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        let mut loaded = store.load_state().unwrap();
+        let file = std::fs::read(store.path()).unwrap();
+        let cipher = Aes256Gcm::new_from_slice(store.keys().encryption.as_ref()).unwrap();
+        let decoded = log::decode(&cipher, store.keys().account.as_str(), &file).unwrap();
+        store.persisted.borrow_mut().as_mut().unwrap().tail = Some(Tail {
+            base_tag: decoded.base_tag,
+            base_len: decoded.base_len,
+            valid_end: decoded.valid_end,
+            next_sequence: 0,
+        });
+        let folder = loaded.census.folders.keys().next().unwrap().clone();
+        loaded
+            .census
+            .folders
+            .get_mut(&folder)
+            .unwrap()
+            .highestmodseq = modseq;
+        journal_change(&mut loaded, 20);
+        store.save_state(&mut loaded).unwrap();
+        assert!(
+            std::fs::metadata(store.path()).unwrap().len() > decoded.valid_end,
+            "a frame on the schema-19 base"
+        );
+        super::decoded::forget(&store.path());
+        let reopened = store.load_state();
+        assert_eq!(reopened.is_ok(), readable, "{modseq:?}");
+        if !readable {
+            assert!(matches!(reopened, Err(CensusError::UnsupportedVersion)));
+        }
+    }
+    drop(state);
+}

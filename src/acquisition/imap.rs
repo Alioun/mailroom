@@ -1,34 +1,48 @@
 use super::{AcquisitionError, Provider, SecretValue, scan::Cancellation};
 use crate::{
     census::{
-        Direction, HEADER_FIELDS, MessageRecord,
+        Census, Direction, FolderCensus, HEADER_FIELDS, MessageRecord, ScanState,
         acquisition::{CountObservation, CountSource, UnknownCount, now},
         parse_headers,
     },
     policy::ReadPermit,
 };
 use imap_proto::{
-    AttributeValue, MailboxDatum, MessageSection, NameAttribute, Response, SectionPath,
+    AttributeValue, MailboxDatum, MessageSection, NameAttribute, Response, ResponseCode,
+    SectionPath, Status,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{self, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     net::{TcpStream, ToSocketAddrs},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use zeroize::Zeroizing;
 
-pub(super) const BATCH: usize = 25;
 const RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(15);
-fn protocol(step: &'static str) -> impl Fn(imap::Error) -> AcquisitionError {
-    move |_error| {
-        #[cfg(test)]
-        eprintln!("imap.{step}.failure={}", super::diagnostic_code(&_error));
-        let _ = step;
-        AcquisitionError::Protocol
-    }
-}
+/// A header fetch asks for at most this many bytes of each message's header,
+/// so its response is bounded by the count it asks for.
+const HEADER_BYTES: usize = 65_537;
+/// Bytes a FETCH response row adds around its data.
+const ROW_OVERHEAD: usize = 1024;
+/// Header fetches aim at responses of about this size, from the mean header
+/// seen so far, so a connection carries few large commands instead of many
+/// small ones.
+const HEADER_TARGET: usize = 1024 * 1024;
+const HEADER_COMMAND_MAX: usize = 500;
+/// Metadata rows are small; one command carries up to this many.
+const METADATA_COMMAND_MAX: usize = 5_000;
+const METADATA_ROW_LIMIT: usize = 4 * 1024;
+/// UID sets stay under this length so command lines stay well inside the
+/// 8,000-octet limit RFC 7162 section 4 asks clients to respect.
+const SET_LENGTH: usize = 4_000;
+/// Commands in flight at once. A flight is written before its responses are
+/// read, so its commands must fit the socket buffers: a server blocked
+/// writing a response it cannot send stops reading commands.
+const WINDOW_COMMANDS: usize = 32;
+const WINDOW_BYTES: usize = 16 * 1024;
 
 #[derive(Clone)]
 pub(super) struct Folder {
@@ -75,6 +89,28 @@ impl Metadata {
                 Direction::Received
             };
     }
+    /// The metadata a saved record holds.
+    pub fn saved(record: &MessageRecord) -> Self {
+        Self {
+            uid: record.uid,
+            size: record.size,
+            date: record.internal_date.clone(),
+            flags: record.flags.clone(),
+            gmail_id: record.gmail_message_id.clone(),
+            thread_id: record.gmail_thread_id.clone(),
+            labels: record.gmail_labels.clone(),
+        }
+    }
+}
+
+/// One folder as EXAMINE and UID SEARCH ALL report it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Listing {
+    pub validity: u32,
+    pub uids: BTreeSet<u32>,
+    /// HIGHESTMODSEQ, when the server keeps mod-sequences for the folder
+    /// (RFC 7162) and this session asked for them.
+    pub modseq: Option<u64>,
 }
 
 pub(super) trait MailRead {
@@ -82,14 +118,95 @@ pub(super) trait MailRead {
     fn capabilities(&self) -> BTreeSet<String>;
     fn count(&mut self, folder: &Folder) -> CountObservation;
     fn folders(&mut self) -> Result<Vec<Folder>, AcquisitionError>;
-    fn inventory(&mut self, folder: &Folder) -> Result<(u32, BTreeSet<u32>), AcquisitionError>;
+    /// Examines `folder` and lists its UIDs. With `since`, also the metadata
+    /// of every message whose mod-sequence exceeds it, or `None` when the
+    /// folder cannot answer that.
+    fn inventory(
+        &mut self,
+        folder: &Folder,
+        since: Option<u64>,
+    ) -> Result<(Listing, Option<BTreeMap<u32, Metadata>>), AcquisitionError>;
+    /// Metadata of exactly `uids` in the folder `inventory` last examined.
     fn metadata(&mut self, uids: &[u32]) -> Result<BTreeMap<u32, Metadata>, AcquisitionError>;
     fn headers(&mut self, uids: &[u32]) -> Result<BTreeMap<u32, Vec<u8>>, AcquisitionError>;
+    /// How many headers one `headers` call should ask for.
+    fn header_batch(&self) -> usize;
 }
 
+/// Compact UID sets for `uids`: runs of three or more consecutive UIDs become
+/// ranges, and each set stays under `SET_LENGTH`. Every set names exactly
+/// the given UIDs.
+pub(in crate::acquisition) fn uid_sets(uids: impl IntoIterator<Item = u32>) -> Vec<String> {
+    let mut runs: Vec<(u32, u32)> = vec![];
+    let mut sorted: Vec<u32> = uids.into_iter().collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    for uid in sorted {
+        match runs.last_mut() {
+            Some((_, end)) if end.checked_add(1) == Some(uid) => *end = uid,
+            _ => runs.push((uid, uid)),
+        }
+    }
+    let mut sets = vec![];
+    let mut current = String::new();
+    for (start, end) in runs {
+        let item = match end - start {
+            0 => start.to_string(),
+            1 => format!("{start},{end}"),
+            _ => format!("{start}:{end}"),
+        };
+        if !current.is_empty() && current.len() + 1 + item.len() > SET_LENGTH {
+            sets.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(',');
+        }
+        current.push_str(&item);
+    }
+    if !current.is_empty() {
+        sets.push(current);
+    }
+    sets
+}
+
+/// The bytes and time one response may take. It fails after `idle` without
+/// bytes, or once it falls below `rate` bytes per second on average after
+/// its first `idle`: a slow healthy link completes, a stalled one fails
+/// promptly, and a trickle cannot hold the session.
 struct Budget {
     remaining: usize,
-    deadline: Instant,
+    started: Instant,
+    last: Instant,
+    received: usize,
+    pace: Pace,
+}
+#[derive(Clone, Copy)]
+struct Pace {
+    idle: Duration,
+    rate: usize,
+}
+const PACE: Pace = Pace {
+    idle: TIMEOUT,
+    rate: 32 * 1024,
+};
+impl Budget {
+    fn new(remaining: usize, pace: Pace) -> Self {
+        let now = Instant::now();
+        Self {
+            remaining,
+            started: now,
+            last: now,
+            received: 0,
+            pace,
+        }
+    }
+    fn expired(&self, now: Instant) -> bool {
+        now.duration_since(self.last) > self.pace.idle
+            || now
+                > self.started
+                    + self.pace.idle
+                    + Duration::from_secs_f64(self.received as f64 / self.pace.rate as f64)
+    }
 }
 struct LimitedTls {
     tls: native_tls::TlsStream<TcpStream>,
@@ -99,12 +216,14 @@ struct LimitedTls {
 impl Read for LimitedTls {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let mut budget = self.budget.lock().expect("response budget");
-        if self.cancel.is_cancelled() || budget.remaining == 0 || Instant::now() > budget.deadline {
+        if self.cancel.is_cancelled() || budget.remaining == 0 || budget.expired(Instant::now()) {
             return Err(io::Error::other("Read limit reached"));
         }
         let limit = buf.len().min(budget.remaining);
         let read = self.tls.read(&mut buf[..limit])?;
         budget.remaining -= read;
+        budget.received += read;
+        budget.last = Instant::now();
         Ok(read)
     }
 }
@@ -120,13 +239,57 @@ impl Write for LimitedTls {
     }
 }
 
+/// How the server refused one command. Transport failures are errors of
+/// their own and end the session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refused {
+    No,
+    Bad,
+}
+/// One command's untagged responses, and its tagged completion line.
+struct Reply {
+    data: Vec<u8>,
+    done: Vec<u8>,
+}
+type Answer = Result<Reply, Refused>;
+
+fn quote(value: &str) -> Option<String> {
+    if value.contains(['\r', '\n']) {
+        return None;
+    }
+    Some(format!(
+        "\"{}\"",
+        value.replace('\\', "\\\\").replace('"', "\\\"")
+    ))
+}
+
+fn protocol(step: &'static str) -> impl Fn(Refused) -> AcquisitionError {
+    move |_refused| {
+        #[cfg(test)]
+        eprintln!("imap.{step}.refused={_refused:?}");
+        let _ = step;
+        AcquisitionError::Protocol
+    }
+}
+
+/// Read-only IMAP session. Commands are written and read by this client:
+/// several read-only commands may be pipelined (RFC 3501 section 5.5), and
+/// each response is read in order up to its tagged line.
 pub(super) struct ReadOnlyImap {
-    session: imap::Session<LimitedTls>,
+    stream: BufReader<LimitedTls>,
     budget: Arc<Mutex<Budget>>,
     cancel: Cancellation,
     gmail: bool,
     special_use: bool,
+    /// CONDSTORE (RFC 7162) is advertised; Gmail's labels are not covered
+    /// by its mod-sequences, so it is never used there.
+    condstore: bool,
     capabilities: BTreeSet<String>,
+    tag: u32,
+    /// A response was left unread or unparsed, so the stream is unusable.
+    broken: bool,
+    /// Mean bytes of each header row read so far, for sizing header fetches.
+    header_mean: usize,
 }
 impl ReadOnlyImap {
     pub fn connect(
@@ -229,35 +392,44 @@ impl ReadOnlyImap {
         tcp.set_read_timeout(Some(TIMEOUT))
             .and_then(|_| tcp.set_write_timeout(Some(TIMEOUT)))
             .map_err(|_| AcquisitionError::Tls)?;
+        let _ = tcp.set_nodelay(true);
         let tls = connector
             .connect(hostname, tcp)
             .map_err(|_| AcquisitionError::Tls)?;
-        let budget = Arc::new(Mutex::new(Budget {
-            remaining: RESPONSE_LIMIT,
-            deadline: Instant::now() + TIMEOUT,
-        }));
-        let mut client = imap::Client::new(LimitedTls {
-            tls,
-            budget: budget.clone(),
-            cancel: cancel.clone(),
-        });
-        client.read_greeting().map_err(protocol("greeting"))?;
-        let session = client
-            .login(login, password.text()?)
-            .map_err(|_| AcquisitionError::Authentication)?;
+        let budget = Arc::new(Mutex::new(Budget::new(RESPONSE_LIMIT, PACE)));
         let mut result = Self {
-            session,
+            stream: BufReader::new(LimitedTls {
+                tls,
+                budget: budget.clone(),
+                cancel: cancel.clone(),
+            }),
             budget,
             cancel,
             gmail,
             special_use: false,
+            condstore: false,
             capabilities: BTreeSet::new(),
+            tag: 0,
+            broken: false,
+            header_mean: 4096,
         };
-        result.reset()?;
+        let mut greeting = vec![];
+        if !matches!(result.stream.read_until(b'\n', &mut greeting), Ok(n) if n > 0) {
+            return Err(AcquisitionError::Protocol);
+        }
+        let command = Zeroizing::new(format!(
+            "LOGIN {} {}",
+            quote(login).ok_or(AcquisitionError::Authentication)?,
+            *Zeroizing::new(quote(password.text()?).ok_or(AcquisitionError::Authentication)?)
+        ));
+        match result.run(&command, RESPONSE_LIMIT) {
+            Ok(Ok(_)) => {}
+            _ => return Err(AcquisitionError::Authentication),
+        }
         let raw = result
-            .session
-            .run_command_and_read_response("CAPABILITY")
-            .map_err(protocol("capability"))?;
+            .run("CAPABILITY", RESPONSE_LIMIT)?
+            .map_err(protocol("capability"))?
+            .data;
         let mut rest = raw.as_slice();
         while !rest.is_empty() {
             let (remaining, response) =
@@ -283,39 +455,574 @@ impl ReadOnlyImap {
             return Err(AcquisitionError::Protocol);
         }
         result.special_use = result.capabilities.contains("SPECIAL-USE");
+        result.condstore = !gmail && result.capabilities.contains("CONDSTORE");
         Ok(result)
     }
-    fn reset(&self) -> Result<(), AcquisitionError> {
+
+    /// Shortens the response pace for tests of slow and stalled links.
+    #[cfg(test)]
+    pub(super) fn pace(&mut self, idle: Duration, rate: usize) {
+        let _ = self
+            .stream
+            .get_ref()
+            .tls
+            .get_ref()
+            .set_read_timeout(Some(idle));
+        self.budget.lock().expect("response budget").pace = Pace { idle, rate };
+    }
+    fn transport(&mut self) -> AcquisitionError {
+        self.broken = true;
+        if self.cancel.is_cancelled() {
+            AcquisitionError::Cancelled
+        } else {
+            AcquisitionError::Protocol
+        }
+    }
+    /// Writes tagged commands and returns their tags.
+    fn send(&mut self, commands: &[&str]) -> Result<Vec<String>, AcquisitionError> {
         self.cancel.check()?;
-        *self.budget.lock().expect("response budget") = Budget {
-            remaining: RESPONSE_LIMIT,
-            deadline: Instant::now() + TIMEOUT,
-        };
+        if self.broken {
+            return Err(AcquisitionError::Protocol);
+        }
+        let mut bytes = Zeroizing::new(vec![]);
+        let mut tags = vec![];
+        for command in commands {
+            if command.contains(['\r', '\n']) {
+                return Err(AcquisitionError::InvalidInput);
+            }
+            self.tag += 1;
+            let tag = format!("A{}", self.tag);
+            bytes.extend_from_slice(tag.as_bytes());
+            bytes.push(b' ');
+            bytes.extend_from_slice(command.as_bytes());
+            bytes.extend_from_slice(b"\r\n");
+            tags.push(tag);
+        }
+        let stream = self.stream.get_mut();
+        if stream
+            .write_all(&bytes)
+            .and_then(|_| stream.flush())
+            .is_err()
+        {
+            return Err(self.transport());
+        }
+        Ok(tags)
+    }
+    /// Reads one response, literals included, onto `data` and returns where
+    /// it starts. Lines are read until the response parses, as the imap
+    /// crate did: a literal's bytes may hold line ends of their own.
+    fn response(&mut self, data: &mut Vec<u8>) -> Result<usize, AcquisitionError> {
+        let start = data.len();
+        loop {
+            match self.stream.read_until(b'\n', data) {
+                Ok(0) | Err(_) => return Err(self.transport()),
+                Ok(_) => {}
+            }
+            match imap_proto::parser::parse_response(&data[start..]) {
+                Ok((rest, _)) if rest.is_empty() => return Ok(start),
+                Err(e) if e.is_incomplete() => {}
+                _ => return Err(self.transport()),
+            }
+        }
+    }
+    /// Reads the response to `tag` within `limit` bytes.
+    fn answer(&mut self, tag: &str, limit: usize) -> Result<Answer, AcquisitionError> {
+        self.cancel.check()?;
+        let mut budget = self.budget.lock().expect("response budget");
+        *budget = Budget::new(limit, budget.pace);
+        drop(budget);
+        let mut data = vec![];
+        loop {
+            let start = self.response(&mut data)?;
+            let status = match imap_proto::parser::parse_response(&data[start..]) {
+                Ok((_, Response::Done { tag: t, status, .. })) if t.0 == tag => Some(status),
+                Ok((_, Response::Done { .. } | Response::Continue { .. })) => {
+                    return Err(self.transport());
+                }
+                Ok((
+                    _,
+                    Response::Data {
+                        status: Status::Bye,
+                        ..
+                    },
+                )) => {
+                    return Err(self.transport());
+                }
+                Ok(_) => None,
+                Err(_) => return Err(self.transport()),
+            };
+            if let Some(status) = status {
+                let done = data.split_off(start);
+                return Ok(match status {
+                    Status::Ok => Ok(Reply { data, done }),
+                    Status::No => Err(Refused::No),
+                    Status::Bad => Err(Refused::Bad),
+                    _ => return Err(self.transport()),
+                });
+            }
+        }
+    }
+    fn run(&mut self, command: &str, limit: usize) -> Result<Answer, AcquisitionError> {
+        let tag = self.send(&[command])?.remove(0);
+        self.answer(&tag, limit)
+    }
+    /// Pipelines read-only commands, each with its response limit, and hands
+    /// each answer to `visit` in order. At most `WINDOW_COMMANDS` commands
+    /// and `WINDOW_BYTES` of them are outstanding at once.
+    fn flight(
+        &mut self,
+        commands: &[(String, usize)],
+        mut visit: impl FnMut(usize, Answer) -> Result<(), AcquisitionError>,
+    ) -> Result<(), AcquisitionError> {
+        let mut pending = std::collections::VecDeque::new();
+        let mut next = 0;
+        let mut done = 0;
+        while done < commands.len() {
+            let mut batch = vec![];
+            let mut bytes: usize = pending.iter().map(|(_, len)| len).sum();
+            while next < commands.len()
+                && pending.len() + batch.len() < WINDOW_COMMANDS
+                && (bytes + commands[next].0.len() <= WINDOW_BYTES
+                    || pending.len() + batch.len() == 0)
+            {
+                bytes += commands[next].0.len() + 16;
+                batch.push(next);
+                next += 1;
+            }
+            if !batch.is_empty() {
+                let lines: Vec<&str> = batch.iter().map(|i| commands[*i].0.as_str()).collect();
+                for (i, tag) in batch.iter().zip(self.send(&lines)?) {
+                    pending.push_back(((*i, tag), commands[*i].0.len() + 16));
+                }
+            }
+            let ((i, tag), _) = pending.pop_front().expect("outstanding command");
+            let answer = self.answer(&tag, commands[i].1)?;
+            done += 1;
+            if let Err(error) = visit(i, answer) {
+                if done < commands.len() {
+                    self.broken = true;
+                }
+                return Err(error);
+            }
+        }
         Ok(())
     }
-    fn fetch(&mut self, uids: &[u32], headers: bool) -> Result<Vec<u8>, AcquisitionError> {
-        if uids.is_empty() || uids.len() > BATCH || uids.contains(&0) {
-            return Err(AcquisitionError::InvalidInput);
-        }
-        self.reset()?;
-        let sequence = uids
-            .iter()
-            .map(u32::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
-        let fields = if headers {
-            format!(
-                "BODY.PEEK[HEADER.FIELDS ({})]<0.65537>",
-                HEADER_FIELDS.join(" ").to_ascii_uppercase()
-            )
-        } else if self.gmail {
-            "RFC822.SIZE INTERNALDATE FLAGS X-GM-MSGID X-GM-THRID X-GM-LABELS".to_owned()
+    fn examine_command(&self, folder: &Folder) -> Result<String, AcquisitionError> {
+        let name = quote(&folder.wire).ok_or(AcquisitionError::Protocol)?;
+        Ok(if self.condstore {
+            format!("EXAMINE {name} (CONDSTORE)")
         } else {
-            "RFC822.SIZE INTERNALDATE FLAGS".to_owned()
+            format!("EXAMINE {name}")
+        })
+    }
+    fn metadata_items(&self) -> &'static str {
+        if self.gmail {
+            "UID RFC822.SIZE INTERNALDATE FLAGS X-GM-MSGID X-GM-THRID X-GM-LABELS"
+        } else {
+            "UID RFC822.SIZE INTERNALDATE FLAGS"
+        }
+    }
+    fn header_items() -> String {
+        format!(
+            "UID BODY.PEEK[HEADER.FIELDS ({})]<0.{HEADER_BYTES}>",
+            HEADER_FIELDS.join(" ").to_ascii_uppercase()
+        )
+    }
+    /// Metadata commands for `uids`, each with its response limit.
+    fn metadata_commands(&self, uids: &[u32]) -> Vec<(String, usize)> {
+        let mut commands = vec![];
+        for chunk in uids.chunks(METADATA_COMMAND_MAX) {
+            let limit = RESPONSE_LIMIT.max(chunk.len() * METADATA_ROW_LIMIT);
+            for set in uid_sets(chunk.iter().copied()) {
+                commands.push((
+                    format!("UID FETCH {set} ({})", self.metadata_items()),
+                    limit,
+                ));
+            }
+        }
+        commands
+    }
+    fn header_commands(&self, uids: &[u32]) -> Vec<(String, usize)> {
+        let mut commands = vec![];
+        for chunk in uids.chunks(self.header_batch()) {
+            let limit = RESPONSE_LIMIT.max(chunk.len() * (HEADER_BYTES + ROW_OVERHEAD));
+            for set in uid_sets(chunk.iter().copied()) {
+                commands.push((format!("UID FETCH {set} ({})", Self::header_items()), limit));
+            }
+        }
+        commands
+    }
+    fn parse_metadata(
+        gmail: bool,
+        raw: &[u8],
+        into: &mut BTreeMap<u32, Metadata>,
+    ) -> Result<(), AcquisitionError> {
+        parse_fetches(raw, |attrs| {
+            let uid = uid(attrs)?;
+            let mut item = Metadata {
+                uid,
+                size: 0,
+                date: String::new(),
+                flags: BTreeSet::new(),
+                gmail_id: None,
+                thread_id: None,
+                labels: BTreeSet::new(),
+            };
+            let (mut size, mut date, mut flags, mut labels) = (false, false, false, false);
+            for attr in attrs {
+                match attr {
+                    AttributeValue::Rfc822Size(v) => {
+                        item.size = *v as u64;
+                        size = true;
+                    }
+                    AttributeValue::InternalDate(v) => {
+                        item.date = v.to_string();
+                        date = true;
+                    }
+                    AttributeValue::Flags(v) => {
+                        item.flags = v.iter().map(|f| f.to_string()).collect();
+                        flags = true;
+                    }
+                    AttributeValue::GmailMsgId(v) => item.gmail_id = Some(v.to_string()),
+                    AttributeValue::GmailThrId(v) => item.thread_id = Some(v.to_string()),
+                    AttributeValue::GmailLabels(v) => {
+                        item.labels = v.iter().map(|l| decode_name(l)).collect::<Result<_, _>>()?;
+                        labels = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !size
+                || !date
+                || !flags
+                || (gmail && (item.gmail_id.is_none() || item.thread_id.is_none() || !labels))
+                || into.insert(uid, item).is_some()
+            {
+                return Err(AcquisitionError::Incomplete);
+            }
+            Ok(())
+        })
+    }
+    /// Parses header rows and folds their mean size into `mean`.
+    fn parse_headers(
+        mean: &mut usize,
+        raw: &[u8],
+        into: &mut BTreeMap<u32, Vec<u8>>,
+    ) -> Result<(), AcquisitionError> {
+        let mut rows = 0;
+        parse_fetches(raw, |attrs| {
+            let uid = uid(attrs)?;
+            let header = attrs
+                .iter()
+                .find_map(|a| match a {
+                    AttributeValue::BodySection {
+                        section: Some(SectionPath::Full(MessageSection::Header)),
+                        data: Some(data),
+                        ..
+                    } => Some(data.as_ref()),
+                    _ => None,
+                })
+                .ok_or(AcquisitionError::Incomplete)?;
+            if header.len() > 65536 || into.insert(uid, header.to_vec()).is_some() {
+                return Err(AcquisitionError::Incomplete);
+            }
+            rows += 1;
+            Ok(())
+        })?;
+        if rows > 0 {
+            *mean = (*mean + raw.len() / rows).div_ceil(2).max(256);
+        }
+        Ok(())
+    }
+    /// Parses EXAMINE and UID SEARCH ALL answers into a listing.
+    fn listing(examine: Answer, search: Answer) -> Result<Listing, AcquisitionError> {
+        let examine = examine.map_err(protocol("examine"))?;
+        let (mut exists, mut validity, mut modseq) = (None, None, None);
+        let mut rest = examine.data.as_slice();
+        while !rest.is_empty() {
+            let (remaining, response) =
+                imap_proto::parser::parse_response(rest).map_err(|_| AcquisitionError::Protocol)?;
+            match response {
+                Response::MailboxData(MailboxDatum::Exists(n)) => exists = Some(n),
+                Response::Data {
+                    code: Some(ResponseCode::UidValidity(v)),
+                    ..
+                } => validity = Some(v),
+                Response::Data {
+                    code: Some(ResponseCode::HighestModSeq(v)),
+                    ..
+                } => modseq = Some(v),
+                _ => {}
+            }
+            rest = remaining;
+        }
+        let read_only = matches!(
+            imap_proto::parser::parse_response(&examine.done),
+            Ok((
+                _,
+                Response::Done {
+                    code: Some(ResponseCode::ReadOnly),
+                    ..
+                }
+            ))
+        );
+        if !read_only {
+            return Err(AcquisitionError::Protocol);
+        }
+        let validity = validity
+            .filter(|v| *v != 0)
+            .ok_or(AcquisitionError::Incomplete)?;
+        let search = search.map_err(protocol("search"))?;
+        let mut uids = BTreeSet::new();
+        let mut rest = search.data.as_slice();
+        while !rest.is_empty() {
+            let (remaining, response) =
+                imap_proto::parser::parse_response(rest).map_err(|_| AcquisitionError::Protocol)?;
+            if let Response::MailboxData(MailboxDatum::Search(values)) = response {
+                uids.extend(values);
+            }
+            rest = remaining;
+        }
+        if Some(uids.len() as u32) != exists || uids.len() > 250_000 || uids.contains(&0) {
+            return Err(AcquisitionError::Incomplete);
+        }
+        Ok(Listing {
+            validity,
+            uids,
+            modseq: modseq.filter(|m| *m > 0),
+        })
+    }
+
+    /// Reads `folders` for one request in three flights. The first examines
+    /// every folder, lists its UIDs and fetches its metadata: with CONDSTORE
+    /// and a saved census taken at a known HIGHESTMODSEQ under the same
+    /// UIDVALIDITY, only what changed since. The second fetches the metadata
+    /// and headers the saved census cannot supply. Headers are immutable for
+    /// a UID under one UIDVALIDITY (RFC 3501 section 2.3.1.1), so a saved
+    /// record's header evidence stands for the message. The third examines
+    /// every folder again; each must still show the same UIDVALIDITY and
+    /// UIDs.
+    pub(super) fn observe(
+        &mut self,
+        folders: &[Folder],
+        saved: &Census,
+    ) -> Result<BTreeMap<String, FolderCensus>, AcquisitionError> {
+        let cached = |folder: &Folder, validity: u32| {
+            saved
+                .folders
+                .get(&folder.name)
+                .filter(|f| f.uidvalidity == validity)
         };
-        self.session
-            .run_command_and_read_response(format!("UID FETCH {sequence} (UID {fields})"))
-            .map_err(protocol("fetch"))
+        // Flight one: EXAMINE, UID SEARCH ALL and metadata per folder.
+        let mut commands = vec![];
+        for folder in folders {
+            commands.push((self.examine_command(folder)?, RESPONSE_LIMIT));
+            commands.push(("UID SEARCH ALL".to_owned(), RESPONSE_LIMIT));
+            let since = saved
+                .folders
+                .get(&folder.name)
+                .and_then(|f| f.highestmodseq)
+                .filter(|_| self.condstore);
+            commands.push((
+                match since {
+                    Some(m) => format!(
+                        "UID FETCH 1:* ({}) (CHANGEDSINCE {m})",
+                        self.metadata_items()
+                    ),
+                    None => format!("UID FETCH 1:* ({})", self.metadata_items()),
+                },
+                64 * 1024 * 1024,
+            ));
+        }
+        let mut answers: Vec<Option<Answer>> = (0..commands.len()).map(|_| None).collect();
+        self.flight(&commands, |i, answer| {
+            answers[i] = Some(answer);
+            Ok(())
+        })?;
+        let mut answers = answers.into_iter().map(|a| a.expect("answered"));
+        struct Partial {
+            listing: Listing,
+            metadata: BTreeMap<u32, Metadata>,
+            missing_metadata: Vec<u32>,
+            missing_headers: Vec<u32>,
+        }
+        let mut partials = vec![];
+        for folder in folders {
+            let (examine, search, fetch) = (
+                answers.next().expect("examine"),
+                answers.next().expect("search"),
+                answers.next().expect("fetch"),
+            );
+            let listing = Self::listing(examine, search)?;
+            let saved_folder = cached(folder, listing.validity);
+            let since = saved
+                .folders
+                .get(&folder.name)
+                .and_then(|f| f.highestmodseq)
+                .filter(|_| self.condstore);
+            let mut fetched = BTreeMap::new();
+            let usable = match fetch {
+                Ok(reply) => {
+                    Self::parse_metadata(self.gmail, &reply.data, &mut fetched)?;
+                    // CHANGEDSINCE rows describe changes after the saved
+                    // census only under its UIDVALIDITY and when the folder
+                    // reports mod-sequences.
+                    since.is_none() || (saved_folder.is_some() && listing.modseq.is_some())
+                }
+                Err(_) => false,
+            };
+            fetched.retain(|uid, _| listing.uids.contains(uid));
+            let mut metadata = BTreeMap::new();
+            if usable {
+                if let (Some(_), Some(saved_folder)) = (since, saved_folder) {
+                    for uid in &listing.uids {
+                        if let Some(record) = saved_folder.messages.get(uid) {
+                            metadata.insert(*uid, Metadata::saved(record));
+                        }
+                    }
+                }
+                metadata.extend(fetched);
+            }
+            let missing_metadata = listing
+                .uids
+                .iter()
+                .filter(|u| !metadata.contains_key(u))
+                .copied()
+                .collect();
+            let missing_headers = listing
+                .uids
+                .iter()
+                .filter(|u| saved_folder.is_none_or(|f| !f.messages.contains_key(u)))
+                .copied()
+                .collect();
+            partials.push(Partial {
+                listing,
+                metadata,
+                missing_metadata,
+                missing_headers,
+            });
+        }
+        // Flight two: what the saved census cannot supply. Each folder is
+        // examined again first, and must show the listing flight one saw.
+        enum Need {
+            Examine,
+            Search(usize),
+            Metadata(usize),
+            Headers(usize),
+        }
+        let mut commands = vec![];
+        let mut needs = vec![];
+        for (n, (folder, p)) in folders.iter().zip(&partials).enumerate() {
+            if p.missing_metadata.is_empty() && p.missing_headers.is_empty() {
+                continue;
+            }
+            commands.push((self.examine_command(folder)?, RESPONSE_LIMIT));
+            needs.push(Need::Examine);
+            commands.push(("UID SEARCH ALL".to_owned(), RESPONSE_LIMIT));
+            needs.push(Need::Search(n));
+            for command in self.metadata_commands(&p.missing_metadata) {
+                commands.push(command);
+                needs.push(Need::Metadata(n));
+            }
+            for command in self.header_commands(&p.missing_headers) {
+                commands.push(command);
+                needs.push(Need::Headers(n));
+            }
+        }
+        let mut headers: Vec<BTreeMap<u32, Vec<u8>>> =
+            folders.iter().map(|_| BTreeMap::new()).collect();
+        let gmail = self.gmail;
+        let mut mean = self.header_mean;
+        let mut examined = None;
+        self.flight(&commands, |i, answer| {
+            match needs[i] {
+                Need::Examine => examined = Some(answer),
+                Need::Search(n) => {
+                    let listing =
+                        Self::listing(examined.take().ok_or(AcquisitionError::Protocol)?, answer)?;
+                    if (listing.validity, &listing.uids)
+                        != (partials[n].listing.validity, &partials[n].listing.uids)
+                    {
+                        return Err(AcquisitionError::InvalidInput);
+                    }
+                }
+                Need::Metadata(n) => {
+                    let reply = answer.map_err(protocol("fetch"))?;
+                    Self::parse_metadata(gmail, &reply.data, &mut partials[n].metadata)?;
+                }
+                Need::Headers(n) => {
+                    let reply = answer.map_err(protocol("fetch"))?;
+                    Self::parse_headers(&mut mean, &reply.data, &mut headers[n])?;
+                }
+            }
+            Ok(())
+        })?;
+        self.header_mean = mean;
+        // Flight three: every folder unchanged.
+        let mut commands = vec![];
+        for folder in folders {
+            commands.push((self.examine_command(folder)?, RESPONSE_LIMIT));
+            commands.push(("UID SEARCH ALL".to_owned(), RESPONSE_LIMIT));
+        }
+        let mut answers: Vec<Option<Answer>> = (0..commands.len()).map(|_| None).collect();
+        self.flight(&commands, |i, answer| {
+            answers[i] = Some(answer);
+            Ok(())
+        })?;
+        let mut answers = answers.into_iter().map(|a| a.expect("answered"));
+        let mut result = BTreeMap::new();
+        for ((folder, p), headers) in folders.iter().zip(partials).zip(headers) {
+            let again = Self::listing(
+                answers.next().expect("examine"),
+                answers.next().expect("search"),
+            )?;
+            if again.validity != p.listing.validity || again.uids != p.listing.uids {
+                return Err(AcquisitionError::InvalidInput);
+            }
+            validate_uids(
+                &p.listing.uids.iter().copied().collect::<Vec<_>>(),
+                p.metadata.keys().copied(),
+            )?;
+            let saved_folder = cached(folder, p.listing.validity);
+            let mut messages = BTreeMap::new();
+            for uid in &p.listing.uids {
+                let metadata = &p.metadata[uid];
+                let record = match headers.get(uid) {
+                    Some(raw) => record(metadata, folder, raw)?,
+                    None => {
+                        let saved = saved_folder
+                            .and_then(|f| f.messages.get(uid))
+                            .ok_or(AcquisitionError::Incomplete)?;
+                        let mut record = MessageRecord {
+                            delivery: Default::default(),
+                            uid: *uid,
+                            size: 0,
+                            internal_date: String::new(),
+                            flags_observed: true,
+                            flags: BTreeSet::new(),
+                            gmail_message_id: None,
+                            gmail_thread_id: None,
+                            gmail_labels: BTreeSet::new(),
+                            headers: saved.headers.clone(),
+                        };
+                        metadata.apply(&mut record, folder);
+                        record
+                    }
+                };
+                messages.insert(*uid, record);
+            }
+            result.insert(
+                folder.name.clone(),
+                FolderCensus {
+                    uidvalidity: p.listing.validity,
+                    state: ScanState::Complete,
+                    live_uids: p.listing.uids,
+                    messages,
+                    highestmodseq: None,
+                },
+            );
+        }
+        Ok(result)
     }
 }
 impl MailRead for ReadOnlyImap {
@@ -329,31 +1036,21 @@ impl MailRead for ReadOnlyImap {
         if !folder.selectable {
             return CountObservation::unknown(UnknownCount::NotSelectable);
         }
-        if self.reset().is_err() {
+        if self.cancel.check().is_err() {
             return CountObservation::unknown(UnknownCount::Unavailable);
         }
-        let mailbox = format!(
-            "\"{}\"",
-            folder.wire.replace('\\', "\\\\").replace('"', "\\\"")
-        );
-        let raw = match self
-            .session
-            .run_command_and_read_response(format!("STATUS {mailbox} (MESSAGES)"))
-        {
-            Ok(raw) => raw,
-            Err(imap::error::Error::No(_)) | Err(imap::error::Error::Bad(_)) => {
-                return CountObservation::unknown(UnknownCount::Denied);
-            }
-            Err(imap::error::Error::Parse(_)) => {
-                return CountObservation::unknown(UnknownCount::Malformed);
-            }
-            Err(_) => return CountObservation::unknown(UnknownCount::Unavailable),
+        let Some(mailbox) = quote(&folder.wire) else {
+            return CountObservation::unknown(UnknownCount::Unavailable);
         };
-        parse_count(&raw, &folder.wire)
+        match self.run(&format!("STATUS {mailbox} (MESSAGES)"), RESPONSE_LIMIT) {
+            Ok(Ok(reply)) => parse_count(&reply.data, &folder.wire),
+            Ok(Err(_)) => CountObservation::unknown(UnknownCount::Denied),
+            Err(_) => CountObservation::unknown(UnknownCount::Unavailable),
+        }
     }
 
     fn folders(&mut self) -> Result<Vec<Folder>, AcquisitionError> {
-        self.reset()?;
+        self.cancel.check()?;
         if !self.special_use && !self.gmail {
             return Err(AcquisitionError::Protocol);
         }
@@ -363,9 +1060,9 @@ impl MailRead for ReadOnlyImap {
             "LIST \"\" *"
         };
         let raw = self
-            .session
-            .run_command_and_read_response(command)
-            .map_err(protocol("list"))?;
+            .run(command, RESPONSE_LIMIT)?
+            .map_err(protocol("list"))?
+            .data;
         let mut rest = raw.as_slice();
         let mut folders = Vec::new();
         while !rest.is_empty() {
@@ -439,105 +1136,78 @@ impl MailRead for ReadOnlyImap {
         }
         Ok(folders)
     }
-    fn inventory(&mut self, folder: &Folder) -> Result<(u32, BTreeSet<u32>), AcquisitionError> {
-        self.reset()?;
-        let mailbox = self
-            .session
-            .examine(&folder.wire)
-            .map_err(protocol("examine"))?;
-        if !mailbox.is_read_only {
-            return Err(AcquisitionError::Protocol);
+    /// EXAMINE, UID SEARCH ALL and, with `since`, CHANGEDSINCE, pipelined.
+    fn inventory(
+        &mut self,
+        folder: &Folder,
+        since: Option<u64>,
+    ) -> Result<(Listing, Option<BTreeMap<u32, Metadata>>), AcquisitionError> {
+        let since = since.filter(|_| self.condstore);
+        let mut commands = vec![
+            (self.examine_command(folder)?, RESPONSE_LIMIT),
+            ("UID SEARCH ALL".to_owned(), RESPONSE_LIMIT),
+        ];
+        if let Some(m) = since {
+            commands.push((
+                format!(
+                    "UID FETCH 1:* ({}) (CHANGEDSINCE {m})",
+                    self.metadata_items()
+                ),
+                64 * 1024 * 1024,
+            ));
         }
-        let validity = mailbox
-            .uid_validity
-            .filter(|v| *v != 0)
-            .ok_or(AcquisitionError::Incomplete)?;
-        self.reset()?;
-        let uids: BTreeSet<_> = self
-            .session
-            .uid_search("ALL")
-            .map_err(protocol("search"))?
-            .into_iter()
-            .collect();
-        if uids.len() != mailbox.exists as usize || uids.len() > 250_000 || uids.contains(&0) {
-            return Err(AcquisitionError::Incomplete);
-        }
-        Ok((validity, uids))
+        let mut answers = vec![];
+        self.flight(&commands, |_, answer| {
+            answers.push(answer);
+            Ok(())
+        })?;
+        let mut answers = answers.into_iter();
+        let listing = Self::listing(
+            answers.next().ok_or(AcquisitionError::Protocol)?,
+            answers.next().ok_or(AcquisitionError::Protocol)?,
+        )?;
+        let changed = match answers.next() {
+            Some(Ok(reply)) if listing.modseq.is_some() => {
+                let mut changed = BTreeMap::new();
+                Self::parse_metadata(self.gmail, &reply.data, &mut changed)?;
+                changed.retain(|uid, _| listing.uids.contains(uid));
+                Some(changed)
+            }
+            _ => None,
+        };
+        Ok((listing, changed))
     }
     fn metadata(&mut self, uids: &[u32]) -> Result<BTreeMap<u32, Metadata>, AcquisitionError> {
-        let raw = self.fetch(uids, false)?;
+        if uids.is_empty() || uids.contains(&0) {
+            return Err(AcquisitionError::InvalidInput);
+        }
+        let commands = self.metadata_commands(uids);
+        let gmail = self.gmail;
         let mut result = BTreeMap::new();
-        parse_fetches(&raw, |attrs| {
-            let uid = uid(attrs)?;
-            let mut item = Metadata {
-                uid,
-                size: 0,
-                date: String::new(),
-                flags: BTreeSet::new(),
-                gmail_id: None,
-                thread_id: None,
-                labels: BTreeSet::new(),
-            };
-            let (mut size, mut date, mut flags, mut labels) = (false, false, false, false);
-            for attr in attrs {
-                match attr {
-                    AttributeValue::Rfc822Size(v) => {
-                        item.size = *v as u64;
-                        size = true;
-                    }
-                    AttributeValue::InternalDate(v) => {
-                        item.date = v.to_string();
-                        date = true;
-                    }
-                    AttributeValue::Flags(v) => {
-                        item.flags = v.iter().map(|f| f.to_string()).collect();
-                        flags = true;
-                    }
-                    AttributeValue::GmailMsgId(v) => item.gmail_id = Some(v.to_string()),
-                    AttributeValue::GmailThrId(v) => item.thread_id = Some(v.to_string()),
-                    AttributeValue::GmailLabels(v) => {
-                        item.labels = v.iter().map(|l| decode_name(l)).collect::<Result<_, _>>()?;
-                        labels = true;
-                    }
-                    _ => {}
-                }
-            }
-            if !size
-                || !date
-                || !flags
-                || (self.gmail && (item.gmail_id.is_none() || item.thread_id.is_none() || !labels))
-                || result.insert(uid, item).is_some()
-            {
-                return Err(AcquisitionError::Incomplete);
-            }
-            Ok(())
+        self.flight(&commands, |_, answer| {
+            let reply = answer.map_err(protocol("fetch"))?;
+            Self::parse_metadata(gmail, &reply.data, &mut result)
         })?;
         validate_uids(uids, result.keys().copied())?;
         Ok(result)
     }
     fn headers(&mut self, uids: &[u32]) -> Result<BTreeMap<u32, Vec<u8>>, AcquisitionError> {
-        let raw = self.fetch(uids, true)?;
+        if uids.is_empty() || uids.contains(&0) {
+            return Err(AcquisitionError::InvalidInput);
+        }
+        let commands = self.header_commands(uids);
+        let mut mean = self.header_mean;
         let mut result = BTreeMap::new();
-        parse_fetches(&raw, |attrs| {
-            let uid = uid(attrs)?;
-            let header = attrs
-                .iter()
-                .find_map(|a| match a {
-                    AttributeValue::BodySection {
-                        section: Some(SectionPath::Full(MessageSection::Header)),
-                        data: Some(data),
-                        ..
-                    } => Some(data.as_ref()),
-                    _ => None,
-                })
-                .ok_or(AcquisitionError::Incomplete)?;
-            if header.len() > 65536 || result.insert(uid, header.to_vec()).is_some() {
-                return Err(AcquisitionError::Incomplete);
-            }
-            Ok(())
+        self.flight(&commands, |_, answer| {
+            let reply = answer.map_err(protocol("fetch"))?;
+            Self::parse_headers(&mut mean, &reply.data, &mut result)
         })?;
+        self.header_mean = mean;
         validate_uids(uids, result.keys().copied())?;
         Ok(result)
+    }
+    fn header_batch(&self) -> usize {
+        (HEADER_TARGET / self.header_mean).clamp(25, HEADER_COMMAND_MAX)
     }
 }
 fn uid(attrs: &[AttributeValue<'_>]) -> Result<u32, AcquisitionError> {

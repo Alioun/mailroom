@@ -280,9 +280,11 @@ fn folder_delta(old: &FolderCensus, new: &FolderCensus) -> Result<Delta, CensusE
         state,
         live_uids,
         messages,
+        highestmodseq,
     } = new;
     let mut o = Object::default();
     o.field("uidvalidity", &old.uidvalidity, uidvalidity)?;
+    o.field("highestmodseq", &old.highestmodseq, highestmodseq)?;
     o.field("state", &old.state, state)?;
     o.field("live_uids", &old.live_uids, live_uids)?;
     let mut m = Object::default();
@@ -377,6 +379,7 @@ fn apply_folders(
                         "uidvalidity" => through_value(&mut folder.uidvalidity, change)?,
                         "state" => through_value(&mut folder.state, change)?,
                         "live_uids" => through_value(&mut folder.live_uids, change)?,
+                        "highestmodseq" => through_value(&mut folder.highestmodseq, change)?,
                         "messages" => apply_messages(&mut folder.messages, change)?,
                         _ => return Err(CensusError::Storage),
                     }

@@ -662,3 +662,39 @@ pub(super) fn report_failure(failure: Error) {
     };
     eprintln!("sieve.discovery.failure={code}");
 }
+
+/// Sieve discovery over the link `$MAILROOM_FIXTURE_LINK` emulates, for a
+/// personal-scale account.
+#[test]
+#[ignore = "personal-scale measurement; run explicitly"]
+fn latency_sieve_discovery() {
+    use crate::census::scale;
+    let root = tempfile::tempdir().unwrap();
+    let fake = Fake::start("normal", None);
+    let mut repo = persistent_test_accounts(root.path());
+    repo.sieve_source = Some(Arc::new(super::super::managesieve::InstalledSource {
+        address: fake.source.address,
+        tls_name: fake.source.tls_name.clone(),
+        root: fake.source.root.clone(),
+        epoch: fake.source.epoch.clone(),
+        command_timeout: fake.source.command_timeout,
+        attempt_timeout: fake.source.attempt_timeout,
+    }));
+    let account = repo
+        .create(
+            Provider::MailboxOrg,
+            "invented@example.test".into(),
+            &SecretValue::new(b"invented".to_vec()),
+        )
+        .unwrap();
+    let setup = scale::inflate_store(&repo.store(&account).unwrap(), false);
+    scale::report("sieve.discovery_setup", setup, Default::default());
+    for attempt in 0..2 {
+        let result = scale::measure(
+            "sieve.discovery",
+            serde_json::json!({"attempt": attempt}),
+            || repo.discover_sieve(&account.id, Cancellation::default()),
+        );
+        result.unwrap();
+    }
+}

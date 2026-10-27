@@ -600,3 +600,151 @@ fn label_runs_follow_the_ninety_day_undo_window_and_uncertain_runs_stay_whole() 
     assert!(kept.summaries.is_empty());
     assert!(kept.runs[0] == uncertain);
 }
+
+/// Live Gmail label operations against a fake whose All Mail holds a
+/// personal-scale mailbox, over the link `$MAILROOM_FIXTURE_LINK` emulates.
+/// Same phases and environment as the MOVE measurement, with `undo_lost`
+/// dropping the reply of each label STORE.
+#[test]
+#[ignore = "personal-scale measurement; run explicitly"]
+fn latency_gmail_phases() {
+    use crate::census::scale;
+    let root = std::path::PathBuf::from(std::env::var("MAILROOM_SCALE_ROOT").unwrap());
+    let phases = std::env::var("MAILROOM_LATENCY_PHASES").unwrap();
+    if phases.starts_with("setup") {
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("workspace-authority"), "gmail-label-tests-v1").unwrap();
+        std::fs::write(root.join("gmail-large"), "501").unwrap();
+        std::fs::write(
+            root.join("gmail-scale"),
+            scale::spec_from_env(true).messages.to_string(),
+        )
+        .unwrap();
+    }
+    let (repo, account, _fake) = fixture_install(&root);
+    let open = || repo.store(&account).unwrap();
+    let report = |store: &EncryptedStore, operation: &str, result: String| {
+        let saved = store.load_state().unwrap();
+        let r = saved.gmail_backlog.runs.last();
+        scale::report(
+            operation,
+            serde_json::json!({
+                "result": result,
+                "status": r.as_ref().map(|r| r.status),
+                "batches": r.as_ref().map(|r| r.batches.len()),
+                "census_messages": scale::messages(&saved.census),
+            }),
+            Default::default(),
+        );
+    };
+    for phase in phases.split(',') {
+        let cancel = Cancellation::default();
+        if phase == "refresh" || phase == "rescan" {
+            let result = scale::measure(&format!("gmail.{phase}"), serde_json::json!({}), || {
+                repo.scan(&account.id, cancel.clone(), |_| {})
+            });
+            report(
+                &open(),
+                &format!("gmail.after_{phase}"),
+                format!("{:?}", result.map(|c| c.folders.len())),
+            );
+            continue;
+        }
+        let store = open();
+        match phase {
+            "setup" => report(&store, "gmail.setup", "installed".into()),
+            "preview" => {
+                let saved = store.load_state().unwrap();
+                let result = scale::measure("gmail.preview", serde_json::json!({}), || {
+                    repo.gmail_preview(&account, &store, &saved, personal_only(), cancel.clone())
+                });
+                report(
+                    &store,
+                    "gmail.after_preview",
+                    format!("{:?}", result.map(|p| p.operation.batches.len())),
+                );
+            }
+            "confirm" => {
+                let saved = store.load_state().unwrap();
+                let preview = repo
+                    .gmail_preview(&account, &store, &saved, personal_only(), cancel.clone())
+                    .unwrap();
+                crate::acquisition::backlog::STOP_BETWEEN_BATCHES
+                    .with(|s| *s.borrow_mut() = Some((std::time::Instant::now(), cancel.clone())));
+                let mut saved = store.load_state().unwrap();
+                let result = scale::measure("gmail.confirm", serde_json::json!({}), || {
+                    repo.gmail_confirm(
+                        &account,
+                        &store,
+                        &mut saved,
+                        personal_only(),
+                        &preview.receipt,
+                        cancel.clone(),
+                        |_| Ok(()),
+                    )
+                });
+                crate::acquisition::backlog::STOP_BETWEEN_BATCHES.with(|s| *s.borrow_mut() = None);
+                report(&store, "gmail.after_confirm", format!("{result:?}"));
+            }
+            "resume" => {
+                let mut saved = store.load_state().unwrap();
+                let id = saved.gmail_backlog.runs.last().unwrap().id.clone();
+                let result = scale::measure("gmail.resume", serde_json::json!({}), || {
+                    repo.gmail_run(
+                        &account,
+                        &store,
+                        &mut saved,
+                        &id,
+                        false,
+                        cancel.clone(),
+                        |_| Ok(()),
+                    )
+                });
+                report(&store, "gmail.after_resume", format!("{result:?}"));
+            }
+            "undo_preview" => {
+                let saved = store.load_state().unwrap();
+                let id = saved.gmail_backlog.runs.last().unwrap().id.clone();
+                let result = scale::measure("gmail.undo_preview", serde_json::json!({}), || {
+                    repo.gmail_undo_preview(&account, &store, &saved, &id, cancel.clone())
+                });
+                report(
+                    &store,
+                    "gmail.after_undo_preview",
+                    format!("{:?}", result.map(|p| p.conflicts)),
+                );
+            }
+            "undo_lost" => {
+                let saved = store.load_state().unwrap();
+                let id = saved.gmail_backlog.runs.last().unwrap().id.clone();
+                let preview = repo
+                    .gmail_undo_preview(&account, &store, &saved, &id, cancel.clone())
+                    .unwrap();
+                std::fs::write(root.join("gmail-mode"), "lost").unwrap();
+                let mut saved = store.load_state().unwrap();
+                let result = scale::measure("gmail.undo", serde_json::json!({}), || {
+                    repo.gmail_undo(
+                        &account,
+                        &store,
+                        &mut saved,
+                        &id,
+                        &preview.receipt,
+                        cancel.clone(),
+                        |_| Ok(()),
+                    )
+                });
+                std::fs::write(root.join("gmail-mode"), "").unwrap();
+                report(&store, "gmail.after_undo", format!("{result:?}"));
+            }
+            "reconcile" => {
+                let mut saved = store.load_state().unwrap();
+                let id = saved.gmail_backlog.runs.last().unwrap().id.clone();
+                let result = scale::measure("gmail.reconcile", serde_json::json!({}), || {
+                    repo.gmail_reconcile(&account, &store, &mut saved, &id, cancel.clone())
+                });
+                report(&store, "gmail.after_reconcile", format!("{result:?}"));
+            }
+            _ => unreachable!("{phase}"),
+        }
+    }
+}

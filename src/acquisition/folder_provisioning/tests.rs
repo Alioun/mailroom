@@ -265,7 +265,13 @@ impl Fixture {
                     Ok((tcp, _)) => {
                         let _serving = Serving::start(&serving);
                         accepted.fetch_add(1, Ordering::SeqCst);
-                        let served = Peer::new(tcp, stopping.clone())
+                        // `folder-link` gives this installation its own
+                        // emulated link, which tests that pace a session use.
+                        let link = std::fs::read_to_string(root.join("folder-link"))
+                            .ok()
+                            .and_then(|spec| crate::acquisition::fixture_peer::Link::parse(&spec))
+                            .or_else(crate::acquisition::fixture_peer::Link::from_env);
+                        let served = Peer::with_link(tcp, stopping.clone(), link)
                             .and_then(|tcp| serve(tcp, config.clone(), &repo, &id, &root));
                         if let Err(error) = served {
                             eprintln!("folder.fixture.serve.io_kind={:?}", error.kind());

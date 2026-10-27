@@ -149,119 +149,145 @@ impl Connection {
     fn exchange(
         &mut self,
         command: &[u8],
-        mut row: impl FnMut(&[Token], bool) -> Result<(), Error>,
+        row: impl FnMut(&[Token], bool) -> Result<(), Error>,
     ) -> Result<(), Error> {
-        let tag = self.io.begin(command)?;
-        for _ in 0..2048 {
-            let response = self.io.row()?;
-            let first = response
-                .first()
-                .and_then(Token::atom)
-                .ok_or(Error::Protocol)?;
-            let tagged = first == tag;
-            if !tagged && first != "*" {
-                return Err(Error::Protocol);
-            }
-            if tagged {
-                self.io.completed();
-            }
-            if response.get(1).and_then(Token::atom) == Some("BYE") {
-                return Err(Error::Bye);
-            }
-            row(&response, tagged)?;
-            if tagged {
-                return Ok(());
-            }
-        }
-        Err(Error::Limit)
+        self.io
+            .flight(vec![Step::new(command.to_vec(), row)])?
+            .pop()
+            .unwrap_or(Ok(()))
     }
 
-    fn select(&mut self, mailbox: &MailboxIdentity) -> Result<(), Error> {
+    /// SELECT as a pipelined step. Its tagged line fails the step unless the
+    /// mailbox is writable under the expected UIDVALIDITY, so the unit's
+    /// later steps never see rows from another mailbox.
+    fn select<'a>(mailbox: &'a MailboxIdentity, unit: usize) -> Result<Step<'a>, Error> {
         let name = quoted(mailbox.name.wire.as_bytes())?;
         let mut validity = None;
         let mut writable = false;
-        self.exchange(&[b"SELECT ".as_slice(), &name].concat(), |row, tagged| {
-            if let Some(code) = row.get(2).and_then(Token::atom) {
-                if code == "[UIDNOTSTICKY]" || code == "[READ-ONLY]" {
-                    return Err(Error::Unsupported);
-                }
-                if let Some(v) = code
-                    .strip_prefix("[UIDVALIDITY ")
-                    .and_then(|s| s.strip_suffix(']'))
-                {
-                    let v = UidValidity::new(v.parse().map_err(|_| Error::Protocol)?)
-                        .map_err(|_| Error::Protocol)?;
-                    if validity.replace(v).is_some() {
-                        return Err(Error::Protocol);
+        Ok(Step::new(
+            [b"SELECT ".as_slice(), &name].concat(),
+            move |row, tagged| {
+                if let Some(code) = row.get(2).and_then(Token::atom) {
+                    if code == "[UIDNOTSTICKY]" || code == "[READ-ONLY]" {
+                        return Err(Error::Unsupported);
                     }
-                } else if code == "[READ-WRITE]" {
-                    writable = true;
-                } else if code.starts_with('[')
-                    && !code.starts_with("[PERMANENTFLAGS ")
-                    && !code.starts_with("[UIDNEXT ")
-                    && !code.starts_with("[UNSEEN ")
-                {
-                    return Err(Error::UnknownCode);
+                    if let Some(v) = code
+                        .strip_prefix("[UIDVALIDITY ")
+                        .and_then(|s| s.strip_suffix(']'))
+                    {
+                        let v = UidValidity::new(v.parse().map_err(|_| Error::Protocol)?)
+                            .map_err(|_| Error::Protocol)?;
+                        if validity.replace(v).is_some() {
+                            return Err(Error::Protocol);
+                        }
+                    } else if code == "[READ-WRITE]" {
+                        writable = true;
+                    } else if code.starts_with('[')
+                        && !code.starts_with("[PERMANENTFLAGS ")
+                        && !code.starts_with("[UIDNEXT ")
+                        && !code.starts_with("[UNSEEN ")
+                        && !code.starts_with("[HIGHESTMODSEQ ")
+                        && code != "[NOMODSEQ]"
+                    {
+                        return Err(Error::UnknownCode);
+                    }
                 }
-            }
-            if tagged && row.get(1).and_then(Token::atom) != Some("OK") {
-                return Err(Error::No);
-            }
-            Ok(())
-        })?;
-        if validity != Some(mailbox.uidvalidity) || !writable {
-            return Err(Error::Unstable);
-        }
-        Ok(())
+                if tagged {
+                    if row.get(1).and_then(Token::atom) != Some("OK") {
+                        return Err(Error::No);
+                    }
+                    if validity != Some(mailbox.uidvalidity) || !writable {
+                        return Err(Error::Unstable);
+                    }
+                }
+                Ok(())
+            },
+        )
+        .unit(unit))
     }
 
+    /// The steps reading `uids` in `mailbox`: SELECT, then UID FETCH in
+    /// sets of consecutive ranges. Rows for other UIDs are ignored.
+    fn readback_steps<'a>(
+        mailbox: &'a MailboxIdentity,
+        uids: &'a BTreeSet<Uid>,
+        messages: &'a std::cell::RefCell<BTreeMap<Uid, Metadata>>,
+        unit: usize,
+    ) -> Result<Vec<Step<'a>>, Error> {
+        if uids.len() > crate::backlog::BATCH_LIMIT {
+            return Err(Error::Limit);
+        }
+        let mut steps = vec![Self::select(mailbox, unit)?];
+        for set in crate::acquisition::imap::uid_sets(uids.iter().map(|u| u.get())) {
+            let command = format!(
+                "UID FETCH {set} (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"
+            );
+            steps.push(
+                Step::new(command.into_bytes(), move |row, tagged| {
+                    if tagged {
+                        return if row.get(1).and_then(Token::atom) == Some("OK") {
+                            Ok(())
+                        } else {
+                            Err(Error::No)
+                        };
+                    }
+                    if row.get(2).and_then(Token::atom) != Some("FETCH") {
+                        return Ok(());
+                    }
+                    let Some(uid) = fetch_uid(row)? else {
+                        return Ok(());
+                    };
+                    if !uids.contains(&uid) {
+                        return Ok(());
+                    }
+                    let (uid, metadata) = parse_metadata(row)?;
+                    if messages.borrow_mut().insert(uid, metadata).is_some() {
+                        return Err(Error::Unstable);
+                    }
+                    Ok(())
+                })
+                .unit(unit),
+            );
+        }
+        Ok(steps)
+    }
+
+    #[cfg(test)]
     pub(in crate::acquisition) fn readback(
         &mut self,
         mailbox: &MailboxIdentity,
         uids: &BTreeSet<Uid>,
     ) -> Result<MailboxReadback, Error> {
-        if uids.len() > crate::backlog::BATCH_LIMIT {
-            return Err(Error::Limit);
+        self.readbacks(&[(mailbox, uids)])?
+            .pop()
+            .unwrap_or(Err(Error::Protocol))
+    }
+
+    /// Several independent readbacks in one flight. Each fails on its own.
+    pub(in crate::acquisition) fn readbacks(
+        &mut self,
+        requests: &[(&MailboxIdentity, &BTreeSet<Uid>)],
+    ) -> Result<Vec<Result<MailboxReadback, Error>>, Error> {
+        let found: Vec<_> = requests
+            .iter()
+            .map(|_| std::cell::RefCell::new(BTreeMap::new()))
+            .collect();
+        let mut steps = vec![];
+        for (unit, ((mailbox, uids), messages)) in requests.iter().zip(&found).enumerate() {
+            steps.extend(Self::readback_steps(mailbox, uids, messages, unit)?);
         }
-        self.select(mailbox)?;
-        let mut messages = BTreeMap::new();
-        for chunk in uids.iter().copied().collect::<Vec<_>>().chunks(25) {
-            let set = chunk
-                .iter()
-                .map(|u| u.get().to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            let command = format!(
-                "UID FETCH {set} (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"
-            );
-            self.exchange(command.as_bytes(), |row, tagged| {
-                if tagged {
-                    return if row.get(1).and_then(Token::atom) == Some("OK") {
-                        Ok(())
-                    } else {
-                        Err(Error::No)
-                    };
-                }
-                if row.get(2).and_then(Token::atom) != Some("FETCH") {
-                    return Ok(());
-                }
-                let Some(uid) = fetch_uid(row)? else {
-                    return Ok(());
-                };
-                if !chunk.contains(&uid) {
-                    return Ok(());
-                }
-                let (uid, metadata) = parse_metadata(row)?;
-                if messages.insert(uid, metadata).is_some() {
-                    return Err(Error::Unstable);
-                }
-                Ok(())
-            })?;
-        }
-        Ok(MailboxReadback {
-            identity: mailbox.clone(),
-            messages,
-        })
+        let results = self.io.flight(steps)?;
+        Ok(requests
+            .iter()
+            .zip(found)
+            .zip(results)
+            .map(|(((mailbox, _), messages), result)| {
+                result.map(|()| MailboxReadback {
+                    identity: (*mailbox).clone(),
+                    messages: messages.into_inner(),
+                })
+            })
+            .collect())
     }
 
     pub(in crate::acquisition) fn move_messages(
@@ -278,7 +304,26 @@ impl Connection {
             return Err(Error::Unsupported);
         }
         let intent = evidence.command().clone();
-        let inventory = self.inventory()?;
+        // Every check before the effect travels in one flight: topology, the
+        // destination's identity, the sources' exact state, and the source
+        // selected again for the MOVE. The MOVE leaves only after all passed.
+        let mut observed = InventoryRows::default();
+        let before = std::cell::RefCell::new(BTreeMap::new());
+        let requested = intent.messages().keys().copied().collect();
+        let mut steps = observed.steps();
+        steps.push(Self::select(intent.destination(), 0)?);
+        steps.extend(Self::readback_steps(
+            intent.source(),
+            &requested,
+            &before,
+            0,
+        )?);
+        steps.push(Self::select(intent.source(), 0)?);
+        let result = self.io.flight(steps)?.pop().unwrap_or(Ok(()));
+        let inventory = match observed.finish(&self.capabilities) {
+            Ok(inventory) => inventory,
+            Err(error) => return Err(result.err().unwrap_or(error)),
+        };
         if [intent.source(), intent.destination()].iter().any(|m| {
             inventory
                 .get(&m.name.decoded)
@@ -286,15 +331,10 @@ impl Connection {
         }) {
             return Err(Error::Unsupported);
         }
-        self.select(intent.destination())?;
-        let before = self.readback(
-            intent.source(),
-            &intent.messages().keys().copied().collect(),
-        )?;
-        if &before.messages != intent.messages() {
+        result?;
+        if before.into_inner() != *intent.messages() {
             return Err(Error::Unstable);
         }
-        self.select(intent.source())?;
         let destination = quoted(intent.destination().name.wire.as_bytes())?;
         let command = [
             b"UID MOVE ".as_slice(),

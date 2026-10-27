@@ -55,6 +55,7 @@ pub(crate) struct Fake {
     source: InstalledSource,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
+    root: std::path::PathBuf,
 }
 
 impl Drop for Fake {
@@ -66,6 +67,7 @@ impl Drop for Fake {
                 result.unwrap();
             }
         }
+        modseqs::persist(&self.root);
     }
 }
 
@@ -96,6 +98,7 @@ fn folder(validity: u32, uids: &[u32]) -> FolderCensus {
         state: ScanState::Complete,
         live_uids: uids.iter().copied().collect(),
         messages: uids.iter().map(|u| (*u, record(*u))).collect(),
+        highestmodseq: None,
     }
 }
 
@@ -193,6 +196,45 @@ impl Fake {
                     .collect();
             }
         }
+        if root.join("move-condstore").exists() {
+            state
+                .synthetic_folders
+                .as_mut()
+                .unwrap()
+                .inventory
+                .capabilities
+                .insert("CONDSTORE".into());
+        }
+        if let Some(spec) = scale_spec(root) {
+            if !state.census.folders.contains_key("Scale/Sent") {
+                crate::census::scale::inflate(&mut state.census, spec);
+                let p = state.synthetic_folders.as_mut().unwrap();
+                for name in state.census.folders.keys() {
+                    if p.inventory
+                        .mailboxes
+                        .iter()
+                        .all(|m| m.name.decoded != *name)
+                    {
+                        p.inventory.mailboxes.push(Mailbox {
+                            name: ExactName::new(name).unwrap(),
+                            delimiter: Some("/".into()),
+                            attributes: if name == "Scale/Sent" {
+                                ["\\Sent".to_owned()].into()
+                            } else {
+                                BTreeSet::new()
+                            },
+                        });
+                    }
+                }
+                p.inventory
+                    .mailboxes
+                    .sort_by(|a, b| a.name.decoded.cmp(&b.name.decoded));
+                for (name, folder) in &state.census.folders {
+                    let next = folder.live_uids.last().map_or(1, |u| u + 1);
+                    state.synthetic_uid_next.entry(name.clone()).or_insert(next);
+                }
+            }
+        }
         let p = state.synthetic_folders.as_ref().unwrap();
         let source = InstalledSource {
             account: account.id.clone(),
@@ -207,25 +249,21 @@ impl Fake {
         };
         store.save_state(&mut state).unwrap();
         drop(store);
+        modseqs::restore(root, &state);
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let id = account.id.clone();
         let path = root.to_owned();
-        let worker = thread::spawn(move || {
-            while !stopping.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((tcp, _)) => {
-                        let _ = Peer::new(tcp, stopping.clone())
-                            .and_then(|tcp| serve(tcp, config.clone(), &repo, &id, &path));
-                    }
-                    Err(_) => thread::sleep(Duration::from_millis(5)),
-                }
-            }
-        });
+        let worker = crate::acquisition::fixture_peer::serve_sessions(
+            listener,
+            stopping,
+            move |tcp, lock| serve(tcp, config.clone(), &repo, &id, &path, lock),
+        );
         Self {
             source,
             stop,
             worker: Some(worker),
+            root: root.to_owned(),
         }
     }
 
@@ -268,6 +306,7 @@ fn serve(
     repo: &Accounts,
     id: &AccountId,
     root: &Path,
+    lock: &std::sync::Mutex<()>,
 ) -> std::io::Result<()> {
     tcp.tcp.set_nodelay(true)?;
     let mut io = BufReader::new(StreamOwned::new(
@@ -292,6 +331,8 @@ fn serve(
     io.get_mut().flush()?;
     let mut selected = None;
     let mut authenticated = false;
+    let scaled = scale_spec(root).is_some();
+    let mut cache = crate::acquisition::fixture_peer::Cached::default();
     loop {
         let mut line = String::new();
         if io.by_ref().take(16385).read_line(&mut line)? == 0 {
@@ -304,8 +345,35 @@ fn serve(
             .trim_end_matches("\r\n")
             .split_once(' ')
             .ok_or(std::io::ErrorKind::InvalidData)?;
-        let (store, mut state) = external(repo, id, root);
+        let guard = crate::acquisition::fixture_peer::command(lock);
+        if root.join("move-command-log").exists() {
+            let mut log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(root.join("move-commands.log"))?;
+            let logged = if command.starts_with("LOGIN ") {
+                "LOGIN [REDACTED]"
+            } else {
+                command
+            };
+            writeln!(log, "{logged}")?;
+        }
+        let (store, mut state) = if scaled {
+            let store = repo.fixture_sieve_store(id, root).unwrap();
+            let state = cache.load(&store);
+            (store, state)
+        } else {
+            external(repo, id, root)
+        };
         let mode = std::fs::read_to_string(root.join("move-mode")).unwrap_or_default();
+        let condstore = state
+            .synthetic_folders
+            .as_ref()
+            .unwrap()
+            .inventory
+            .capabilities
+            .contains("CONDSTORE");
+        let mut modseq_changed = condstore && modseqs::sync(root, &store, &mut state, false);
         let mut reply = String::new();
         if command == "CAPABILITY" {
             reply = format!(
@@ -354,13 +422,29 @@ fn serve(
                 }
                 _ if command.starts_with("SELECT ") || command.starts_with("EXAMINE ") => {
                     let read_only = command.starts_with("EXAMINE ");
-                    let name = unquote(&command[if read_only { 8 } else { 7 }..])?;
+                    let argument = &command[if read_only { 8 } else { 7 }..];
+                    let (argument, enable) = match argument.strip_suffix(" (CONDSTORE)") {
+                        Some(name) => (name, true),
+                        None => (argument, false),
+                    };
+                    let name = unquote(argument)?;
                     let folder = &state.census.folders[&name];
                     reply = format!(
-                        "* {} EXISTS\r\n* OK [UIDVALIDITY {}] instance\r\n{tag} OK [READ-WRITE] selected\r\n",
+                        "* {} EXISTS\r\n* OK [UIDVALIDITY {}] instance\r\n{}{tag} OK [READ-WRITE] selected\r\n",
                         folder.live_uids.len(),
-                        folder.uidvalidity
+                        folder.uidvalidity,
+                        if condstore {
+                            format!(
+                                "* OK [HIGHESTMODSEQ {}] modseq\r\n",
+                                modseqs::highest(folder)
+                            )
+                        } else {
+                            String::new()
+                        }
                     );
+                    if enable && !condstore {
+                        reply = format!("{tag} BAD CONDSTORE is not advertised\r\n");
+                    }
                     if read_only || mode == "read_only" {
                         reply = reply.replace("READ-WRITE", "READ-ONLY");
                     }
@@ -404,9 +488,21 @@ fn serve(
                     }
                     let set = command[10..].split_once(' ').unwrap().0;
                     let f = &state.census.folders[selected.as_ref().unwrap()];
+                    let since = command
+                        .rsplit_once(" (CHANGEDSINCE ")
+                        .and_then(|(_, n)| n.strip_suffix(')'))
+                        .map(|n| n.parse::<u64>().unwrap());
+                    let Some(requested) =
+                        crate::acquisition::fixture_peer::uid_set(set, &f.live_uids)
+                    else {
+                        panic!("Malformed UID set reached the synthetic MOVE fixture");
+                    };
+                    let refused = since.is_some() && !condstore;
+                    if refused {
+                        reply = format!("{tag} BAD CONDSTORE is not advertised\r\n");
+                    }
                     if mode == "unsolicited" && command.contains("(MESSAGE-ID)") {
-                        let requested: BTreeSet<u32> =
-                            set.split(',').map(|u| u.parse().unwrap()).collect();
+                        let requested: BTreeSet<u32> = requested.iter().copied().collect();
                         if let Some((seq, uid)) = f
                             .live_uids
                             .iter()
@@ -422,16 +518,29 @@ fn serve(
                             reply.push_str(&format!("* {} FETCH (FLAGS ({flags}))\r\n* {} FETCH (UID {uid} FLAGS ({flags}))\r\n* {} EXISTS\r\n", seq + 1, seq + 1, f.live_uids.len()));
                         }
                     }
-                    for uid in set.split(',').map(|u| u.parse::<u32>().unwrap()) {
+                    for uid in requested.into_iter().filter(|_| !refused) {
+                        let modseq =
+                            since.map(|_| modseqs::of(root, selected.as_ref().unwrap(), uid));
+                        if since
+                            .zip(modseq)
+                            .is_some_and(|(since, modseq)| modseq <= since)
+                        {
+                            continue;
+                        }
                         if let Some(m) = f.messages.get(&uid) {
                             let body = if let Some((_, fields)) = command.split_once("BODY.PEEK[") {
                                 let fields = fields.split_once(']').unwrap().0;
-                                let header = header_for(root, m);
+                                let mut header = header_for(root, selected.as_deref().unwrap(), m);
+                                if scaled {
+                                    header = crate::census::scale::header_fields(&header, fields);
+                                }
                                 format!(" BODY[{fields}] {{{}}}\r\n{header}", header.len())
                             } else {
                                 String::new()
                             };
-                            reply.push_str(&format!("* 1 FETCH (UID {uid} FLAGS ({}) INTERNALDATE \"{}\" RFC822.SIZE {}{body})\r\n", m.flags.iter().cloned().collect::<Vec<_>>().join(" "), m.internal_date, m.size));
+                            let modseq =
+                                modseq.map(|m| format!(" MODSEQ ({m})")).unwrap_or_default();
+                            reply.push_str(&format!("* 1 FETCH (UID {uid} FLAGS ({}) INTERNALDATE \"{}\" RFC822.SIZE {}{body}{modseq})\r\n", m.flags.iter().cloned().collect::<Vec<_>>().join(" "), m.internal_date, m.size));
                         }
                     }
                 }
@@ -507,7 +616,16 @@ fn serve(
                         let m = dest.messages.get_mut(&mapped[0]).unwrap();
                         m.flags.insert("$race-client".into());
                     }
-                    store.save_state(&mut state).unwrap();
+                    if condstore {
+                        modseqs::sync(root, &store, &mut state, true);
+                    }
+                    if scaled {
+                        cache.save(&store, &mut state);
+                    } else {
+                        store.save_state(&mut state).unwrap();
+                    }
+                    modseqs::saved(root, &store);
+                    modseq_changed = false;
                     let mut log = std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
@@ -528,6 +646,7 @@ fn serve(
                     }
                     if mode == "slow" {
                         drop(store);
+                        drop(guard);
                         Peer::until_closed(&mut io);
                         return Ok(());
                     }
@@ -594,8 +713,15 @@ fn serve(
         if !reply.contains(&format!("{tag} ")) {
             reply.push_str(&format!("{tag} OK completed\r\n"));
         }
-        store.save_state(&mut state).unwrap();
+        if !scaled {
+            store.save_state(&mut state).unwrap();
+            modseqs::saved(root, &store);
+        } else if command.starts_with("LOGIN ") || modseq_changed {
+            cache.save(&store, &mut state);
+            modseqs::saved(root, &store);
+        }
         drop(store);
+        drop(guard);
         for chunk in reply
             .as_bytes()
             .chunks(if root.join("move-large").exists() {
@@ -610,9 +736,163 @@ fn serve(
     }
 }
 
+/// Mod-sequences of a fake that advertises CONDSTORE (RFC 7162). Each
+/// folder's HIGHESTMODSEQ persists with the provider state. Per-message
+/// values live in memory for the installation and follow the state's
+/// content: a new message or changed flags get a new mod-sequence, whoever
+/// made the change. A fake that stops cleanly writes them to
+/// `move-modseq.json`, and the next start takes back each folder whose
+/// HIGHESTMODSEQ has not moved since. Otherwise every message counts as
+/// changed at a new HIGHESTMODSEQ, which only makes clients read more.
+mod modseqs {
+    use super::*;
+    use crate::acquisition::fixture_peer::{FileId, file_id};
+    use std::{path::PathBuf, sync::Mutex};
+
+    /// One folder's mod-sequences: per message, its own and the flags it
+    /// had then.
+    #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+    struct Known {
+        validity: u32,
+        highest: u64,
+        messages: BTreeMap<u32, (u64, BTreeSet<String>)>,
+    }
+    type Folders = BTreeMap<String, Known>;
+    static STATE: Mutex<BTreeMap<PathBuf, (Option<FileId>, Folders)>> = Mutex::new(BTreeMap::new());
+
+    pub(super) fn highest(folder: &FolderCensus) -> u64 {
+        folder.highestmodseq.unwrap_or(1)
+    }
+    /// Brings the mod-sequences up to the state's content and returns true
+    /// when a HIGHESTMODSEQ moved, so the state needs saving. Unless
+    /// `force`d, a state whose file is unchanged since the last sync is
+    /// taken as synced.
+    pub(super) fn sync(
+        root: &Path,
+        store: &EncryptedStore,
+        state: &mut AccountState,
+        force: bool,
+    ) -> bool {
+        let mut all = STATE.lock().unwrap_or_else(|p| p.into_inner());
+        let (synced, folders) = all.entry(root.to_owned()).or_default();
+        let current = file_id(&store.path());
+        if !force && synced.is_some() && *synced == current {
+            return false;
+        }
+        let mut moved = vec![];
+        for (name, folder) in &state.census.folders {
+            let before = folder.highestmodseq.unwrap_or(1);
+            let known = folders.entry(name.clone()).or_default();
+            if known.validity != folder.uidvalidity || known.highest > before {
+                *known = Known {
+                    validity: folder.uidvalidity,
+                    ..Known::default()
+                };
+            }
+            let mut highest = before;
+            let fresh = known.messages.is_empty();
+            if fresh && !folder.messages.is_empty() {
+                highest += 1;
+            }
+            for (uid, m) in &folder.messages {
+                if known
+                    .messages
+                    .get(uid)
+                    .is_none_or(|(_, flags)| *flags != m.flags)
+                {
+                    if !fresh {
+                        highest += 1;
+                    }
+                    known.messages.insert(*uid, (highest, m.flags.clone()));
+                }
+            }
+            let listed = known.messages.len();
+            known
+                .messages
+                .retain(|uid, _| folder.messages.contains_key(uid));
+            if known.messages.len() < listed {
+                highest += 1;
+            }
+            known.highest = highest;
+            if highest != before || folder.highestmodseq.is_none() {
+                moved.push((name.clone(), highest));
+            }
+        }
+        let changed = !moved.is_empty();
+        for (name, highest) in moved {
+            state
+                .census
+                .folders
+                .get_mut(&name)
+                .expect("synced folder")
+                .highestmodseq = Some(highest);
+        }
+        *synced = if changed { None } else { current };
+        changed
+    }
+    /// Records that the state on disk is what the last sync saw.
+    pub(super) fn saved(root: &Path, store: &EncryptedStore) {
+        let mut all = STATE.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((synced, _)) = all.get_mut(root) {
+            *synced = file_id(&store.path());
+        }
+    }
+    pub(super) fn persist(root: &Path) {
+        let all = STATE.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((_, folders)) = all.get(root) {
+            let _ = std::fs::write(
+                root.join("move-modseq.json"),
+                serde_json::to_vec(folders).unwrap(),
+            );
+        }
+    }
+    /// Takes back the saved mod-sequences of each folder whose
+    /// UIDVALIDITY and HIGHESTMODSEQ are what they were when saved.
+    pub(super) fn restore(root: &Path, state: &AccountState) {
+        let Some(saved) = std::fs::read(root.join("move-modseq.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Folders>(&b).ok())
+        else {
+            return;
+        };
+        let mut all = STATE.lock().unwrap_or_else(|p| p.into_inner());
+        let (synced, folders) = all.entry(root.to_owned()).or_default();
+        *synced = None;
+        for (name, known) in saved {
+            if state.census.folders.get(&name).is_some_and(|f| {
+                f.uidvalidity == known.validity && f.highestmodseq == Some(known.highest)
+            }) {
+                folders.insert(name, known);
+            }
+        }
+    }
+    pub(super) fn of(root: &Path, folder: &str, uid: u32) -> u64 {
+        let all = STATE.lock().unwrap_or_else(|p| p.into_inner());
+        all.get(root)
+            .and_then(|(_, folders)| folders.get(folder))
+            .and_then(|known| known.messages.get(&uid))
+            .map_or(u64::MAX, |(modseq, _)| *modseq)
+    }
+}
+
+/// The personal-scale mailbox `move-scale` asks for: that many invented
+/// messages in the scale folders, besides the workflow's own.
+fn scale_spec(root: &Path) -> Option<crate::census::scale::Spec> {
+    let messages = std::fs::read_to_string(root.join("move-scale")).ok()?;
+    Some(crate::census::scale::Spec {
+        messages: messages.trim().parse().ok()?,
+        ..crate::census::scale::PERSONAL
+    })
+}
+
 /// Raw header the fake serves for a message: the shared invented header unless
 /// a recipient profile assigns one by message size, which travels with a MOVE.
-fn header_for(root: &Path, m: &MessageRecord) -> String {
+fn header_for(root: &Path, folder: &str, m: &MessageRecord) -> String {
+    if let Some(raw) =
+        scale_spec(root).and_then(|spec| crate::census::scale::raw_header(spec, folder, m.uid))
+    {
+        return raw;
+    }
     std::fs::read(root.join("move-headers.json"))
         .ok()
         .and_then(|b| serde_json::from_slice::<BTreeMap<String, String>>(&b).ok())
@@ -1155,4 +1435,161 @@ pub(crate) fn workflow_install(root: &Path) -> (Accounts, Account, Fake) {
         }
     }
     (repo, account, fake)
+}
+
+fn tagged_status(connection: &mut Connection, command: &str) -> (String, Vec<Vec<Token>>) {
+    let mut status = String::new();
+    let mut rows = vec![];
+    connection
+        .exchange(command.as_bytes(), |row, tagged| {
+            if tagged {
+                status = row.get(1).and_then(Token::atom).unwrap_or_default().into();
+            } else {
+                rows.push(row.to_vec());
+            }
+            Ok(())
+        })
+        .unwrap();
+    (status, rows)
+}
+
+fn highest(rows: &[Vec<Token>]) -> Option<u64> {
+    rows.iter().find_map(|row| {
+        row.get(2)
+            .and_then(Token::atom)?
+            .strip_prefix("[HIGHESTMODSEQ ")?
+            .strip_suffix(']')?
+            .parse()
+            .ok()
+    })
+}
+
+/// The fake answers CONDSTORE's EXAMINE parameter and CHANGEDSINCE with BAD
+/// unless it advertises CONDSTORE. When it does, HIGHESTMODSEQ and each
+/// message's MODSEQ follow every change, whoever made it.
+#[test]
+fn fake_refuses_condstore_unless_advertised_and_then_tracks_every_change() {
+    for advertised in [false, true] {
+        let root = EvidenceRoot::new();
+        if advertised {
+            std::fs::write(root.path().join("move-condstore"), "advertised").unwrap();
+        }
+        let (repo, account, fake) = setup(root.path());
+        let mut connection = fake.connect(&account, Cancellation::default()).unwrap();
+        assert_eq!(connection.capabilities.contains("CONDSTORE"), advertised);
+        let (status, rows) = tagged_status(&mut connection, "EXAMINE \"INBOX\" (CONDSTORE)");
+        let since = "UID FETCH 1:* (UID FLAGS) (CHANGEDSINCE 1)";
+        if !advertised {
+            assert_eq!(status, "BAD");
+            assert_eq!(tagged_status(&mut connection, since).0, "BAD");
+            continue;
+        }
+        assert_eq!(status, "OK");
+        let before = highest(&rows).unwrap();
+        let unchanged = format!("UID FETCH 1:* (UID FLAGS) (CHANGEDSINCE {before})");
+        let (status, rows) = tagged_status(&mut connection, &unchanged);
+        assert_eq!((status.as_str(), rows.len()), ("OK", 0));
+        let (store, mut state) = external(&repo, &account.id, root.path());
+        state
+            .census
+            .folders
+            .get_mut("INBOX")
+            .unwrap()
+            .messages
+            .get_mut(&8)
+            .unwrap()
+            .flags
+            .insert("\\Flagged".into());
+        store.save_state(&mut state).unwrap();
+        drop(store);
+        let (_, rows) = tagged_status(&mut connection, "EXAMINE \"INBOX\" (CONDSTORE)");
+        let after = highest(&rows).unwrap();
+        assert!(after > before);
+        let (status, rows) = tagged_status(&mut connection, &unchanged);
+        assert_eq!(status, "OK");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(fetch_uid(&rows[0]).unwrap(), Some(Uid::new(8).unwrap()));
+        assert!(rows[0].contains(&Token::Atom("MODSEQ".into())));
+    }
+}
+
+/// Every check before a MOVE travels in one flight, and the MOVE leaves only
+/// when all of them passed: a source whose state moved, or a destination
+/// under another UIDVALIDITY, stops before any effect. Readbacks pipelined
+/// together fail one by one, and rows never reach a readback whose SELECT
+/// failed.
+#[test]
+fn pipelined_checks_stop_at_the_first_unsafe_response_before_any_effect() {
+    for change in ["source_flags", "destination_validity"] {
+        let root = EvidenceRoot::new();
+        let (repo, account, fake) = setup(root.path());
+        let mut connection = fake.connect(&account, Cancellation::default()).unwrap();
+        let mut planned = intent(&mut connection);
+        if change == "source_flags" {
+            let (store, mut state) = external(&repo, &account.id, root.path());
+            let inbox = state.census.folders.get_mut("INBOX").unwrap();
+            inbox
+                .messages
+                .get_mut(&19)
+                .unwrap()
+                .flags
+                .insert("$changed".into());
+            store.save_state(&mut state).unwrap();
+        } else {
+            planned = MoveIntent::new(
+                Purpose::Filing {
+                    protect_flagged: true,
+                },
+                identity("INBOX", 101),
+                identity("Filed/Receipts", 999),
+                planned.messages().clone(),
+            )
+            .unwrap();
+        }
+        let mut evidence = MoveEvidence::intent(planned);
+        let permit = fake
+            .source
+            .permit(
+                &account.id,
+                account.provider,
+                &account.login,
+                "test-bound-authority",
+            )
+            .unwrap();
+        let mut persisted = 0;
+        assert_eq!(
+            connection.move_messages(&permit, &mut evidence, |_| {
+                persisted += 1;
+                Ok(())
+            }),
+            Err(Error::Unstable),
+            "{change}"
+        );
+        assert_eq!(persisted, 0, "{change}: no attempt was recorded");
+        assert!(!evidence.attempted());
+        assert!(
+            !root.path().join("move-wire-observations").exists(),
+            "{change}: no MOVE reached the fixture"
+        );
+        let all: BTreeSet<Uid> = [4, 8, 19, 99].map(|u| Uid::new(u).unwrap()).into();
+        let results = connection
+            .readbacks(&[
+                (&identity("INBOX", 999), &all),
+                (&identity("INBOX", 101), &all),
+                (&identity("Filed/Receipts", 202), &BTreeSet::new()),
+            ])
+            .unwrap();
+        assert_eq!(results[0].as_ref().unwrap_err(), &Error::Unstable);
+        assert_eq!(
+            results[1]
+                .as_ref()
+                .unwrap()
+                .messages
+                .keys()
+                .collect::<Vec<_>>(),
+            all.iter().collect::<Vec<_>>()
+        );
+        assert!(results[2].as_ref().unwrap().messages.is_empty());
+        connection.inventory().unwrap();
+    }
 }

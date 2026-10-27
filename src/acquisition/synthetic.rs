@@ -1,6 +1,6 @@
 use super::{
     AccountPaths, Accounts, AcquisitionError, CredentialBackend, SecretValue,
-    imap::{Folder, MailRead, Metadata},
+    imap::{Folder, Listing, MailRead, Metadata},
     scan::{self, Cancellation, ScanProgress},
 };
 use crate::census::{AccountId, Census};
@@ -72,11 +72,25 @@ impl MailRead for SyntheticMail {
             excluded: false,
         }])
     }
-    fn inventory(&mut self, _: &Folder) -> Result<(u32, BTreeSet<u32>), AcquisitionError> {
+    fn inventory(
+        &mut self,
+        _: &Folder,
+        _: Option<u64>,
+    ) -> Result<(Listing, Option<BTreeMap<u32, Metadata>>), AcquisitionError> {
         let count = 100;
         #[cfg(test)]
         let count = if cancel_fixture() { 601 } else { count };
-        Ok((7, (1..=count).collect()))
+        Ok((
+            Listing {
+                validity: 7,
+                uids: (1..=count).collect(),
+                modseq: None,
+            },
+            None,
+        ))
+    }
+    fn header_batch(&self) -> usize {
+        25
     }
     fn metadata(&mut self, uids: &[u32]) -> Result<BTreeMap<u32, Metadata>, AcquisitionError> {
         Ok(uids

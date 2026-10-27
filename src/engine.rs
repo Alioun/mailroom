@@ -79,6 +79,7 @@ pub fn synthetic_census(input: &PreviewInput) -> Result<Census, String> {
                 state: ScanState::Complete,
                 live_uids: BTreeSet::new(),
                 messages: Default::default(),
+                highestmodseq: None,
             });
         folder.live_uids.insert(uid);
         folder.messages.insert(

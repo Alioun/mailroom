@@ -68,6 +68,17 @@ pub(crate) fn external(
     (store, state)
 }
 
+/// The personal-scale All Mail `gmail-scale` asks for: that many invented
+/// messages besides the fixture's own.
+fn scale_spec(root: &Path) -> Option<crate::census::scale::Spec> {
+    let messages = std::fs::read_to_string(root.join("gmail-scale")).ok()?;
+    Some(crate::census::scale::Spec {
+        messages: messages.trim().parse().ok()?,
+        gmail: true,
+        ..crate::census::scale::PERSONAL
+    })
+}
+
 pub(crate) fn header(id: u64) -> String {
     let (from, to) = match id {
         1006 => ("updates@studio.example.com", "team@work.example.test"),
@@ -151,6 +162,7 @@ pub(crate) fn sync(state: &mut AccountState) {
                 state: ScanState::Complete,
                 live_uids: Default::default(),
                 messages: Default::default(),
+                highestmodseq: None,
             });
         let members: BTreeMap<_, _> = canonical
             .messages
@@ -263,15 +275,18 @@ fn initialize(root: &Path, state: &mut AccountState, listener: &TcpListener) {
         next = (1000 + 2 * count + 1).max(3000);
     }
     state.census.folders.clear();
-    state.census.folders.insert(
-        ALL.into(),
-        FolderCensus {
-            uidvalidity: 11,
-            state: ScanState::Complete,
-            live_uids: all.keys().copied().collect(),
-            messages: all,
-        },
-    );
+    let mut canonical = FolderCensus {
+        uidvalidity: 11,
+        state: ScanState::Complete,
+        live_uids: all.keys().copied().collect(),
+        messages: all,
+        highestmodseq: None,
+    };
+    if let Some(spec) = scale_spec(root) {
+        crate::census::scale::inflate_all_mail(&mut canonical, spec);
+        next = next.max(crate::census::scale::GMAIL_UID_BASE + spec.messages);
+    }
+    state.census.folders.insert(ALL.into(), canonical);
     for (name, uidvalidity, id) in [(STATIC[0], 71, 2001), (STATIC[1], 72, 2002)] {
         state.census.folders.insert(
             name.into(),
@@ -280,6 +295,7 @@ fn initialize(root: &Path, state: &mut AccountState, listener: &TcpListener) {
                 state: ScanState::Complete,
                 live_uids: [1].into(),
                 messages: [(1, record(1, id, &[], &[]))].into(),
+                highestmodseq: None,
             },
         );
     }
@@ -338,17 +354,11 @@ impl Fake {
         let stopping = stop.clone();
         let id = account.id.clone();
         let path = root.to_owned();
-        let worker = thread::spawn(move || {
-            while !stopping.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((tcp, _)) => {
-                        let _ = Peer::new(tcp, stopping.clone())
-                            .and_then(|tcp| serve(tcp, config.clone(), &repo, &id, &path));
-                    }
-                    Err(_) => thread::sleep(Duration::from_millis(5)),
-                }
-            }
-        });
+        let worker = crate::acquisition::fixture_peer::serve_sessions(
+            listener,
+            stopping,
+            move |tcp, lock| serve(tcp, config.clone(), &repo, &id, &path, lock),
+        );
         Self {
             source,
             stop,
@@ -544,6 +554,7 @@ fn serve(
     repo: &Accounts,
     id: &AccountId,
     root: &Path,
+    lock: &std::sync::Mutex<()>,
 ) -> std::io::Result<()> {
     tcp.tcp.set_nodelay(true)?;
     let mut io = BufReader::new(StreamOwned::new(
@@ -555,6 +566,8 @@ fn serve(
     io.get_mut().flush()?;
     let mut selected: Option<String> = None;
     let mut authenticated = false;
+    let spec = scale_spec(root);
+    let mut cache = crate::acquisition::fixture_peer::Cached::default();
     loop {
         let mut line = String::new();
         if io.by_ref().take(16385).read_line(&mut line)? == 0 {
@@ -567,7 +580,14 @@ fn serve(
             .trim_end_matches("\r\n")
             .split_once(' ')
             .ok_or(std::io::ErrorKind::InvalidData)?;
-        let (store, mut state) = external(repo, id, root);
+        let guard = crate::acquisition::fixture_peer::command(lock);
+        let (store, mut state) = if spec.is_some() {
+            let store = repo.fixture_sieve_store(id, root).unwrap();
+            let state = cache.load(&store);
+            (store, state)
+        } else {
+            external(repo, id, root)
+        };
         let mode = std::fs::read_to_string(root.join("gmail-mode")).unwrap_or_default();
         let mut reply = String::new();
         if command == "CAPABILITY" {
@@ -690,11 +710,15 @@ fn serve(
                         }
                         rest = rest.trim_start();
                     }
-                    for uid in set.split(',').map(|u| u.parse::<u32>().unwrap()) {
+                    let Some(uids) = crate::acquisition::fixture_peer::uid_set(set, &f.live_uids)
+                    else {
+                        forbidden(root, command);
+                    };
+                    for uid in uids {
                         let Some(m) = f.messages.get(&uid) else {
                             continue;
                         };
-                        let seq = f.live_uids.iter().position(|u| *u == uid).unwrap() + 1;
+                        let seq = f.live_uids.range(..uid).count() + 1;
                         let gmail = m.gmail_message_id.as_deref().unwrap();
                         let parts = requested
                             .iter()
@@ -712,7 +736,15 @@ fn serve(
                                 }
                                 "X-GM-LABELS" => format!("X-GM-LABELS ({})", label_list(m, &mode)),
                                 body if body.starts_with("BODY[") => {
-                                    let text = header(gmail.parse().unwrap());
+                                    let text = match spec.and_then(|spec| {
+                                        crate::census::scale::gmail_raw_header(spec, uid)
+                                    }) {
+                                        Some(raw) => crate::census::scale::header_fields(
+                                            &raw,
+                                            &body[5..body.len() - 1],
+                                        ),
+                                        None => header(gmail.parse().unwrap()),
+                                    };
                                     format!("{body} {{{}}}\r\n{text}", text.len())
                                 }
                                 other => panic!("Unexpected Gmail FETCH item {other}"),
@@ -769,7 +801,7 @@ fn serve(
                     }
                     race(&mut state, root, "after", &effected);
                     sync(&mut state);
-                    store.save_state(&mut state).unwrap();
+                    cache.save(&store, &mut state);
                     let mut exact = std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
@@ -805,9 +837,10 @@ fn serve(
             reply.push_str(&format!("{tag} OK completed\r\n"));
         }
         if command.starts_with("LOGIN ") {
-            store.save_state(&mut state).unwrap();
+            cache.save(&store, &mut state);
         }
         drop(store);
+        drop(guard);
         for chunk in reply.as_bytes().chunks(512) {
             io.get_mut().write_all(chunk)?;
             io.get_mut().flush()?;

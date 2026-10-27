@@ -110,7 +110,11 @@ impl Workflow {
         Self::sized(large.then_some(501))
     }
     fn sized(eligible: Option<u32>) -> Self {
+        Self::prepared(eligible, |_| {})
+    }
+    fn prepared(eligible: Option<u32>, prepare: impl FnOnce(&std::path::Path)) -> Self {
         let root = tempfile::tempdir().unwrap();
+        prepare(root.path());
         std::fs::write(
             root.path().join("workspace-authority"),
             "completion-fixture-v1",
@@ -1260,5 +1264,274 @@ fn scale_move_phase() {
             assert!(exact && same_journal && restored.recovery_pending());
         }
         _ => unreachable!("{phase}"),
+    }
+}
+
+/// Live MOVE operations against a fake holding a personal-scale mailbox,
+/// over the link `$MAILROOM_FIXTURE_LINK` emulates. The installation lives
+/// at `$MAILROOM_SCALE_ROOT`; `$MAILROOM_LATENCY_PHASES` lists the phases
+/// this process runs, in order: `setup` (`$MAILROOM_SCALE_MESSAGES`
+/// messages, default 100,000; the fake advertises CONDSTORE when
+/// `$MAILROOM_LATENCY_CONDSTORE` is set), `refresh` (the first acquisition), `rescan`
+/// (a refresh of an unchanged mailbox), `preview`, `confirm` (stops after
+/// its first batch, like Cancel), `resume`, `undo_preview`, `undo_lost`
+/// (the fake drops each MOVE's reply), `reconcile`.
+#[test]
+#[ignore = "personal-scale measurement; run explicitly"]
+fn latency_move_phases() {
+    use crate::census::scale;
+    let root = std::path::PathBuf::from(std::env::var("MAILROOM_SCALE_ROOT").unwrap());
+    let phases = std::env::var("MAILROOM_LATENCY_PHASES").unwrap();
+    if phases.starts_with("setup") {
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("workspace-authority"), "completion-fixture-v1").unwrap();
+        std::fs::write(root.join("move-large"), "501 exact eligible messages").unwrap();
+        std::fs::write(
+            root.join("move-scale"),
+            scale::spec_from_env(false).messages.to_string(),
+        )
+        .unwrap();
+        if std::env::var_os("MAILROOM_LATENCY_CONDSTORE").is_some() {
+            std::fs::write(root.join("move-condstore"), "advertised").unwrap();
+        }
+    }
+    let (repo, account, _fake) = fixture_install(&root);
+    let open = || repo.store(&account).unwrap();
+    let report = |store: &EncryptedStore, operation: &str, result: String| {
+        let saved = store.load_state().unwrap();
+        let r = saved.protocol_backlog.runs.last();
+        scale::report(
+            operation,
+            serde_json::json!({
+                "result": result,
+                "status": r.as_ref().map(|r| r.status),
+                "batches": r.as_ref().map(|r| r.batches.len()),
+                "census_messages": scale::messages(&saved.census),
+            }),
+            Default::default(),
+        );
+    };
+    for phase in phases.split(',') {
+        let cancel = Cancellation::default();
+        if phase == "refresh" || phase == "rescan" {
+            let result = scale::measure(&format!("move.{phase}"), serde_json::json!({}), || {
+                repo.scan(&account.id, cancel.clone(), |_| {})
+            });
+            report(
+                &open(),
+                &format!("move.after_{phase}"),
+                format!("{:?}", result.map(|c| c.folders.len())),
+            );
+            continue;
+        }
+        let store = open();
+        match phase {
+            "setup" => report(&store, "move.setup", "installed".into()),
+            "preview" => {
+                let saved = store.load_state().unwrap();
+                let result = scale::measure("move.preview", serde_json::json!({}), || {
+                    repo.backlog_preview(
+                        &account,
+                        &store,
+                        &saved,
+                        Options::default(),
+                        cancel.clone(),
+                    )
+                });
+                report(
+                    &store,
+                    "move.after_preview",
+                    format!("{:?}", result.map(|p| p.operation.batches.len())),
+                );
+            }
+            "confirm" => {
+                let saved = store.load_state().unwrap();
+                let preview = repo
+                    .backlog_preview(&account, &store, &saved, Options::default(), cancel.clone())
+                    .unwrap();
+                STOP_BETWEEN_BATCHES
+                    .with(|s| *s.borrow_mut() = Some((std::time::Instant::now(), cancel.clone())));
+                let mut saved = store.load_state().unwrap();
+                let result = scale::measure("move.confirm", serde_json::json!({}), || {
+                    repo.backlog_confirm(
+                        &account,
+                        &store,
+                        &mut saved,
+                        Options::default(),
+                        &preview.receipt,
+                        cancel.clone(),
+                        |_| Ok(()),
+                    )
+                });
+                STOP_BETWEEN_BATCHES.with(|s| *s.borrow_mut() = None);
+                report(&store, "move.after_confirm", format!("{result:?}"));
+            }
+            "resume" => {
+                let mut saved = store.load_state().unwrap();
+                let id = saved.protocol_backlog.runs.last().unwrap().id.clone();
+                let result = scale::measure("move.resume", serde_json::json!({}), || {
+                    repo.backlog_run(
+                        &account,
+                        &store,
+                        &mut saved,
+                        &id,
+                        false,
+                        cancel.clone(),
+                        |_| Ok(()),
+                    )
+                });
+                report(&store, "move.after_resume", format!("{result:?}"));
+            }
+            "undo_preview" => {
+                let saved = store.load_state().unwrap();
+                let id = saved.protocol_backlog.runs.last().unwrap().id.clone();
+                let result = scale::measure("move.undo_preview", serde_json::json!({}), || {
+                    repo.backlog_undo_preview(&account, &store, &saved, &id, cancel.clone())
+                });
+                report(
+                    &store,
+                    "move.after_undo_preview",
+                    format!("{:?}", result.map(|p| p.reverse.len())),
+                );
+            }
+            "undo_lost" => {
+                let saved = store.load_state().unwrap();
+                let id = saved.protocol_backlog.runs.last().unwrap().id.clone();
+                let preview = repo
+                    .backlog_undo_preview(&account, &store, &saved, &id, cancel.clone())
+                    .unwrap();
+                std::fs::write(root.join("move-mode"), "lost").unwrap();
+                let mut saved = store.load_state().unwrap();
+                let result = scale::measure("move.undo", serde_json::json!({}), || {
+                    repo.backlog_undo(
+                        &account,
+                        &store,
+                        &mut saved,
+                        &id,
+                        &preview.receipt,
+                        cancel.clone(),
+                        |_| Ok(()),
+                    )
+                });
+                std::fs::write(root.join("move-mode"), "").unwrap();
+                report(&store, "move.after_undo", format!("{result:?}"));
+            }
+            "reconcile" => {
+                let mut saved = store.load_state().unwrap();
+                let id = saved.protocol_backlog.runs.last().unwrap().id.clone();
+                let result = scale::measure("move.reconcile", serde_json::json!({}), || {
+                    repo.backlog_reconcile(&account, &store, &mut saved, &id, cancel.clone())
+                });
+                report(&store, "move.after_reconcile", format!("{result:?}"));
+            }
+            _ => unreachable!("{phase}"),
+        }
+    }
+}
+
+impl Workflow {
+    fn commands(&self) -> Vec<String> {
+        let log = std::fs::read_to_string(self.path("move-commands.log")).unwrap_or_default();
+        std::fs::remove_file(self.path("move-commands.log")).ok();
+        log.lines().map(String::from).collect()
+    }
+    fn scan(&self) {
+        self.repo
+            .scan(&self.account.id, Cancellation::default(), |_| {})
+            .unwrap();
+    }
+    fn edit_provider(&self, edit: impl FnOnce(&mut crate::census::FolderCensus)) {
+        let store = self
+            .repo
+            .fixture_sieve_store(&self.account.id, self.root.path())
+            .unwrap();
+        let mut provider = store.load_state().unwrap();
+        edit(provider.census.folders.get_mut("INBOX").unwrap());
+        store.save_state(&mut provider).unwrap();
+    }
+}
+
+fn header_fetches(commands: &[String]) -> Vec<&String> {
+    commands
+        .iter()
+        .filter(|c| c.contains("BODY.PEEK[HEADER.FIELDS (FROM"))
+        .collect()
+}
+
+/// After a census refresh, a preview reads no header the census already
+/// holds: a header is immutable for a UID under one UIDVALIDITY. With
+/// CONDSTORE it reads only the metadata that changed, and still sees every
+/// change: a message flagged by another client leaves the plan, and only a
+/// newly delivered message's header is read. Without CONDSTORE the client
+/// never asks for it. A confirm runs over the session its preview opened.
+#[test]
+fn previews_read_only_what_changed_since_the_census_and_confirm_reuses_the_session() {
+    for condstore in [false, true] {
+        let w = Workflow::prepared(Some(501), |root| {
+            if condstore {
+                std::fs::write(root.join("move-condstore"), "advertised").unwrap();
+            }
+            std::fs::write(root.join("move-command-log"), "on").unwrap();
+        });
+        w.scan();
+        w.commands();
+        let first = w.preview().unwrap();
+        let commands = w.commands();
+        assert!(header_fetches(&commands).is_empty(), "{condstore}");
+        assert_eq!(
+            commands.iter().any(|c| c.contains("CHANGEDSINCE")),
+            condstore
+        );
+        assert_eq!(
+            commands.iter().any(|c| c.contains("(CONDSTORE)")),
+            condstore
+        );
+        let flagged = first.operation.plan.filing.changes[0].source.uid;
+        w.edit_provider(|inbox| {
+            inbox
+                .messages
+                .get_mut(&flagged)
+                .unwrap()
+                .flags
+                .insert("\\Flagged".into());
+        });
+        let second = w.preview().unwrap();
+        assert!(
+            second
+                .operation
+                .plan
+                .filing
+                .changes
+                .iter()
+                .all(|c| c.source.uid != flagged),
+            "{condstore}: the flag reached the plan"
+        );
+        assert_eq!(
+            second.operation.plan.filing.changes.len() + 1,
+            first.operation.plan.filing.changes.len()
+        );
+        let arrived = 100_001;
+        w.edit_provider(|inbox| {
+            let mut message = inbox.messages[&4].clone();
+            message.uid = arrived;
+            inbox.live_uids.insert(arrived);
+            inbox.messages.insert(arrived, message);
+        });
+        w.commands();
+        let third = w.preview().unwrap();
+        let commands = w.commands();
+        let headers = header_fetches(&commands);
+        assert_eq!(headers.len(), 1, "{condstore}");
+        assert!(headers[0].starts_with(&format!("UID FETCH {arrived} ")));
+        w.confirm(&third).unwrap();
+        assert_eq!(
+            w.commands()
+                .iter()
+                .filter(|c| c.starts_with("LOGIN"))
+                .count(),
+            2,
+            "{condstore}: preview and run share the MOVE session"
+        );
+        assert_eq!(w.run().status, Status::Complete);
     }
 }

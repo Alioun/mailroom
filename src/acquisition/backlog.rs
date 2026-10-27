@@ -1,7 +1,7 @@
 use super::{
     Account, Accounts, AcquisitionError, Cancellation,
     folder_provisioning::transport::message_move::{Connection, InstalledSource, RuntimeBinding},
-    imap::{self, MailRead, ReadOnlyImap},
+    imap::{MailRead, ReadOnlyImap},
 };
 use crate::{
     backlog::{
@@ -9,10 +9,7 @@ use crate::{
         imap_move::*,
         protocol::{self as model, Binding, Preview, Reverse, Run, SavedPlan, Status, UndoPreview},
     },
-    census::{
-        AccountId, AccountState, Census, EncryptedStore, FolderCensus, ScanState,
-        folder_provisioning::Inventory,
-    },
+    census::{AccountId, AccountState, Census, EncryptedStore, folder_provisioning::Inventory},
     rules::{proof, workspace},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -101,6 +98,10 @@ impl Accounts {
             ),
         })
     }
+    /// Observes every folder over one MOVE session, which stays open for
+    /// the request, and one read-only session. The topology must not change
+    /// while the folders are read, and every folder must still be writable
+    /// under the UIDVALIDITY it was read with.
     fn backlog_observe(
         &self,
         account: &Account,
@@ -108,7 +109,7 @@ impl Accounts {
         saved: &AccountState,
         binding: &Binding,
         cancel: Cancellation,
-    ) -> Result<(Inventory, Census), AcquisitionError> {
+    ) -> Result<(Inventory, Census, Connection), AcquisitionError> {
         let runtime = self.backlog_runtime(account, store, saved, binding)?;
         let source = self.backlog_source(account)?;
         let permit = source.runtime_permit(&runtime).map_err(failure)?;
@@ -116,70 +117,50 @@ impl Accounts {
         let mut connection =
             Connection::connect(&permit, &password, cancel.clone()).map_err(failure)?;
         let before = connection.inventory().map_err(failure)?;
-        drop(connection);
         let read = crate::policy::read_permit(account.provider)?;
-        let mut connection =
+        let mut reader =
             ReadOnlyImap::loopback(&permit, &read, &account.login, &password, cancel.clone())?;
-        let mut census = saved.census.clone();
-        census.folders.clear();
-        census.folder_roles.clear();
-        let folders = connection.folders()?;
-        for folder in folders {
-            if !folder.selectable {
-                return Err(invalid());
-            }
-            if before
-                .get(&folder.name)
-                .is_none_or(|m| m.name.wire != folder.wire)
+        let folders = reader.folders()?;
+        for folder in &folders {
+            if !folder.selectable
+                || before
+                    .get(&folder.name)
+                    .is_none_or(|m| m.name.wire != folder.wire)
             {
                 return Err(invalid());
             }
-            let (validity, uids) = connection.inventory(&folder)?;
-            let mut messages = BTreeMap::new();
-            for chunk in uids.iter().copied().collect::<Vec<_>>().chunks(imap::BATCH) {
-                let metadata = connection.metadata(chunk)?;
-                let headers = connection.headers(chunk)?;
-                for uid in chunk {
-                    messages.insert(*uid, imap::record(&metadata[uid], &folder, &headers[uid])?);
-                }
-            }
-            if connection.inventory(&folder)? != (validity, uids.clone()) {
-                return Err(invalid());
-            }
-            census
-                .folder_roles
-                .insert(folder.name.clone(), folder.roles.clone());
-            census.folders.insert(
-                folder.name,
-                FolderCensus {
-                    uidvalidity: validity,
-                    state: ScanState::Complete,
-                    live_uids: uids,
-                    messages,
-                },
-            );
         }
+        let observed = reader.observe(&folders, &saved.census)?;
+        drop(reader);
+        let census = saved.census.observed(
+            folders
+                .iter()
+                .map(|f| (f.name.clone(), f.roles.clone()))
+                .collect(),
+            observed,
+        );
         if census.folders.len() != before.mailboxes.len() {
             return Err(invalid());
         }
-        census.acquisition_state = ScanState::Complete;
-        drop(connection);
-        let mut connection = Connection::connect(&permit, &password, cancel).map_err(failure)?;
         if connection.inventory().map_err(failure)? != before {
             return Err(invalid());
         }
-        for (name, folder) in &census.folders {
-            connection
-                .readback(
-                    &MailboxIdentity {
-                        name: before.get(name).ok_or_else(invalid)?.name.clone(),
-                        uidvalidity: UidValidity::new(folder.uidvalidity).map_err(failure)?,
-                    },
-                    &BTreeSet::new(),
-                )
-                .map_err(failure)?;
+        let identities = census
+            .folders
+            .iter()
+            .map(|(name, folder)| {
+                Ok(MailboxIdentity {
+                    name: before.get(name).ok_or_else(invalid)?.name.clone(),
+                    uidvalidity: UidValidity::new(folder.uidvalidity).map_err(failure)?,
+                })
+            })
+            .collect::<Result<Vec<_>, AcquisitionError>>()?;
+        let none = BTreeSet::new();
+        let requests: Vec<_> = identities.iter().map(|i| (i, &none)).collect();
+        for readback in connection.readbacks(&requests).map_err(failure)? {
+            readback.map_err(failure)?;
         }
-        Ok((before, census.into_inner()))
+        Ok((before, census, connection))
     }
     pub(crate) fn backlog_preview(
         &self,
@@ -189,6 +170,19 @@ impl Accounts {
         options: Options,
         cancel: Cancellation,
     ) -> Result<Preview, AcquisitionError> {
+        self.backlog_prepare(account, store, saved, options, cancel)
+            .map(|(preview, _)| preview)
+    }
+    /// The preview and the MOVE session it observed through, which a confirm
+    /// goes on to use.
+    fn backlog_prepare(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &AccountState,
+        options: Options,
+        cancel: Cancellation,
+    ) -> Result<(Preview, Connection), AcquisitionError> {
         let binding = self.backlog_binding(account, store, saved)?;
         if saved.protocol_backlog.runs.len() >= model::HISTORY
             || saved.protocol_backlog.runs.iter().any(|r| !r.finished())
@@ -200,7 +194,8 @@ impl Accounts {
         if !saved_proof.download_available {
             return Err(invalid());
         }
-        let (topology, observed) = self.backlog_observe(account, store, saved, &binding, cancel)?;
+        let (topology, observed, connection) =
+            self.backlog_observe(account, store, saved, &binding, cancel)?;
         let input = &saved.workspace.as_ref().ok_or_else(invalid)?.input;
         let baseline = if input.baseline == proof::Baseline::Previous {
             Some(&saved.exports.last().ok_or_else(invalid)?.artifact)
@@ -311,13 +306,16 @@ impl Accounts {
             undo_conflicts: 0,
             completed_at: None,
         };
-        Ok(Preview {
-            operation,
-            receipt,
-            saved: saved_proof,
-            execution,
-            limitations: model::LIMITATIONS,
-        })
+        Ok((
+            Preview {
+                operation,
+                receipt,
+                saved: saved_proof,
+                execution,
+                limitations: model::LIMITATIONS,
+            },
+            connection,
+        ))
     }
     pub(crate) fn backlog_confirm(
         &self,
@@ -329,7 +327,8 @@ impl Accounts {
         cancel: Cancellation,
         fresh: impl Fn(&AccountState) -> Result<(), String>,
     ) -> Result<(), AcquisitionError> {
-        let p = self.backlog_preview(account, store, saved, options, cancel.clone())?;
+        let (p, connection) =
+            self.backlog_prepare(account, store, saved, options, cancel.clone())?;
         if !bool::from(p.receipt.as_bytes().ct_eq(receipt.as_bytes()))
             || saved
                 .protocol_backlog
@@ -344,7 +343,16 @@ impl Accounts {
         saved.protocol_backlog.runs.push(p.operation);
         save(store, saved)?;
         boundary("move_consumed");
-        self.backlog_run(account, store, saved, &id, false, cancel, fresh)
+        self.backlog_execute(
+            account,
+            store,
+            saved,
+            &id,
+            false,
+            cancel,
+            fresh,
+            Some(connection),
+        )
     }
     pub(crate) fn backlog_run(
         &self,
@@ -355,6 +363,22 @@ impl Accounts {
         reverse: bool,
         cancel: Cancellation,
         fresh: impl Fn(&AccountState) -> Result<(), String>,
+    ) -> Result<(), AcquisitionError> {
+        self.backlog_execute(account, store, saved, id, reverse, cancel, fresh, None)
+    }
+    /// Runs the batches over `session` when the request already holds one
+    /// for this source, or over a new one.
+    #[allow(clippy::too_many_arguments)]
+    fn backlog_execute(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &mut AccountState,
+        id: &str,
+        reverse: bool,
+        cancel: Cancellation,
+        fresh: impl Fn(&AccountState) -> Result<(), String>,
+        session: Option<Connection>,
     ) -> Result<(), AcquisitionError> {
         let i = saved
             .protocol_backlog
@@ -410,8 +434,10 @@ impl Accounts {
         let permit = source.runtime_permit(&runtime).map_err(failure)?;
         let password = self.password(account)?;
         let result = (|| {
-            let mut connection =
-                Connection::connect(&permit, &password, cancel.clone()).map_err(failure)?;
+            let mut connection = match session {
+                Some(connection) => connection,
+                None => Connection::connect(&permit, &password, cancel.clone()).map_err(failure)?,
+            };
             if connection.inventory().map_err(failure)?
                 != saved.protocol_backlog.runs[i].plan.topology
             {
@@ -597,6 +623,9 @@ impl Accounts {
         let compatible_topology = connection.inventory().map_err(failure)? == run.plan.topology;
         let mut reverse = vec![];
         let mut conflicts = 0;
+        // Every batch's current destination and source identity, read in
+        // one flight.
+        let mut candidates = vec![];
         for (forward, e) in run.batches.iter().enumerate() {
             if !e.attempted() {
                 continue;
@@ -613,18 +642,37 @@ impl Accounts {
                 conflicts += e.command().messages().len();
                 continue;
             }
-            let uids = verified.values().copied().collect();
-            let current = match connection.readback(e.command().destination(), &uids) {
+            let uids: BTreeSet<Uid> = verified.values().copied().collect();
+            candidates.push((forward, e, verified, uids));
+        }
+        let none = BTreeSet::new();
+        let requests: Vec<_> = candidates
+            .iter()
+            .flat_map(|(_, e, _, uids)| {
+                [
+                    (e.command().destination(), uids),
+                    (e.command().source(), &none),
+                ]
+            })
+            .collect();
+        let mut readbacks = connection
+            .readbacks(&requests)
+            .map_err(failure)?
+            .into_iter();
+        for (forward, e, verified, _) in &candidates {
+            let (current, original) = (readbacks.next(), readbacks.next());
+            let unstable = crate::census::folder_provisioning::Failure::Unstable;
+            let current = match current.ok_or_else(invalid)? {
                 Ok(value) => value,
-                Err(crate::census::folder_provisioning::Failure::Unstable) => {
+                Err(error) if error == unstable => {
                     conflicts += e.command().messages().len();
                     continue;
                 }
                 Err(error) => return Err(failure(error)),
             };
-            let original = match connection.readback(e.command().source(), &BTreeSet::new()) {
+            let original = match original.ok_or_else(invalid)? {
                 Ok(value) => value,
-                Err(crate::census::folder_provisioning::Failure::Unstable) => {
+                Err(error) if error == unstable => {
                     conflicts += e.command().messages().len();
                     continue;
                 }
@@ -653,7 +701,7 @@ impl Accounts {
                 continue;
             }
             reverse.push(Reverse {
-                forward,
+                forward: *forward,
                 evidence: MoveEvidence::intent(
                     MoveIntent::new(
                         Purpose::ConditionalUndo,
@@ -716,17 +764,22 @@ fn observe(
     connection: &mut Connection,
     e: &mut MoveEvidence,
 ) -> Result<(), crate::census::folder_provisioning::Failure> {
-    let source = connection.readback(
-        e.command().source(),
-        &e.command().messages().keys().copied().collect(),
-    )?;
+    use crate::census::folder_provisioning::Failure;
+    let requested = e.command().messages().keys().copied().collect();
     let mapped = e
         .mapping()
         .map(|m| m.pairs().values().copied().collect())
         .unwrap_or_default();
-    let destination = connection.readback(e.command().destination(), &mapped)?;
+    let mut readbacks = connection
+        .readbacks(&[
+            (e.command().source(), &requested),
+            (e.command().destination(), &mapped),
+        ])?
+        .into_iter();
+    let source = readbacks.next().unwrap_or(Err(Failure::Protocol))?;
+    let destination = readbacks.next().unwrap_or(Err(Failure::Protocol))?;
     e.observe(source, destination)
-        .map_err(|_| crate::census::folder_provisioning::Failure::Protocol)
+        .map_err(|_| Failure::Protocol)
 }
 #[cfg(test)]
 thread_local! {
@@ -736,16 +789,20 @@ thread_local! {
     pub(crate) static STOP_BETWEEN_BATCHES: std::cell::RefCell<Option<(std::time::Instant, Cancellation)>> =
         const { std::cell::RefCell::new(None) };
 }
+#[cfg(test)]
+pub(crate) fn stop_between_batches() {
+    STOP_BETWEEN_BATCHES.with(|stop| {
+        if let Some((deadline, cancel)) = stop.borrow().as_ref() {
+            if std::time::Instant::now() > *deadline {
+                cancel.cancel();
+            }
+        }
+    });
+}
 pub(crate) fn boundary(name: &str) {
     #[cfg(test)]
     if name == "move_between_batches" {
-        STOP_BETWEEN_BATCHES.with(|stop| {
-            if let Some((deadline, cancel)) = stop.borrow().as_ref() {
-                if std::time::Instant::now() > *deadline {
-                    cancel.cancel();
-                }
-            }
-        });
+        stop_between_batches();
     }
     #[cfg(test)]
     if let Some(root) = std::env::var_os("MAILROOM_MOVE_FIXTURE") {
@@ -941,11 +998,12 @@ fn workflow_observer() {
         {
             provider.census.folders.insert(
                 name.into(),
-                FolderCensus {
+                crate::census::FolderCensus {
                     uidvalidity: 300 + index as u32,
-                    state: ScanState::Complete,
+                    state: crate::census::ScanState::Complete,
                     live_uids: [4].into(),
                     messages: [(4, message.clone())].into(),
+                    highestmodseq: None,
                 },
             );
             provider.synthetic_uid_next.insert(name.into(), 1004);

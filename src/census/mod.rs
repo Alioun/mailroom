@@ -152,6 +152,11 @@ pub struct FolderCensus {
     pub state: ScanState,
     pub live_uids: BTreeSet<u32>,
     pub messages: BTreeMap<u32, MessageRecord>,
+    /// HIGHESTMODSEQ (RFC 7162) observed before the metadata of the last
+    /// complete acquisition of this folder was read, so every saved record
+    /// is at least that current. Schema 20.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highestmodseq: Option<u64>,
 }
 
 impl FolderCensus {
@@ -165,6 +170,7 @@ impl FolderCensus {
         }
         if self.uidvalidity != uidvalidity {
             self.messages.clear();
+            self.highestmodseq = None;
         }
         self.uidvalidity = uidvalidity;
         self.messages.retain(|uid, _| live_uids.contains(uid));
@@ -213,6 +219,28 @@ pub struct Census {
     pub acquisition_state: ScanState,
     #[serde(default)]
     pub last_completed_at: Option<i64>,
+}
+
+impl Census {
+    /// This census with `folders` and their roles as a complete live
+    /// observation, without copying the saved folders it replaces.
+    pub fn observed(
+        &self,
+        folder_roles: BTreeMap<String, BTreeSet<String>>,
+        folders: BTreeMap<String, FolderCensus>,
+    ) -> Self {
+        Self {
+            acquisition: self.acquisition.clone(),
+            winddown_evidence: self.winddown_evidence.clone(),
+            folder_roles,
+            account: self.account.clone(),
+            folders,
+            confirmed_own_addresses: self.confirmed_own_addresses.clone(),
+            account_login: self.account_login.clone(),
+            acquisition_state: ScanState::Complete,
+            last_completed_at: self.last_completed_at,
+        }
+    }
 }
 
 /// A census shared between a loaded `AccountState` and the store's record of
@@ -302,15 +330,50 @@ pub(crate) mod binding {
         f()
     }
 
-    struct Hasher(Sha256);
-    impl std::io::Write for Hasher {
+    /// Hands the serialized census to the hashing thread in chunks.
+    struct Chunks {
+        chunk: Vec<u8>,
+        sender: std::sync::mpsc::SyncSender<Vec<u8>>,
+    }
+    const CHUNK: usize = 256 * 1024;
+    impl std::io::Write for Chunks {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.update(bytes);
+            self.chunk.extend_from_slice(bytes);
+            if self.chunk.len() >= CHUNK {
+                self.flush()?;
+            }
             Ok(bytes.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+            let full = std::mem::replace(&mut self.chunk, Vec::with_capacity(CHUNK + 4096));
+            self.sender
+                .send(full)
+                .map_err(|_| std::io::Error::other("hasher stopped"))
         }
+    }
+    /// SHA-256 of the census's JSON. Serializing and hashing each take about
+    /// a second for a personal-scale census, so a second thread hashes the
+    /// bytes while this one serializes the next; the bytes and the digest
+    /// are the same as hashing in one pass.
+    fn hash(census: &Census) -> [u8; 32] {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<u8>>(4);
+        std::thread::scope(|scope| {
+            let hasher = scope.spawn(move || {
+                let mut sha = Sha256::new();
+                for chunk in receiver {
+                    sha.update(&chunk);
+                }
+                <[u8; 32]>::from(sha.finalize())
+            });
+            let mut chunks = Chunks {
+                chunk: Vec::with_capacity(CHUNK + 4096),
+                sender,
+            };
+            serde_json::to_writer(&mut chunks, census).expect("census serializes");
+            std::io::Write::flush(&mut chunks).expect("hasher runs");
+            drop(chunks);
+            hasher.join().expect("census hasher")
+        })
     }
 
     /// A few recent censuses by allocation. The weak reference keeps the
@@ -329,10 +392,8 @@ pub(crate) mod binding {
         }
         drop(cache);
         let was = ACTIVE.with(|a| a.replace(false));
-        let mut hasher = Hasher(Sha256::new());
-        serde_json::to_writer(&mut hasher, &**census).expect("census serializes");
+        let digest = hash(census);
         ACTIVE.with(|a| a.set(was));
-        let digest: [u8; 32] = hasher.0.finalize().into();
         let mut cache = DIGESTS.lock().expect("census digests");
         if cache.len() >= 8 {
             cache.remove(0);
@@ -386,6 +447,7 @@ impl Census {
                 state: ScanState::Idle,
                 live_uids: BTreeSet::new(),
                 messages: BTreeMap::new(),
+                highestmodseq: None,
             });
         entry.reconcile(uidvalidity, uids)
     }
@@ -464,5 +526,29 @@ impl Census {
             .report(keys, as_of, gmail)?
             .summary_preview(keys, &BTreeSet::new())?
             .summary)
+    }
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    /// The pipelined digest is SHA-256 of exactly the census's JSON, so
+    /// bindings saved before it stay valid.
+    #[test]
+    fn census_digest_is_the_sha256_of_its_json() {
+        for messages in [0, 3, 5_000] {
+            let mut census = Census::new(AccountId::new("digest-fixture").unwrap());
+            scale::inflate(
+                &mut census,
+                scale::Spec {
+                    messages,
+                    ..scale::PERSONAL
+                },
+            );
+            let expected: [u8; 32] = Sha256::digest(serde_json::to_vec(&census).unwrap()).into();
+            assert_eq!(SharedCensus::from(census).digest(), expected, "{messages}");
+        }
     }
 }

@@ -1,6 +1,6 @@
 use super::{
     Accounts, AcquisitionError, Provider,
-    imap::{BATCH, MailRead, record},
+    imap::{Listing, MailRead, Metadata, record},
 };
 use crate::{
     census::{
@@ -19,7 +19,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Default)]
@@ -247,6 +247,7 @@ fn run_started(
                 .collect(),
         };
         checkpoint(census, store, &snapshot)?;
+        let mut pace = Pace::default();
         let selected: Vec<_> = folders
             .iter()
             .filter(|f| !f.excluded && all.as_ref().is_none_or(|name| *name == f.name))
@@ -255,7 +256,22 @@ fn run_started(
         let mut gmail_ids = BTreeSet::new();
         for folder in selected {
             cancel.check()?;
-            let (validity, inventory) = source.inventory(&folder)?;
+            // A folder saved at a known HIGHESTMODSEQ under the same
+            // UIDVALIDITY keeps its saved metadata; only messages changed
+            // since then are read again (RFC 7162 CHANGEDSINCE).
+            let since = census
+                .folders
+                .get(&folder.name)
+                .and_then(|f| f.highestmodseq)
+                .filter(|_| provider != Provider::Gmail);
+            let (
+                Listing {
+                    validity,
+                    uids: inventory,
+                    modseq,
+                },
+                changed,
+            ) = source.inventory(&folder, since)?;
             let observation = snapshot
                 .folders
                 .iter_mut()
@@ -267,9 +283,28 @@ fn run_started(
                 observed_at: acquisition::now(),
                 source: CountSource::ExamineSearch,
             };
-            checkpoint(census, store, &snapshot)?;
+            checkpoint_paced(census, store, &snapshot, &mut pace)?;
             let mut metadata = BTreeMap::new();
-            for batch in inventory.iter().copied().collect::<Vec<_>>().chunks(BATCH) {
+            if let (Some(changed), Some(saved)) = (
+                changed,
+                census
+                    .folders
+                    .get(&folder.name)
+                    .filter(|f| f.uidvalidity == validity),
+            ) {
+                for uid in &inventory {
+                    if let Some(record) = saved.messages.get(uid) {
+                        metadata.insert(*uid, Metadata::saved(record));
+                    }
+                }
+                metadata.extend(changed);
+            }
+            let missing: Vec<u32> = inventory
+                .iter()
+                .filter(|uid| !metadata.contains_key(uid))
+                .copied()
+                .collect();
+            for batch in missing.chunks(METADATA_BATCH) {
                 cancel.check()?;
                 let values = source.metadata(batch)?;
                 if values.keys().copied().collect::<BTreeSet<_>>()
@@ -300,11 +335,11 @@ fn run_started(
             for (uid, message) in &mut saved.messages {
                 metadata[uid].apply(message, &folder);
             }
-            store.save(census)?;
+            pace.save(census, store)?;
             progress(ScanProgress::current(census, ScanState::Running));
             loop {
                 cancel.check()?;
-                let pending = census.folders[&folder.name].pending(BATCH);
+                let pending = census.folders[&folder.name].pending(source.header_batch());
                 if pending.is_empty() {
                     break;
                 }
@@ -325,17 +360,22 @@ fn run_started(
                         .expect("reconciled folder")
                         .insert(message)?;
                 }
-                store.save(census)?;
+                pace.save(census, store)?;
                 progress(ScanProgress::current(census, ScanState::Running));
                 throttle(cancel)?;
             }
+            census
+                .folders
+                .get_mut(&folder.name)
+                .expect("reconciled folder")
+                .highestmodseq = modseq.filter(|_| provider != Provider::Gmail);
             snapshot
                 .folders
                 .iter_mut()
                 .find(|f| f.name == folder.name)
                 .expect("listed folder")
                 .selected_complete = true;
-            checkpoint(census, store, &snapshot)?;
+            checkpoint_paced(census, store, &snapshot, &mut pace)?;
         }
         let mut optional: Vec<_> = folders
             .iter()
@@ -362,7 +402,7 @@ fn run_started(
                 .expect("listed folder")
                 .count = count;
             if index < acquisition::MAX_OPTIONAL_COUNTS {
-                checkpoint(census, store, &snapshot)?;
+                checkpoint_paced(census, store, &snapshot, &mut pace)?;
                 throttle(cancel)?;
             }
         }
@@ -426,6 +466,47 @@ fn run_started(
     }
     outcome
 }
+/// Saves during acquisition at most every `CHECKPOINT_INTERVAL`. Each save
+/// of a personal-scale census compares and copies it, so saving after every
+/// batch would cost more than reading the batch. Completion, failure and
+/// cancellation always save, so only a killed process loses the work since
+/// its last checkpoint.
+struct Pace(Instant);
+impl Default for Pace {
+    fn default() -> Self {
+        Self(Instant::now())
+    }
+}
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
+impl Pace {
+    fn due(&mut self) -> bool {
+        let due = self.0.elapsed() >= CHECKPOINT_INTERVAL;
+        if due {
+            self.0 = Instant::now();
+        }
+        due
+    }
+    fn save(&mut self, census: &Census, store: &EncryptedStore) -> Result<(), AcquisitionError> {
+        if self.due() {
+            store.save(census)?;
+        }
+        Ok(())
+    }
+}
+fn checkpoint_paced(
+    census: &mut Census,
+    store: &EncryptedStore,
+    snapshot: &Snapshot,
+    pace: &mut Pace,
+) -> Result<(), AcquisitionError> {
+    census
+        .acquisition
+        .latest
+        .as_mut()
+        .expect("started attempt")
+        .checkpoint = Some(snapshot.clone());
+    pace.save(census, store)
+}
 fn checkpoint(
     census: &mut Census,
     store: &EncryptedStore,
@@ -440,6 +521,8 @@ fn checkpoint(
     store.save(census)?;
     Ok(())
 }
+/// Metadata rows are about a hundred bytes; one batch reads this many.
+const METADATA_BATCH: usize = 5_000;
 fn throttle(cancel: &Cancellation) -> Result<(), AcquisitionError> {
     for _ in 0..5 {
         cancel.check()?;
@@ -475,8 +558,22 @@ mod tests {
         fn folders(&mut self) -> Result<Vec<Folder>, AcquisitionError> {
             Ok(self.folders.clone())
         }
-        fn inventory(&mut self, _: &Folder) -> Result<(u32, BTreeSet<u32>), AcquisitionError> {
-            Ok((self.validity, self.metadata.keys().copied().collect()))
+        fn inventory(
+            &mut self,
+            _: &Folder,
+            _: Option<u64>,
+        ) -> Result<(Listing, Option<BTreeMap<u32, Metadata>>), AcquisitionError> {
+            Ok((
+                Listing {
+                    validity: self.validity,
+                    uids: self.metadata.keys().copied().collect(),
+                    modseq: None,
+                },
+                None,
+            ))
+        }
+        fn header_batch(&self) -> usize {
+            25
         }
         fn metadata(&mut self, uids: &[u32]) -> Result<BTreeMap<u32, Metadata>, AcquisitionError> {
             if self.fail_metadata {

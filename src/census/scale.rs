@@ -119,6 +119,75 @@ pub(crate) fn record(seed: u32, uid: u32, sent: bool, gmail: bool) -> MessageRec
     }
 }
 
+/// The raw header `inflate` derived the record at `uid` in `folder` from,
+/// so a fake provider can serve the same mail the inflated census holds.
+pub(crate) fn raw_header(spec: Spec, folder: &str, uid: u32) -> Option<String> {
+    let sent_total = spec.messages / 1000 * spec.sent_per_mille;
+    let received_total = spec.messages - sent_total;
+    if uid == 0 {
+        return None;
+    }
+    if folder == "Scale/Sent" {
+        return (uid <= sent_total).then(|| raw(received_total + uid - 1, true));
+    }
+    let index: u32 = folder.strip_prefix("Scale/Folder-")?.parse().ok()?;
+    let seed = (uid - 1) * (spec.folders - 1) + index;
+    (index < spec.folders - 1 && seed < received_total).then(|| raw(seed, false))
+}
+
+/// What a server returns for `BODY.PEEK[<fields>]` of `raw`: for
+/// `HEADER.FIELDS (...)`, the named fields with their continuation lines
+/// and the closing blank line; anything else, the whole header.
+pub(crate) fn header_fields(raw: &str, fields: &str) -> String {
+    let Some(names) = fields
+        .strip_prefix("HEADER.FIELDS (")
+        .and_then(|f| f.strip_suffix(')'))
+    else {
+        return raw.to_owned();
+    };
+    let names: Vec<_> = names.split(' ').collect();
+    let mut result = String::new();
+    let mut keep = false;
+    for line in raw.split_inclusive("\r\n") {
+        if line == "\r\n" {
+            break;
+        }
+        if !line.starts_with([' ', '\t']) {
+            let name = line.split(':').next().unwrap_or_default();
+            keep = names.iter().any(|n| n.eq_ignore_ascii_case(name));
+        }
+        if keep {
+            result.push_str(line);
+        }
+    }
+    result.push_str("\r\n");
+    result
+}
+
+/// Gmail keeps every message in All Mail: the inflated messages there, each
+/// with the UID `GMAIL_UID_BASE + seed` and its raw header.
+pub(crate) const GMAIL_UID_BASE: u32 = 1_000_000;
+pub(crate) fn inflate_all_mail(folder: &mut FolderCensus, spec: Spec) {
+    let sent_total = spec.messages / 1000 * spec.sent_per_mille;
+    let received_total = spec.messages - sent_total;
+    for seed in 0..spec.messages {
+        let uid = GMAIL_UID_BASE + seed;
+        let mut m = record(seed, uid, seed >= received_total, true);
+        if seed >= received_total {
+            m.gmail_labels.insert("\\Sent".into());
+        }
+        folder.live_uids.insert(uid);
+        folder.messages.insert(uid, m);
+    }
+}
+pub(crate) fn gmail_raw_header(spec: Spec, uid: u32) -> Option<String> {
+    let sent_total = spec.messages / 1000 * spec.sent_per_mille;
+    let seed = uid
+        .checked_sub(GMAIL_UID_BASE)
+        .filter(|s| *s < spec.messages)?;
+    Some(raw(seed, seed >= spec.messages - sent_total))
+}
+
 /// Adds `spec.messages` invented messages in `spec.folders` new folders, one
 /// of them a Sent folder holding the sent share.
 pub(crate) fn inflate(census: &mut Census, spec: Spec) {
@@ -151,6 +220,7 @@ pub(crate) fn inflate(census: &mut Census, spec: Spec) {
                 state: ScanState::Complete,
                 live_uids,
                 messages: records.into_iter().map(|m| (m.uid, m)).collect(),
+                highestmodseq: None,
             },
         );
     }
@@ -208,6 +278,7 @@ pub(crate) fn thread_cpu_ms() -> u64 {
 /// thread's CPU time and the load average at the end.
 pub(crate) fn measure<T>(operation: &str, extra: serde_json::Value, step: impl FnOnce() -> T) -> T {
     super::io::take();
+    crate::acquisition::fixture_peer::take_traffic();
     let began = std::time::Instant::now();
     let cpu = thread_cpu_ms();
     let result = step();
@@ -218,6 +289,7 @@ pub(crate) fn measure<T>(operation: &str, extra: serde_json::Value, step: impl F
     let mut load = [0f64; 3];
     unsafe { libc::getloadavg(load.as_mut_ptr(), 3) };
     extra["load1"] = load[0].into();
+    extra["link"] = serde_json::to_value(crate::acquisition::fixture_peer::take_traffic()).unwrap();
     report(operation, extra, super::io::take());
     result
 }

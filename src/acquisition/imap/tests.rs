@@ -176,6 +176,32 @@ impl FakeTls {
                     format!("* SEARCH 1 2\r\n{tag} OK search\r\n")
                 } else if command.starts_with("UID FETCH ") && mode == "fail_metadata" {
                     format!("{tag} NO incomplete selected read\r\n")
+                } else if command.starts_with("UID FETCH ")
+                    && !command.contains("BODY.PEEK")
+                    && let Some((lines, size, pause)) = match mode.as_str() {
+                        "slow_metadata" => Some((40, 1000, 50)),
+                        "stalled_metadata" => Some((5, 1000, 3000)),
+                        "trickled_metadata" => Some((40, 50, 300)),
+                        _ => None,
+                    }
+                {
+                    // Untagged filler, paced like a slow, stalled or
+                    // trickling link, before the real rows.
+                    for _ in 0..lines {
+                        let line = format!("* OK {}\r\n", "x".repeat(size));
+                        if io
+                            .get_mut()
+                            .write_all(line.as_bytes())
+                            .and_then(|_| io.get_mut().flush())
+                            .is_err()
+                        {
+                            return;
+                        }
+                        thread::sleep(Duration::from_millis(pause));
+                    }
+                    format!(
+                        "* 1 FETCH (UID 1 RFC822.SIZE 4096 INTERNALDATE \"24-Oct-2026 10:00:00 +0000\" FLAGS (\\Seen))\r\n{tag} OK fetched\r\n"
+                    )
                 } else if command.starts_with("UID FETCH ") {
                     let uids = command.split_whitespace().nth(2).unwrap();
                     let mut response = String::new();
@@ -259,9 +285,10 @@ fn tls_wire_is_read_only_and_parses_fragmented_literals_unicode_and_gmail_metada
     assert_eq!(folders[3].name, "Archiv/Grüße");
     assert!(folders[3].roles.is_empty());
     assert!(folders[4].roles.contains("archive"));
-    let (validity, uids) = source.inventory(&folders[0]).unwrap();
-    assert_eq!(validity, 7);
-    assert_eq!(uids, BTreeSet::from([1, 2]));
+    let (listing, changed) = source.inventory(&folders[0], Some(5)).unwrap();
+    assert!(changed.is_none(), "no CHANGEDSINCE without CONDSTORE");
+    assert_eq!(listing.validity, 7);
+    assert_eq!(listing.uids, BTreeSet::from([1, 2]));
     let metadata = source.metadata(&[1, 2]).unwrap();
     assert_eq!(metadata[&1].gmail_id.as_deref(), Some("101"));
     assert!(metadata[&1].labels.contains("Arbeit/Übersicht"));
@@ -713,4 +740,51 @@ fn installed_tls_scan_reopen_failures_retry_topology_reset_and_cancellation_pres
             .count(),
         13
     );
+}
+
+/// UID sets name exactly the given UIDs: runs of three or more become
+/// ranges, and long sets split below the command-line bound.
+#[test]
+fn uid_sets_name_exactly_the_given_uids() {
+    assert_eq!(uid_sets([4, 8, 19]), ["4,8,19"]);
+    assert_eq!(uid_sets([1, 2]), ["1,2"]);
+    assert_eq!(uid_sets([3, 1, 2, 2, 7, 9, 8, 10]), ["1:3,7:10"]);
+    let sparse: Vec<u32> = (0..5_000).map(|n| 1_000_000 + 2 * n).collect();
+    let sets = uid_sets(sparse.iter().copied());
+    assert!(sets.len() > 1 && sets.iter().all(|s| s.len() <= SET_LENGTH));
+    let existing: BTreeSet<u32> = (1..=2_000_000).collect();
+    let named: Vec<u32> = sets
+        .iter()
+        .flat_map(|s| crate::acquisition::fixture_peer::uid_set(s, &existing).unwrap())
+        .collect();
+    assert_eq!(named, sparse);
+}
+
+/// A response may be slow as long as its bytes keep coming at a healthy
+/// average; one that stalls or trickles fails within the pace's idle time.
+#[test]
+fn slow_responses_complete_and_stalled_or_trickling_ones_fail_promptly() {
+    for (mode, completes) in [
+        ("slow_metadata", true),
+        ("stalled_metadata", false),
+        ("trickled_metadata", false),
+    ] {
+        let fake = FakeTls::scenario(false, false, mode, false, None);
+        let mut source = fake
+            .connect("localhost", fake.connector(), Cancellation::default())
+            .unwrap();
+        source.gmail = false;
+        source.pace(Duration::from_millis(500), 8 * 1024);
+        let folders = source.folders().unwrap();
+        source.inventory(&folders[0], None).unwrap();
+        let started = Instant::now();
+        let result = source.metadata(&[1]);
+        assert_eq!(result.is_ok(), completes, "{mode}");
+        if !completes {
+            assert_eq!(result.err(), Some(AcquisitionError::Protocol));
+            assert!(started.elapsed() < Duration::from_millis(1500), "{mode}");
+        }
+        drop(source);
+        fake.worker.join().unwrap();
+    }
 }

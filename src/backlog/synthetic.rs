@@ -251,6 +251,7 @@ fn empty_folder() -> FolderCensus {
         state: ScanState::Complete,
         live_uids: BTreeSet::new(),
         messages: BTreeMap::new(),
+        highestmodseq: None,
     }
 }
 

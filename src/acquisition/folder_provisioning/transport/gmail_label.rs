@@ -154,71 +154,106 @@ impl Connection {
     fn exchange(
         &mut self,
         command: &[u8],
-        mut row: impl FnMut(&[Token], bool) -> Result<(), Error>,
+        row: impl FnMut(&[Token], bool) -> Result<(), Error>,
     ) -> Result<(), Error> {
-        let tag = self.io.begin(command)?;
-        for _ in 0..2048 {
-            let response = self.io.row()?;
-            let first = response
-                .first()
-                .and_then(Token::atom)
-                .ok_or(Error::Protocol)?;
-            let tagged = first == tag;
-            if !tagged && first != "*" {
-                return Err(Error::Protocol);
-            }
-            if tagged {
-                self.io.completed();
-            }
-            if response.get(1).and_then(Token::atom) == Some("BYE") {
-                return Err(Error::Bye);
-            }
-            row(&response, tagged)?;
-            if tagged {
-                return Ok(());
-            }
-        }
-        Err(Error::Limit)
+        self.io
+            .flight(vec![Step::new(command.to_vec(), row)])?
+            .pop()
+            .unwrap_or(Ok(()))
     }
 
-    fn select(&mut self, mailbox: &MailboxIdentity) -> Result<(), Error> {
+    /// SELECT as a pipelined step that fails on its tagged line unless the
+    /// mailbox is writable under the expected UIDVALIDITY.
+    fn select<'a>(mailbox: &'a MailboxIdentity, unit: usize) -> Result<Step<'a>, Error> {
         let name = quoted(mailbox.name.wire.as_bytes())?;
         let mut validity = None;
         let mut writable = false;
-        self.exchange(&[b"SELECT ".as_slice(), &name].concat(), |row, tagged| {
-            if let Some(code) = row.get(2).and_then(Token::atom) {
-                if code == "[UIDNOTSTICKY]" || code == "[READ-ONLY]" {
-                    return Err(Error::Unsupported);
-                }
-                if let Some(v) = code
-                    .strip_prefix("[UIDVALIDITY ")
-                    .and_then(|s| s.strip_suffix(']'))
-                {
-                    let v = UidValidity::new(v.parse().map_err(|_| Error::Protocol)?)
-                        .map_err(|_| Error::Protocol)?;
-                    if validity.replace(v).is_some() {
-                        return Err(Error::Protocol);
+        Ok(Step::new(
+            [b"SELECT ".as_slice(), &name].concat(),
+            move |row, tagged| {
+                if let Some(code) = row.get(2).and_then(Token::atom) {
+                    if code == "[UIDNOTSTICKY]" || code == "[READ-ONLY]" {
+                        return Err(Error::Unsupported);
                     }
-                } else if code == "[READ-WRITE]" {
-                    writable = true;
-                } else if code.starts_with('[')
-                    && !code.starts_with("[PERMANENTFLAGS ")
-                    && !code.starts_with("[UIDNEXT ")
-                    && !code.starts_with("[UNSEEN ")
-                    && !code.starts_with("[HIGHESTMODSEQ ")
-                {
-                    return Err(Error::UnknownCode);
+                    if let Some(v) = code
+                        .strip_prefix("[UIDVALIDITY ")
+                        .and_then(|s| s.strip_suffix(']'))
+                    {
+                        let v = UidValidity::new(v.parse().map_err(|_| Error::Protocol)?)
+                            .map_err(|_| Error::Protocol)?;
+                        if validity.replace(v).is_some() {
+                            return Err(Error::Protocol);
+                        }
+                    } else if code == "[READ-WRITE]" {
+                        writable = true;
+                    } else if code.starts_with('[')
+                        && !code.starts_with("[PERMANENTFLAGS ")
+                        && !code.starts_with("[UIDNEXT ")
+                        && !code.starts_with("[UNSEEN ")
+                        && !code.starts_with("[HIGHESTMODSEQ ")
+                    {
+                        return Err(Error::UnknownCode);
+                    }
                 }
-            }
-            if tagged && row.get(1).and_then(Token::atom) != Some("OK") {
-                return Err(Error::No);
-            }
-            Ok(())
-        })?;
-        if validity != Some(mailbox.uidvalidity) || !writable {
-            return Err(Error::Unstable);
+                if tagged {
+                    if row.get(1).and_then(Token::atom) != Some("OK") {
+                        return Err(Error::No);
+                    }
+                    if validity != Some(mailbox.uidvalidity) || !writable {
+                        return Err(Error::Unstable);
+                    }
+                }
+                Ok(())
+            },
+        )
+        .unit(unit))
+    }
+
+    fn readback_steps<'a>(
+        mailbox: &'a MailboxIdentity,
+        uids: &'a BTreeSet<Uid>,
+        found: &'a std::cell::RefCell<(BTreeMap<Uid, Snapshot>, BTreeSet<GmailId>)>,
+        unit: usize,
+    ) -> Result<Vec<Step<'a>>, Error> {
+        if uids.len() > crate::backlog::BATCH_LIMIT {
+            return Err(Error::Limit);
         }
-        Ok(())
+        let mut steps = vec![Self::select(mailbox, unit)?];
+        for set in crate::acquisition::imap::uid_sets(uids.iter().map(|u| u.get())) {
+            let command = format!(
+                "UID FETCH {set} (UID FLAGS INTERNALDATE RFC822.SIZE X-GM-MSGID X-GM-LABELS BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"
+            );
+            steps.push(
+                Step::new(command.into_bytes(), move |row, tagged| {
+                    if tagged {
+                        return if row.get(1).and_then(Token::atom) == Some("OK") {
+                            Ok(())
+                        } else {
+                            Err(Error::No)
+                        };
+                    }
+                    if row.get(2).and_then(Token::atom) != Some("FETCH") {
+                        return Ok(());
+                    }
+                    let Some(uid) = super::message_move::fetch_uid(row)? else {
+                        return Ok(());
+                    };
+                    if !uids.contains(&uid) {
+                        return Ok(());
+                    }
+                    let (uid, snapshot) = parse_snapshot(row)?;
+                    let (messages, ids) = &mut *found.borrow_mut();
+                    if !ids.insert(snapshot.gmail_id.clone())
+                        || messages.insert(uid, snapshot).is_some()
+                    {
+                        return Err(Error::Unstable);
+                    }
+                    Ok(())
+                })
+                .unit(unit),
+            );
+        }
+        Ok(steps)
     }
 
     /// Fresh state of the requested All Mail UIDs. An absent UID is omitted.
@@ -227,50 +262,12 @@ impl Connection {
         mailbox: &MailboxIdentity,
         uids: &BTreeSet<Uid>,
     ) -> Result<LabelReadback, Error> {
-        if uids.len() > crate::backlog::BATCH_LIMIT {
-            return Err(Error::Limit);
-        }
-        self.select(mailbox)?;
-        let mut messages = BTreeMap::new();
-        let mut ids = BTreeSet::new();
-        for chunk in uids.iter().copied().collect::<Vec<_>>().chunks(25) {
-            let set = chunk
-                .iter()
-                .map(|u| u.get().to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            let command = format!(
-                "UID FETCH {set} (UID FLAGS INTERNALDATE RFC822.SIZE X-GM-MSGID X-GM-LABELS BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"
-            );
-            self.exchange(command.as_bytes(), |row, tagged| {
-                if tagged {
-                    return if row.get(1).and_then(Token::atom) == Some("OK") {
-                        Ok(())
-                    } else {
-                        Err(Error::No)
-                    };
-                }
-                if row.get(2).and_then(Token::atom) != Some("FETCH") {
-                    return Ok(());
-                }
-                let Some(uid) = super::message_move::fetch_uid(row)? else {
-                    return Ok(());
-                };
-                if !chunk.contains(&uid) {
-                    return Ok(());
-                }
-                let (uid, snapshot) = parse_snapshot(row)?;
-                if !ids.insert(snapshot.gmail_id.clone())
-                    || messages.insert(uid, snapshot).is_some()
-                {
-                    return Err(Error::Unstable);
-                }
-                Ok(())
-            })?;
-        }
+        let found = std::cell::RefCell::new(Default::default());
+        let steps = Self::readback_steps(mailbox, uids, &found, 0)?;
+        self.io.flight(steps)?.pop().unwrap_or(Ok(()))?;
         Ok(LabelReadback {
             identity: mailbox.clone(),
-            messages,
+            messages: found.into_inner().0,
         })
     }
 
@@ -289,7 +286,22 @@ impl Connection {
             return Err(Error::Unsupported);
         }
         let intent = batch.intent().clone();
-        let inventory = self.inventory()?;
+        // Topology and the members' exact state travel in one flight; the
+        // STORE leaves only after both passed.
+        let mut observed = InventoryRows::default();
+        let found = std::cell::RefCell::new(Default::default());
+        let mut steps = observed.steps();
+        steps.extend(Self::readback_steps(
+            intent.context(),
+            &step.uids,
+            &found,
+            0,
+        )?);
+        let result = self.io.flight(steps)?.pop().unwrap_or(Ok(()));
+        let inventory = match observed.finish(&self.capabilities) {
+            Ok(inventory) => inventory,
+            Err(error) => return Err(result.err().unwrap_or(error)),
+        };
         if all_mail(&inventory)?.name != intent.context().name
             || inventory
                 .get(&intent.destination().decoded)
@@ -297,8 +309,12 @@ impl Connection {
         {
             return Err(Error::Unsupported);
         }
+        result?;
         let expected = batch.expected(index);
-        let before = self.readback(intent.context(), &step.uids)?;
+        let before = LabelReadback {
+            identity: intent.context().clone(),
+            messages: found.into_inner().0,
+        };
         if before.messages.len() != expected.len()
             || expected
                 .iter()

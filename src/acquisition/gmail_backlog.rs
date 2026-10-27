@@ -4,7 +4,7 @@ use super::{
         gmail_label::{Connection, InstalledSource, all_mail},
         message_move::RuntimeBinding,
     },
-    imap::{self, MailRead, ReadOnlyImap},
+    imap::{MailRead, ReadOnlyImap},
 };
 use crate::{
     backlog::{
@@ -15,7 +15,7 @@ use crate::{
         protocol::{Binding, SavedPlan, Status, same_binding},
     },
     census::{
-        AccountId, AccountState, Census, EncryptedStore, FolderCensus, ScanState,
+        AccountId, AccountState, Census, EncryptedStore,
         folder_provisioning::{Failure, Inventory},
     },
     rules::{proof, workspace},
@@ -164,18 +164,18 @@ impl Accounts {
         Connection::connect(&permit, &self.password(account)?, cancel).map_err(failure)
     }
     /// Reads All Mail once over the installed source. Other label mailboxes are
-    /// topology only; X-GM-MSGID is the message identity.
+    /// topology only; X-GM-MSGID is the message identity. The label session
+    /// stays open for the request.
     fn gmail_observe(
         &self,
         account: &Account,
         saved: &AccountState,
         runtime: &RuntimeBinding,
         cancel: Cancellation,
-    ) -> Result<(Inventory, Census), AcquisitionError> {
+    ) -> Result<(Inventory, Census, Connection), AcquisitionError> {
         let mut connection = self.gmail_connect(account, runtime, cancel.clone())?;
         let before = connection.inventory().map_err(failure)?;
         let all = all_mail(&before).map_err(failure)?.name.clone();
-        drop(connection);
         let read = crate::policy::read_permit(account.provider)?;
         let permit = self
             .label_source(account)?
@@ -188,63 +188,47 @@ impl Accounts {
             &self.password(account)?,
             cancel.clone(),
         )?;
-        let mut census = saved.census.clone();
-        census.folders.clear();
-        census.folder_roles.clear();
         let folders = reader.folders()?;
         if folders.len() != before.mailboxes.len() {
             return Err(invalid());
         }
-        for folder in folders {
+        for folder in &folders {
             if before
                 .get(&folder.name)
                 .is_none_or(|m| m.name.wire != folder.wire)
             {
                 return Err(invalid());
             }
-            census
-                .folder_roles
-                .insert(folder.name.clone(), folder.roles.clone());
-            if folder.name != all.decoded {
-                continue;
-            }
-            let (validity, uids) = reader.inventory(&folder)?;
-            let mut messages = BTreeMap::new();
+        }
+        let selected: Vec<_> = folders
+            .iter()
+            .filter(|f| f.name == all.decoded)
+            .cloned()
+            .collect();
+        let observed = reader.observe(&selected, &saved.census)?;
+        drop(reader);
+        for folder in observed.values() {
             let mut ids = BTreeSet::new();
-            for chunk in uids.iter().copied().collect::<Vec<_>>().chunks(imap::BATCH) {
-                let metadata = reader.metadata(chunk)?;
-                let headers = reader.headers(chunk)?;
-                for uid in chunk {
-                    let record = imap::record(&metadata[uid], &folder, &headers[uid])?;
-                    if !ids.insert(record.gmail_message_id.clone().ok_or_else(invalid)?) {
-                        return Err(invalid());
-                    }
-                    messages.insert(*uid, record);
+            for record in folder.messages.values() {
+                if !ids.insert(record.gmail_message_id.clone().ok_or_else(invalid)?) {
+                    return Err(invalid());
                 }
             }
-            if reader.inventory(&folder)? != (validity, uids.clone()) {
-                return Err(invalid());
-            }
-            census.folders.insert(
-                folder.name,
-                FolderCensus {
-                    uidvalidity: validity,
-                    state: ScanState::Complete,
-                    live_uids: uids,
-                    messages,
-                },
-            );
         }
+        let census = saved.census.observed(
+            folders
+                .iter()
+                .map(|f| (f.name.clone(), f.roles.clone()))
+                .collect(),
+            observed,
+        );
         if census.folders.len() != 1 {
             return Err(invalid());
         }
-        census.acquisition_state = ScanState::Complete;
-        drop(reader);
-        let mut connection = self.gmail_connect(account, runtime, cancel)?;
         if connection.inventory().map_err(failure)? != before {
             return Err(invalid());
         }
-        Ok((before, census.into_inner()))
+        Ok((before, census, connection))
     }
 
     pub(crate) fn gmail_preview(
@@ -255,6 +239,19 @@ impl Accounts {
         options: Options,
         cancel: Cancellation,
     ) -> Result<Preview, AcquisitionError> {
+        self.gmail_prepare(account, store, saved, options, cancel)
+            .map(|(preview, _)| preview)
+    }
+    /// The preview and the label session it observed through, which a
+    /// confirm goes on to use.
+    fn gmail_prepare(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &AccountState,
+        options: Options,
+        cancel: Cancellation,
+    ) -> Result<(Preview, Connection), AcquisitionError> {
         let binding = self.gmail_binding(account, store, saved)?;
         if saved.gmail_backlog.runs.len() >= model::HISTORY
             || saved.gmail_backlog.runs.iter().any(|r| !r.finished())
@@ -267,7 +264,8 @@ impl Accounts {
             return Err(invalid());
         }
         let runtime = self.gmail_runtime(account, store, saved, &binding)?;
-        let (topology, observed) = self.gmail_observe(account, saved, &runtime, cancel)?;
+        let (topology, observed, connection) =
+            self.gmail_observe(account, saved, &runtime, cancel)?;
         let input = &saved.workspace.as_ref().ok_or_else(invalid)?.input;
         let baseline = if input.baseline == proof::Baseline::Previous {
             Some(&saved.exports.last().ok_or_else(invalid)?.artifact)
@@ -357,24 +355,27 @@ impl Accounts {
         let id = store
             .keys()
             .binding_for(b"mailroom/gmail-backlog-id/v1", receipt.as_bytes());
-        Ok(Preview {
-            operation: Run {
-                id,
-                receipt: receipt.clone(),
-                plan,
-                status: Status::Prepared,
-                stop_requested: false,
-                batches,
-                reverse: vec![],
-                undo_receipt: None,
-                undo_conflicts: 0,
-                completed_at: None,
+        Ok((
+            Preview {
+                operation: Run {
+                    id,
+                    receipt: receipt.clone(),
+                    plan,
+                    status: Status::Prepared,
+                    stop_requested: false,
+                    batches,
+                    reverse: vec![],
+                    undo_receipt: None,
+                    undo_conflicts: 0,
+                    completed_at: None,
+                },
+                receipt,
+                saved: saved_proof,
+                execution,
+                limitations: model::LIMITATIONS,
             },
-            receipt,
-            saved: saved_proof,
-            execution,
-            limitations: model::LIMITATIONS,
-        })
+            connection,
+        ))
     }
 
     pub(crate) fn gmail_confirm(
@@ -387,7 +388,7 @@ impl Accounts {
         cancel: Cancellation,
         fresh: impl Fn(&AccountState) -> Result<(), String>,
     ) -> Result<(), AcquisitionError> {
-        let p = self.gmail_preview(account, store, saved, options, cancel.clone())?;
+        let (p, connection) = self.gmail_prepare(account, store, saved, options, cancel.clone())?;
         if !bool::from(p.receipt.as_bytes().ct_eq(receipt.as_bytes()))
             || saved
                 .gmail_backlog
@@ -402,7 +403,16 @@ impl Accounts {
         saved.gmail_backlog.runs.push(p.operation);
         save(store, saved)?;
         boundary("gmail_consumed");
-        self.gmail_run(account, store, saved, &id, false, cancel, fresh)
+        self.gmail_execute(
+            account,
+            store,
+            saved,
+            &id,
+            false,
+            cancel,
+            fresh,
+            Some(connection),
+        )
     }
 
     pub(crate) fn gmail_run(
@@ -414,6 +424,22 @@ impl Accounts {
         reverse: bool,
         cancel: Cancellation,
         fresh: impl Fn(&AccountState) -> Result<(), String>,
+    ) -> Result<(), AcquisitionError> {
+        self.gmail_execute(account, store, saved, id, reverse, cancel, fresh, None)
+    }
+    /// Runs the steps over `session` when the request already holds one for
+    /// this source, or over a new one.
+    #[allow(clippy::too_many_arguments)]
+    fn gmail_execute(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &mut AccountState,
+        id: &str,
+        reverse: bool,
+        cancel: Cancellation,
+        fresh: impl Fn(&AccountState) -> Result<(), String>,
+        session: Option<Connection>,
     ) -> Result<(), AcquisitionError> {
         let i = saved
             .gmail_backlog
@@ -453,8 +479,10 @@ impl Accounts {
         let permit = source.runtime_permit(&runtime).map_err(failure)?;
         let password = self.password(account)?;
         let result = (|| {
-            let mut connection =
-                Connection::connect(&permit, &password, cancel.clone()).map_err(failure)?;
+            let mut connection = match session {
+                Some(connection) => connection,
+                None => Connection::connect(&permit, &password, cancel.clone()).map_err(failure)?,
+            };
             if !compatible(
                 &saved.gmail_backlog.runs[i],
                 &connection.inventory().map_err(failure)?,
@@ -761,6 +789,10 @@ impl Accounts {
 }
 
 pub(crate) fn boundary(name: &str) {
+    #[cfg(test)]
+    if name == "gmail_between_batches" {
+        super::backlog::stop_between_batches();
+    }
     #[cfg(test)]
     if let Some(root) = std::env::var_os("MAILROOM_GMAIL_FIXTURE") {
         let root = std::path::Path::new(&root);

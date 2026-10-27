@@ -77,7 +77,7 @@ impl InstalledSource {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Token {
+pub(super) enum Token {
     Atom(String),
     String(Vec<u8>),
     Open,
@@ -115,6 +115,59 @@ pub(super) struct Session {
     remaining: usize,
     tag: u32,
     code_limit: usize,
+    /// Set when a pipelined flight ended without reading every response, so
+    /// the stream position is unknown and no later command may use it.
+    broken: bool,
+    /// When the session last finished a flight. Time spent idle between
+    /// flights, such as local work between a preview's reads and its run,
+    /// is added to the overall deadline: that deadline bounds time spent
+    /// waiting on the server, not time the client spends elsewhere.
+    idle: Option<Instant>,
+}
+
+/// One command of a pipelined flight. Its handler sees each response row,
+/// untagged then tagged. Steps of the same unit stand or fall together: once
+/// one fails, the unit's later responses are read past without their
+/// handlers, so rows never reach a step whose precondition failed.
+pub(super) struct Step<'a> {
+    command: Zeroizing<Vec<u8>>,
+    unit: usize,
+    handler: Box<dyn FnMut(&[Token], bool) -> Result<(), Error> + 'a>,
+}
+impl<'a> Step<'a> {
+    pub(super) fn new(
+        command: Vec<u8>,
+        handler: impl FnMut(&[Token], bool) -> Result<(), Error> + 'a,
+    ) -> Self {
+        Self {
+            command: Zeroizing::new(command),
+            unit: 0,
+            handler: Box::new(handler),
+        }
+    }
+    pub(super) fn unit(mut self, unit: usize) -> Self {
+        self.unit = unit;
+        self
+    }
+    /// Collects a command's untagged data rows the way `execute` does.
+    fn collect(command: &[u8], rows: &'a mut Vec<Vec<Token>>) -> Self {
+        Self::new(command.to_vec(), move |row, tagged| {
+            if tagged {
+                return Session::status(row, 1);
+            }
+            if row.len() < 2 {
+                return Err(Error::Protocol);
+            }
+            if matches!(row[1].atom(), Some("OK" | "NO" | "BAD" | "BYE")) {
+                Session::status(row, 1)
+            } else if rows.len() >= 256 {
+                Err(Error::Limit)
+            } else {
+                rows.push(row.to_vec());
+                Ok(())
+            }
+        })
+    }
 }
 fn guard(cancel: &Cancellation, end: Instant) -> Result<(), Error> {
     if cancel.is_cancelled() {
@@ -238,6 +291,8 @@ impl Session {
             remaining: RESPONSE,
             tag: 0,
             code_limit: 256,
+            broken: false,
+            idle: None,
         };
         let greeting = s.row()?;
         if greeting.first().and_then(Token::atom) != Some("*")
@@ -484,13 +539,29 @@ impl Session {
             _ => Err(Error::Protocol),
         }
     }
-    fn begin(&mut self, command: &[u8]) -> Result<String, Error> {
-        self.check()?;
+    /// Sends commands in one write and returns their tags. Only the overall
+    /// deadline applies here: time spent between commands is not a stalled
+    /// command, and each response gets its own deadline when it is awaited.
+    fn send(&mut self, commands: &[&[u8]]) -> Result<Vec<String>, Error> {
+        if let Some(idle) = self.idle.take() {
+            self.end += idle.elapsed();
+        }
+        guard(&self.cancel, self.end)?;
+        if self.broken {
+            return Err(Error::Protocol);
+        }
         self.command_end = (Instant::now() + self.timeout).min(self.end);
-        self.remaining = RESPONSE;
-        self.tag = self.tag.checked_add(1).ok_or(Error::Limit)?;
-        let tag = format!("F{}", self.tag);
-        let bytes = Zeroizing::new([tag.as_bytes(), b" ", command, b"\r\n"].concat());
+        let mut tags = vec![];
+        let mut bytes = Zeroizing::new(vec![]);
+        for command in commands {
+            self.tag = self.tag.checked_add(1).ok_or(Error::Limit)?;
+            let tag = format!("F{}", self.tag);
+            bytes.extend_from_slice(tag.as_bytes());
+            bytes.push(b' ');
+            bytes.extend_from_slice(command);
+            bytes.extend_from_slice(b"\r\n");
+            tags.push(tag);
+        }
         if bytes.len() > self.budget.saturating_sub(self.written) {
             return Err(Error::Limit);
         }
@@ -531,34 +602,97 @@ impl Session {
                 }
             }
         }
-        Ok(tag)
+        Ok(tags)
     }
-    fn execute(&mut self, command: &[u8]) -> Result<Vec<Vec<Token>>, Error> {
-        let tag = self.begin(command)?;
-        let mut rows = vec![];
-        loop {
-            let row = self.row()?;
-            let first = row.first().and_then(Token::atom).ok_or(Error::Protocol)?;
-            if first == tag {
-                self.completed();
-                Self::status(&row, 1)?;
-                return Ok(rows);
-            }
-            if first != "*" || row.len() < 2 {
+    /// Reads one command's response up to its tagged line. A handler error
+    /// is that command's result; the rest of its response is still read, so
+    /// the stream stays aligned. Any other error leaves the stream unusable.
+    fn response(
+        &mut self,
+        tag: &str,
+        handler: Option<&mut (dyn FnMut(&[Token], bool) -> Result<(), Error> + '_)>,
+    ) -> Result<Result<(), Error>, Error> {
+        self.command_end = (Instant::now() + self.timeout).min(self.end);
+        self.remaining = RESPONSE;
+        let mut handler = handler;
+        let mut failed: Option<Error> = None;
+        for _ in 0..2048 {
+            let response = self.row()?;
+            let first = response
+                .first()
+                .and_then(Token::atom)
+                .ok_or(Error::Protocol)?;
+            let tagged = first == tag;
+            if !tagged && first != "*" {
                 return Err(Error::Protocol);
             }
-            if matches!(row[1].atom(), Some("OK" | "NO" | "BAD" | "BYE")) {
-                Self::status(&row, 1)?;
-            } else {
-                if rows.len() >= 256 {
-                    return Err(Error::Limit);
+            if tagged {
+                self.completed();
+            }
+            if response.get(1).and_then(Token::atom) == Some("BYE") {
+                return Err(Error::Bye);
+            }
+            if failed.is_none() {
+                if let Some(handler) = handler.as_mut() {
+                    failed = handler(&response, tagged).err();
                 }
-                rows.push(row);
+            }
+            if tagged {
+                return Ok(failed.map_or(Ok(()), Err));
             }
         }
+        Err(Error::Limit)
+    }
+    /// Pipelines `steps` (RFC 3501 section 5.5) and returns each unit's
+    /// result, indexed by unit. Responses are read strictly in order, so rows
+    /// belong to the command whose tagged line follows them; a server must
+    /// finish a command that changes the selected mailbox before starting
+    /// the next. A step runs its handler only while its unit has not failed.
+    pub(super) fn flight(&mut self, steps: Vec<Step<'_>>) -> Result<Vec<Result<(), Error>>, Error> {
+        let units = steps.iter().map(|s| s.unit + 1).max().unwrap_or(0);
+        let commands: Vec<&[u8]> = steps.iter().map(|s| s.command.as_slice()).collect();
+        let tags = self.send(&commands)?;
+        let mut results: Vec<Result<(), Error>> = (0..units).map(|_| Ok(())).collect();
+        for (mut step, tag) in steps.into_iter().zip(tags) {
+            let handler = results[step.unit].is_ok().then_some(
+                &mut *step.handler as &mut dyn FnMut(&[Token], bool) -> Result<(), Error>,
+            );
+            match self.response(&tag, handler) {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    if results[step.unit].is_ok() {
+                        results[step.unit] = Err(error);
+                    }
+                }
+                Err(error) => {
+                    self.broken = true;
+                    return Err(error);
+                }
+            }
+        }
+        self.idle = Some(Instant::now());
+        Ok(results)
+    }
+    /// Pipelines `commands`, all of which must succeed, and returns each
+    /// one's untagged data rows.
+    fn execute_all(&mut self, commands: &[&[u8]]) -> Result<Vec<Vec<Vec<Token>>>, Error> {
+        let mut rows: Vec<Vec<Vec<Token>>> = vec![vec![]; commands.len()];
+        let steps = commands
+            .iter()
+            .zip(rows.iter_mut())
+            .map(|(command, rows)| Step::collect(command, rows))
+            .collect();
+        self.flight(steps)?.pop().unwrap_or(Ok(()))?;
+        Ok(rows)
+    }
+    fn execute(&mut self, command: &[u8]) -> Result<Vec<Vec<Token>>, Error> {
+        Ok(self.execute_all(&[command])?.pop().unwrap_or_default())
     }
     fn capabilities(&mut self) -> Result<BTreeSet<String>, Error> {
         let rows = self.execute(b"CAPABILITY")?;
+        Self::parse_capabilities(rows)
+    }
+    fn parse_capabilities(rows: Vec<Vec<Token>>) -> Result<BTreeSet<String>, Error> {
         if rows.len() != 1 || rows[0].get(1).and_then(Token::atom) != Some("CAPABILITY") {
             return Err(Error::Protocol);
         }
@@ -578,8 +712,7 @@ impl Session {
         }
         Ok(caps)
     }
-    fn namespaces(&mut self) -> Result<Namespaces, Error> {
-        let rows = self.execute(b"NAMESPACE")?;
+    fn parse_namespaces(rows: Vec<Vec<Token>>) -> Result<Namespaces, Error> {
         if rows.len() != 1 || rows[0].get(1).and_then(Token::atom) != Some("NAMESPACE") {
             return Err(Error::Protocol);
         }
@@ -634,9 +767,75 @@ impl Session {
         Ok(ns)
     }
     pub(super) fn observe(&mut self) -> Result<Inventory, Error> {
-        let capabilities = self.capabilities()?;
-        let namespaces = self.namespaces()?;
-        let rows = self.execute(b"LIST \"\" \"*\"")?;
+        let mut rows = InventoryRows::default();
+        let steps = rows.steps();
+        self.flight(steps)?.pop().unwrap_or(Ok(()))?;
+        rows.inventory()
+    }
+    pub(super) fn create(
+        &mut self,
+        permit: &CreatePermit<'_>,
+        name: &ExactName,
+    ) -> Result<(), Error> {
+        if self.source != permit.0.identity()
+            || ExactName::from_wire(&name.wire)? != *name
+            || name
+                .decoded
+                .split('/')
+                .any(|s| s.is_empty() || s.eq_ignore_ascii_case("INBOX"))
+        {
+            return Err(Error::Unsupported);
+        }
+        let args = quoted(name.wire.as_bytes())?;
+        let rows = self.execute(&[b"CREATE ".as_slice(), &args].concat())?;
+        if !rows.is_empty() {
+            return Err(Error::UnknownCode);
+        }
+        Ok(())
+    }
+    pub(super) fn logout(&mut self) {
+        let _ = self.execute(b"LOGOUT");
+    }
+}
+
+/// The responses of one topology observation: CAPABILITY, NAMESPACE, LIST,
+/// then NAMESPACE and CAPABILITY again, which must repeat the first answers.
+#[derive(Default)]
+pub(super) struct InventoryRows([Vec<Vec<Token>>; 5]);
+impl InventoryRows {
+    const COMMANDS: [&'static [u8]; 5] = [
+        b"CAPABILITY",
+        b"NAMESPACE",
+        b"LIST \"\" \"*\"",
+        b"NAMESPACE",
+        b"CAPABILITY",
+    ];
+    pub(super) fn steps(&mut self) -> Vec<Step<'_>> {
+        Self::COMMANDS
+            .iter()
+            .zip(self.0.iter_mut())
+            .map(|(command, rows)| Step::collect(command, rows))
+            .collect()
+    }
+    /// The observed inventory, which must have been read under `expected`
+    /// capabilities.
+    pub(super) fn finish(self, expected: &BTreeSet<String>) -> Result<Inventory, Error> {
+        let inventory = self.inventory()?;
+        if inventory.capabilities != *expected {
+            return Err(Error::Unstable);
+        }
+        Ok(inventory)
+    }
+    fn inventory(self) -> Result<Inventory, Error> {
+        let [
+            capabilities,
+            namespaces,
+            rows,
+            namespaces_after,
+            capabilities_after,
+        ] = self.0;
+        let capabilities = Session::parse_capabilities(capabilities)?;
+        let namespaces = Session::parse_namespaces(namespaces)?;
         let mut mailboxes = vec![];
         for row in rows {
             if row.get(1).and_then(Token::atom) != Some("LIST") || row.get(2) != Some(&Token::Open)
@@ -671,7 +870,9 @@ impl Session {
             });
         }
         mailboxes.sort_by(|a, b| a.name.decoded.cmp(&b.name.decoded));
-        if self.namespaces()? != namespaces || self.capabilities()? != capabilities {
+        if Session::parse_namespaces(namespaces_after)? != namespaces
+            || Session::parse_capabilities(capabilities_after)? != capabilities
+        {
             return Err(Error::Unstable);
         }
         let inventory = Inventory {
@@ -681,30 +882,6 @@ impl Session {
         };
         inventory.validate()?;
         Ok(inventory)
-    }
-    pub(super) fn create(
-        &mut self,
-        permit: &CreatePermit<'_>,
-        name: &ExactName,
-    ) -> Result<(), Error> {
-        if self.source != permit.0.identity()
-            || ExactName::from_wire(&name.wire)? != *name
-            || name
-                .decoded
-                .split('/')
-                .any(|s| s.is_empty() || s.eq_ignore_ascii_case("INBOX"))
-        {
-            return Err(Error::Unsupported);
-        }
-        let args = quoted(name.wire.as_bytes())?;
-        let rows = self.execute(&[b"CREATE ".as_slice(), &args].concat())?;
-        if !rows.is_empty() {
-            return Err(Error::UnknownCode);
-        }
-        Ok(())
-    }
-    pub(super) fn logout(&mut self) {
-        let _ = self.execute(b"LOGOUT");
     }
 }
 
@@ -813,12 +990,15 @@ mod write_tests {
 
     /// The initial budget alone would end both sessions after 4 s. Completed
     /// commands extend it, so a progressing session outlives it, and without
-    /// that credit the same session stops at the overall deadline.
+    /// that credit the same session stops at the overall deadline. A 20 ms
+    /// link keeps the session waiting on the server, which is what the
+    /// deadline bounds, and keeps the commands within the fixture's log.
     #[test]
     fn completed_commands_extend_the_overall_deadline_and_without_progress_credit_it_still_ends() {
         let root = tempfile::tempdir().unwrap();
         let (_repo, account, fake) =
             crate::acquisition::folder_provisioning::tests::install(root.path());
+        std::fs::write(root.path().join("folder-link"), "delay_ms=20").unwrap();
         let source = InstalledSource {
             account: fake.source.account.clone(),
             address: fake.source.address,
@@ -853,6 +1033,36 @@ mod write_tests {
                 assert!(started.elapsed() < Duration::from_secs(9));
             }
         }
+    }
+
+    /// The overall deadline bounds time spent waiting on the server. A
+    /// session left idle past it, while its client works on something else,
+    /// still runs its next command, which keeps its own deadline.
+    #[test]
+    fn idle_time_between_flights_does_not_use_up_the_overall_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let (_repo, account, fake) =
+            crate::acquisition::folder_provisioning::tests::install(root.path());
+        let source = InstalledSource {
+            account: fake.source.account.clone(),
+            address: fake.source.address,
+            tls_name: fake.source.tls_name.clone(),
+            root: fake.source.root.clone(),
+            epoch: fake.source.epoch.clone(),
+            command_timeout: fake.source.command_timeout,
+            operation_timeout: Duration::from_secs(2),
+        };
+        let mut session = Session::connect(
+            &source.permit(&account.id).unwrap(),
+            &account.login,
+            &SecretValue::new(b"invented".to_vec()),
+            Cancellation::default(),
+        )
+        .unwrap();
+        session.credit = Duration::ZERO;
+        session.end = Instant::now() + Duration::from_secs(1);
+        std::thread::sleep(Duration::from_millis(2500));
+        session.observe().unwrap();
     }
 
     /// A session that has read past its initial byte budget keeps going

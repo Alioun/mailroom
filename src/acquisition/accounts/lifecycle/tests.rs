@@ -602,6 +602,17 @@ fn credential_errors_and_failed_retirement_retain_retry_information_without_fals
                 self.inner.delete(r)
             }
         }
+        fn delete_owned(
+            &self,
+            r: &str,
+            owned: &dyn Fn(&[u8]) -> bool,
+        ) -> Result<bool, AcquisitionError> {
+            if self.delete.load(Ordering::SeqCst) {
+                Err(AcquisitionError::Credentials)
+            } else {
+                self.inner.delete_owned(r, owned)
+            }
+        }
     }
     let root = tempfile::tempdir().unwrap();
     let backend = Arc::new(Faults {
@@ -853,19 +864,14 @@ fn rotation_recovery_follows_the_state_table_and_never_uses_an_unauthenticated_n
                     earlier,
                     "{case}: earlier data untouched"
                 );
-                // Next-generation files go only with a key proved to be the rotation's own.
-                let owned = matches!(variant, "genuine" | "metadata_only");
+                // Rollback never unlinks a file: every next-generation entry is moved,
+                // byte for byte, into quarantine beside it.
                 for (dir, before_rollback) in repo.directories(&effects).iter().zip(&later_files) {
-                    let now = fs::read(cipher_path(dir, &a.id, 1)).ok();
-                    if owned {
+                    assert!(!cipher_path(dir, &a.id, 1).exists(), "{case}: name freed");
+                    if let Some(bytes) = before_rollback {
                         assert!(
-                            now.is_none(),
-                            "{case}: the rotation's own next-generation data is removed"
-                        );
-                    } else {
-                        assert_eq!(
-                            &now, before_rollback,
-                            "{case}: unprovable next-generation data is kept"
+                            quarantined(dir, &a.id).contains(bytes),
+                            "{case}: next-generation data kept in quarantine"
                         );
                     }
                 }
@@ -996,6 +1002,13 @@ impl CredentialBackend for Swapping {
     }
     fn delete(&self, reference: &str) -> Result<(), AcquisitionError> {
         self.inner.delete(reference)
+    }
+    fn delete_owned(
+        &self,
+        reference: &str,
+        owned: &dyn Fn(&[u8]) -> bool,
+    ) -> Result<bool, AcquisitionError> {
+        self.inner.delete_owned(reference, owned)
     }
 }
 
@@ -1152,7 +1165,11 @@ fn rotation_never_deletes_an_entry_it_did_not_create() {
         repo.backend.get(&next_key).unwrap().bytes(),
         &[0x55; 32][..]
     );
-    assert_eq!(fs::read(&foreign_file).unwrap(), b"foreign");
+    assert!(!foreign_file.exists());
+    assert!(
+        quarantined(&repo.paths.data, &a.id).contains(&b"foreign".to_vec()),
+        "the foreign file is moved intact, not deleted"
+    );
 }
 
 #[test]
@@ -1193,4 +1210,101 @@ fn an_interrupted_rollback_resumes_and_removes_only_the_rotations_own_entries() 
         }
         assert!(repo.store(&repo.load(&a.id).unwrap()).is_ok(), "{phase}");
     }
+}
+
+/// The contents of every file rollback moved into quarantine in `dir` for account `id`.
+fn quarantined(dir: &Path, id: &AccountId) -> Vec<Vec<u8>> {
+    let mut found = vec![];
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+        if name.starts_with(&format!(".{}.rollback-", id.as_str())) {
+            for file in fs::read_dir(&path).unwrap() {
+                found.push(fs::read(file.unwrap().path()).unwrap());
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn rollback_preserves_whatever_file_holds_a_next_generation_name_across_retries() {
+    for interrupt in [None, Some("rollback_keys")] {
+        let root = tempfile::tempdir().unwrap();
+        let repo = persistent_accounts(root.path());
+        let a = account(&repo);
+        let effects = root.path().join("mailboxes");
+        populate(&repo, &a, &effects);
+        fail(Some("rotate_unsubscribe"));
+        assert!(repo.rotate(&a.id, &effects).is_err());
+        fail(None);
+        // Another process swaps a different file in under the rotation's own name.
+        let dirs = repo.directories(&effects);
+        let genuine: Vec<Vec<u8>> = dirs[1..]
+            .iter()
+            .map(|dir| fs::read(cipher_path(dir, &a.id, 1)).unwrap())
+            .collect();
+        let swapped = cipher_path(&repo.paths.data, &a.id, 1);
+        fs::rename(&swapped, root.path().join("moved-away")).unwrap();
+        fs::write(&swapped, b"unrelated bytes moved into this name").unwrap();
+        if let Some(phase) = interrupt {
+            fail(Some(phase));
+            assert!(repo.recover(&a.id, &effects).is_err());
+            fail(None);
+        }
+        drop(repo);
+        let repo = persistent_accounts(root.path());
+        repo.recover(&a.id, &effects).unwrap();
+        assert!(
+            quarantined(&repo.paths.data, &a.id)
+                .contains(&b"unrelated bytes moved into this name".to_vec()),
+            "{interrupt:?}: the swapped-in file survives"
+        );
+        assert!(fs::read(root.path().join("moved-away")).is_ok());
+        for (dir, bytes) in dirs[1..].iter().zip(&genuine) {
+            assert!(quarantined(dir, &a.id).contains(bytes), "{interrupt:?}");
+        }
+        assert_eq!(repo.load(&a.id).unwrap().generation, 0);
+        let again = repo.rotate(&a.id, &effects);
+        assert!(
+            again.is_ok(),
+            "{interrupt:?}: quarantine frees the names for a later rotation"
+        );
+    }
+}
+
+#[test]
+fn the_file_backend_deletes_only_the_entry_it_checked() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = persistent_accounts(root.path());
+    let backend = repo.backend.clone();
+    backend
+        .put("x-key-g1", &SecretValue::new(vec![1; 32]))
+        .unwrap();
+    assert!(
+        !backend.delete_owned("x-key-g1", &|v| v == [2; 32]).unwrap(),
+        "unequal is kept"
+    );
+    assert_eq!(backend.get("x-key-g1").unwrap().bytes(), &[1; 32][..]);
+    assert!(
+        !backend.delete_owned("x-absent", &|_| true).unwrap(),
+        "missing deletes nothing"
+    );
+    // The check itself replaces the named entry; the replacement must survive.
+    let replace = |value: &[u8]| {
+        backend.delete("x-key-g1").unwrap();
+        backend
+            .put("x-key-g1", &SecretValue::new(vec![9; 32]))
+            .unwrap();
+        value == [1; 32]
+    };
+    assert!(
+        backend.delete_owned("x-key-g1", &replace).unwrap(),
+        "the checked entry is deleted"
+    );
+    assert_eq!(
+        backend.get("x-key-g1").unwrap().bytes(),
+        &[9; 32][..],
+        "the replacement survives"
+    );
 }

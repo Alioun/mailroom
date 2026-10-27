@@ -35,6 +35,15 @@ impl CredentialBackend for MemoryCredentials {
             .insert(reference.to_owned(), Zeroizing::new(value.bytes().to_vec()));
         Ok(())
     }
+    fn delete_owned(
+        &self,
+        reference: &str,
+        owned: &dyn Fn(&[u8]) -> bool,
+    ) -> Result<bool, AcquisitionError> {
+        let mut values = self.0.lock().expect("synthetic credentials");
+        let checked = values.get(reference).is_some_and(|v| owned(v));
+        Ok(checked && values.remove(reference).is_some())
+    }
 }
 
 pub(crate) fn accounts(root: &std::path::Path) -> Accounts {

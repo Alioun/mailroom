@@ -629,3 +629,59 @@ fn a_failed_empty_or_unresolved_search_list_refuses() {
         Ok(vec![real])
     );
 }
+
+#[test]
+fn native_delete_owned_checks_and_deletes_the_same_item() {
+    let throwaway = Throwaway::new();
+    let keychain = throwaway.keychain();
+    let (value, other_value) = (dummy(), dummy());
+    assert_eq!(keychain.create("a-key-g1", &value), Status::Ok);
+    assert_eq!(
+        keychain.delete_owned("a-key-g1", &|v| v == other_value.as_slice()),
+        Ok(false),
+        "an unequal item is kept"
+    );
+    assert_eq!(
+        keychain.read("a-key-g1").unwrap().as_slice(),
+        value.as_slice()
+    );
+    assert_eq!(
+        keychain.delete_owned("a-absent-key-g1", &|_| true),
+        Ok(false),
+        "missing"
+    );
+    assert_eq!(
+        keychain.add(SERVICE, "b-key-g1", &trusting(&[other()]), &value),
+        Status::Ok
+    );
+    assert_eq!(
+        keychain.delete_owned("b-key-g1", &|_| true),
+        Ok(false),
+        "an item whose access lists fail the policy is never read or deleted"
+    );
+    assert_eq!(keychain.status("b-key-g1"), Status::OtherBinary);
+    assert_eq!(
+        keychain.delete_owned("a-key-g1", &|v| v == value.as_slice()),
+        Ok(true)
+    );
+    assert_eq!(
+        keychain.status("a-key-g1"),
+        Status::Missing,
+        "an equal item is deleted"
+    );
+
+    // The check itself replaces the item under the same name; the replacement survives.
+    assert_eq!(keychain.create("c-key-g1", &value), Status::Ok);
+    let replace = |checked: &[u8]| {
+        assert_eq!(keychain.remove("c-key-g1"), Status::Ok);
+        assert_eq!(keychain.create("c-key-g1", &other_value), Status::Ok);
+        checked == value.as_slice()
+    };
+    let _ = keychain.delete_owned("c-key-g1", &replace);
+    assert_eq!(
+        keychain.read("c-key-g1").unwrap().as_slice(),
+        other_value.as_slice(),
+        "the replacement under the same name survives"
+    );
+    assert_no_plaintext(throwaway.dir.path(), &value);
+}

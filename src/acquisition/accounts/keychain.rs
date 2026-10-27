@@ -674,23 +674,28 @@ impl Keychain {
         self.create_as(reference, Class::of(reference), secret)
     }
     fn create_as(&self, reference: &str, class: Class, secret: &[u8]) -> Status {
+        match self.create_item(reference, class, secret) {
+            Ok(_) => Status::Ok,
+            Err(status) => status,
+        }
+    }
+    /// Creates an item and returns the reference `SecItemAdd` gives for that insertion.
+    fn create_item(&self, reference: &str, class: Class, secret: &[u8]) -> Result<CFType, Status> {
         if !valid_reference(reference) || secret.is_empty() || secret.len() > 8192 {
-            return Status::Failed;
+            return Err(Status::Failed);
         }
         let own = match class {
-            Class::PinnedSelf => match own_application() {
-                Ok((application, _)) => Some(application),
-                Err(status) => return status,
-            },
+            Class::PinnedSelf => Some(own_application()?.0),
             Class::EveryAccess => None,
         };
         let trusted: Vec<CFType> = own
             .iter()
             .map(|a| unsafe { CFType::wrap_under_get_rule(a.0 as CFTypeRef) })
             .collect();
-        self.add(SERVICE, reference, &CFArray::from_CFTypes(&trusted), secret)
+        self.add_item(SERVICE, reference, &CFArray::from_CFTypes(&trusted), secret)
     }
 
+    #[cfg(test)]
     fn add(
         &self,
         service: &str,
@@ -698,6 +703,19 @@ impl Keychain {
         trusted: &CFArray<CFType>,
         secret: &[u8],
     ) -> Status {
+        match self.add_item(service, reference, trusted, secret) {
+            Ok(_) => Status::Ok,
+            Err(status) => status,
+        }
+    }
+
+    fn add_item(
+        &self,
+        service: &str,
+        reference: &str,
+        trusted: &CFArray<CFType>,
+        secret: &[u8],
+    ) -> Result<CFType, Status> {
         let label = CFString::new(&format!("Mailroom: {reference}"));
         let mut access = std::ptr::null_mut();
         if unsafe {
@@ -709,7 +727,7 @@ impl Keychain {
         } != 0
             || access.is_null()
         {
-            return Status::Failed;
+            return Err(Status::Failed);
         }
         let access = unsafe { CFType::wrap_under_create_rule(access as CFTypeRef) };
         // The CFData borrows the caller's buffer, so this side makes no unwiped copy.
@@ -730,8 +748,19 @@ impl Keychain {
         if let Some(keychain) = &self.explicit {
             pairs.push((key(unsafe { kSecUseKeychain }), keychain.clone()));
         }
+        pairs.push((
+            key(unsafe { kSecReturnRef }),
+            CFBoolean::true_value().as_CFType(),
+        ));
         let attributes = CFDictionary::from_CFType_pairs(&pairs);
-        Status::of(unsafe { SecItemAdd(attributes.as_CFTypeRef(), std::ptr::null_mut()) })
+        let mut result = std::ptr::null();
+        match Status::of(unsafe { SecItemAdd(attributes.as_CFTypeRef(), &mut result) }) {
+            Status::Ok if !result.is_null() => {
+                Ok(unsafe { CFType::wrap_under_create_rule(result) })
+            }
+            Status::Ok => Err(Status::Failed),
+            status => Err(status),
+        }
     }
 
     pub(crate) fn remove(&self, reference: &str) -> Status {
@@ -934,14 +963,15 @@ impl Keychain {
         }
     }
 
-    /// Creates a pinned item and proves it reads back as `value`. Returns that item.
+    /// Creates a pinned item and proves the inserted item, by the reference `SecItemAdd`
+    /// returned, reads back as `value`. Returns that item.
     fn created(&self, reference: &str, value: &[u8]) -> Result<CFType, Status> {
-        match self.create_as(reference, Class::PinnedSelf, value) {
+        let item = self.create_item(reference, Class::PinnedSelf, value)?;
+        match Self::check(&item, Class::PinnedSelf) {
             Status::Ok => {}
             status => return Err(status),
         }
-        let (item, read) = self.protected_item(reference, Class::PinnedSelf)?;
-        if equal(&read, value) {
+        if equal(&self.data(&item)?, value) {
             Ok(item)
         } else {
             Err(Status::Failed)

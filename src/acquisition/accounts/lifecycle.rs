@@ -797,12 +797,14 @@ impl Accounts {
     }
     /// Recovery of a rotation whose metadata still selects the earlier generation. The
     /// earlier ciphertexts and key are intact, so the rotation is undone and no
-    /// next-generation key is ever trusted. Cleanup deletes only what this rotation provably
-    /// created, and `rotate` refused to start over any existing entry it would create:
-    /// the next key only when it reproduces the commitment recorded before it was created;
-    /// next-generation files of the recorded stores only when that key opens them; and a
-    /// first identity only when it equals the bytes derived from the earlier key. Anything
-    /// else, including a key planted in place of the rotation's own, is kept.
+    /// next-generation key is ever trusted. `rotate` refused to start over any existing
+    /// entry it would create. Rollback deletes a key only when its value proves the
+    /// rotation created it, through `delete_owned`, which checks and deletes the same entry:
+    /// the next key when it reproduces the commitment recorded before it was created, and a
+    /// first identity when it equals the bytes derived from the earlier key. Files are never
+    /// unlinked, because a path cannot be bound to the file a check read: whatever entry
+    /// holds a recorded store's next-generation name is moved, intact, into a fresh
+    /// quarantine directory beside it for the owner to remove.
     fn roll_back_rotation(
         &self,
         before: &Account,
@@ -823,32 +825,14 @@ impl Accounts {
                 })
                 .is_ok_and(|keys| keys.commits_to(Some(commitment)))
         };
-        let next = match self.backend.get(&after.local_secret_ref) {
-            Ok(key) if owns_key(key.bytes()) => Some(key),
-            Ok(_) | Err(AcquisitionError::CredentialMissing) => None,
-            Err(e) => return Err(e),
-        };
-        if let (Some(key), Some(identity)) = (&next, &identity) {
-            let directories = self.directories(effects);
-            for &kind in stores {
-                let dir = directories.get(kind).ok_or(AcquisitionError::Storage)?;
-                let path = cipher_path(dir, &after.id, after.generation);
-                if !path.try_exists().map_err(|_| AcquisitionError::Storage)? {
-                    continue;
-                }
-                let keys = CensusKeys::rotated(
-                    &LocalSecret::from_bytes(key.bytes().to_vec())?,
-                    &after.id,
-                    identity,
-                    after.generation,
-                )?;
-                let opens = EncryptedStore::new(dir.clone(), Self::kind_keys(after, keys, kind)?)?
-                    .load_state()
-                    .is_ok();
-                if opens {
-                    remove_file(&path)?;
-                }
-            }
+        let directories = self.directories(effects);
+        for &kind in stores {
+            let dir = directories.get(kind).ok_or(AcquisitionError::Storage)?;
+            quarantine(
+                dir,
+                &cipher_path(dir, &after.id, after.generation),
+                &after.id,
+            )?;
         }
         boundary("rollback_data")?;
         self.backend
@@ -1045,6 +1029,33 @@ pub(crate) fn write_new_secret(path: &Path, bytes: &[u8]) -> Result<(), Acquisit
     file.persist_noclobber(path)
         .map_err(|_| AcquisitionError::Storage)?;
     sync_dir(parent)
+}
+/// Moves the entry at `path`, whatever it is, into a new private directory beside it,
+/// keeping its name. A rename moves the entry itself and never follows a link, so nothing
+/// is destroyed and no check has to match the entry moved. A missing entry moves nothing.
+fn quarantine(dir: &Path, path: &Path, id: &AccountId) -> Result<(), AcquisitionError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(AcquisitionError::Storage),
+    }
+    let target = dir.join(format!(".{}.rollback-{}", id.as_str(), nonce()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&target)
+            .map_err(|_| AcquisitionError::Storage)?;
+    }
+    #[cfg(not(unix))]
+    fs::create_dir(&target).map_err(|_| AcquisitionError::Storage)?;
+    let name = path.file_name().ok_or(AcquisitionError::Storage)?;
+    match fs::rename(path, target.join(name)) {
+        Ok(()) => sync_dir(dir),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(AcquisitionError::Storage),
+    }
 }
 pub(crate) fn remove_file(path: &Path) -> Result<(), AcquisitionError> {
     match fs::remove_file(path) {

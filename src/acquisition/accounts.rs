@@ -37,19 +37,16 @@ pub trait CredentialBackend: Send + Sync {
     fn get(&self, reference: &str) -> Result<SecretValue, AcquisitionError>;
     fn put(&self, reference: &str, value: &SecretValue) -> Result<(), AcquisitionError>;
     fn delete(&self, reference: &str) -> Result<(), AcquisitionError>;
-    /// Deletes the item only when its value satisfies `owned`, reading and deleting the
-    /// same item, so cleanup never removes an entry it did not prove it created. Returns
-    /// whether it deleted. Backends without item handles read and delete by name.
+    /// Deletes the entry only when its value satisfies `owned`, and only the entry whose
+    /// value was checked, so cleanup never removes an entry it did not prove it created.
+    /// Returns whether it deleted. A backend that cannot bind the deletion to the checked
+    /// entry keeps it: this default never deletes.
     fn delete_owned(
         &self,
-        reference: &str,
-        owned: &dyn Fn(&[u8]) -> bool,
+        _reference: &str,
+        _owned: &dyn Fn(&[u8]) -> bool,
     ) -> Result<bool, AcquisitionError> {
-        match self.get(reference) {
-            Ok(value) if owned(value.bytes()) => self.delete(reference).map(|()| true),
-            Ok(_) | Err(AcquisitionError::CredentialMissing) => Ok(false),
-            Err(e) => Err(e),
-        }
+        Ok(false)
     }
 }
 
@@ -294,6 +291,14 @@ impl Accounts {
                 self.count(reference);
                 self.backend.delete(reference)
             }
+            fn delete_owned(
+                &self,
+                reference: &str,
+                owned: &dyn Fn(&[u8]) -> bool,
+            ) -> Result<bool, AcquisitionError> {
+                self.count(reference);
+                self.backend.delete_owned(reference, owned)
+            }
         }
         let accesses = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         self.backend = Arc::new(Tracked {
@@ -490,6 +495,15 @@ mod tests {
                 .insert(reference.to_owned(), Zeroizing::new(value.bytes().to_vec()));
             Ok(())
         }
+        fn delete_owned(
+            &self,
+            reference: &str,
+            owned: &dyn Fn(&[u8]) -> bool,
+        ) -> Result<bool, AcquisitionError> {
+            let mut values = self.0.lock().unwrap();
+            let checked = values.get(reference).is_some_and(|v| owned(v));
+            Ok(checked && values.remove(reference).is_some())
+        }
     }
     #[test]
     fn process_reconstruction_uses_stable_backend_keys_and_keeps_metadata_secret_free() {
@@ -608,6 +622,32 @@ pub(crate) mod process_tests {
         fn put(&self, reference: &str, value: &SecretValue) -> Result<(), AcquisitionError> {
             private_directory(&self.0)?;
             lifecycle::write_new_secret(&self.0.join(reference), value.bytes())
+        }
+        /// Moves the entry to a private name first, so the file checked is the file removed;
+        /// an entry that is not owned is linked back under its name, never over another.
+        fn delete_owned(
+            &self,
+            reference: &str,
+            owned: &dyn Fn(&[u8]) -> bool,
+        ) -> Result<bool, AcquisitionError> {
+            let named = self.0.join(reference);
+            let private = self
+                .0
+                .join(format!(".{reference}.owned-{}", lifecycle::nonce()));
+            match fs::rename(&named, &private) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(_) => return Err(AcquisitionError::Storage),
+            }
+            let value = Zeroizing::new(fs::read(&private).map_err(|_| AcquisitionError::Storage)?);
+            if owned(&value) {
+                lifecycle::remove_file(&private)?;
+                return Ok(true);
+            }
+            if fs::hard_link(&private, &named).is_ok() {
+                lifecycle::remove_file(&private)?;
+            }
+            Ok(false)
         }
     }
     pub(crate) fn persistent_accounts(root: &std::path::Path) -> Accounts {

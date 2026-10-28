@@ -45,8 +45,8 @@ pub(in crate::server) async fn handle(
         Ok(v) => v,
         Err(e) => return e,
     };
-    if !state.accounts.synthetic() || state.accounts.ledger.is_none() {
-        return (StatusCode::FORBIDDEN, Json(json!({"error":"No production wind-down evidence adapter is installed. Reports grant no provider authority."}))).into_response();
+    if !state.accounts.local_bookkeeping() {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"Protected saved-census report installation is unavailable. Reports grant no provider authority."}))).into_response();
     }
     match tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let _operation = state.accounts.operation.lock().expect("account operation");

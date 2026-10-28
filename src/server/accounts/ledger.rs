@@ -29,8 +29,8 @@ pub(in crate::server) async fn handle(
         Err(e) => return e,
     };
     // Deny before repository construction or credential access.
-    if !state.accounts.synthetic() || state.accounts.ledger.is_none() {
-        return (StatusCode::FORBIDDEN, Json(json!({"error":"No production ledger adapter is installed. Local bookkeeping grants no account-write authority."}))).into_response();
+    if !state.accounts.local_bookkeeping() {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"Protected private ledger installation is unavailable. Local bookkeeping grants no account-write authority."}))).into_response();
     }
     match tokio::task::spawn_blocking(move || {
         let _operation = state.accounts.operation.lock().expect("account operation");

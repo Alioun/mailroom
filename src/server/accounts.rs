@@ -4,6 +4,7 @@ pub(super) mod folder_provisioning;
 pub(super) mod invoices;
 pub(super) mod ledger;
 pub(super) mod lifecycle;
+mod local;
 pub(super) mod managesieve;
 pub(super) mod proposals;
 pub(super) mod recovery;
@@ -48,6 +49,10 @@ pub(super) struct AccountController {
 }
 enum AccountSource {
     Os,
+    Unavailable,
+    Installed {
+        accounts: Arc<Accounts>,
+    },
     Synthetic {
         accounts: Arc<Accounts>,
         _directory: tempfile::TempDir,
@@ -96,6 +101,7 @@ fn mailbox_consent(
 
 impl AccountController {
     pub fn new(synthetic: bool) -> Self {
+        let mut installed_ledger = None;
         let source = if synthetic {
             let directory = tempfile::tempdir().expect("synthetic account directory");
             AccountSource::Synthetic {
@@ -104,7 +110,14 @@ impl AccountController {
                 _directory: directory,
             }
         } else {
-            AccountSource::Os
+            match local::installed() {
+                Ok(Some(local::Services { accounts, ledger })) => {
+                    installed_ledger = Some(ledger);
+                    AccountSource::Installed { accounts }
+                }
+                Ok(None) => AccountSource::Os,
+                Err(_) => AccountSource::Unavailable,
+            }
         };
         let ledger = match &source {
             AccountSource::Synthetic { mailboxes, .. } => {
@@ -114,7 +127,7 @@ impl AccountController {
                         .expect("synthetic private ledger"),
                 )
             }
-            _ => None,
+            _ => installed_ledger,
         };
         Self {
             confirmations: Mutex::new(if synthetic {
@@ -138,15 +151,25 @@ impl AccountController {
         self.repository_accesses
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match &self.source {
+            AccountSource::Unavailable => Err(AcquisitionError::Storage),
             AccountSource::Os => Ok(Arc::new(Accounts::new(
                 AccountPaths::per_user()?,
                 Arc::new(OsCredentials),
             ))),
-            AccountSource::Synthetic { accounts, .. } => Ok(accounts.clone()),
+            AccountSource::Installed { accounts } | AccountSource::Synthetic { accounts, .. } => {
+                Ok(accounts.clone())
+            }
         }
     }
     fn synthetic(&self) -> bool {
         matches!(self.source, AccountSource::Synthetic { .. })
+    }
+    fn local_bookkeeping(&self) -> bool {
+        self.ledger.is_some()
+            && matches!(
+                self.source,
+                AccountSource::Installed { .. } | AccountSource::Synthetic { .. }
+            )
     }
     fn reserve(&self) -> Result<Cancellation, AcquisitionError> {
         let mut job = self.job.lock().expect("account job");

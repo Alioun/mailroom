@@ -2,7 +2,7 @@ use super::{Document, Snapshot, digest, encode, validate};
 #[cfg(unix)]
 use std::os::{
     fd::{AsRawFd, FromRawFd},
-    unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
 };
 use std::{
     fs::{self, File, OpenOptions},
@@ -27,7 +27,7 @@ impl Drop for LockedLedger<'_> {
     }
 }
 impl InstalledLedger {
-    // Called only by the installed synthetic launcher, never from an HTTP-supplied path.
+    // Installed paths come from the launcher, never an HTTP request.
     pub fn install(directory: PathBuf) -> Result<Self, String> {
         #[cfg(not(unix))]
         {
@@ -36,87 +36,117 @@ impl InstalledLedger {
         }
         #[cfg(unix)]
         {
-            if !directory.is_absolute() {
+            if !directory.is_absolute()
+                || directory.components().any(|c| {
+                    matches!(
+                        c,
+                        std::path::Component::ParentDir | std::path::Component::CurDir
+                    )
+                })
+            {
                 return Err(ERROR.into());
             }
-            if !directory.exists() {
-                fs::DirBuilder::new()
-                    .mode(0o700)
-                    .create(&directory)
-                    .map_err(|_| ERROR)?;
+            let parent = directory
+                .parent()
+                .ok_or(ERROR)?
+                .canonicalize()
+                .map_err(|_| ERROR)?;
+            let parent_fd = open_directory_path(&parent)?;
+            let m = parent_fd.metadata().map_err(|_| ERROR)?;
+            if m.uid() != unsafe { libc::geteuid() } || m.permissions().mode() & 0o022 != 0 {
+                return Err(ERROR.into());
             }
-            if fs::symlink_metadata(&directory)
+            no_granting_acl(&parent_fd)?;
+            let name = directory
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or(ERROR)?;
+            Self::install_in(parent, parent_fd, name)
+        }
+    }
+    pub(crate) fn install_under(account_data: &Path) -> Result<Self, String> {
+        #[cfg(not(unix))]
+        {
+            let _ = account_data;
+            Err(ERROR.into())
+        }
+        #[cfg(unix)]
+        {
+            if fs::symlink_metadata(account_data)
                 .map_err(|_| ERROR)?
                 .file_type()
                 .is_symlink()
             {
                 return Err(ERROR.into());
             }
-            let directory = directory
-                .parent()
-                .ok_or(ERROR)?
-                .canonicalize()
-                .map_err(|_| ERROR)?
-                .join(directory.file_name().ok_or(ERROR)?);
-            check_components(&directory)?;
-            let m = fs::symlink_metadata(&directory).map_err(|_| ERROR)?;
-            if !m.is_dir() || m.permissions().mode() & 0o777 != 0o700 {
-                return Err(ERROR.into());
-            }
-            let installed = Self {
-                directory,
-                identity: (m.dev(), m.ino()),
-            };
-            let dir = installed.open_directory()?;
-            let existed = installed
-                .directory
-                .join("addresses.lock")
-                .try_exists()
-                .map_err(|_| ERROR)?;
-            let lock = open_at(&dir, "addresses.lock", libc::O_RDWR | libc::O_CREAT, 0o600)?;
-            private_regular(&lock)?;
-            lock.try_lock()
-                .map_err(|_| "Private ledger is in use by another account or process")?;
-            let guard = LockedLedger {
-                installed: &installed,
-                directory: dir,
-                lock,
-            };
-            if !existed {
-                let bytes = encode(&Document::default())?;
-                match open_at(
-                    &guard.directory,
-                    "addresses.yaml",
-                    libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-                    0o600,
-                ) {
-                    Ok(mut f) => {
-                        f.write_all(&bytes)
-                            .and_then(|_| f.sync_all())
-                            .map_err(|_| ERROR)?;
-                        guard.directory.sync_all().map_err(|_| ERROR)?;
-                    }
-                    Err(_) => {
-                        guard.read()?;
-                    }
-                }
-            } else if guard.raw()?.is_some() {
-                guard.read()?;
-            }
-            drop(guard);
-            Ok(installed)
+            let parent = account_data.canonicalize().map_err(|_| ERROR)?;
+            let directory = open_directory_path(&parent)?;
+            private_directory(&directory)?;
+            Self::install_in(parent, directory, "ledger")
         }
     }
     #[cfg(unix)]
-    fn open_directory(&self) -> Result<File, String> {
-        check_components(&self.directory)?;
-        let f = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
-            .open(&self.directory)
+    fn install_in(parent: PathBuf, parent_fd: File, name: &str) -> Result<Self, String> {
+        let text = std::ffi::CString::new(name).map_err(|_| ERROR)?;
+        if unsafe { libc::mkdirat(parent_fd.as_raw_fd(), text.as_ptr(), 0o700) } != 0
+            && std::io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST)
+        {
+            return Err(ERROR.into());
+        }
+        let dir = open_at(&parent_fd, name, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+        private_directory(&dir)?;
+        parent_fd.sync_all().map_err(|_| ERROR)?;
+        let m = dir.metadata().map_err(|_| ERROR)?;
+        let installed = Self {
+            directory: parent.join(name),
+            identity: (m.dev(), m.ino()),
+        };
+        installed.open_directory()?;
+        let existed = installed
+            .directory
+            .join("addresses.lock")
+            .try_exists()
             .map_err(|_| ERROR)?;
+        let lock = open_at(&dir, "addresses.lock", libc::O_RDWR | libc::O_CREAT, 0o600)?;
+        private_regular(&lock)?;
+        lock.try_lock()
+            .map_err(|_| "Private ledger is in use by another account or process")?;
+        let guard = LockedLedger {
+            installed: &installed,
+            directory: dir,
+            lock,
+        };
+        if !existed {
+            let bytes = encode(&Document::default())?;
+            match open_at(
+                &guard.directory,
+                "addresses.yaml",
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+                0o600,
+            ) {
+                Ok(mut f) => {
+                    private_regular(&f)?;
+                    f.write_all(&bytes)
+                        .and_then(|_| f.sync_all())
+                        .map_err(|_| ERROR)?;
+                    guard.directory.sync_all().map_err(|_| ERROR)?;
+                }
+                Err(_) => {
+                    guard.read()?;
+                }
+            }
+        } else if guard.raw()?.is_some() {
+            guard.read()?;
+        }
+        drop(guard);
+        Ok(installed)
+    }
+    #[cfg(unix)]
+    fn open_directory(&self) -> Result<File, String> {
+        let f = open_directory_path(&self.directory)?;
+        private_directory(&f)?;
         let m = f.metadata().map_err(|_| ERROR)?;
-        if (m.dev(), m.ino()) != self.identity || m.permissions().mode() & 0o777 != 0o700 {
+        if (m.dev(), m.ino()) != self.identity {
             return Err(ERROR.into());
         }
         Ok(f)
@@ -144,24 +174,89 @@ impl InstalledLedger {
     }
 }
 #[cfg(unix)]
-fn check_components(path: &Path) -> Result<(), String> {
-    let mut checked = PathBuf::new();
+fn open_directory_path(path: &Path) -> Result<File, String> {
+    if !path.is_absolute() {
+        return Err(ERROR.into());
+    }
+    let mut directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open("/")
+        .map_err(|_| ERROR)?;
     for component in path.components() {
-        if matches!(
-            component,
-            std::path::Component::ParentDir | std::path::Component::CurDir
-        ) {
-            return Err(ERROR.into());
-        }
-        checked.push(component);
-        if fs::symlink_metadata(&checked)
-            .map_err(|_| ERROR)?
-            .file_type()
-            .is_symlink()
-        {
-            return Err(ERROR.into());
+        match component {
+            std::path::Component::RootDir => {}
+            std::path::Component::Normal(name) => {
+                directory = open_at(
+                    &directory,
+                    name.to_str().ok_or(ERROR)?,
+                    libc::O_RDONLY | libc::O_DIRECTORY,
+                    0,
+                )?;
+            }
+            _ => return Err(ERROR.into()),
         }
     }
+    Ok(directory)
+}
+#[cfg(unix)]
+fn private_directory(file: &File) -> Result<(), String> {
+    let m = file.metadata().map_err(|_| ERROR)?;
+    if !m.is_dir()
+        || m.uid() != unsafe { libc::geteuid() }
+        || m.permissions().mode() & 0o7777 != 0o700
+    {
+        return Err(ERROR.into());
+    }
+    no_granting_acl(file)
+}
+#[cfg(target_os = "macos")]
+fn no_granting_acl(file: &File) -> Result<(), String> {
+    use std::ffi::{c_int, c_void};
+    unsafe extern "C" {
+        fn acl_get_fd_np(fd: c_int, kind: c_int) -> *mut c_void;
+        fn acl_valid(acl: *mut c_void) -> c_int;
+        fn acl_get_entry(acl: *mut c_void, which: c_int, entry: *mut *mut c_void) -> c_int;
+        fn acl_get_tag_type(entry: *mut c_void, tag: *mut c_int) -> c_int;
+        fn acl_free(object: *mut c_void) -> c_int;
+    }
+    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), 0x100) };
+    if acl.is_null() {
+        return if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+            Ok(())
+        } else {
+            Err(ERROR.into())
+        };
+    }
+    let result = (|| {
+        if unsafe { acl_valid(acl) } != 0 {
+            return Err(ERROR.into());
+        }
+        let mut entry = std::ptr::null_mut();
+        let mut which = 0;
+        loop {
+            if unsafe { acl_get_entry(acl, which, &mut entry) } != 0 {
+                // macOS returns EINVAL at the end, including for an empty valid ACL.
+                return if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL)
+                    && unsafe { acl_valid(acl) } == 0
+                {
+                    Ok(())
+                } else {
+                    Err(ERROR.into())
+                };
+            }
+            let mut tag = 0;
+            if unsafe { acl_get_tag_type(entry, &mut tag) } != 0 || tag != 2 {
+                return Err(ERROR.into());
+            }
+            which = -1;
+        }
+    })();
+    unsafe { acl_free(acl) };
+    result
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+fn no_granting_acl(_: &File) -> Result<(), String> {
     Ok(())
 }
 #[cfg(unix)]
@@ -187,11 +282,11 @@ fn private_regular(file: &File) -> Result<(), String> {
     if !m.is_file()
         || m.nlink() != 1
         || m.uid() != unsafe { libc::geteuid() }
-        || m.permissions().mode() & 0o777 != 0o600
+        || m.permissions().mode() & 0o7777 != 0o600
     {
         return Err(ERROR.into());
     }
-    Ok(())
+    no_granting_acl(file)
 }
 impl LockedLedger<'_> {
     #[cfg(unix)]
@@ -285,6 +380,7 @@ impl LockedLedger<'_> {
                 libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
                 0o600,
             )?;
+            private_regular(&staged)?;
             staged
                 .write_all(bytes)
                 .and_then(|_| staged.sync_all())
@@ -350,6 +446,7 @@ impl LockedLedger<'_> {
                 0o600,
             )?;
             let result = (|| {
+                private_regular(&staged)?;
                 staged
                     .write_all(&bytes)
                     .and_then(|_| staged.sync_all())

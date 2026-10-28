@@ -177,7 +177,9 @@ async fn absent_read_only_and_wrong_account_deny_without_repository_credentials_
             AccountSource::Synthetic { accounts, .. } => {
                 Some(Arc::get_mut(accounts).unwrap().track_credential_accesses())
             }
-            AccountSource::Os => None,
+            AccountSource::Os | AccountSource::Installed { .. } | AccountSource::Unavailable => {
+                None
+            }
         };
         let state = Arc::new(app);
         for action in ["preview", "confirm", "status", "cancel", "reconcile"] {

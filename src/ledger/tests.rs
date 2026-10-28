@@ -547,3 +547,57 @@ fn ledger_change_blocks_old_sorting_plan_without_starting_effects_or_undo() {
         original
     );
 }
+
+#[test]
+fn unsafe_parent_is_refused_before_creating_ledger() {
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o777)).unwrap();
+    let path = root.path().join("private");
+    assert!(InstalledLedger::install(path.clone()).is_err());
+    assert!(!path.exists());
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(InstalledLedger::install(path).is_ok());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn granting_acls_are_refused_on_directory_lock_and_ledger_but_deny_only_is_allowed() {
+    fn chmod(path: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("/bin/chmod")
+            .args(args)
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "dummy ACL fixture command failed");
+    }
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("private");
+    let installed = InstalledLedger::install(directory.clone()).unwrap();
+    for path in [
+        directory.clone(),
+        directory.join("addresses.lock"),
+        directory.join("addresses.yaml"),
+    ] {
+        chmod(&path, &["+a", "everyone allow read"]);
+        assert!(
+            installed.lock().and_then(|g| g.read()).is_err(),
+            "granting ACL accepted"
+        );
+        assert!(
+            InstalledLedger::install(directory.clone()).is_err(),
+            "reinstallation accepted granting ACL"
+        );
+        chmod(&path, &["-N"]);
+        assert!(installed.lock().and_then(|g| g.read()).is_ok());
+        chmod(&path, &["+a", "everyone deny delete"]);
+        assert!(
+            installed.lock().and_then(|g| g.read()).is_ok(),
+            "deny-only ACL refused"
+        );
+        chmod(&path, &["-N"]);
+    }
+    chmod(root.path(), &["+a", "everyone allow read"]);
+    assert!(InstalledLedger::install(root.path().join("second")).is_err());
+    assert!(!root.path().join("second").exists());
+    chmod(root.path(), &["-N"]);
+}

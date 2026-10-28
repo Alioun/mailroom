@@ -146,7 +146,7 @@ pub(in crate::server) async fn handle(
                 Ok(json!({"restored":restored,"local_restore_complete":true,"provider_authority":false}))
             },
             Request::SelectedResume => {
-                let restored = repo.selected_resume(&secret, state.accounts.ledger.as_ref())?;
+                let restored = repo.selected_resume_reviewed(&secret, state.accounts.ledger.as_ref(), |_, _| Ok(()))?;
                 *state.accounts.confirmations.lock().expect("confirmations") = crate::confirmation::Boundary::synthetic();
                 *state.accounts.job.lock().expect("account job") = None;
                 Ok(json!({"restored":restored,"local_restore_complete":true,"provider_authority":false}))

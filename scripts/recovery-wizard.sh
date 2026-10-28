@@ -213,11 +213,11 @@ TOTAL_STAGES=5
 if [[ "${1:-}" == "--plan" ]]; then
   printf '%s\n' \
     '1. Verify protected native launch, authenticated IPC and Keychain access before real recovery.' \
-    '2. Privately generate and separately store a random 256-bit recovery key through the future protected adapter.' \
+    '2. Use the approved frozen setup wizard recovery phase, with a separately held random 256-bit recovery key.' \
     '3. Review the exact selected account set, optional authoritative ledger, captured resources, boundary and exclusions; approve creation once.' \
     '4. Keep the completed encrypted bundle outside this Mac, apart from its key, and verify local authentication in an isolated installation.' \
     '5. Reconnect privately, acquire fresh provider evidence and reconcile later effects before any operation resumes.' \
-    'HOLD: production creation, private key entry, restore and reconnection are unavailable in this build. No storage provider, schedule, retention or escrow is selected.'
+    'HOLD: checkout execution and reconnection remain unavailable. Protected owner recovery requires exact approval and installed acceptance. No storage provider, schedule, retention or escrow is selected.'
   return 0
 fi
 if [[ $# -ne 0 || ! -t 0 ]]; then
@@ -231,7 +231,7 @@ say "Real recovery requires verified protected installation, native launch, auth
 say "Complete those boundaries and owner-run verification before handling any real recovery key or bundle."
 pause "Record this unmet prerequisite privately."
 stage "Hold the recovery key separately"
-say "Use a randomly generated 256-bit key, not a password, through the future approved private input."
+say "Use a randomly generated 256-bit key through the approved frozen wizard recovery phase."
 say "Never paste it into chat, argv, browser storage, receipts or logs."
 say "Keep the key apart from the encrypted bundle. This wizard requests and records no secret."
 pause "Record your separate storage arrangement privately."
@@ -239,15 +239,15 @@ stage "Review the exact capture"
 say "Review every selected account, schema, generation, revision, capture time and exact resource hashes."
 say "Approve this exact plan once through protected native confirmation after the protected recovery setup is accepted."
 say "Authoritative ledger inclusion is optional and initially unchecked. Review its exact bytes and source version. Provider passwords and external mail effects are excluded."
-pause "Record that real capture remains blocked."
+pause "Use only the approved frozen recovery phase for actual capture."
 stage "Verify outside this installation"
 say "Keep the durable encrypted bundle outside this Mac in a location you choose."
 say "Retain a usable copy while authenticating an isolated restoration with only its separate recovery key."
 say "Verify rules, decisions and histories exactly before replacing or losing any original state."
-say "This build supports synthetic selected absent-account restoration. Shared ledger restoration requires explicit approval of an absent or identical target. Current differing owner bytes reject. Real restoration remains denied."
+say "The selected restore engine supports absent-account restoration. Shared ledger restoration requires explicit approval of an absent or identical target. Current differing owner bytes reject. Production HTTP restoration remains denied. Only the separately approved frozen owner recovery phase can restore local data."
 pause "Record the unperformed real restoration checks."
 stage "Reconcile before resuming"
-say "Reconnect only through the future protected private credential flow. Provider passwords were not captured."
+say "Re-enter excluded provider passwords only through the approved frozen credential flow. Provider passwords were not captured."
 say "Acquire fresh mailbox and transport evidence. Preserve uncertainty when acceptance cannot be established."
 say "Never replay a send or unsubscribe because the local snapshot predates it. Undo requires current evidence and separate approval."
 warn "Acceptance remains incomplete. No backup, restoration, secret entry or provider action was performed."

@@ -63,10 +63,17 @@ impl InstalledLedger {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .ok_or(ERROR)?;
-            Self::install_in(parent, parent_fd, name)
+            Self::install_in(parent, parent_fd, name, true)
         }
     }
     pub(crate) fn install_under(account_data: &Path) -> Result<Self, String> {
+        Self::under(account_data, true)
+    }
+    /// Pins the restore target without creating an owner ledger to be overwritten.
+    pub(crate) fn recovery_under(account_data: &Path) -> Result<Self, String> {
+        Self::under(account_data, false)
+    }
+    fn under(account_data: &Path, initialize: bool) -> Result<Self, String> {
         #[cfg(not(unix))]
         {
             let _ = account_data;
@@ -84,11 +91,16 @@ impl InstalledLedger {
             let parent = account_data.canonicalize().map_err(|_| ERROR)?;
             let directory = open_directory_path(&parent)?;
             private_directory(&directory)?;
-            Self::install_in(parent, directory, "ledger")
+            Self::install_in(parent, directory, "ledger", initialize)
         }
     }
     #[cfg(unix)]
-    fn install_in(parent: PathBuf, parent_fd: File, name: &str) -> Result<Self, String> {
+    fn install_in(
+        parent: PathBuf,
+        parent_fd: File,
+        name: &str,
+        initialize: bool,
+    ) -> Result<Self, String> {
         let text = std::ffi::CString::new(name).map_err(|_| ERROR)?;
         if unsafe { libc::mkdirat(parent_fd.as_raw_fd(), text.as_ptr(), 0o700) } != 0
             && std::io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST)
@@ -118,7 +130,7 @@ impl InstalledLedger {
             directory: dir,
             lock,
         };
-        if !existed {
+        if !existed && initialize {
             let bytes = encode(&Document::default())?;
             match open_at(
                 &guard.directory,

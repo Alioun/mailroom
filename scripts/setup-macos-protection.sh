@@ -303,6 +303,9 @@ allowed() {
     forget) echo "status=forgotten:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=cancelled:1 status=denied:1 status=invalid_input:1 status=recovery_required:1 status=rollback_copies_full:1 status=core_dumps_enabled:1" ;;
     rotate-key) echo "status=rotated:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=cancelled:1 status=denied:1 status=invalid_input:1 status=recovery_required:1 status=rollback_copies_full:1 status=core_dumps_enabled:1" ;;
     recover-local) echo "status=recovered:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=cancelled:1 status=denied:1 status=invalid_input:1 status=recovery_required:1 status=rollback_copies_full:1 status=core_dumps_enabled:1" ;;
+    recovery-prepare) echo "status=recovery_prepared:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=core_dumps_enabled:1" ;;
+    recovery-capture|recovery-capture-with-ledger) echo "status=captured:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=no_tty:1 status=invalid_input:1 status=mismatch:1 status=cancelled:1 status=denied:1 status=recovery_required:1 status=authentication_failed:1 status=core_dumps_enabled:1" ;;
+    recovery-restore|recovery-restore-with-ledger|recovery-resume) echo "status=restored_read_only:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=no_tty:1 status=invalid_input:1 status=cancelled:1 status=denied:1 status=recovery_required:1 status=authentication_failed:1 status=core_dumps_enabled:1" ;;
     native-check) echo "outcome=approved:0 outcome=cancelled:0 outcome=denied:1 outcome=unavailable:1" ;;
     status) echo "status=ok:0 status=missing:1 status=other_binary:1 status=changed:1 status=denied:1 status=failed:1 $opened" ;;
     probe) echo "status=ok:0 status=denied:1 status=missing:1 status=changed:1 status=other_binary:1 status=failed:1 $opened" ;;
@@ -509,11 +512,12 @@ case "${1:-}" in
     printf '%s\n' \
       'Build phase (owner): 1. check the frozen copy; 2. build and sign with the installed toolchains, then print the identities.' \
       "Install phase (root): 1. check the frozen copy; 2. copy the signed outputs into a fresh root-owned $LIBEXEC after checking the typed identities." \
-      "Owner phase: 1. check the frozen copy and installation; 2. approve then cancel an invented action; 3. optionally create one local account with hidden entry and exact native consent; 4. move each account's keys from an earlier build; 5. migrate and verify legacy passwords; 6. enter missing passwords; 7. optionally replace a saved password with exact native consent; 8. check the prompt at every password read. Optional maintenance phase: check the frozen installation, then review local recovery, key rotation or local forgetting."
+      "Owner phase: 1. check the frozen copy and installation; 2. approve then cancel an invented action; 3. optionally create one local account with hidden entry and exact native consent; 4. move each account's keys from an earlier build; 5. migrate and verify legacy passwords; 6. enter missing passwords; 7. optionally replace a saved password with exact native consent; 8. check the prompt at every password read. Optional maintenance phase: check the frozen installation, then review local recovery, key rotation or local forgetting. Optional recovery phase: select accounts and ledger policy, enter the separately held key privately, then confirm capture, absent-account restoration or interrupted local restoration."
     return 0 ;;
   --digest) tree_digest "$frozen"; return 0 ;;
   build) phase=build; shift ;;
   maintenance) phase=maintenance; shift ;;
+  recovery) phase=recovery; shift ;;
   install) phase=root; arguments=1; shift ;;
 esac
 if ! clean_environment; then
@@ -541,6 +545,9 @@ if [[ $phase == build ]]; then
 elif [[ $phase == maintenance ]]; then
   RECORDS="$CONFIG/native-maintenance-records"
   maintenance_phase "$frozen"
+elif [[ $phase == recovery ]]; then
+  RECORDS="$CONFIG/native-recovery-records"
+  recovery_phase "$frozen"
 else
   RECORDS="$CONFIG/native-setup-records"
   owner_phase "$frozen"
@@ -781,6 +788,86 @@ if [[ -n "$ACCOUNTS" ]] && confirm_no "Review native confirmation to forget one 
   select_saved_account || { expect account_selection saved unknown || stop_incomplete; return 1; }
   mailroom account forget "$SELECTED_ACCOUNT"
   expect local_forget status=forgotten "$RESULT" || { stop_incomplete; return 1; }
+fi
+finish
+}
+
+recovery_phase() {
+TOTAL_STAGES=5
+local frozen="$1" kind command expected id bundle chosen="" transfer="$CONFIG/recovery-transfer"
+local selected=()
+/bin/mkdir -p "$(/usr/bin/dirname "$RECORDS")" && : >"$RECORDS"
+banner "Mailroom encrypted recovery"
+stage "Check the frozen copy and installation"
+check_frozen "$frozen" || { stop_incomplete; return 1; }
+read_pins || { expect installation trusted untrusted || stop_incomplete; return 1; }
+say "Stop active account work first. This phase never connects to a provider or resumes a mail action."
+say "Use this exact version only after its secret-flow tests, review and owner approval."
+if ! confirm_no "Run one local recovery action now?"; then finish; return 0; fi
+mailroom account recovery-prepare
+expect recovery_directories status=recovery_prepared "$RESULT" || { stop_incomplete; return 1; }
+
+stage "Select the exact local action"
+ask kind "Choose capture, restore or resume" "capture"
+case "$kind" in
+  capture)
+    expected_references || { expect account_metadata readable unreadable || stop_incomplete; return 1; }
+    say "Saved account IDs:"
+    printf '%s' "$ACCOUNTS"
+    ask chosen "Enter one to eight saved account IDs, separated by spaces"
+    read -r -a selected <<<"$chosen"
+    (( ${#selected[@]} >= 1 && ${#selected[@]} <= 8 )) || { expect capture_selection valid invalid || stop_incomplete; return 1; }
+    chosen=" "
+    for id in "${selected[@]}"; do
+      [[ "$id" =~ ^[A-Za-z0-9-]{1,64}$ && $'\n'"$ACCOUNTS" == *$'\n'"$id"$'\n'* && "$chosen" != *" $id "* ]] || { expect capture_selection valid invalid || stop_incomplete; return 1; }
+      chosen+="$id "
+    done
+    command=recovery-capture
+    if confirm_no "Include the shared authoritative address ledger in this bundle?"; then command=recovery-capture-with-ledger; fi
+    expected=status=captured
+    ;;
+  restore)
+    say "In Finder, use Go > Go to Folder to open $transfer/incoming to select the incoming folder prepared by the installed binary."
+    say "Place the encrypted <bundle-id>.bundle file there. Keep owner-only mode 0600. The binary refuses links and unsafe files."
+    say "Only absent captured accounts can be restored. A different installed ledger is never replaced."
+    ask bundle "Enter the 64-character lowercase bundle ID, without .bundle"
+    [[ "$bundle" =~ ^[a-f0-9]{64}$ ]] || { expect bundle_selection valid invalid || stop_incomplete; return 1; }
+    command=recovery-restore
+    if confirm_no "Restore the bundled authoritative ledger into an absent or identical target?"; then command=recovery-restore-with-ledger; fi
+    selected=("$bundle")
+    expected=status=restored_read_only
+    ;;
+  resume)
+    say "Resume only the recorded interrupted local restoration. This never resumes a provider action."
+    command=recovery-resume
+    expected=status=restored_read_only
+    ;;
+  *) expect recovery_action known unknown || { stop_incomplete; return 1; } ;;
+esac
+
+stage "Keep the recovery key separately"
+say "Use the separately held random 256-bit key, encoded as 64 lowercase hex characters. A memorable password is not a recovery key."
+say "Generate and store a new capture key privately in the owner's secret manager. Keep it apart from the encrypted bundle."
+say "The wizard never receives or records the key. The installed binary reads it from the controlling terminal with echo disabled."
+if ! confirm_no "Is the separate recovery key available for this action?"; then INCOMPLETE+=("separate recovery key"); finish; return 1; fi
+
+stage "Confirm the exact local recovery action"
+say "Read the native dialog's accounts, captured versions, ledger action and exclusions. Cancellation leaves the restore intent unpublished."
+if [[ $kind == resume ]]; then
+  mailroom account "$command"
+else
+  mailroom account "$command" "${selected[@]}"
+fi
+expect recovery "$expected" "$RESULT" || { stop_incomplete; return 1; }
+
+stage "Check bundle custody and restored-account holds"
+if [[ $kind == capture ]]; then
+  say "In Finder, open $transfer/outgoing. Move the completed encrypted bundle outside this Mac using the owner's chosen storage."
+  say "Keep the recovery key separately. Preserve a usable bundle while testing restoration in an isolated protected installation."
+  if confirm_no "Has the encrypted bundle been stored separately from its key?"; then note_result bundle_custody owner_confirmed; else INCOMPLETE+=("off-Mac bundle custody"); fi
+else
+  say "Restored accounts remain read-only. Provider passwords and uncaptured changes are excluded."
+  say "Later external mail effects remain. Reconnection and authoritative reconciliation are still required before any provider operation resumes."
 fi
 finish
 }

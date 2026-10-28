@@ -42,11 +42,13 @@ fn repository_if(
 enum Entry {
     Credential(Command),
     Maintenance(super::maintenance::Command),
+    Recovery(super::recovery::Command),
 }
 pub(super) fn run(tail: &[&str]) -> u8 {
     let entry = parse(tail)
         .map(Entry::Credential)
-        .or_else(|| super::maintenance::parse(tail).map(Entry::Maintenance));
+        .or_else(|| super::maintenance::parse(tail).map(Entry::Maintenance))
+        .or_else(|| super::recovery::parse(tail).map(Entry::Recovery));
     let Some(entry) = entry else {
         return status("usage", false);
     };
@@ -67,6 +69,9 @@ pub(super) fn run(tail: &[&str]) -> u8 {
         Entry::Credential(command) => perform(&repository, command, &mut hidden, &mut boundary),
         Entry::Maintenance(command) => {
             super::maintenance::perform(&repository, command, &mut boundary)
+        }
+        Entry::Recovery(command) => {
+            super::recovery::perform(&repository, command, &mut hidden, &mut boundary)
         }
     };
     match result {

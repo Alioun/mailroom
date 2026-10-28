@@ -25,7 +25,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{BufReader, BufWriter, Read, Write},
+    io::{BufReader, BufWriter, Read, Seek, Write},
     path::Path,
 };
 use zeroize::Zeroizing;
@@ -237,8 +237,13 @@ pub(super) struct Reader {
 
 impl Reader {
     pub(super) fn is_stream(path: &Path) -> Result<bool, AcquisitionError> {
+        Self::is_stream_file(&fs::File::open(path).map_err(|_| AcquisitionError::Storage)?)
+    }
+
+    pub(super) fn is_stream_file(file: &fs::File) -> Result<bool, AcquisitionError> {
         let mut magic = vec![0; MAGIC.len()];
-        let mut file = fs::File::open(path).map_err(|_| AcquisitionError::Storage)?;
+        let mut file = file.try_clone().map_err(|_| AcquisitionError::Storage)?;
+        file.rewind().map_err(|_| AcquisitionError::Storage)?;
         match file.read_exact(&mut magic) {
             Ok(()) => Ok(magic == MAGIC),
             Err(_) => Ok(false),
@@ -250,12 +255,26 @@ impl Reader {
         secret: &SecretValue,
         max_len: u64,
     ) -> Result<(Self, T), AcquisitionError> {
-        let cipher = cipher(secret)?;
         let metadata = fs::symlink_metadata(path).map_err(|_| AcquisitionError::Storage)?;
         if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > max_len {
             return Err(AcquisitionError::InvalidInput);
         }
         let file = fs::File::open(path).map_err(|_| AcquisitionError::Storage)?;
+        Self::open_file(&file, secret, max_len)
+    }
+
+    pub(super) fn open_file<T: DeserializeOwned>(
+        file: &fs::File,
+        secret: &SecretValue,
+        max_len: u64,
+    ) -> Result<(Self, T), AcquisitionError> {
+        let cipher = cipher(secret)?;
+        let metadata = file.metadata().map_err(|_| AcquisitionError::Storage)?;
+        if !metadata.is_file() || metadata.len() > max_len {
+            return Err(AcquisitionError::InvalidInput);
+        }
+        let mut file = file.try_clone().map_err(|_| AcquisitionError::Storage)?;
+        file.rewind().map_err(|_| AcquisitionError::Storage)?;
         let mut reader = Self {
             input: Hashed {
                 inner: BufReader::with_capacity(CHUNK, file),

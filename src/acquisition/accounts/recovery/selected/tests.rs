@@ -199,7 +199,26 @@ fn selected_loss_restore_every_boundary_preserves_bytes_histories_and_authority(
                     .selected_resume(&SecretValue::new(vec![9; 32]), Some(&target))
                     .is_err()
             );
-            fresh.selected_resume(&secret(), Some(&target)).unwrap();
+            let before = serde_json::to_vec(&fresh.recovery_view().unwrap()).unwrap();
+            let mut confirmations = 0;
+            assert!(matches!(
+                fresh.selected_resume_reviewed(&secret(), Some(&target), |plan, reviewed| {
+                    confirmations += 1;
+                    assert_eq!(plan.actions.len(), 2);
+                    assert!(reviewed.manifest == manifest);
+                    assert!(fresh.lock_account(&ids[0]).is_err());
+                    Err(AcquisitionError::Cancelled)
+                }),
+                Err(AcquisitionError::Cancelled)
+            ));
+            assert_eq!(confirmations, 1);
+            assert!(serde_json::to_vec(&fresh.recovery_view().unwrap()).unwrap() == before);
+            fresh.selected_resume_reviewed(&secret(), Some(&target), |plan, _| {
+                confirmations += 1;
+                assert!(plan.actions.iter().all(|a| matches!(a, crate::confirmation::ExactAction::Recovery { operation, .. } if operation == "resume_selected_local_restore")));
+                Ok(())
+            }).unwrap();
+            assert_eq!(confirmations, 2);
         }
         for id in &ids[..2] {
             let before = repo.store(&repo.load(id).unwrap()).unwrap();

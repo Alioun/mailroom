@@ -10,6 +10,7 @@ use data_encoding::BASE64URL_NOPAD as B64;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
+    io::{Read, Seek},
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -208,6 +209,21 @@ pub(crate) fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("system clock")
         .as_secs()
+}
+fn open_bundle_file(path: &Path) -> Result<fs::File, AcquisitionError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    let file = options.open(path).map_err(|_| AcquisitionError::Storage)?;
+    let metadata = file.metadata().map_err(|_| AcquisitionError::Storage)?;
+    if !metadata.is_file() || metadata.len() > MAX_STREAM {
+        return Err(AcquisitionError::InvalidInput);
+    }
+    Ok(file)
 }
 fn encoded(value: &impl Serialize) -> Result<Zeroizing<Vec<u8>>, AcquisitionError> {
     serde_json::to_vec(value)
@@ -765,6 +781,9 @@ impl Accounts {
     }
     /// Copies `bundle` beside the restore marker, or checks an existing copy.
     fn stage_bundle(&self, bundle: &Path, id: &str) -> Result<(), AcquisitionError> {
+        self.stage_bundle_file(&open_bundle_file(bundle)?, id)
+    }
+    fn stage_bundle_file(&self, bundle: &fs::File, id: &str) -> Result<(), AcquisitionError> {
         let directory = self.paths.config.join("recovery");
         if let Ok(existing) = self.staged_bundle(id) {
             return if stream::file_digest(&existing)?.1 == id {
@@ -774,7 +793,7 @@ impl Accounts {
             };
         }
         private_directory(&directory)?;
-        let extension = if stream::Reader::is_stream(bundle)? {
+        let extension = if stream::Reader::is_stream_file(bundle)? {
             stream::EXTENSION
         } else {
             "jwe"
@@ -783,9 +802,16 @@ impl Accounts {
             .prefix(".recovery-stage-")
             .tempfile_in(&directory)
             .map_err(|_| AcquisitionError::Storage)?;
-        let mut source = fs::File::open(bundle).map_err(|_| AcquisitionError::Storage)?;
-        std::io::copy(&mut source, staged.as_file_mut())
-            .and_then(|_| staged.as_file().sync_all())
+        let mut source = bundle.try_clone().map_err(|_| AcquisitionError::Storage)?;
+        source.rewind().map_err(|_| AcquisitionError::Storage)?;
+        let bytes = std::io::copy(&mut source.take(MAX_STREAM + 1), staged.as_file_mut())
+            .map_err(|_| AcquisitionError::Storage)?;
+        if bytes > MAX_STREAM {
+            return Err(AcquisitionError::InvalidInput);
+        }
+        staged
+            .as_file()
+            .sync_all()
             .map_err(|_| AcquisitionError::Storage)?;
         if stream::file_digest(staged.path())?.1 != id {
             return Err(AcquisitionError::Storage);

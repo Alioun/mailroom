@@ -26,6 +26,16 @@ Forgetting derives its resource preview while the account lease and every depend
 
 Active account work keeps its account lease, so the separate owner command refuses competing work. It cannot cancel or join another process's worker. Stop active work first and reopen the app after maintenance. Production HTTP lifecycle stays closed. These controls require exact approval and installed owner-run verification before real use.
 
+## Owner-held encrypted recovery
+
+The optional frozen `recovery` phase prepares private transfer directories, selects up to eight accounts, and offers capture, absent-account restoration or interrupted local restoration. Ledger inclusion and restoration each start disabled. The script receives account IDs, a bundle ID and fixed result codes. The installed binary reads the separate random 256-bit recovery key from the controlling terminal with echo disabled. Capture requires the same key twice. Encoded and decoded key buffers have erasing owners. The key never travels through argv, a browser request or result output.
+
+Native consent names each account, capture time, schema, generation, revision and resource count. Shared exclusions appear once. Restore and resume explicitly say whether the installed ledger is preserved or the bundled ledger is restored. The immutable receipt binds the complete source plan and entered key using a fresh private HMAC key. Capture and restoration recompute under their transaction leases. Resume obtains new consent under installation and account leases before continuing recorded local effects.
+
+Completed captures appear at `~/.config/mailroom/recovery-transfer/outgoing/<bundle-id>.bundle`. The owner keeps the encrypted bundle outside this Mac and its key separately. Imports use the fixed `incoming` sibling directory. The binary rejects symlinks, nonregular files, extra hard links, other owners, granting ACLs and permissions other than 0600. It retains the checked descriptor through preview, restore and durable staging. Renaming or replacing the import pathname does not select a different input. Authentication and exact bundle identity remain required. The restore target may be absent or identical, and differing owner ledger bytes reject.
+
+Provider passwords and uncaptured changes remain excluded. Restoration keeps accounts read-only and cannot resume sends, filing, unsubscribe or other provider actions. Production HTTP recovery stays denied. These additions require passing dummy checks, a separate secret-flow review, exact owner approval and installed owner-run acceptance before real use. No current execution approval is implied by this reference.
+
 ## Helper launch
 
 macOS refuses to execute an already-open descriptor (`/dev/fd/N` returns EACCES), so mailroom checks the started process instead. It rejects symlinks, non-regular files, and files or parent directories that other users can write. It starts the helper suspended with a fixed argv, an empty environment, stdin and stdout pipes, `/dev/null` as stderr and every other descriptor closed. It reads the kernel's cdhash and code-signing flags for that process and resumes it only when the cdhash matches the pin and the hardened runtime, kill and hard flags are set. The answer must carry an HMAC under a challenge sent only on the helper's stdin. Any process may start the helper and see a dialog, but no answer it obtains is accepted by mailroom. The Developer ID requirement is a typed slot (`Pin::DeveloperIdRequirement`) that this build refuses.
@@ -144,6 +154,12 @@ For approved local maintenance, run the same frozen wizard as the owner with the
 
 ```sh
 /usr/bin/env -i HOME="$HOME" TERM="$TERM" PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p "$F" maintenance
+```
+
+For approved encrypted recovery, use the same frozen wizard's optional phase:
+
+```sh
+/usr/bin/env -i HOME="$HOME" TERM="$TERM" PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p "$F" recovery
 ```
 
 Daily use runs `/usr/local/libexec/mailroom/mailroom`, which serves the root-owned UI copy installed beside it. Each phase stops with "Setup incomplete" on any unexpected result and keeps fixed records.

@@ -1296,4 +1296,8 @@ pub(crate) fn boundary(name: &str) -> Result<(), AcquisitionError> {
 #[cfg(test)]
 thread_local! { pub(super) static FAIL: std::cell::RefCell<(Option<String>, usize)> = const { std::cell::RefCell::new((None,0)) }; }
 #[cfg(test)]
+pub(crate) fn inject_failure(name: Option<&str>) {
+    FAIL.with(|f| *f.borrow_mut() = (name.map(str::to_owned), 0));
+}
+#[cfg(test)]
 mod tests;

@@ -146,8 +146,14 @@ fn selected_open(
     bundle: &Path,
     secret: &SecretValue,
 ) -> Result<(SelectedCaptured, String), AcquisitionError> {
-    let (captured, id) = if stream::Reader::is_stream(bundle)? {
-        let (mut reader, body) = stream::Reader::open::<Body>(bundle, secret, MAX_STREAM)?;
+    selected_open_file(&open_bundle_file(bundle)?, secret)
+}
+fn selected_open_file(
+    bundle: &fs::File,
+    secret: &SecretValue,
+) -> Result<(SelectedCaptured, String), AcquisitionError> {
+    let (captured, id) = if stream::Reader::is_stream_file(bundle)? {
+        let (mut reader, body) = stream::Reader::open_file::<Body>(bundle, secret, MAX_STREAM)?;
         let captured = match body {
             Body::Single { captured } => {
                 let captured = stage_streamed(captured, &mut reader)?;
@@ -174,7 +180,23 @@ fn selected_open(
         };
         (captured, reader.finish()?)
     } else {
-        let bytes = read_bounded(bundle, MAX_BUNDLE)?;
+        if !bundle
+            .metadata()
+            .map_err(|_| AcquisitionError::Storage)?
+            .is_file()
+        {
+            return Err(AcquisitionError::InvalidInput);
+        }
+        let mut source = bundle.try_clone().map_err(|_| AcquisitionError::Storage)?;
+        source.rewind().map_err(|_| AcquisitionError::Storage)?;
+        let mut bytes = vec![];
+        source
+            .take(MAX_BUNDLE + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| AcquisitionError::Storage)?;
+        if bytes.len() as u64 > MAX_BUNDLE {
+            return Err(AcquisitionError::InvalidInput);
+        }
         let plain = open_plain(&bytes, secret)?;
         let captured = match serde_json::from_slice::<LegacySelected>(&plain) {
             Ok(c) => SelectedCaptured {
@@ -515,7 +537,21 @@ impl Accounts {
         restore_ledger: bool,
         ledger: Option<&InstalledLedger>,
     ) -> Result<SelectedRestorePreview, AcquisitionError> {
-        let (captured, id) = selected_open(bundle, secret)?;
+        self.selected_restore_preview_file(
+            &open_bundle_file(bundle)?,
+            secret,
+            restore_ledger,
+            ledger,
+        )
+    }
+    pub(crate) fn selected_restore_preview_file(
+        &self,
+        bundle: &fs::File,
+        secret: &SecretValue,
+        restore_ledger: bool,
+        ledger: Option<&InstalledLedger>,
+    ) -> Result<SelectedRestorePreview, AcquisitionError> {
+        let (captured, id) = selected_open_file(bundle, secret)?;
         self.selected_validate_accounts(&captured)?;
         let _installation = self.lock_installation()?;
         let _leases = self.selected_locks(&ids(&captured.manifest))?;
@@ -534,7 +570,23 @@ impl Accounts {
         ledger: Option<&InstalledLedger>,
         authorize: impl FnOnce(crate::confirmation::Plan) -> Result<(), AcquisitionError>,
     ) -> Result<Vec<Restored>, AcquisitionError> {
-        let (captured, id) = selected_open(bundle, secret)?;
+        self.selected_restore_file(
+            &open_bundle_file(bundle)?,
+            secret,
+            preview,
+            ledger,
+            authorize,
+        )
+    }
+    pub(crate) fn selected_restore_file(
+        &self,
+        bundle: &fs::File,
+        secret: &SecretValue,
+        preview: &SelectedRestorePreview,
+        ledger: Option<&InstalledLedger>,
+        authorize: impl FnOnce(crate::confirmation::Plan) -> Result<(), AcquisitionError>,
+    ) -> Result<Vec<Restored>, AcquisitionError> {
+        let (captured, id) = selected_open_file(bundle, secret)?;
         self.selected_validate_accounts(&captured)?;
         let _installation = self.lock_installation()?;
         let _leases = self.selected_locks(&ids(&captured.manifest))?;
@@ -556,15 +608,27 @@ impl Accounts {
             authority: nonce(),
             preview: preview.clone(),
         };
-        self.stage_bundle(bundle, &preview.bundle)?;
+        self.stage_bundle_file(bundle, &preview.bundle)?;
         write_json(&self.selected_marker(), &tx)?;
         boundary("selected_restore_intent")?;
         self.finish_selected(captured, &tx, guard.as_ref())
     }
+    #[cfg(test)]
     pub(crate) fn selected_resume(
         &self,
         secret: &SecretValue,
         ledger: Option<&InstalledLedger>,
+    ) -> Result<Vec<Restored>, AcquisitionError> {
+        self.selected_resume_reviewed(secret, ledger, |_, _| Ok(()))
+    }
+    pub(crate) fn selected_resume_reviewed(
+        &self,
+        secret: &SecretValue,
+        ledger: Option<&InstalledLedger>,
+        authorize: impl FnOnce(
+            crate::confirmation::Plan,
+            &SelectedRestorePreview,
+        ) -> Result<(), AcquisitionError>,
     ) -> Result<Vec<Restored>, AcquisitionError> {
         let _installation = self.lock_installation()?;
         let tx: SelectedTransaction =
@@ -591,6 +655,15 @@ impl Accounts {
         self.selected_validate_accounts(&captured)?;
         let _leases = self.selected_locks(&ids(&captured.manifest))?;
         let guard = ledger_lock(ledger)?;
+        authorize(
+            selected_plan(
+                "resume_selected_local_restore",
+                &tx,
+                &ids(&captured.manifest),
+                digest(&encoded(&tx)?),
+            )?,
+            &tx.preview,
+        )?;
         self.finish_selected(captured, &tx, guard.as_ref())
     }
     fn selected_restored(c: &Captured, tx: &SelectedTransaction) -> Restored {

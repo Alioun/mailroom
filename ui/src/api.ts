@@ -196,10 +196,10 @@ const invoicePreview = z.object({ plan: invoicePlan, receipt: z.string().length(
 export type InvoiceView = z.infer<typeof invoiceView>
 export type InvoicePreview = z.infer<typeof invoicePreview>
 export async function openInvoices(account: string): Promise<InvoiceView> { return invoiceView.parse(await accountPost('invoices', { account, command: { action: 'open' } })) }
-/** The wired real adapters; without one the synthetic fixture transport sends. */
-export type InvoiceRoute = 'smtp' | 'mail_app'
+/** The wired real adapter; without one the synthetic fixture transport sends. */
+export type InvoiceRoute = 'smtp'
 export type Resolution = z.infer<typeof resolution>
-const route = (mode: string): InvoiceRoute | undefined => mode === 'smtp' ? 'smtp' : mode === 'mail_app_handoff' ? 'mail_app' : undefined
+const route = (mode: string): InvoiceRoute | undefined => mode === 'smtp' ? 'smtp' : undefined
 export async function acquireInvoice(account: string, selection: string): Promise<InvoiceView> { return invoiceView.parse(await accountPost('invoices', { account, command: { action: 'acquire', selection } })) }
 export async function previewInvoice(account: string, selection: string, target: string, mode?: InvoiceRoute): Promise<InvoicePreview> { return invoicePreview.parse(await accountPost('invoices', { account, command: { action: 'preview', selection, target, ...(mode ? { mode } : {}) } })) }
 export async function sendInvoice(account: string, preview: InvoicePreview): Promise<InvoiceView> { const mode = route(preview.plan.mode); return invoiceView.parse(await accountPost('invoices', { account, command: { action: 'send', selection: preview.plan.selection, target: preview.plan.target_name, receipt: preview.receipt, confirmation_action: preview.plan.confirmation_action, ...(mode ? { mode } : {}) } })) }

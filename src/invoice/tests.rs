@@ -362,12 +362,9 @@ fn keyword_forwards_follow_acquired_pdf_xml_evidence_and_stay_omitted_without_mi
 
 mod adapters {
     use super::*;
-    use crate::send::{
-        handoff::{Launcher, Recorder, Request},
-        smtp::{
-            Login, Outcome, Stage, Timeouts,
-            tests::{DUMMY, Dummy, Fake, Mode},
-        },
+    use crate::send::smtp::{
+        Login, Outcome, Stage, Timeouts,
+        tests::{DUMMY, Dummy, Fake, Mode},
     };
     use std::{sync::atomic::AtomicUsize, time::Duration};
 
@@ -568,18 +565,11 @@ mod adapters {
         assert_eq!(fake.finish().message.iter().count(), 1);
     }
 
-    struct Refusing;
-    impl Launcher for Refusing {
-        fn launch(&self, _: &Request) -> Result<(), String> {
-            Err("Mail app did not open the message".into())
-        }
-    }
-
     #[test]
-    fn mail_app_handoff_opens_the_original_for_forwarding_and_is_never_called_sent() {
+    fn a_mail_handoff_is_refused_because_mail_cannot_bind_the_original_and_sender() {
         let (_dir, store, mut state) = fixture();
         acquire(&mut state, &store);
-        let p = preview(
+        let refused = preview(
             &state,
             Provider::MailboxOrg,
             store.keys(),
@@ -588,53 +578,11 @@ mod adapters {
             true,
             SendMode::MailAppHandoff,
             SENDER,
-        )
-        .unwrap();
-        let id = consent(&mut state, p);
-        store.save_state(&mut state).unwrap();
-        let recorder = Recorder::default();
-        hand_off(&mut state, &id, &recorder).unwrap();
-        store.save_state(&mut state).unwrap();
-        assert_eq!(status(&store, &id).0, Status::HandedOff);
-        assert_eq!(
-            *recorder.0.lock().unwrap(),
-            vec![Request::ForwardOriginal {
-                message_id: "acquired-1@shop.example.org".into(),
-                target: "archive@example.net".into()
-            }]
-        );
-        let report = report(&state, Provider::MailboxOrg, true, store.keys()).unwrap();
-        assert_eq!(
-            report
-                .rows
-                .iter()
-                .find(|r| r.id == "INBOX/1/1")
-                .unwrap()
-                .handoff,
-            "mail_app_handoff"
         );
         assert!(
-            hand_off(&mut state, &id, &recorder).is_err(),
-            "one launch per handoff"
+            refused.is_err_and(|e| e.contains("cannot be bound")),
+            "no confirmation is offered for a handoff Mail would resolve by Message-ID alone"
         );
-
-        let (_dir, store, mut state) = fixture();
-        acquire(&mut state, &store);
-        let p = preview(
-            &state,
-            Provider::MailboxOrg,
-            store.keys(),
-            "INBOX/1/1",
-            "accounting",
-            true,
-            SendMode::MailAppHandoff,
-            SENDER,
-        )
-        .unwrap();
-        let id = consent(&mut state, p);
-        hand_off(&mut state, &id, &Refusing).unwrap();
-        store.save_state(&mut state).unwrap();
-        assert_eq!(status(&store, &id).0, Status::NotSent);
     }
 
     #[test]
@@ -745,7 +693,7 @@ mod adapters {
     #[test]
     fn wired_modes_name_the_exact_message_bytes_and_need_an_acquired_original() {
         let (_dir, store, mut state) = fixture();
-        for mode in [SendMode::Smtp, SendMode::MailAppHandoff] {
+        for mode in [SendMode::Smtp] {
             assert!(
                 preview(
                     &state,
@@ -763,10 +711,7 @@ mod adapters {
         }
         acquire(&mut state, &store);
         let original = state.invoices.sources["INBOX/1/1"].original.clone();
-        for (mode, purpose) in [
-            (SendMode::Smtp, "smtp_send"),
-            (SendMode::MailAppHandoff, "mail_app_handoff"),
-        ] {
+        for (mode, purpose) in [(SendMode::Smtp, "smtp_send")] {
             let p = preview(
                 &state,
                 Provider::MailboxOrg,

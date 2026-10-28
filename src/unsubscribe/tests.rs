@@ -874,14 +874,29 @@ mod adapters {
         installed: &InstalledSynthetic,
         method: Method,
     ) -> (String, String) {
-        let input = review(state, store.keys(), installed, method);
-        let p = preview(
-            state,
-            Provider::MailboxOrg,
-            store.keys(),
-            &input,
-            Some(installed),
-        )
+        let input = review(state, store.keys(), installed, method.clone());
+        // Real mail adapters bind what they hand over; one-click keeps the fixture's authority.
+        let wired = Wired {
+            trusted_recipients: true,
+            authserv: None,
+        };
+        let p = if method == Method::OneClick {
+            preview(
+                state,
+                Provider::MailboxOrg,
+                store.keys(),
+                &input,
+                Some(installed),
+            )
+        } else {
+            preview(
+                state,
+                Provider::MailboxOrg,
+                store.keys(),
+                &input,
+                Some(&wired),
+            )
+        }
         .unwrap();
         let recipient = p.actions[0].recipient.clone();
         let ids = confirm(
@@ -1028,6 +1043,7 @@ mod adapters {
                 &id,
                 MAILTO,
                 &recipient,
+                1792886400,
                 &fake.server(true),
                 &login,
                 timeouts,
@@ -1040,6 +1056,7 @@ mod adapters {
                     &id,
                     MAILTO,
                     &recipient,
+                    1792886400,
                     &fake.server(true),
                     &login,
                     timeouts
@@ -1057,7 +1074,13 @@ mod adapters {
                         enhanced: Some("2.0.0".into())
                     })
                 );
-                let message = String::from_utf8(seen.message.unwrap()).unwrap();
+                let bytes = seen.message.unwrap();
+                assert_eq!(
+                    crate::unsubscribe::digest(&bytes),
+                    entry.payload_digest,
+                    "the confirmed digest is the SHA-256 of exactly the submitted bytes"
+                );
+                let message = String::from_utf8(bytes).unwrap();
                 assert!(message.starts_with(&format!(
                     "From: <{recipient}>\r\nTo: <leave@shop.example>\r\nSubject: unsubscribe\r\n"
                 )));
@@ -1073,7 +1096,92 @@ mod adapters {
     }
 
     #[test]
-    fn mailto_handoff_launches_the_exact_link_and_records_handed_off() {
+    fn a_changed_review_time_changes_the_bytes_and_is_refused_before_sending() {
+        let (_dir, store, mut state, installed) = fixture();
+        let (id, recipient) = confirmed(&mut state, &store, &installed, Method::LocalMail);
+        let backend = Dummy(AtomicUsize::new(0));
+        let login = Login {
+            user: "books@work.example.test",
+            backend: &backend,
+            reference: "account-password-ref",
+        };
+        let fake = Fake::start(Mode::Accept, true);
+        let outcome = submit_local_mail(
+            &mut state,
+            &id,
+            MAILTO,
+            &recipient,
+            1792886401,
+            &fake.server(true),
+            &login,
+            Timeouts::default(),
+        );
+        assert!(outcome.is_err());
+        assert_eq!(backend.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        drop(fake);
+    }
+
+    #[test]
+    fn mailto_decoding_preserves_unicode_fields_and_stable_framing() {
+        let mail = safety::Mail::parse(
+            "mailto:leave@shop.example?subject=Gr%C3%BC%C3%9Fe&body=token%3Ddummy%26x%0D%0Asecond%0Athird",
+            "alias@home.example.test",
+        )
+        .unwrap();
+        let _: &zeroize::Zeroizing<String> = &mail.subject;
+        let _: &zeroize::Zeroizing<String> = &mail.body;
+        assert_eq!(mail.subject.as_str(), "Grüße");
+        assert_eq!(mail.body.as_str(), "token=dummy&x\r\nsecond\nthird");
+        assert_eq!(
+            mail.digest(),
+            digest("[\"leave@shop.example\",\"alias@home.example.test\",\"Grüße\",\"token=dummy&x\\r\\nsecond\\nthird\"]".as_bytes())
+        );
+        let message = mail.message(1792886400).unwrap();
+        let text = std::str::from_utf8(&message).unwrap();
+        assert!(text.contains("\r\nSubject: =?UTF-8?B?R3LDvMOfZQ==?=\r\n"));
+        assert!(text.ends_with("\r\n\r\ntoken=dummy&x\r\nsecond\r\nthird\r\n"));
+    }
+
+    #[test]
+    fn malformed_mailto_text_is_refused_after_valid_token_bytes() {
+        for query in [
+            "subject=dummy%FF",
+            "body=dummy%FF",
+            "body=dummy%0",
+            "body=dummy%GG",
+            "subject=dummy&body=dummy%FF",
+            "subject=dummy&subject=other",
+        ] {
+            assert!(
+                safety::Mail::parse(
+                    &format!("mailto:leave@shop.example?{query}"),
+                    "alias@home.example.test",
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn a_fragment_in_a_mailto_link_is_refused() {
+        assert!(
+            safety::Mail::parse(
+                "mailto:leave@shop.example?subject=a#b",
+                "alias@home.example.test"
+            )
+            .is_err()
+        );
+        assert!(
+            safety::Mail::parse(
+                "mailto:leave@shop.example?subject=a%23b",
+                "alias@home.example.test"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn mailto_handoff_composes_in_mail_from_the_receiving_address() {
         let (_dir, store, mut state, installed) = fixture();
         let (id, recipient) = confirmed(&mut state, &store, &installed, Method::MailAppPreparation);
         assert_eq!(saved(&store, &id).status, Status::Prepared);
@@ -1093,8 +1201,21 @@ mod adapters {
         assert_eq!(saved(&store, &id).status, Status::HandedOff);
         let launched = recorder.0.lock().unwrap();
         assert_eq!(launched.len(), 1);
-        assert!(
-            matches!(&launched[0], crate::send::handoff::Request::OpenMailto { uri, host } if uri.as_str() == MAILTO && host == "shop.example")
+        let crate::send::handoff::Request::ComposeInMail {
+            to,
+            from,
+            subject,
+            body,
+        } = &launched[0];
+        assert_eq!(
+            (to.as_str(), from.as_str(), subject.as_str(), body.as_str()),
+            (
+                "leave@shop.example",
+                recipient.as_str(),
+                "unsubscribe",
+                "synthetic-mail-token"
+            ),
+            "Mail gets the confirmed fields from the confirmed sender, not the raw link"
         );
     }
 }

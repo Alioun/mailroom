@@ -48,12 +48,15 @@ pub(crate) fn post_one_click(
 }
 
 /// Submits a confirmed local unsubscribe message once from the receiving
-/// address, built from the exact previewed `mailto:` link.
+/// address: exactly the bytes the preview built from the `mailto:` link at the
+/// review time `as_of`, whose SHA-256 the confirmation named.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn submit_local_mail(
     state: &mut AccountState,
     id: &str,
     raw_mailto: &str,
     recipient: &str,
+    as_of: i64,
     server: &crate::send::smtp::Server,
     login: &crate::send::smtp::Login<'_>,
     timeouts: crate::send::smtp::Timeouts,
@@ -61,10 +64,10 @@ pub(crate) fn submit_local_mail(
     use crate::send::smtp::{Outcome, submit};
     let entry = intent(state, id, Method::LocalMail)?;
     let mail = Mail::parse(raw_mailto, recipient)?;
-    if mail.digest() != entry.payload_digest {
+    let message = mail.message(as_of).ok_or("Message framing")?;
+    if digest(&message) != entry.payload_digest {
         return Err("Exact payload changed".into());
     }
-    let message = mail.message(entry.time).ok_or("Message framing")?;
     let outcome = submit(server, login, &mail.from, &mail.to, &message, timeouts);
     entry.status = match outcome {
         Outcome::Accepted { .. } => Status::Submitted,
@@ -75,8 +78,9 @@ pub(crate) fn submit_local_mail(
     Ok(())
 }
 
-/// Opens a confirmed mail-app preparation's exact `mailto:` link in the mail app.
-/// The entry records the handoff only; whether the person sent it stays unknown.
+/// Opens a new message in Mail with the confirmed fields of the exact `mailto:`
+/// link, from the receiving address. The entry records the handoff only;
+/// whether the person sent it stays unknown.
 pub(crate) fn hand_off_mailto(
     state: &mut AccountState,
     id: &str,
@@ -97,9 +101,11 @@ pub(crate) fn hand_off_mailto(
     if mail.digest() != entry.payload_digest || host != entry.host {
         return Err("Exact payload changed".into());
     }
-    let request = crate::send::handoff::Request::OpenMailto {
-        uri: zeroize::Zeroizing::new(raw_mailto.into()),
-        host: host.unwrap_or_default(),
+    let request = crate::send::handoff::Request::ComposeInMail {
+        to: mail.to,
+        from: mail.from,
+        subject: mail.subject,
+        body: mail.body,
     };
     if launcher.launch(&request).is_ok() {
         entry.status = Status::HandedOff;

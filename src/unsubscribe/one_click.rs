@@ -96,20 +96,7 @@ fn send(
     let Ok(mut stream) = tls.connect(bound.host(), tcp) else {
         return not_sent(Stage::Tls);
     };
-    let target = bound.target();
-    let mut request = zeroize::Zeroizing::new(Vec::with_capacity(target.len() + 256));
-    request.extend_from_slice(b"POST ");
-    request.extend_from_slice(target.as_bytes());
-    request.extend_from_slice(b" HTTP/1.1\r\nHost: ");
-    request.extend_from_slice(bound.host().as_bytes());
-    request.extend_from_slice(
-        format!(
-            "\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nUser-Agent: Mailroom\r\n\r\n{BODY}",
-            bound.headers()[0].1,
-            BODY.len()
-        )
-        .as_bytes(),
-    );
+    let request = request(bound);
     if stream
         .write_all(&request)
         .and_then(|_| stream.flush())
@@ -132,6 +119,36 @@ fn send(
     }
 }
 
+/// The exact request bytes, in one zeroizing buffer sized up front, so the
+/// token-bearing target leaves no unwiped copy behind a reallocation.
+fn request(bound: &BoundPost) -> zeroize::Zeroizing<Vec<u8>> {
+    let target = bound.target();
+    let headers = format!(
+        "\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nUser-Agent: Mailroom\r\n\r\n{BODY}",
+        bound.headers()[0].1,
+        BODY.len()
+    );
+    let parts = [
+        "POST ".as_bytes(),
+        target.as_bytes(),
+        b" HTTP/1.1\r\nHost: ",
+        bound.host().as_bytes(),
+        headers.as_bytes(),
+    ];
+    let mut request =
+        zeroize::Zeroizing::new(Vec::with_capacity(parts.iter().map(|p| p.len()).sum()));
+    let allocated = request.capacity();
+    for part in parts {
+        request.extend_from_slice(part);
+    }
+    debug_assert_eq!(
+        request.capacity(),
+        allocated,
+        "the request never reallocates"
+    );
+    request
+}
+
 /// The address the bound destination was checked for. Tests dial a loopback
 /// stand-in for it; production dials the address itself.
 fn network_peer(dialed: SocketAddr, peer: SocketAddr) -> IpAddr {
@@ -143,8 +160,11 @@ fn network_peer(dialed: SocketAddr, peer: SocketAddr) -> IpAddr {
     peer.ip()
 }
 
+/// The status code of the first response line. A server may echo the request
+/// target there, so the line is wiped; it never exceeds the reader's limit, so it
+/// never reallocates.
 fn status(reader: &mut impl BufRead) -> Option<u16> {
-    let mut line = vec![];
+    let mut line = zeroize::Zeroizing::new(Vec::with_capacity(STATUS_LINE_LIMIT as usize));
     reader.read_until(b'\n', &mut line).ok()?;
     let line = std::str::from_utf8(&line).ok()?;
     let mut parts = line.split(' ');
@@ -250,6 +270,28 @@ pub(crate) mod tests {
         }
     }
     const URI: &str = "https://shop.example/remove?token=synthetic-private-token";
+
+    #[test]
+    fn the_request_buffer_never_grows_past_its_first_allocation() {
+        let label = "a".repeat(63);
+        let host = format!("{label}.{label}.{label}.{}.example", "b".repeat(53));
+        assert_eq!(host.len(), 253);
+        let bound = Endpoint::parse(&format!(
+            "https://{host}/remove?token=synthetic-private-token"
+        ))
+        .unwrap()
+        .bind(&[PUBLIC.parse().unwrap()])
+        .unwrap();
+        let request = request(&bound);
+        assert_eq!(
+            request.capacity(),
+            request.len(),
+            "sized exactly, so the token never sits in a freed smaller buffer"
+        );
+        assert!(
+            request.starts_with(b"POST /remove?token=synthetic-private-token HTTP/1.1\r\nHost: ")
+        );
+    }
 
     #[test]
     fn posts_exactly_the_one_click_form_and_records_status_and_host_only() {

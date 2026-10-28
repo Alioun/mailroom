@@ -92,12 +92,12 @@
    "action": {
     "purpose": "mail_app_handoff",
     "account": "invented-account",
-    "operation": "Forward this invoice in Mail",
-    "target": "target@example.test",
-    "sending_identity": "sender@example.test",
+    "operation": "Open the unsubscribe message for subscription sub-3",
+    "target": "leave@list.example.test",
+    "sending_identity": "alias@example.test",
     "content_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
    },
-   "display": "Forward this invoice in Mail for account invented-account. Open Mail with a message to target@example.test from sender@example.test. Exact content SHA-256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb. Nothing is sent unless you send it in Mail."
+   "display": "Open the unsubscribe message for subscription sub-3 for account invented-account. Open a new message in Mail to leave@list.example.test from alias@example.test with the confirmed subject and body. Fields SHA-256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb. Nothing is sent unless you send it in Mail."
   }
  ],
  "outcome": {

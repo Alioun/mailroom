@@ -1,5 +1,5 @@
 //! The real adapters' side of invoice send-on: acquired originals, SMTP
-//! submission and mail-app handoff. Routes reach the send adapters only with a
+//! submission. Routes reach the send adapters only with a
 //! `policy::WritePermit`, which `policy::authorize` still denies.
 use super::*;
 
@@ -97,21 +97,5 @@ pub(crate) fn submit_smtp(
         Outcome::Uncertain { .. } => Status::Uncertain,
     };
     send.smtp = Some(outcome);
-    Ok(())
-}
-
-/// Asks the mail app to open a recorded handoff. Never records the message as sent.
-pub(crate) fn hand_off(
-    state: &mut AccountState,
-    id: &str,
-    launcher: &dyn crate::send::handoff::Launcher,
-) -> Result<(), String> {
-    let send = intent(state, id, SendMode::MailAppHandoff)?;
-    let request = handoff_request(&send.plan).ok_or("Original has no Message-ID")?;
-    send.status = if launcher.launch(&request).is_ok() {
-        Status::HandedOff
-    } else {
-        Status::NotSent
-    };
     Ok(())
 }

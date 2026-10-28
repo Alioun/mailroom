@@ -8,7 +8,7 @@ use crate::{
     census::{AccountState, CensusKeys},
     rules,
 };
-pub(crate) use adapters::{hand_off, record_original, submit_smtp};
+pub(crate) use adapters::{record_original, submit_smtp};
 pub(crate) use report::report;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -89,7 +89,8 @@ pub enum SendMode {
     NativeForwardPreparationOnly,
     /// SMTP submission of the exact original through the account's server.
     Smtp,
-    /// The mail app opens the original for forwarding; the person sends it.
+    /// Kept so schema-22 records still load; no new send uses it, because Mail
+    /// cannot be bound to the confirmed original and sender.
     MailAppHandoff,
 }
 
@@ -172,25 +173,18 @@ pub(crate) fn confirmation_plan(preview: &Preview) -> crate::confirmation::Plan 
             sending_identity: p.sending_address.clone(),
             content_digest: message(),
         },
-        SendMode::MailAppHandoff => ExactAction::MailAppHandoff {
+        SendMode::SyntheticTransport
+        | SendMode::NativeForwardPreparationOnly
+        | SendMode::MailAppHandoff => ExactAction::InvoiceSend {
             account: p.account.clone(),
-            operation: format!("Forward invoice {} to {}", p.selection, p.target_name),
+            revision: p.state_revision,
+            report_version: p.report_version.clone(),
+            target_name: p.target_name.clone(),
             target: p.target.clone(),
             sending_identity: p.sending_address.clone(),
-            content_digest: message(),
+            source: p.selection.clone(),
+            content_digest: p.content_digest.clone(),
         },
-        SendMode::SyntheticTransport | SendMode::NativeForwardPreparationOnly => {
-            ExactAction::InvoiceSend {
-                account: p.account.clone(),
-                revision: p.state_revision,
-                report_version: p.report_version.clone(),
-                target_name: p.target_name.clone(),
-                target: p.target.clone(),
-                sending_identity: p.sending_address.clone(),
-                source: p.selection.clone(),
-                content_digest: p.content_digest.clone(),
-            }
-        }
     };
     crate::confirmation::Plan {
         exact_receipt: preview.receipt.clone(),
@@ -216,6 +210,11 @@ pub(crate) fn preview(
     );
     if fixture_mode && !synthetic {
         return Err("No original-message/native/SMTP adapter installed".into());
+    }
+    // Mail finds a message only by Message-ID across every account and picks the
+    // sender itself, so it cannot be bound to the confirmed bytes and identity.
+    if mode == SendMode::MailAppHandoff {
+        return Err("Mail cannot be bound to the confirmed original and sender. Send by SMTP or forward it yourself.".into());
     }
     if !rules::config::mailbox(sending_address) {
         return Err("Invalid sending address".into());
@@ -272,7 +271,6 @@ pub(crate) fn preview(
         semantics: SEMANTICS.into(),
         confirmation_action: match mode {
             SendMode::Smtp => "Send exactly this invoice to this target from this sending address",
-            SendMode::MailAppHandoff => "Open this invoice for forwarding to this target in Mail",
             _ => "Send exactly this invoice to this target from this sending address (synthetic only)",
         }
         .into(),
@@ -329,7 +327,7 @@ pub(crate) fn record_intent(
         let receipt = consent.receipt();
         if !matches!(
             preview.plan.mode,
-            SendMode::SyntheticTransport | SendMode::Smtp | SendMode::MailAppHandoff
+            SendMode::SyntheticTransport | SendMode::Smtp
         ) || action != preview.plan.confirmation_action
             || receipt.len() != 64
             || preview
@@ -363,7 +361,7 @@ pub(super) fn push_intent(state: &mut AccountState, preview: Preview) -> Result<
     Ok(id)
 }
 
-/// Records the owner's finding for an uncertain SMTP send or mail-app handoff.
+/// Records the owner's finding for an uncertain SMTP send.
 /// Nothing is sent again: a send recorded as not sent needs a fresh preview and
 /// confirmation, whose receipt differs because this state changed.
 pub(crate) fn resolve(
@@ -377,9 +375,7 @@ pub(crate) fn resolve(
         .iter_mut()
         .find(|s| s.id == id)
         .ok_or("Unknown invoice operation")?;
-    if send.status != Status::Uncertain
-        || !matches!(send.plan.mode, SendMode::Smtp | SendMode::MailAppHandoff)
-    {
+    if send.status != Status::Uncertain || send.plan.mode != SendMode::Smtp {
         return Err("Only an uncertain send can be resolved".into());
     }
     send.status = match resolution {
@@ -418,22 +414,6 @@ pub(crate) fn sent_evidence(state: &AccountState) -> BTreeMap<String, Vec<String
             (s.id.clone(), matches)
         })
         .collect()
-}
-
-/// What the mail app is asked to open for `plan`.
-pub(crate) fn handoff_request(plan: &Plan) -> Option<crate::send::handoff::Request> {
-    Some(crate::send::handoff::Request::ForwardOriginal {
-        message_id: message_id(&plan.source.original)?,
-        target: plan.target.clone(),
-    })
-}
-
-pub(super) fn message_id(original: &str) -> Option<String> {
-    use mailparse::MailHeaderMap;
-    let (headers, _) = mailparse::parse_headers(original.as_bytes()).ok()?;
-    let value = headers.get_first_value("Message-ID")?;
-    let id = value.trim().strip_prefix('<')?.strip_suffix('>')?;
-    (!id.is_empty() && !id.contains(['<', '>'])).then(|| id.to_owned())
 }
 
 pub(crate) fn observe(

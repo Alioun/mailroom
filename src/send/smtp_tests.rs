@@ -8,6 +8,7 @@ use std::{
     },
     thread,
 };
+use zeroize::Zeroizing;
 
 pub(crate) const DUMMY: &str = "dummy-SMTP-secret-7Qx";
 const MESSAGE: &[u8] = b"From: books@work.example.test\r\nTo: intake@accounting.example.net\r\nSubject: Fwd\r\n\r\n.leading dot line\r\nbody\r\n.\r\nend\r\n";
@@ -36,6 +37,12 @@ pub(crate) enum Mode {
     NoStartTls,
     InjectAfterStartTls,
     AuthFailEcho,
+    /// Echoes the credentials in a continuation line, then closes.
+    AuthEchoTruncated,
+    /// Echoes the credentials, then sends a line with another code.
+    AuthEchoMalformed,
+    /// Accepts TCP for implicit TLS and never answers the handshake.
+    StallTls,
     RcptReject,
 }
 
@@ -76,6 +83,10 @@ impl Fake {
             };
             tcp.set_nonblocking(false).unwrap();
             tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            if mode == Mode::StallTls {
+                thread::sleep(Duration::from_secs(4));
+                return;
+            }
             let mut plain: Option<BufReader<TcpStream>> = None;
             let mut tls = None;
             if implicit {
@@ -143,6 +154,13 @@ impl Fake {
                     drop(seen);
                     if mode == Mode::AuthFailEcho {
                         let echo = format!("535-5.7.8 bad {DUMMY}\r\n535 5.7.8 {encoded}\r\n");
+                        write!(echo.as_bytes());
+                    } else if mode == Mode::AuthEchoTruncated {
+                        let echo = format!("535-5.7.8 {encoded}\r\n535-5.7.8 {DUMMY}");
+                        write!(echo.as_bytes());
+                        return;
+                    } else if mode == Mode::AuthEchoMalformed {
+                        let echo = format!("535-5.7.8 {encoded}\r\n421 {DUMMY}\r\n");
                         write!(echo.as_bytes());
                     } else {
                         write!(b"235 2.7.0 ok\r\n");
@@ -247,6 +265,8 @@ fn scenarios() -> Vec<(String, Outcome, Seen, usize)> {
         (Mode::NoStartTls, false),
         (Mode::InjectAfterStartTls, false),
         (Mode::AuthFailEcho, true),
+        (Mode::AuthEchoTruncated, true),
+        (Mode::AuthEchoMalformed, false),
         (Mode::RcptReject, false),
     ] {
         let fake = Fake::start(mode, implicit);
@@ -351,6 +371,17 @@ fn submissions_record_exact_outcomes_and_never_retry() {
                     }
                 );
                 assert_eq!(reads, 0);
+            }
+            "AuthEchoTruncated/true" | "AuthEchoMalformed/false" => {
+                assert_eq!(
+                    outcome,
+                    Outcome::NotSent {
+                        stage: Stage::Auth,
+                        code: None
+                    },
+                    "{name}: an echoed, unfinished or inconsistent reply ends the session"
+                );
+                assert!(seen.commands.iter().all(|c| !c.starts_with("MAIL")));
             }
             "AuthFailEcho/true" => {
                 assert_eq!(
@@ -511,14 +542,111 @@ fn dummy_password_never_reaches_output_argv_or_errors() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("worker-complete"));
-    assert!(stdout.contains("AuthFailEcho"), "failure paths ran");
+    for name in ["AuthFailEcho", "AuthEchoTruncated", "AuthEchoMalformed"] {
+        assert!(stdout.contains(name), "failure path {name} ran");
+    }
+    // The raw password, the exact AUTH PLAIN encoding the fake echoes, and the
+    // password's own encoding at each of the three base64 alignments.
+    let auth = data_encoding::BASE64
+        .encode(&[b"\0books@work.example.test\0".as_slice(), DUMMY.as_bytes()].concat());
+    let mut needles = vec![DUMMY.to_owned(), auth];
+    for pad in 0..3 {
+        let encoded = data_encoding::BASE64.encode(&[&b"xx"[..pad], DUMMY.as_bytes()].concat());
+        needles.push(encoded[4.min(encoded.len())..20].to_owned());
+    }
     for stream in [&output.stdout, &output.stderr] {
         let text = String::from_utf8_lossy(stream);
-        assert!(!text.contains(DUMMY), "dummy password in child output");
-        let encoded = data_encoding::BASE64.encode(DUMMY.as_bytes());
-        assert!(
-            !text.contains(&encoded[..16]),
-            "encoded dummy password in child output"
-        );
+        for needle in &needles {
+            assert!(
+                !text.contains(needle.as_str()),
+                "dummy password form in child output"
+            );
+        }
     }
+}
+
+#[test]
+fn a_stalled_implicit_tls_handshake_ends_at_the_command_deadline() {
+    let fake = Fake::start(Mode::StallTls, true);
+    let backend = Dummy(AtomicUsize::new(0));
+    let timeouts = Timeouts {
+        command: Duration::from_millis(300),
+        final_reply: Duration::from_millis(300),
+    };
+    let started = std::time::Instant::now();
+    let outcome = submit_to(&fake, true, &backend, timeouts);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the handshake waited {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        outcome,
+        Outcome::NotSent {
+            stage: Stage::Tls,
+            code: None
+        }
+    );
+    assert_eq!(backend.0.load(Ordering::SeqCst), 0, "no password was read");
+    drop(fake);
+}
+
+/// A reply's lines own erasing storage, so dropping a reply, or any error inside
+/// `Session::reply`, wipes every echoed line.
+#[test]
+fn reply_lines_wipe_themselves() {
+    fn erasing(_: &[Zeroizing<String>]) {}
+    let reply = Reply {
+        code: 535,
+        lines: vec![Zeroizing::new(DUMMY.to_owned())],
+    };
+    erasing(&reply.lines);
+}
+
+#[test]
+fn invalid_utf8_reply_text_preserves_lossy_decoding_without_growing() {
+    let samples = [
+        Vec::new(),
+        DUMMY.as_bytes().to_vec(),
+        [b"\xff".as_slice(), DUMMY.as_bytes(), b"\xfe"].concat(),
+        vec![0xff; LINE_LIMIT],
+        "Grüße 📨".as_bytes().to_vec(),
+        vec![0xe2, 0x82],
+        vec![0xf0, 0x90, 0x80, 0x41, 0xff],
+    ];
+    for bytes in samples {
+        let text = reply_text(&bytes);
+        assert_eq!(text.as_str(), String::from_utf8_lossy(&bytes).as_ref());
+    }
+}
+
+#[test]
+fn reply_parser_handles_echoes_and_refuses_malformed_or_truncated_responses() {
+    use std::io::Cursor;
+    let encoded = data_encoding::BASE64.encode(format!("\0owner@example.test\0{DUMMY}").as_bytes());
+    let accepted = format!("535-{DUMMY}\r\n535 {encoded}\r\n");
+    let reply = read_reply(&mut Cursor::new(accepted.as_bytes())).unwrap();
+    assert_eq!(reply.code, 535);
+    assert_eq!(reply.lines.len(), 2);
+    assert_eq!(reply.lines[0].as_str(), DUMMY);
+    assert_eq!(reply.lines[1].as_str(), encoded);
+    for input in [
+        format!("535-{DUMMY}\r\n"),
+        format!("535-{encoded}\r\n535 {DUMMY}"),
+        format!("535-{encoded}\r\n235 {DUMMY}\r\n"),
+        format!("535?{DUMMY}\r\n"),
+        format!("535 {}{DUMMY}\r\n", "x".repeat(LINE_LIMIT)),
+        format!(
+            "{}535 {DUMMY}\r\n",
+            format!("535-{encoded}\r\n").repeat(REPLY_LINES)
+        ),
+    ] {
+        let error = read_reply(&mut Cursor::new(input.as_bytes()))
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "Malformed SMTP reply");
+    }
+    let invalid_utf8 = [b"535 ".as_slice(), DUMMY.as_bytes(), b"\xff\r\n"].concat();
+    let reply = read_reply(&mut Cursor::new(invalid_utf8)).unwrap();
+    assert_eq!(reply.lines[0].as_str(), format!("{DUMMY}\u{fffd}"));
 }

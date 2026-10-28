@@ -327,12 +327,17 @@ pub(crate) fn preview<A: Adapters + ?Sized>(
             Method::LocalMail | Method::MailAppPreparation => {
                 let mail =
                     safety::Mail::parse(mailto.ok_or("Mailto unavailable")?, &row.recipient)?;
-                plan.payload_digest = mail.digest();
+                // The wired SMTP send names the exact bytes it submits; the others the fields.
+                plan.payload_digest = if wired && selection.method == Method::LocalMail {
+                    digest(&mail.message(input.as_of).ok_or("Message framing")?)
+                } else {
+                    mail.digest()
+                };
                 plan.host = mail.to.split_once('@').map(|(_, h)| h.into());
                 plan.effect = match (selection.method == Method::LocalMail, wired) {
                     (true, true) => "One SMTP submission from the receiving address after additional action-naming confirmation. Unsubscribe success unknown. No Undo.",
                     (true, false) => "One synthetic mail handoff after additional action-naming confirmation. Unsubscribe success unknown. No Undo.",
-                    (false, true) => "Opens this message in Mail after confirmation. Nothing is sent unless the person sends it.",
+                    (false, true) => "Opens a new message with these fields in Mail, from the receiving address, after confirmation. Mail refuses another sender. Nothing is sent unless the person sends it.",
                     (false, false) => "Preparation only. Nothing opens or sends.",
                 }
                 .into();
@@ -340,7 +345,7 @@ pub(crate) fn preview<A: Adapters + ?Sized>(
                     uri: None,
                     to: Some(mail.to),
                     from: Some(mail.from),
-                    subject: Some(mail.subject),
+                    subject: Some(mail.subject.to_string()),
                     body: Some(mail.body.to_string()),
                 });
             }

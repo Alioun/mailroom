@@ -12,6 +12,7 @@ use std::{
     net::{SocketAddr, TcpStream},
     time::Duration,
 };
+use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -120,9 +121,11 @@ impl Stream {
     }
 }
 
+/// A server reply. A server may echo what it received, AUTH credentials
+/// included, so every line is wiped when the reply drops.
 pub(super) struct Reply {
     pub code: u16,
-    pub lines: Vec<String>,
+    pub lines: Vec<Zeroizing<String>>,
 }
 impl Reply {
     fn enhanced(&self) -> Option<String> {
@@ -141,41 +144,65 @@ impl Reply {
 const LINE_LIMIT: usize = 1024;
 const REPLY_LINES: usize = 64;
 
+// An echoed credential can sit beside invalid UTF-8. Replacement characters
+// need up to three bytes per input byte, so reserve before decoding to avoid
+// leaving an unwiped allocation behind when the string grows.
+fn reply_text(bytes: &[u8]) -> Zeroizing<String> {
+    let mut text = Zeroizing::new(String::with_capacity(bytes.len() * 3));
+    let allocated = text.capacity();
+    for chunk in bytes.utf8_chunks() {
+        text.push_str(chunk.valid());
+        if !chunk.invalid().is_empty() {
+            text.push(char::REPLACEMENT_CHARACTER);
+        }
+    }
+    debug_assert_eq!(text.capacity(), allocated, "reply text never reallocates");
+    text
+}
+
+fn read_reply(reader: &mut impl BufRead) -> io::Result<Reply> {
+    let malformed = || io::Error::other("Malformed SMTP reply");
+    let mut first = None;
+    let mut lines: Vec<Zeroizing<String>> = Vec::with_capacity(REPLY_LINES);
+    loop {
+        let mut line = Zeroizing::new(Vec::with_capacity(LINE_LIMIT));
+        let allocated = line.capacity();
+        let read = Read::by_ref(reader)
+            .take(LINE_LIMIT as u64)
+            .read_until(b'\n', &mut line)?;
+        debug_assert_eq!(line.capacity(), allocated, "a reply line never reallocates");
+        if read == 0 || !line.ends_with(b"\r\n") || line.len() < 5 || lines.len() >= REPLY_LINES {
+            return Err(malformed());
+        }
+        let code = std::str::from_utf8(&line[..3])
+            .ok()
+            .filter(|c| c.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|c| c.parse::<u16>().ok())
+            .filter(|c| (200..600).contains(c))
+            .ok_or_else(malformed)?;
+        if *first.get_or_insert(code) != code {
+            return Err(malformed());
+        }
+        lines.push(reply_text(&line[4..line.len() - 2]));
+        match line[3] {
+            b' ' => return Ok(Reply { code, lines }),
+            b'-' => {}
+            _ => return Err(malformed()),
+        }
+    }
+}
+
 /// One SMTP conversation. It writes only what its caller asks for.
 pub(crate) struct Session {
     io: BufReader<Stream>,
     pub(super) extensions: BTreeSet<String>,
 }
 impl Session {
+    /// Reads one reply. Each raw line goes into a zeroizing buffer allocated at
+    /// the line limit, so reading never reallocates it, and every line already
+    /// collected is wiped on every return path, errors included.
     pub(super) fn reply(&mut self) -> io::Result<Reply> {
-        let malformed = || io::Error::other("Malformed SMTP reply");
-        let mut first = None;
-        let mut lines = vec![];
-        loop {
-            let mut line = vec![];
-            let read = (&mut self.io)
-                .take(LINE_LIMIT as u64)
-                .read_until(b'\n', &mut line)?;
-            if read == 0 || !line.ends_with(b"\r\n") || line.len() < 5 || lines.len() >= REPLY_LINES
-            {
-                return Err(malformed());
-            }
-            let code = std::str::from_utf8(&line[..3])
-                .ok()
-                .filter(|c| c.bytes().all(|b| b.is_ascii_digit()))
-                .and_then(|c| c.parse::<u16>().ok())
-                .filter(|c| (200..600).contains(c))
-                .ok_or_else(malformed)?;
-            if *first.get_or_insert(code) != code {
-                return Err(malformed());
-            }
-            lines.push(String::from_utf8_lossy(&line[4..line.len() - 2]).into_owned());
-            match line[3] {
-                b' ' => return Ok(Reply { code, lines }),
-                b'-' => {}
-                _ => return Err(malformed()),
-            }
-        }
+        read_reply(&mut self.io)
     }
     /// Writes one command line. Commands never carry secrets; `smtp_secret` writes its own.
     fn command(&mut self, line: &str) -> io::Result<Reply> {
@@ -276,6 +303,12 @@ pub(crate) fn submit(
         return not_sent(Stage::Connect, None);
     };
     let _ = tcp.set_nodelay(true);
+    // Deadlines hold from the first byte, so a stalled TLS handshake ends too.
+    if tcp.set_read_timeout(Some(timeouts.command)).is_err()
+        || tcp.set_write_timeout(Some(timeouts.command)).is_err()
+    {
+        return not_sent(Stage::Connect, None);
+    }
     let mut session = match server.security {
         Security::ImplicitTls => match server.tls.connect(&server.tls_name, tcp) {
             Ok(tls) => Session {

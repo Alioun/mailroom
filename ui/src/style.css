@@ -7,12 +7,14 @@
 * { box-sizing: border-box; }
 body { margin: 0; }
 ::selection { background: #c3e2eb; color: #102f3a; }
-button, input { font: inherit; }
+button, input, select, textarea { font: inherit; }
 button { border: 1px solid #a4b6bf; background: transparent; color: var(--ink); padding: 9px 16px; border-radius: 5px; cursor: pointer; min-height: 44px; }
 button:hover:not(:disabled) { background: #e5edf0; }
 button:disabled { color: #65767d; background: #e2e8eb; border-color: #d3dde1; cursor: default; }
-button:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visible, [role="radiogroup"]:focus-visible { outline: 3px solid #1c7086 !important; outline-offset: 4px; }
+button:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [role="radiogroup"]:focus-visible { outline: 3px solid #1c7086 !important; outline-offset: 4px; }
 a { color: inherit; text-underline-offset: 4px; }
+.skip-link { position: fixed; z-index: 10; top: 12px; left: 20px; padding: 10px 16px; background: #fff; border: 1px solid var(--accent); border-radius: 5px; transform: translateY(calc(-100% - 20px)); }
+.skip-link:focus { transform: translateY(0); }
 .app-shell { max-width: 1200px; margin: auto; padding: 0 40px; }
 header { display: flex; align-items: center; justify-content: space-between; gap: 20px; min-height: 104px; border-bottom: 1px solid var(--line); }
 .wordmark { font-size: 27px; font-weight: 750; text-decoration: none; letter-spacing: -.03em; }
@@ -109,6 +111,9 @@ progress { display: block; width: 100%; max-width: 560px; height: 16px; margin-t
 .accounts .census-actions label { min-width: 0; max-width: 100%; }
 .accounts p, .account-addresses label { overflow-wrap: anywhere; }
 .account-addresses { padding-left: 20px; }
+.account-empty { padding-block: 20px; }
+.account-load-error { margin-top: 16px; }
+.account-load-error button { margin-top: 12px; }
 
 .reports { margin-block: 1.5rem; border-block: 1px solid var(--border, #ccc); padding-block: 1rem; }
 .reports p, .reports summary { overflow-wrap: anywhere; }

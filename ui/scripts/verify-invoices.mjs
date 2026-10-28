@@ -35,9 +35,10 @@ try {
   await region.getByText('Business candidates · 7 · Unresolved role or evidence · 0', { exact: true }).waitFor()
   assert.equal(await region.locator('article').count(), 7)
   await region.locator('article').first().getByText('Predicted copies · accounting · Matching copy rules · forward.invoice_address', { exact: true }).waitFor()
-  for (const name of ['Preview sending by SMTP', 'Preview forwarding in Mail']) {
+  assert.equal(await region.getByRole('button', { name: 'Preview forwarding in Mail', exact: true }).count(), 0, 'no invoice Mail handoff is offered')
+  for (const name of ['Preview sending by SMTP']) {
     await region.getByRole('button', { name, exact: true }).first().click()
-    await region.getByRole('alert').getByText('Locked. Real sends, Mail handoffs and their records are denied until the owner authorizes live validation.', { exact: true }).waitFor()
+    await region.getByRole('alert').getByText('Locked. Real sends and their records are denied until the owner authorizes live validation.', { exact: true }).waitFor()
     assert.equal(await region.getByRole('checkbox').count(), 0)
   }
   await region.screenshot({ path: `${artifacts}/wired-routes-locked.png` })
@@ -82,12 +83,12 @@ try {
   await page.setViewportSize({ width: 390, height: 844 })
   await region.getByRole('button', { name: 'Rechnungsbericht aktualisieren', exact: true }).click()
   await region.getByRole('button', { name: 'Versand per SMTP prüfen', exact: true }).first().click()
-  await region.getByRole('alert').getByText('Gesperrt. Echter Versand, Übergaben an Mail und ihre Vermerke bleiben gesperrt, bis der Inhaber die Live-Prüfung freigibt.', { exact: true }).waitFor()
+  await region.getByRole('alert').getByText('Gesperrt. Echter Versand und seine Vermerke bleiben gesperrt, bis der Inhaber die Live-Prüfung freigibt.', { exact: true }).waitFor()
   await region.getByRole('button', { name: 'Originalnachricht lesen (nur lesend)', exact: true }).first().waitFor()
   await region.screenshot({ path: `${artifacts}/german-narrow.png` })
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
   assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0)
   assert.deepEqual(await page.evaluate(() => window.invoiceCsp), [])
   assert.deepEqual(errors, [])
-  console.log('PASS built invoice UI report badge, exact MIME preview, named synthetic confirmation, changed-state rejection, wired SMTP and Mail routes locked by policy in English and German, send outcome, reload, actual replaced-process recovery, German narrow layout, empty browser storage and CSP')
+  console.log('PASS built invoice UI report badge, exact MIME preview, named synthetic confirmation, changed-state rejection, wired SMTP route locked by policy in English and German, no invoice Mail handoff, send outcome, reload, actual replaced-process recovery, German narrow layout, empty browser storage and CSP')
 } finally { await browser.close() }

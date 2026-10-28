@@ -2,8 +2,9 @@
 //!
 //! Secret flow: the password is read once through the approved
 //! `CredentialBackend::get`, held in a zeroizing `SecretValue`, encoded into one
-//! zeroizing AUTH PLAIN line and written to the TLS session. Every buffer is
-//! wiped when this function returns, on success and on every failure. Nothing
+//! zeroizing AUTH PLAIN line and written to the TLS session. Every buffer this
+//! code or `Session::reply` owns is wiped when it drops, on success and on every
+//! failure; the TLS library's and `BufReader`'s own buffers are not. Nothing
 //! here formats, logs, stores or returns the password or the server's reply
 //! text; callers learn only whether authentication succeeded and the reply code.
 use super::smtp::{Login, Session};
@@ -38,14 +39,9 @@ pub(super) fn authenticate(session: &mut Session, login: &Login<'_>) -> Result<(
     drop(credentials);
     session.write_line(line.as_bytes()).map_err(|_| None)?;
     drop(line);
-    // A server may echo what it received, so its reply text is wiped unread.
-    let code = session.reply().map(|reply| {
-        reply
-            .lines
-            .into_iter()
-            .for_each(|l| drop(Zeroizing::new(l)));
-        reply.code
-    });
+    // A server may echo what it received; the reply's lines wipe themselves on
+    // drop, here and on every error path inside `reply`.
+    let code = session.reply().map(|reply| reply.code);
     match code {
         Ok(235) => Ok(()),
         Ok(code) => Err(Some(code)),

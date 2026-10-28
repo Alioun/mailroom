@@ -116,7 +116,7 @@ pub(in crate::server) async fn handle(
                             }
                             unsubscribe::Method::LocalMail => {
                                 let server = server.as_ref().ok_or("Submission server")?;
-                                unsubscribe::submit_local_mail(&mut saved, id, &uri("mailto:")?, &action.recipient, server, &repo.smtp_login(&account), writes.timeouts())?;
+                                unsubscribe::submit_local_mail(&mut saved, id, &uri("mailto:")?, &action.recipient, input.as_of, server, &repo.smtp_login(&account), writes.timeouts())?;
                             }
                             unsubscribe::Method::MailAppPreparation => unsubscribe::hand_off_mailto(&mut saved, id, &uri("mailto:")?, &action.recipient, writes.launcher(permit)?)?,
                             _ => continue,

@@ -1,18 +1,18 @@
 use super::*;
 use crate::invoice::{self, SyntheticTransport};
 
-/// The wired real adapters a send can use instead of the synthetic transport.
+/// The wired real adapter a send can use instead of the synthetic transport. A
+/// Mail handoff is not offered: Mail cannot be bound to the confirmed original
+/// and sender.
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Wired {
     Smtp,
-    MailApp,
 }
 impl Wired {
     fn mode(self) -> invoice::SendMode {
         match self {
             Self::Smtp => invoice::SendMode::Smtp,
-            Self::MailApp => invoice::SendMode::MailAppHandoff,
         }
     }
 }
@@ -135,16 +135,13 @@ pub(in crate::server) async fn handle(
                     ledger_fresh(&latest, ledger_guard.as_ref())?;
                     invoice::preview(&latest, account.provider, store.keys(), &selection, &target, synthetic, send_mode.clone(), address).map(|p| invoice::confirmation_plan(&p))
                 })?;
-                if let (Some(mode), Some(permit)) = (mode, permit.as_ref()) {
+                if let (Some(Wired::Smtp), Some(permit)) = (mode, permit.as_ref()) {
                     // Resolved before the intent is saved, so a missing server leaves nothing uncertain.
-                    let server = match mode { Wired::Smtp => Some(state.accounts.writes.smtp(permit, account.provider)?), Wired::MailApp => None };
+                    let server = state.accounts.writes.smtp(permit, account.provider)?;
                     let id = invoice::record_intent(&mut saved, preview, &consent, &confirmation_action)?;
                     store.save_state(&mut saved).map_err(|e| e.to_string())?;
                     invoice::boundary("before");
-                    match server {
-                        Some(server) => invoice::submit_smtp(&mut saved, &id, &server, &repo.smtp_login(&account), state.accounts.writes.timeouts())?,
-                        None => invoice::hand_off(&mut saved, &id, state.accounts.writes.launcher(permit)?)?,
-                    }
+                    invoice::submit_smtp(&mut saved, &id, &server, &repo.smtp_login(&account), state.accounts.writes.timeouts())?;
                     invoice::boundary("effect");
                     store.save_state(&mut saved).map_err(|e| e.to_string())?;
                     let report = invoice::report(&saved, account.provider, synthetic, store.keys())?;

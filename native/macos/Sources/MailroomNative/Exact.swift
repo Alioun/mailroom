@@ -49,7 +49,7 @@ public struct ExactAction: Decodable, Sendable {
         case "one_click_post":
             return "\(try required(operation)) for account \(account). One HTTPS POST of List-Unsubscribe=One-Click to \(try required(target)) for mail received at \(try required(sending_identity)). Exact URI SHA-256 \(try required(content_digest)). Success unknown. No Undo."
         case "mail_app_handoff":
-            return "\(try required(operation)) for account \(account). Open Mail with a message to \(try required(target)) from \(try required(sending_identity)). Exact content SHA-256 \(try required(content_digest)). Nothing is sent unless you send it in Mail."
+            return "\(try required(operation)) for account \(account). Open a new message in Mail to \(try required(target)) from \(try required(sending_identity)) with the confirmed subject and body. Fields SHA-256 \(try required(content_digest)). Nothing is sent unless you send it in Mail."
         default:
             throw Denied()
         }

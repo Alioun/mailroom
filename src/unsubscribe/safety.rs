@@ -4,6 +4,7 @@ use zeroize::Zeroizing;
 pub(crate) struct Endpoint {
     pub host: String,
     uri: Zeroizing<String>,
+    target: Zeroizing<String>,
 }
 impl std::fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -62,9 +63,18 @@ impl Endpoint {
         if host.parse::<IpAddr>().is_ok_and(|ip| !public(ip)) {
             return Err("Nonpublic destination".into());
         }
+        let path = parsed.path_and_query().map_or("/", |p| p.as_str());
+        let query_only = path.starts_with('?');
+        let mut target =
+            Zeroizing::new(String::with_capacity(path.len() + usize::from(query_only)));
+        if query_only {
+            target.push('/');
+        }
+        target.push_str(path);
         Ok(Self {
             host,
             uri: Zeroizing::new(raw.into()),
+            target,
         })
     }
     pub(crate) fn bind(self, answers: &[IpAddr]) -> Result<BoundPost, String> {
@@ -104,9 +114,8 @@ impl BoundPost {
     }
     /// The origin-form request target: path and query, never logged.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn target(&self) -> Zeroizing<String> {
-        let uri: axum::http::Uri = self.endpoint.uri.parse().expect("parsed at construction");
-        Zeroizing::new(uri.path_and_query().map_or("/", |p| p.as_str()).to_owned())
+    pub(crate) fn target(&self) -> &str {
+        &self.endpoint.target
     }
     pub(crate) fn request_digest(&self) -> String {
         super::digest(self.endpoint.uri.as_bytes())
@@ -148,12 +157,16 @@ pub(crate) fn public(ip: IpAddr) -> bool {
 pub(crate) struct Mail {
     pub to: String,
     pub from: String,
-    pub subject: String,
+    pub subject: Zeroizing<String>,
     pub body: Zeroizing<String>,
 }
 impl Mail {
     pub(crate) fn parse(raw: &str, from: &str) -> Result<Self, String> {
         let rest = raw.strip_prefix("mailto:").ok_or("Invalid mailto")?;
+        // A literal `#` would start a fragment for any other reader of this link.
+        if rest.contains('#') {
+            return Err("Invalid mailto".into());
+        }
         let (to, query) = rest.split_once('?').unwrap_or((rest, ""));
         if !crate::rules::config::mailbox(to) || !crate::rules::config::mailbox(from) {
             return Err("Mailto needs exactly one target and receiving identity".into());
@@ -161,7 +174,7 @@ impl Mail {
         let mut mail = Self {
             to: to.into(),
             from: from.into(),
-            subject: String::new(),
+            subject: Zeroizing::new(String::new()),
             body: Zeroizing::new(String::new()),
         };
         let mut seen = std::collections::BTreeSet::new();
@@ -178,7 +191,7 @@ impl Mail {
                         .chars()
                         .any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t') =>
                 {
-                    *mail.body = value
+                    mail.body = value
                 }
                 _ => return Err("Unsupported or unsafe mailto field".into()),
             }
@@ -186,48 +199,95 @@ impl Mail {
         Ok(mail)
     }
     pub(crate) fn digest(&self) -> String {
-        super::digest(
-            &serde_json::to_vec(&(&self.to, &self.from, &self.subject, self.body.as_str()))
-                .expect("mail encoding"),
+        // JSON escapes each input byte to at most six bytes.
+        let capacity =
+            (self.to.len() + self.from.len() + self.subject.len() + self.body.len()) * 6 + 13;
+        let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
+        let allocated = bytes.capacity();
+        serde_json::to_writer(
+            &mut *bytes,
+            &(
+                &self.to,
+                &self.from,
+                self.subject.as_str(),
+                self.body.as_str(),
+            ),
         )
+        .expect("mail encoding");
+        debug_assert_eq!(bytes.capacity(), allocated, "mail digest never reallocates");
+        super::digest(&bytes)
     }
     /// The message SMTP submits: the previewed target, sender, subject and body
-    /// with fixed framing derived from them and the confirmation time `time`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// with fixed framing derived from them and the review time `time`. Built in
+    /// one zeroizing buffer sized up front, so the body leaves no unwiped copy.
     pub(crate) fn message(&self, time: i64) -> Option<Zeroizing<Vec<u8>>> {
         let date = chrono::DateTime::from_timestamp(time, 0)?.to_rfc2822();
         let subject = if self.subject.is_ascii() {
             self.subject.clone()
         } else {
-            format!(
-                "=?UTF-8?B?{}?=",
-                data_encoding::BASE64.encode(self.subject.as_bytes())
-            )
+            const PREFIX: &str = "=?UTF-8?B?";
+            const SUFFIX: &str = "?=";
+            let mut subject = Zeroizing::new(String::with_capacity(
+                PREFIX.len() + data_encoding::BASE64.encode_len(self.subject.len()) + SUFFIX.len(),
+            ));
+            let allocated = subject.capacity();
+            subject.push_str(PREFIX);
+            data_encoding::BASE64.encode_append(self.subject.as_bytes(), &mut subject);
+            subject.push_str(SUFFIX);
+            debug_assert_eq!(subject.capacity(), allocated, "subject never reallocates");
+            subject
         };
         let domain = self.from.rsplit_once('@')?.1;
         let id = &self.digest()[..32];
-        let mut body = self
-            .body
-            .replace("\r\n", "\n")
-            .replace('\r', "\n")
-            .replace('\n', "\r\n");
-        if !body.ends_with("\r\n") {
-            body.push_str("\r\n");
+        let head = [
+            "From: <",
+            &self.from,
+            ">\r\nTo: <",
+            &self.to,
+            ">\r\nSubject: ",
+            &subject,
+            "\r\nDate: ",
+            &date,
+            "\r\nMessage-ID: <",
+            id,
+            ".",
+        ];
+        let tail = [
+            "@",
+            domain,
+            ">\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n",
+        ];
+        let stamp = time.to_string();
+        // Every line end becomes CRLF, at most doubling the body, plus a final CRLF.
+        let capacity = head.iter().chain(&tail).map(|p| p.len()).sum::<usize>()
+            + stamp.len()
+            + self.body.len() * 2
+            + 2;
+        let mut out = Zeroizing::new(Vec::with_capacity(capacity));
+        let allocated = out.capacity();
+        for part in head.iter().chain([&stamp.as_str()]).chain(&tail) {
+            out.extend_from_slice(part.as_bytes());
         }
-        let body = Zeroizing::new(body);
-        Some(Zeroizing::new(
-            format!(
-                "From: <{}>\r\nTo: <{}>\r\nSubject: {subject}\r\nDate: {date}\r\nMessage-ID: <{id}.{time}@{domain}>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{}",
-                self.from,
-                self.to,
-                body.as_str()
-            )
-            .into_bytes(),
-        ))
+        let mut chars = self.body.bytes().peekable();
+        let mut last = None;
+        while let Some(b) = chars.next() {
+            match b {
+                b'\r' if chars.peek() == Some(&b'\n') => {}
+                b'\r' | b'\n' => out.extend_from_slice(b"\r\n"),
+                b => out.push(b),
+            }
+            last = Some(b);
+        }
+        if !matches!(last, Some(b'\r' | b'\n')) {
+            out.extend_from_slice(b"\r\n");
+        }
+        debug_assert_eq!(out.capacity(), allocated, "the message never reallocates");
+        Some(out)
     }
 }
-fn decode(raw: &str) -> Result<String, String> {
-    let mut out = Vec::new();
+fn decode(raw: &str) -> Result<Zeroizing<String>, String> {
+    // Decoding only shrinks, so the buffer never reallocates and leaves no copy.
+    let mut out = Zeroizing::new(Vec::with_capacity(raw.len()));
     let mut bytes = raw.bytes();
     while let Some(b) = bytes.next() {
         if b == b'%' {
@@ -244,5 +304,55 @@ fn decode(raw: &str) -> Result<String, String> {
             out.push(b);
         }
     }
-    String::from_utf8(out).map_err(|_| "Invalid mailto text".into())
+    let text = std::str::from_utf8(&out).map_err(|_| "Invalid mailto text")?;
+    let mut decoded = Zeroizing::new(String::with_capacity(out.len()));
+    decoded.push_str(text);
+    Ok(decoded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validated_request_targets_preserve_escapes_and_supply_an_origin_form_path() {
+        for (uri, expected) in [
+            ("https://shop.example", "/"),
+            ("https://shop.example/", "/"),
+            ("https://shop.example?token=fixture", "/?token=fixture"),
+            ("https://shop.example?", "/?"),
+            ("https://shop.example:443?token=fixture", "/?token=fixture"),
+            (
+                "https://shop.example/a%2fb/%C3%BC?token=a%2Bb&x=%23",
+                "/a%2fb/%C3%BC?token=a%2Bb&x=%23",
+            ),
+        ] {
+            let bound = Endpoint::parse(uri)
+                .unwrap()
+                .bind(&["93.184.216.34".parse().unwrap()])
+                .unwrap();
+            assert_eq!(bound.target(), expected);
+            assert_eq!(
+                bound.request_digest(),
+                crate::unsubscribe::digest(uri.as_bytes())
+            );
+        }
+        let host = format!("{}.{}.example", "a".repeat(63), "b".repeat(63));
+        let uri = format!("https://{host}:443/leave?token={}", "x".repeat(4096));
+        let bound = Endpoint::parse(&uri)
+            .unwrap()
+            .bind(&["93.184.216.34".parse().unwrap()])
+            .unwrap();
+        assert_eq!(bound.target(), format!("/leave?token={}", "x".repeat(4096)));
+        for invalid in [
+            "https://shop.example/path#fragment",
+            "https://shop.example/%xy",
+            "https://shop.example/%",
+            "https://shop.example/a b",
+            "https://user@shop.example/path",
+            "https://shop.example:444/path",
+        ] {
+            assert!(Endpoint::parse(invalid).is_err());
+        }
+    }
 }

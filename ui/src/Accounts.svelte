@@ -27,6 +27,8 @@
       addresses: 'Confirm own addresses', ownership: 'To and Cc are unverified evidence. Confirmation assigns ownership only. It does not assign a business role or forwarding permission.', confirm: 'Confirm own address', details: 'Saved local headers',
       limits: 'Takeout and trusted DKIM correlation remain incomplete. The full personal workflow is not ready for daily use. No result proves rule coexistence, delivery-recipient behavior or accounting acceptance. All account writes stay locked.',
       loadError: 'Could not read the local response. Reload or retry the action.',
+      loading: 'Loading saved accounts…', retry: 'Retry loading accounts', working: 'Working…',
+      empty: 'No saved accounts yet.', emptySynthetic: 'Add a synthetic account above to explore the workflow with invented mail.',
     },
     de: {
       title: 'Konten', detail: 'Gespeicherte Kontoerfassung und lokale Kontoverwaltung. Neue produktive Konten erfordern eine geschützte Installation. Anbieteränderungen bleiben gesperrt.',
@@ -38,6 +40,8 @@
       addresses: 'Eigene Adressen bestätigen', ownership: 'An und Cc sind unbestätigte Belege. Die Bestätigung weist nur die Zugehörigkeit zu. Sie weist keine geschäftliche Rolle oder Weiterleitungsberechtigung zu.', confirm: 'Eigene Adresse bestätigen', details: 'Lokal gespeicherte Kopfzeilen',
       limits: 'Takeout und vertrauenswürdige DKIM-Zuordnung fehlen noch. Der gesamte persönliche Ablauf ist noch nicht für den Alltag bereit. Kein Ergebnis belegt Regel-Koexistenz, Zustellempfänger oder Buchhaltungsannahme. Alle Kontoänderungen bleiben gesperrt.',
       loadError: 'Die lokale Antwort konnte nicht gelesen werden. Lade neu oder wiederhole die Aktion.',
+      loading: 'Gespeicherte Konten werden geladen…', retry: 'Konten erneut laden', working: 'Wird bearbeitet…',
+      empty: 'Noch keine gespeicherten Konten.', emptySynthetic: 'Füge oben ein synthetisches Konto hinzu, um den Ablauf mit erfundenen Nachrichten auszuprobieren.',
     },
   }
   let t = $derived(strings[lang])
@@ -47,12 +51,32 @@
   let view = $state<AccountView | null>(null)
   let busy = $state(false)
   let error = $state('')
+  type AccountLoad = { kind: 'loading'; revision: number } | { kind: 'ready' } | { kind: 'error' }
+  let accountLoad = $state<AccountLoad>({ kind: 'loading', revision: 0 })
   let running = $derived(status?.job?.progress.state === 'running')
   let active = true
   let polling = false
   let cacheEpoch = $state(0)
   let workspaceRevision = $state(0)
   let revision = 0
+  async function loadAccounts() {
+    const requestedRevision = ++revision
+    accountLoad = { kind: 'loading', revision: requestedRevision }
+    error = ''
+    try {
+      const [next, saved] = await Promise.all([readAccountStatus(), listAccounts()])
+      if (!active || requestedRevision !== revision) return
+      accounts = saved
+      if (!accounts.some(account => account.id === selected)) selected = ''
+      accept(next)
+      selected ||= accounts[0]?.id ?? ''
+      accountLoad = { kind: 'ready' }
+    } catch {
+      if (active && requestedRevision === revision) accountLoad = { kind: 'error' }
+    } finally {
+      if (active && accountLoad.kind === 'loading' && accountLoad.revision === requestedRevision) accountLoad = { kind: 'ready' }
+    }
+  }
   async function lifecycleChanged() {
     revision += 1; view = null; cacheEpoch += 1; status = await readAccountStatus(); accounts = await listAccounts(); if (!accounts.some(a => a.id === selected)) selected = ''
   }
@@ -75,28 +99,33 @@
     try {
       const next = await readAccountStatus()
       if (active && requestedRevision === revision) accept(next)
-    } catch { if (active) error = t.loadError } finally { polling = false }
+    } catch { if (active && requestedRevision === revision) error = t.loadError } finally { polling = false }
   }
   onMount(() => {
-    active = true; void refresh()
+    active = true; void loadAccounts()
     const timer = setInterval(() => { if (status?.job?.progress.state === 'running') void refresh() }, 250)
     return () => { active = false; clearInterval(timer) }
   })
 </script>
 
-<section class="accounts" aria-labelledby="accounts-heading">
+<section class="accounts" aria-labelledby="accounts-heading" aria-busy={accountLoad.kind === 'loading'}>
   <h2 id="accounts-heading">{t.title}</h2>
   <p>{t.detail}</p>
+  {#if accountLoad.kind === 'loading'}
+    <p role="status">{t.loading}</p>
+  {:else if accountLoad.kind === 'error'}
+    <div class="account-load-error"><p role="alert">{t.loadError}</p><button onclick={loadAccounts}>{t.retry}</button></div>
+  {/if}
   {#if status?.synthetic}
     <p class="source">{t.synthetic}</p>
-    <button disabled={busy || running} onclick={() => act(async () => { selected = ''; view = null; accept(await syntheticAccount()) })}>{t.add}</button>
-    <button disabled={busy || running} onclick={() => act(async () => { selected = ''; view = null; accept(await syntheticAccount(true)) })}>{t.addGmail}</button>
+    <button disabled={busy || running || accountLoad.kind === 'loading'} onclick={() => act(async () => { selected = ''; view = null; accept(await syntheticAccount()) })}>{t.add}</button>
+    <button disabled={busy || running || accountLoad.kind === 'loading'} onclick={() => act(async () => { selected = ''; view = null; accept(await syntheticAccount(true)) })}>{t.addGmail}</button>
   {:else if status}
     <p>{t.protectedUnavailable}</p>
   {/if}
   {#if error}<p role="alert">{error}</p>{/if}
   <div class="census-actions">
-    <button disabled={busy || running} onclick={() => act(async () => { accounts = await listAccounts(); selected ||= accounts[0]?.id ?? '' })}>{t.load}</button>
+    <button disabled={busy || running || accountLoad.kind === 'loading'} onclick={loadAccounts}>{t.load}</button>
     {#if accounts.length}
       <label>{t.choose}<select bind:value={selected} disabled={busy || running} onchange={() => view = null}><option value="">{t.choose}</option>{#each accounts as account (account.id)}<option value={account.id}>{account.login} · {account.provider === 'gmail' ? 'Gmail' : 'mailbox.org'}</option>{/each}</select></label>
       <button disabled={busy || running || !selected} onclick={() => act(async () => { view = null; accept(await scanAccount(selected)) })}>{t.scan}</button>
@@ -104,6 +133,10 @@
       <button disabled={busy || running || !selected} onclick={() => act(async () => { view = await openAccount(selected) })}>{t.open}</button>
     {/if}
   </div>
+  {#if accountLoad.kind === 'ready' && !accounts.length}
+    <div class="account-empty"><p class="scan-state">{t.empty}</p>{#if status?.synthetic}<p>{t.emptySynthetic}</p>{/if}</div>
+  {/if}
+  {#if busy}<p role="status">{t.working}</p>{/if}
   {#if status?.job}
     <div aria-live="polite"><p class="scan-state">{t[status.job.progress.state]}</p><p>{status.job.progress.saved} {t.saved} · {status.job.progress.folders} {t.folders}</p></div>
     {#if status.job.error}<p role="alert">{t.error}</p>{/if}

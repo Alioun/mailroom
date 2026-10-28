@@ -39,11 +39,10 @@ assert.equal(view.report.rows[6].evidence.kind, 'unknown')
 const selection = view.report.rows[0].id, target = 'accounting'
 let preview = await command('preview', { selection, target })
 const oldReceipt = preview.receipt
-for (const mode of ['smtp', 'mail_app']) {
-  const denied = await command('preview', { selection, target, mode }, 403)
-  assert.equal(denied.error, 'Denied: all real-account mutations are locked in this unit', `${mode}: the wired route reaches the write policy, which denies it`)
-  await command('send', { selection, target, receipt: preview.receipt, confirmation_action: preview.plan.confirmation_action, mode }, 403)
-}
+const denied = await command('preview', { selection, target, mode: 'smtp' }, 403)
+assert.equal(denied.error, 'Denied: all real-account mutations are locked in this unit', 'the wired SMTP route reaches the write policy, which denies it')
+await command('send', { selection, target, receipt: preview.receipt, confirmation_action: preview.plan.confirmation_action, mode: 'smtp' }, 403)
+for (const action of ['preview', 'send']) await command(action, { selection, target, receipt: preview.receipt, confirmation_action: preview.plan.confirmation_action, mode: 'mail_app' }, 422)
 await command('resolve', { send: 'a'.repeat(64), resolution: 'not_sent' }, 403)
 await command('prepare_mail_app', { selection, target }, 422)
 await command('acquire', { selection }, 422)
@@ -79,5 +78,5 @@ assert.equal(Object.keys(view.received).length, 1)
 saved = await post('workspace/open', { account })
 await post('workspace/save', { account, revision: saved.revision, input: { ...input, documents: sample.documents } })
 view = await command('open'); assert.equal(view.report.count, 0)
-console.log(`PASS ${gmail ? 'Gmail' : 'IMAP'} invoice HTTP exact MIME/attachment send, named confirmation, altered/replayed/stale/cross-purpose authority denials, seven evidence cases, bulk, body conversion, refresh report/count, role exclusion, wired SMTP and Mail routes denied by policy, acceptance unknown`)
+console.log(`PASS ${gmail ? 'Gmail' : 'IMAP'} invoice HTTP exact MIME/attachment send, named confirmation, altered/replayed/stale/cross-purpose authority denials, seven evidence cases, bulk, body conversion, refresh report/count, role exclusion, wired SMTP route denied by policy, no invoice Mail handoff, acceptance unknown`)
 }

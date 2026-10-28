@@ -78,7 +78,8 @@ pub(crate) enum ExactAction {
         sending_identity: String,
         content_digest: String,
     },
-    /// Opens a message in the mail app. Sends nothing, but no app opens unconfirmed.
+    /// Opens a new message in Mail from the confirmed sender. Sends nothing, but no app
+    /// opens unconfirmed.
     MailAppHandoff {
         account: String,
         operation: String,
@@ -122,7 +123,7 @@ fn display(actions: &[ExactAction]) -> String {
         ExactAction::SubscriptionAction {account, subscription, method, receiving_identity, host, content_digest, effect, ..} => format!("Apply synthetic {} for subscription {subscription}, account {account}, received at {receiving_identity}, host {}. Payload SHA-256 {content_digest}. {effect}", serde_json::to_string(method).expect("Method encoding"), host.as_deref().unwrap_or("none")),
         ExactAction::SmtpSend {account, operation, target, sending_identity, content_digest} => format!("{operation} for account {account}. Send by SMTP to {target} from {sending_identity}. Exact content SHA-256 {content_digest}. Sent mail has no Undo."),
         ExactAction::OneClickPost {account, operation, target, sending_identity, content_digest} => format!("{operation} for account {account}. One HTTPS POST of List-Unsubscribe=One-Click to {target} for mail received at {sending_identity}. Exact URI SHA-256 {content_digest}. Success unknown. No Undo."),
-        ExactAction::MailAppHandoff {account, operation, target, sending_identity, content_digest} => format!("{operation} for account {account}. Open Mail with a message to {target} from {sending_identity}. Exact content SHA-256 {content_digest}. Nothing is sent unless you send it in Mail."),
+        ExactAction::MailAppHandoff {account, operation, target, sending_identity, content_digest} => format!("{operation} for account {account}. Open a new message in Mail to {target} from {sending_identity} with the confirmed subject and body. Fields SHA-256 {content_digest}. Nothing is sent unless you send it in Mail."),
     }).collect::<Vec<_>>().join("\n")
 }
 

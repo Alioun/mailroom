@@ -304,9 +304,9 @@ fn display_and_authentication_match_the_swift_helper_fixture() {
         },
         ExactAction::MailAppHandoff {
             account: "invented-account".into(),
-            operation: "Forward this invoice in Mail".into(),
-            target: "target@example.test".into(),
-            sending_identity: "sender@example.test".into(),
+            operation: "Open the unsubscribe message for subscription sub-3".into(),
+            target: "leave@list.example.test".into(),
+            sending_identity: "alias@example.test".into(),
             content_digest: "b".repeat(64),
         },
     ];

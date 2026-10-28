@@ -607,15 +607,7 @@ async fn production_invoice_commands_fail_before_account_or_credential_access() 
             POLICY,
         ),
         (
-            serde_json::json!({"action":"preview", "selection":"INBOX/1/1", "target":"accounting", "mode":"mail_app"}),
-            POLICY,
-        ),
-        (
             serde_json::json!({"action":"send", "selection":"INBOX/1/1", "target":"accounting", "receipt":"0".repeat(64), "confirmation_action":"Send exactly this invoice", "mode":"smtp"}),
-            POLICY,
-        ),
-        (
-            serde_json::json!({"action":"send", "selection":"INBOX/1/1", "target":"accounting", "receipt":"0".repeat(64), "confirmation_action":"Send exactly this invoice", "mode":"mail_app"}),
             POLICY,
         ),
         (
@@ -637,11 +629,11 @@ async fn production_invoice_commands_fail_before_account_or_credential_access() 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert!(String::from_utf8_lossy(&body).contains(reason), "{command}");
     }
-    let response = request("/api/accounts/invoices", r#"{"account":"nonexistent", "command":{"action":"prepare_mail_app", "selection":"x", "target":"x"}}"#, None, server::ADDRESS, "application/json").await;
+    let response = request("/api/accounts/invoices", r#"{"account":"nonexistent", "command":{"action":"preview", "selection":"x", "target":"x", "mode":"mail_app"}}"#, None, server::ADDRESS, "application/json").await;
     assert_eq!(
         response.status(),
         StatusCode::UNPROCESSABLE_ENTITY,
-        "the preparation-only path is gone"
+        "no invoice Mail handoff or preparation-only path exists"
     );
     let response = request("/api/accounts/invoices", r#"{"account":"nonexistent", "command":{"action":"send", "selection":"x", "target":"x", "receipt":"x", "confirmation_action":"x", "synthetic":true}}"#, None, server::ADDRESS, "application/json").await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);

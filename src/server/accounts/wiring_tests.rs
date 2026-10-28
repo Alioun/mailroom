@@ -297,18 +297,23 @@ async fn invoice_routes_acquire_send_by_smtp_hand_off_and_resolve_through_fake_e
     );
     assert!(recorded(&wired).is_empty());
 
-    // Mail-app handoff: confirmed, opens Mail's forward window, never "sent".
+    // A Mail handoff is refused: Mail cannot be bound to the confirmed original and sender.
     let wired = app(&f, endpoints(None, &web));
-    let (status, view) = send_invoice(&wired, &f, "INBOX/7/2", "mail_app").await;
-    assert_eq!(status, StatusCode::OK, "{view}");
-    assert_eq!(send(&view, "INBOX/7/2")["status"], "handed_off");
-    assert_eq!(
-        recorded(&wired),
-        vec![Handoff::ForwardOriginal {
-            message_id: "synthetic-account-2@example.test".into(),
-            target: "archive@example.net".into()
-        }]
-    );
+    let (status, _) = invoice(
+        &wired,
+        &f,
+        json!({"action":"acquire","selection":"INBOX/7/2"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    for command in [
+        json!({"action":"preview","selection":"INBOX/7/2","target":"accounting","mode":"mail_app"}),
+        json!({"action":"send","selection":"INBOX/7/2","target":"accounting","receipt":"a".repeat(64),"confirmation_action":"x","mode":"mail_app"}),
+    ] {
+        let (status, _) = invoice(&wired, &f, command).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    assert!(recorded(&wired).is_empty(), "no app was launched");
 
     // An uncertain submission blocks the next send until the owner resolves it.
     let smtp = Smtp::start(Mode::DropAfterData, true);
@@ -462,7 +467,7 @@ async fn unsubscribe_routes_post_one_click_send_mail_and_hand_off_through_fake_e
     for named in [
         "One HTTPS POST of List-Unsubscribe=One-Click to shop.example for mail received at team@home.example.test",
         "Send by SMTP to leave@shop.example from alias@home.example.test",
-        "Open Mail with a message to leave@shop.example from team@home.example.test",
+        "Open a new message in Mail to leave@shop.example from team@home.example.test with the confirmed subject and body",
     ] {
         assert!(display.contains(named), "{display}");
     }
@@ -501,7 +506,19 @@ async fn unsubscribe_routes_post_one_click_send_mail_and_hand_off_through_fake_e
             .contains(&"RCPT TO:<leave@shop.example>".to_owned())
     );
     assert!(
-        matches!(&recorded(&wired)[..], [Handoff::OpenMailto { host, .. }] if host == "shop.example")
+        matches!(&recorded(&wired)[..], [Handoff::ComposeInMail { to, from, .. }] if to == "leave@shop.example" && from == "team@home.example.test"),
+        "Mail composes from the confirmed receiving address"
+    );
+    let submitted = preview["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["method"] == "local_mail")
+        .unwrap();
+    assert_eq!(
+        submitted["payload_digest"].as_str().unwrap(),
+        crate::unsubscribe::digest(seen.message.as_deref().unwrap()),
+        "the confirmed digest is the SHA-256 of exactly the submitted bytes"
     );
     files_secret_free(f.root.path());
 }

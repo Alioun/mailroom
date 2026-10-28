@@ -15,6 +15,7 @@
   onMount(() => { void load().then(data => { availability = data.availability }).catch(() => { availabilityError = true }) })
 </script>
 
+<a class="skip-link" href="#main-content">{lang === 'en' ? 'Skip to content' : 'Zum Inhalt springen'}</a>
 <div class="app-shell">
   <header>
     <a href="/" class="wordmark">mailroom<span aria-hidden="true">.</span></a>
@@ -22,7 +23,7 @@
       <ToggleGroup.Item value="en">English</ToggleGroup.Item><ToggleGroup.Item value="de">Deutsch</ToggleGroup.Item>
     </ToggleGroup.Root>
   </header>
-  <main>
+  <main id="main-content" tabindex="-1">
     <div class="intro"><h1>{t.title}</h1><p>{t.intro}</p><div class="status-line"><span class="source">{lang === 'en' ? 'Local interface' : 'Lokale Oberfläche'}</span><span>{t.locked}</span></div></div>
     <Accounts {lang} />
     <Census {lang} />

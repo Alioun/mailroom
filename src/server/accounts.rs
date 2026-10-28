@@ -904,15 +904,7 @@ async fn production_consequential_routes_deny_before_repository_or_confirmation_
         ),
         (
             "invoices",
-            json!({"account":"synthetic-account","command":{"action":"preview","selection":"INBOX/1/1","target":"accounting","mode":"mail_app"}}),
-        ),
-        (
-            "invoices",
             json!({"account":"synthetic-account","command":{"action":"send","selection":"INBOX/1/1","target":"accounting","receipt":"a".repeat(64),"confirmation_action":"yes","mode":"smtp"}}),
-        ),
-        (
-            "invoices",
-            json!({"account":"synthetic-account","command":{"action":"send","selection":"INBOX/1/1","target":"accounting","receipt":"a".repeat(64),"confirmation_action":"yes","mode":"mail_app"}}),
         ),
         (
             "invoices",
@@ -988,6 +980,28 @@ async fn production_consequential_routes_deny_before_repository_or_confirmation_
             0
         );
     }
+    let refused = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/accounts/invoices")
+                .header("Host", super::ADDRESS)
+                .header("Origin", super::ORIGIN)
+                .header("Content-Type", "application/json")
+                .header("X-Mailroom-Token", state.token.as_str())
+                .body(axum::body::Body::from(
+                    json!({"account":"synthetic-account","command":{"action":"preview","selection":"INBOX/1/1","target":"accounting","mode":"mail_app"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        refused.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "no invoice Mail handoff exists"
+    );
     assert!(
         state
             .accounts

@@ -300,6 +300,9 @@ allowed() {
   case "$1" in
     add) echo "status=created:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=no_tty:1 status=invalid_input:1 status=mismatch:1 status=cancelled:1 status=denied:1 status=recovery_required:1 status=core_dumps_enabled:1" ;;
     replace-password) echo "status=replaced:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=no_tty:1 status=invalid_input:1 status=mismatch:1 status=cancelled:1 status=denied:1 status=recovery_required:1 status=core_dumps_enabled:1" ;;
+    forget) echo "status=forgotten:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=cancelled:1 status=denied:1 status=invalid_input:1 status=recovery_required:1 status=rollback_copies_full:1 status=core_dumps_enabled:1" ;;
+    rotate-key) echo "status=rotated:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=cancelled:1 status=denied:1 status=invalid_input:1 status=recovery_required:1 status=rollback_copies_full:1 status=core_dumps_enabled:1" ;;
+    recover-local) echo "status=recovered:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=cancelled:1 status=denied:1 status=invalid_input:1 status=recovery_required:1 status=rollback_copies_full:1 status=core_dumps_enabled:1" ;;
     native-check) echo "outcome=approved:0 outcome=cancelled:0 outcome=denied:1 outcome=unavailable:1" ;;
     status) echo "status=ok:0 status=missing:1 status=other_binary:1 status=changed:1 status=denied:1 status=failed:1 $opened" ;;
     probe) echo "status=ok:0 status=denied:1 status=missing:1 status=changed:1 status=other_binary:1 status=failed:1 $opened" ;;
@@ -506,10 +509,11 @@ case "${1:-}" in
     printf '%s\n' \
       'Build phase (owner): 1. check the frozen copy; 2. build and sign with the installed toolchains, then print the identities.' \
       "Install phase (root): 1. check the frozen copy; 2. copy the signed outputs into a fresh root-owned $LIBEXEC after checking the typed identities." \
-      "Owner phase: 1. check the frozen copy and installation; 2. approve then cancel an invented action; 3. optionally create one local account with hidden entry and exact native consent; 4. move each account's keys from an earlier build; 5. migrate and verify legacy passwords; 6. enter missing passwords; 7. optionally replace a saved password with exact native consent; 8. check the prompt at every password read."
+      "Owner phase: 1. check the frozen copy and installation; 2. approve then cancel an invented action; 3. optionally create one local account with hidden entry and exact native consent; 4. move each account's keys from an earlier build; 5. migrate and verify legacy passwords; 6. enter missing passwords; 7. optionally replace a saved password with exact native consent; 8. check the prompt at every password read. Optional maintenance phase: check the frozen installation, then review local recovery, key rotation or local forgetting."
     return 0 ;;
   --digest) tree_digest "$frozen"; return 0 ;;
   build) phase=build; shift ;;
+  maintenance) phase=maintenance; shift ;;
   install) phase=root; arguments=1; shift ;;
 esac
 if ! clean_environment; then
@@ -529,11 +533,14 @@ if [[ $phase == root ]]; then
 fi
 [[ $EUID -ne 0 ]] || { printf '%s\n' 'This phase runs as the owner, not root.' >&2; return 2; }
 [[ "$HOME" == "$(owner_home)" ]] || { printf '%s\n' 'HOME must be your account home.' >&2; return 2; }
-/bin/mkdir -p "$HOME/.config/mailroom" || return 2
+/bin/mkdir -p -m 700 "$HOME/.config/mailroom" || return 2
 CONFIG="$HOME/.config/mailroom"
 if [[ $phase == build ]]; then
   RECORDS="$CONFIG/native-build-records"
   build_phase "$frozen"
+elif [[ $phase == maintenance ]]; then
+  RECORDS="$CONFIG/native-maintenance-records"
+  maintenance_phase "$frozen"
 else
   RECORDS="$CONFIG/native-setup-records"
   owner_phase "$frozen"
@@ -713,6 +720,68 @@ while read -r reference class <&3; do
   mailroom keychain probe "$reference"; expect "allow $reference" status=ok "$RESULT" || { stop_incomplete; return 1; }
   mailroom keychain status "$reference"; expect "protection $reference" status=ok "$RESULT" || { stop_incomplete; return 1; }
 done 3<<<"$EXPECTED"
+finish
+}
+
+select_saved_account() {
+  local selected
+  say "Saved account IDs:"
+  printf '%s' "$ACCOUNTS"
+  ask selected "Account ID" ""
+  [[ "$selected" =~ ^[A-Za-z0-9-]{1,64}$ && $'\n'"$ACCOUNTS" == *$'\n'"$selected"$'\n'* ]] || return 1
+  SELECTED_ACCOUNT="$selected"
+}
+
+maintenance_phase() {
+TOTAL_STAGES=4
+local frozen="$1" file id kind
+/bin/mkdir -p "$(/usr/bin/dirname "$RECORDS")" && : >"$RECORDS"
+banner "Mailroom local account maintenance"
+stage "Check the frozen copy and installation"
+check_frozen "$frozen" || { stop_incomplete; return 1; }
+read_pins || { expect installation trusted untrusted || stop_incomplete; return 1; }
+say "Stop active census and sorting work first. Account and store locks refuse competing work."
+say "These actions change local storage only. They never resume a provider action."
+
+stage "Review interrupted local operations"
+for file in "$CONFIG/lifecycle"/*.json; do
+  [[ -e "$file" ]] || continue
+  id=$(/usr/bin/basename "$file" .json)
+  [[ "$id" =~ ^[A-Za-z0-9-]{1,64}$ && ! -L "$file" ]] || { expect lifecycle_metadata readable unreadable || stop_incomplete; return 1; }
+  kind=$(/usr/bin/plutil -extract intent.state raw -o - "$file" 2>/dev/null) || { expect lifecycle_metadata readable unreadable || stop_incomplete; return 1; }
+  case "$kind" in
+    forgotten) continue ;;
+    creating|replacing|forgetting|rotating) ;;
+    *) expect lifecycle_state known unknown || { stop_incomplete; return 1; } ;;
+  esac
+  say "Account $id has an interrupted local $kind operation."
+  if confirm_no "Review native confirmation to reconcile $id now?"; then
+    mailroom account recover-local "$id"
+    expect "recover $id" status=recovered "$RESULT" || { stop_incomplete; return 1; }
+  else
+    INCOMPLETE+=("local recovery $id")
+  fi
+done
+expected_references || { expect account_metadata readable unreadable || stop_incomplete; return 1; }
+
+stage "Optionally rotate a local account key"
+say "Rotation preserves local history. Outstanding approvals become invalid. No mailbox changes occur."
+if [[ -n "$ACCOUNTS" ]] && confirm_no "Rotate one account's local encryption key?"; then
+  select_saved_account || { expect account_selection saved unknown || stop_incomplete; return 1; }
+  mailroom account rotate-key "$SELECTED_ACCOUNT"
+  expect key_rotation status=rotated "$RESULT" || { stop_incomplete; return 1; }
+  expected_references || { expect account_metadata readable unreadable || stop_incomplete; return 1; }
+fi
+
+stage "Optionally forget one local account"
+say "Forgetting deletes local credentials, rules, decisions, mail data, undo and reconciliation history."
+say "Shared addresses.yaml and other accounts stay. Downloads and backup copies are outside this deletion."
+say "This does not undo remote mail changes, unsubscribe or close the provider account."
+if [[ -n "$ACCOUNTS" ]] && confirm_no "Review native confirmation to forget one local account?"; then
+  select_saved_account || { expect account_selection saved unknown || stop_incomplete; return 1; }
+  mailroom account forget "$SELECTED_ACCOUNT"
+  expect local_forget status=forgotten "$RESULT" || { stop_incomplete; return 1; }
+fi
 finish
 }
 

@@ -1,6 +1,8 @@
 # Local account lifecycle
 
-The generic lifecycle runs only with an installed synthetic account backend. Production lifecycle requests and new production connections return 403 before credential or provider access. Existing saved-account reads remain subject to their existing policy. Recovery-status reads serialize with account operations without closing admission for new work. Protected OS credential installation and native confirmation are separate work. No lifecycle result enables a provider write.
+The protected macOS owner CLI supports local account creation, password replacement, forgetting, key rotation and reconciliation of interrupted lifecycle operations. It uses exact native consent and fixed result records. The frozen setup wizard offers creation and password replacement. Its optional maintenance phase offers the remaining operations. These paths require exact version approval and owner-run installed verification before real credentials are used. See [Native confirmation and protected Keychain credentials](macos-confirmation.md).
+
+The HTTP lifecycle handler remains synthetic-only. Production HTTP lifecycle requests and new browser connections return 403 before credential access. Owner commands never connect to a provider. No lifecycle result enables a provider write.
 
 ## Durable account states
 
@@ -16,7 +18,7 @@ Each account owns its metadata, password reference, encryption-generation refere
 
 The forget preview lists exact existing files, sizes, digests and credential references. It binds both English and German consequences, the account, state revision, generation and resource manifest with a distinct full HMAC receipt. Confirmation recomputes the preview. An altered, stale, cross-account, cross-purpose, unconfirmed or replayed request rejects.
 
-Forgetting stops account-work admission, cancels and joins that account's acquisition worker, and writes deletion intent before removing resources. An unrelated acquisition finishes without cancellation. A stable cross-process account lease and every store lock remain held through deletion. Lock files are retained permanently so a held lock can never split across two inodes. These files hold no account content. A tombstone prevents stale account objects from recreating removed resources.
+The synthetic HTTP flow stops account-work admission, cancels and joins that account's acquisition worker, and writes deletion intent before removing resources. The separate protected owner command instead refuses a busy account lease. The owner stops active work first. An unrelated acquisition finishes without cancellation. A stable cross-process account lease and every store lock remain held through deletion. Lock files are retained permanently so a held lock can never split across two inodes. These files hold no account content. A tombstone prevents stale account objects from recreating removed resources.
 
 Deletion removes the account-owned encrypted projection, not the shared authoritative `addresses.yaml`. Other accounts and owner-authored ledger entries survive. Reports recompute their source bindings and expose a missing comparison account as a blocker. The UI clears account previews and reloads account and subscription lists after a successful change.
 

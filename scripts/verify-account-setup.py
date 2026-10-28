@@ -1,6 +1,5 @@
 """Credential-free checks for the owner setup wrapper. No TTY, helper or Keychain opens."""
 import json
-import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -23,6 +22,9 @@ scenario=$(<"$(dirname "$0")/scenario")
 case "$scenario" in
   created) echo status=created ;;
   replaced) echo status=replaced ;;
+  forgotten) echo status=forgotten ;;
+  rotated) echo status=rotated ;;
+  recovered) echo status=recovered ;;
   cancelled) echo status=cancelled; exit 1 ;;
   denied) echo status=denied; exit 1 ;;
   wrong_exit) echo status=created; exit 1 ;;
@@ -53,6 +55,12 @@ printf '%s\\n' "$RESULT"
         ("add", "gmail", "extra_output", "status=unexpected"),
         ("add", "gmail", "private_stderr", "status=created"),
         ("add", "gmail", "shaped_output", "status=unexpected"),
+        ("forget", "invented-account", "forgotten", "status=forgotten"),
+        ("rotate-key", "invented-account", "rotated", "status=rotated"),
+        ("recover-local", "invented-account", "recovered", "status=recovered"),
+        ("forget", "invented-account", "rotated", "status=unexpected"),
+        ("rotate-key", "invented-account", "recovered", "status=unexpected"),
+        ("recover-local", "invented-account", "forgotten", "status=unexpected"),
     ]:
         (work / "scenario").write_text(scenario)
         completed = subprocess.run(["/bin/bash", str(driver), str(work), command, argument], capture_output=True, env={"PATH":"/usr/bin:/bin", "HOME":str(work)}, timeout=5)
@@ -62,7 +70,11 @@ printf '%s\\n' "$RESULT"
         assert (work / "argv").read_text().splitlines() == ["account", command, argument], "Credential or extra argument passed"
         results.append({"command":command,"scenario":scenario,"passed":True})
 
-owner = script.split("owner_phase() {", 1)[1]
+owner = script.split("owner_phase() {", 1)[1].split("\nselect_saved_account() {",1)[0]
+assert '/bin/mkdir -p -m 700 "$HOME/.config/mailroom"' in script
+maintenance = script.split("maintenance_phase() {",1)[1]
+assert "TOTAL_STAGES=4" in maintenance and maintenance.count('stage "') == 4
+assert maintenance.index("check_frozen") < maintenance.index("mailroom account recover-local") < maintenance.index("mailroom account rotate-key") < maintenance.index("mailroom account forget")
 assert "TOTAL_STAGES=8" in owner and owner.count('stage "') == 8
 assert owner.index('mailroom account add') < owner.index('mailroom keychain refs')
 assert owner.index('expected_references ||', owner.index('mailroom account add')) < owner.index('mailroom keychain refs')

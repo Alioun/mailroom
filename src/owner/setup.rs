@@ -39,8 +39,15 @@ fn repository_if(
         Arc::new(crate::acquisition::OsCredentials),
     ))
 }
+enum Entry {
+    Credential(Command),
+    Maintenance(super::maintenance::Command),
+}
 pub(super) fn run(tail: &[&str]) -> u8 {
-    let Some(command) = parse(tail) else {
+    let entry = parse(tail)
+        .map(Entry::Credential)
+        .or_else(|| super::maintenance::parse(tail).map(Entry::Maintenance));
+    let Some(entry) = entry else {
         return status("usage", false);
     };
     let helper = crate::native::installed().ok();
@@ -55,7 +62,14 @@ pub(super) fn run(tail: &[&str]) -> u8 {
     let Ok(repository) = repository else {
         return status(repository.err().unwrap(), false);
     };
-    match perform(&repository, command, &mut hidden, &mut Boundary::native()) {
+    let mut boundary = Boundary::native();
+    let result = match entry {
+        Entry::Credential(command) => perform(&repository, command, &mut hidden, &mut boundary),
+        Entry::Maintenance(command) => {
+            super::maintenance::perform(&repository, command, &mut boundary)
+        }
+    };
+    match result {
         Ok(code) => status(code, true),
         Err(code) => status(code, false),
     }

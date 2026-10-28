@@ -18,6 +18,14 @@ The native dialog names the exact local operation, account, provider and login. 
 
 Setup creates mode-0700 directories relative to checked parent descriptors. It rejects symlinks, granting ACLs, unsafe ownership and writable shared parents. An existing final directory with broader permissions is refused, not silently repaired. The credential-free checks exercise injected input, native replies and memory credentials. Actual hidden terminal entry, Keychain dialogs and installed helper invocation still need approved owner-run acceptance. Changing this code or its wizard requires fresh secret-flow review and exact approval before real use.
 
+## Local maintenance
+
+The frozen wizard has an optional `maintenance` phase. It first checks the frozen tree and installed identities. It then offers reconciliation of recorded local lifecycle operations, key rotation and local forgetting. Each consequential operation gets exact native confirmation. The installed binary accepts only an operation and account ID on argv. It chooses fixed private local directories and prints one fixed result record. It reads the selected protected mailbox credential only when reconciling a published password replacement, to verify it before retiring the previous reference. It never contacts a provider.
+
+Forgetting derives its resource preview while the account lease and every dependent store lock remain held. The native request binds that exact preview and names the local deletion consequences. Rotation binds the current account, revision and resource manifest before any new key or lifecycle intent is written. Local recovery binds the validated recorded intent before cleanup or key retirement. It describes the pending phase, including continued deletion when applicable. No pending intent means no confirmation or effect. An incomplete recovery-bundle restore blocks these lifecycle actions.
+
+Active account work keeps its account lease, so the separate owner command refuses competing work. It cannot cancel or join another process's worker. Stop active work first and reopen the app after maintenance. Production HTTP lifecycle stays closed. These controls require exact approval and installed owner-run verification before real use.
+
 ## Helper launch
 
 macOS refuses to execute an already-open descriptor (`/dev/fd/N` returns EACCES), so mailroom checks the started process instead. It rejects symlinks, non-regular files, and files or parent directories that other users can write. It starts the helper suspended with a fixed argv, an empty environment, stdin and stdout pipes, `/dev/null` as stderr and every other descriptor closed. It reads the kernel's cdhash and code-signing flags for that process and resumes it only when the cdhash matches the pin and the hardened runtime, kill and hard flags are set. The answer must carry an HMAC under a challenge sent only on the helper's stdin. Any process may start the helper and see a dialog, but no answer it obtains is accepted by mailroom. The Developer ID requirement is a typed slot (`Pin::DeveloperIdRequirement`) that this build refuses.
@@ -66,6 +74,7 @@ mailroom keychain settle | adopt <account>
 mailroom native-check
 mailroom account add gmail | mailbox_org
 mailroom account replace-password <account-id>
+mailroom account forget | rotate-key | recover-local <account-id>
 ```
 
 Options are parsed before any backend opens. A missing value, a repeated option or an unknown option prints `status=usage`. `enroll` reads the password twice from the controlling terminal with echo off and never from a pipe.
@@ -129,6 +138,12 @@ F=/usr/local/share/mailroom/setup-$COMMIT/scripts/setup-macos-protection.sh
 /usr/bin/env -i HOME="$HOME" TERM="$TERM" PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p "$F" build
 /usr/bin/sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p "$F" install <output directory the build printed>
 /usr/bin/env -i HOME="$HOME" TERM="$TERM" PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p "$F"
+```
+
+For approved local maintenance, run the same frozen wizard as the owner with the optional phase:
+
+```sh
+/usr/bin/env -i HOME="$HOME" TERM="$TERM" PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p "$F" maintenance
 ```
 
 Daily use runs `/usr/local/libexec/mailroom/mailroom`, which serves the root-owned UI copy installed beside it. Each phase stops with "Setup incomplete" on any unexpected result and keeps fixed records.

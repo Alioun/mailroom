@@ -17,6 +17,7 @@ unsafe extern "C" {
         flags: std::ffi::c_int,
     ) -> *mut std::ffi::c_char;
 }
+mod maintenance;
 mod setup;
 
 const RPP_REQUIRE_TTY: std::ffi::c_int = 0x02;

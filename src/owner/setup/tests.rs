@@ -91,8 +91,19 @@ impl Backend for Reply {
             return Ok(b"not-authenticated".to_vec());
         }
         let value: serde_json::Value = serde_json::from_slice(request).unwrap();
-        assert_eq!(value["actions"][0]["purpose"], "local_account");
+        assert!(matches!(
+            value["actions"][0]["purpose"].as_str(),
+            Some("local_account" | "recovery")
+        ));
         assert_eq!(value["actions"].as_array().unwrap().len(), 1);
+        if value["actions"][0]["purpose"] == "recovery" {
+            assert!(
+                value["actions"][0]["consequences"]
+                    .as_str()
+                    .unwrap()
+                    .contains("owner@example.test")
+            );
+        }
         let id = value["request_id"].as_str().unwrap();
         let digest = data_encoding::HEXLOWER.encode(&Sha256::digest(request));
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(challenge).unwrap();
@@ -361,4 +372,244 @@ fn account_setup_receipts_bind_password_identity_provider_operation_and_revision
                 .is_err()
         );
     }
+}
+
+fn saved_account(f: &Fixture) -> Account {
+    perform(
+        &f.repo,
+        Command::Add(Provider::Gmail),
+        &mut input(&[b"owner@example.test", DUMMY, DUMMY]),
+        &mut approve(),
+    )
+    .unwrap();
+    f.repo.list().unwrap().remove(0)
+}
+fn maintenance(
+    f: &Fixture,
+    operation: super::super::maintenance::Operation,
+    id: &AccountId,
+    boundary: &mut Boundary,
+) -> Result<&'static str, &'static str> {
+    super::super::maintenance::perform(
+        &f.repo,
+        super::super::maintenance::Command {
+            operation,
+            account: id.clone(),
+        },
+        boundary,
+    )
+}
+#[test]
+fn local_maintenance_parses_only_fixed_operations_and_safe_account_ids() {
+    for verb in ["forget", "rotate-key", "recover-local"] {
+        assert!(super::super::maintenance::parse(&[verb, "saved-account"]).is_some());
+        assert!(super::super::maintenance::parse(&[verb, "../account"]).is_none());
+        assert!(super::super::maintenance::parse(&[verb, "saved-account", "--yes"]).is_none());
+    }
+    assert!(super::super::maintenance::parse(&["resume-provider", "saved-account"]).is_none());
+}
+#[test]
+fn local_maintenance_cancelled_or_forged_forget_and_rotation_leave_state_and_keys_unchanged() {
+    use super::super::maintenance::Operation;
+    for operation in [Operation::Forget, Operation::Rotate] {
+        for reply in [
+            Reply {
+                outcome: "cancelled",
+                malformed: false,
+            },
+            Reply {
+                outcome: "approved",
+                malformed: true,
+            },
+        ] {
+            let f = Fixture::new();
+            let account = saved_account(&f);
+            let metadata = serde_json::to_vec(&account).unwrap();
+            let cipher = std::fs::read(
+                f.repo
+                    .paths
+                    .data
+                    .join(format!("{}.census.enc", account.id.as_str())),
+            )
+            .unwrap();
+            let count = f.memory.0.lock().unwrap().len();
+            let mut boundary = Boundary::with_backend(Box::new(reply));
+            assert!(maintenance(&f, operation, &account.id, &mut boundary).is_err());
+            assert_eq!(boundary.accesses, 1);
+            assert!(serde_json::to_vec(&f.repo.load(&account.id).unwrap()).unwrap() == metadata);
+            assert!(
+                std::fs::read(
+                    f.repo
+                        .paths
+                        .data
+                        .join(format!("{}.census.enc", account.id.as_str()))
+                )
+                .unwrap()
+                    == cipher
+            );
+            assert_eq!(f.memory.0.lock().unwrap().len(), count);
+            assert!(f.repo.recovery_status().unwrap().is_empty());
+        }
+    }
+}
+#[test]
+fn local_maintenance_busy_account_denies_before_confirmation_and_unpinned_helper_denies_before_intent()
+ {
+    use super::super::maintenance::Operation;
+    let f = Fixture::new();
+    let account = saved_account(&f);
+    let store = f.repo.store(&account).unwrap();
+    for operation in [Operation::Forget, Operation::Rotate, Operation::Recover] {
+        let mut boundary = approve();
+        assert_eq!(
+            maintenance(&f, operation, &account.id, &mut boundary),
+            Err("recovery_required")
+        );
+        assert_eq!(boundary.accesses, 0);
+    }
+    drop(store);
+    let restore = f.repo.paths.config.join("recovery-selected.restore");
+    std::fs::write(&restore, b"DUMMY-RESTORE-HOLD").unwrap();
+    let mut held = approve();
+    assert_eq!(
+        maintenance(&f, Operation::Recover, &account.id, &mut held),
+        Err("recovery_required")
+    );
+    assert_eq!(held.accesses, 0);
+    std::fs::remove_file(restore).unwrap();
+
+    let mut boundary = Boundary::native();
+    assert_eq!(
+        maintenance(&f, Operation::Forget, &account.id, &mut boundary),
+        Err("denied")
+    );
+    assert!(f.repo.recovery_status().unwrap().is_empty());
+    assert!(f.repo.store(&account).unwrap().load_state().is_ok());
+}
+#[test]
+fn local_maintenance_rotation_preserves_exact_state_and_forget_preserves_ledger_and_other_accounts()
+{
+    use super::super::maintenance::Operation;
+    let f = Fixture::new();
+    let account = saved_account(&f);
+    let other = f
+        .repo
+        .create(
+            Provider::MailboxOrg,
+            "other@example.test".into(),
+            &SecretValue::new(b"OTHER-DUMMY-7eaa".to_vec()),
+        )
+        .unwrap();
+    let other_metadata = serde_json::to_vec(&other).unwrap();
+    let other_state =
+        serde_json::to_vec(&f.repo.store(&other).unwrap().load_state().unwrap()).unwrap();
+    let ledger = crate::ledger::InstalledLedger::install_under(&f.repo.paths.data).unwrap();
+    let ledger_bytes = std::fs::read(f.repo.paths.data.join("ledger/addresses.yaml")).unwrap();
+    drop(ledger);
+    let store = f.repo.store(&account).unwrap();
+    let mut saved = store.load_state().unwrap();
+    saved
+        .synthetic_uid_next
+        .insert("operation-identity-survives".into(), 92);
+    saved.winddown.settings.winding_down = true;
+    store.save_state(&mut saved).unwrap();
+    let before = serde_json::to_vec(&saved).unwrap();
+    drop(store);
+    assert_eq!(
+        maintenance(&f, Operation::Rotate, &account.id, &mut approve()),
+        Ok("rotated")
+    );
+    let rotated = f.repo.load(&account.id).unwrap();
+    assert_ne!(rotated.key_references(), account.key_references());
+    let mut reopened = f.repo.store(&rotated).unwrap().load_state().unwrap();
+    assert_eq!(reopened.revision, saved.revision + 1);
+    reopened.revision = saved.revision;
+    assert!(serde_json::to_vec(&reopened).unwrap() == before);
+    assert!(f.memory.get(account.key_references()[0]).is_err());
+    assert_eq!(
+        maintenance(&f, Operation::Forget, &account.id, &mut approve()),
+        Ok("forgotten")
+    );
+    assert!(f.repo.load(&account.id).is_err());
+    for reference in rotated.credential_references() {
+        assert!(f.memory.get(reference).is_err());
+    }
+    assert!(
+        std::fs::read(f.repo.paths.data.join("ledger/addresses.yaml")).unwrap() == ledger_bytes
+    );
+    assert!(serde_json::to_vec(&f.repo.load(&other.id).unwrap()).unwrap() == other_metadata);
+    assert!(
+        serde_json::to_vec(&f.repo.store(&other).unwrap().load_state().unwrap()).unwrap()
+            == other_state
+    );
+}
+struct FailPassword(Arc<Memory>);
+impl CredentialBackend for FailPassword {
+    fn get(&self, r: &str) -> Result<SecretValue, AcquisitionError> {
+        self.0.get(r)
+    }
+    fn put(&self, r: &str, v: &SecretValue) -> Result<(), AcquisitionError> {
+        if r.ends_with("-password") {
+            Err(AcquisitionError::Credentials)
+        } else {
+            self.0.put(r, v)
+        }
+    }
+    fn delete(&self, r: &str) -> Result<(), AcquisitionError> {
+        self.0.delete(r)
+    }
+}
+#[test]
+fn local_maintenance_recovery_requires_consent_before_cleaning_unpublished_creation_and_is_idempotent()
+ {
+    use super::super::maintenance::Operation;
+    let f = Fixture::new();
+    let failing = Accounts::new(
+        f.repo.paths.clone(),
+        Arc::new(FailPassword(f.memory.clone())),
+    );
+    assert!(
+        failing
+            .create(
+                Provider::Gmail,
+                "owner@example.test".into(),
+                &SecretValue::new(DUMMY.to_vec())
+            )
+            .is_err()
+    );
+    let pending = f.repo.recovery_status().unwrap();
+    assert_eq!(pending.len(), 1);
+    let id = &pending[0].account;
+    let path = f
+        .repo
+        .paths
+        .config
+        .join("lifecycle")
+        .join(format!("{}.json", id.as_str()));
+    let intent = std::fs::read(&path).unwrap();
+    let count = f.memory.0.lock().unwrap().len();
+    assert_eq!(count, 1);
+    let mut cancel = Boundary::with_backend(Box::new(Reply {
+        outcome: "cancelled",
+        malformed: false,
+    }));
+    assert_eq!(
+        maintenance(&f, Operation::Recover, id, &mut cancel),
+        Err("cancelled")
+    );
+    assert!(std::fs::read(&path).unwrap() == intent);
+    assert_eq!(f.memory.0.lock().unwrap().len(), count);
+    assert_eq!(
+        maintenance(&f, Operation::Recover, id, &mut approve()),
+        Ok("recovered")
+    );
+    assert!(!path.exists());
+    assert!(f.memory.0.lock().unwrap().is_empty());
+    assert!(f.repo.list().unwrap().is_empty());
+    let mut no_work = Boundary::native();
+    assert_eq!(
+        maintenance(&f, Operation::Recover, id, &mut no_work),
+        Ok("recovered")
+    );
+    assert_eq!(no_work.accesses, 0);
 }

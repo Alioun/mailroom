@@ -28,6 +28,24 @@ enum Intent {
         account: AccountId,
     },
 }
+impl Intent {
+    fn account(&self) -> Option<&Account> {
+        match self {
+            Self::Creating { account } | Self::Forgetting { account, .. } => Some(account),
+            Self::Replacing { before, .. } | Self::Rotating { before, .. } => Some(before),
+            Self::Forgotten { .. } => None,
+        }
+    }
+    fn state(&self) -> LifecycleState {
+        match self {
+            Self::Creating { .. } => LifecycleState::Creating,
+            Self::Replacing { .. } => LifecycleState::Replacing,
+            Self::Forgetting { .. } => LifecycleState::Forgetting,
+            Self::Rotating { .. } => LifecycleState::Rotating,
+            Self::Forgotten { .. } => LifecycleState::Forgotten,
+        }
+    }
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LifecycleRecord {
@@ -115,7 +133,7 @@ impl Accounts {
             fs::TryLockError::Error(_) => AcquisitionError::Storage,
         })
     }
-    pub(super) fn require_ready(&self, id: &AccountId) -> Result<(), AcquisitionError> {
+    pub(super) fn require_no_restore(&self, id: &AccountId) -> Result<(), AcquisitionError> {
         if self
             .paths
             .config
@@ -134,6 +152,10 @@ impl Accounts {
         {
             return Err(AcquisitionError::LifecyclePending);
         }
+        Ok(())
+    }
+    pub(super) fn require_ready(&self, id: &AccountId) -> Result<(), AcquisitionError> {
+        self.require_no_restore(id)?;
         if self
             .intent_path(id)
             .try_exists()
@@ -447,6 +469,14 @@ impl Accounts {
         effects: &Path,
     ) -> Result<ForgetPreview, AcquisitionError> {
         let store = self.open_store(a, &self.paths.data, 0)?;
+        self.preview_from_store(a, effects, &store)
+    }
+    fn preview_from_store(
+        &self,
+        a: &Account,
+        effects: &Path,
+        store: &EncryptedStore,
+    ) -> Result<ForgetPreview, AcquisitionError> {
         let revision = store.load_state()?.revision;
         let mut value = ForgetPreview {
             account: a.id.clone(),
@@ -483,18 +513,29 @@ impl Accounts {
         confirmed: bool,
     ) -> Result<(), AcquisitionError> {
         use subtle::ConstantTimeEq;
+        self.forget_reviewed(id, effects, |_, current| {
+            if !confirmed
+                || !bool::from(preview.receipt.as_bytes().ct_eq(current.receipt.as_bytes()))
+                || serde_json::to_vec(preview).ok() != serde_json::to_vec(current).ok()
+            {
+                return Err(AcquisitionError::InvalidInput);
+            }
+            Ok(())
+        })
+    }
+    pub(crate) fn forget_reviewed(
+        &self,
+        id: &AccountId,
+        effects: &Path,
+        authorize: impl FnOnce(&Account, &ForgetPreview) -> Result<(), AcquisitionError>,
+    ) -> Result<(), AcquisitionError> {
         let _lease = self.lock_account(id)?;
         self.require_ready(id)?;
         let a = self.load_metadata(id)?;
-        let current = self.preview_locked(&a, effects)?;
-        if !confirmed
-            || !bool::from(preview.receipt.as_bytes().ct_eq(current.receipt.as_bytes()))
-            || serde_json::to_vec(preview).ok() != serde_json::to_vec(&current).ok()
-        {
-            return Err(AcquisitionError::InvalidInput);
-        }
-        // Hold every store lock until deletion is durably complete. Lock paths survive.
-        let _stores = self.lock_stores(&a, effects)?;
+        // Derive and confirm the exact preview while every dependent store stays locked.
+        let stores = self.lock_stores(&a, effects)?;
+        let current = self.preview_from_store(&a, effects, &stores[0])?;
+        authorize(&a, &current)?;
         self.record(
             id,
             &Intent::Forgetting {
@@ -570,12 +611,20 @@ impl Accounts {
         )
     }
     pub fn rotate(&self, id: &AccountId, effects: &Path) -> Result<(), AcquisitionError> {
+        self.rotate_reviewed(id, effects, |_, _, _| Ok(()))
+    }
+    pub(crate) fn rotate_reviewed(
+        &self,
+        id: &AccountId,
+        effects: &Path,
+        authorize: impl FnOnce(&Account, u64, &[Resource]) -> Result<(), AcquisitionError>,
+    ) -> Result<(), AcquisitionError> {
         let _lease = self.lock_account(id)?;
         self.require_ready(id)?;
         let before = self.load_metadata(id)?;
         let stores = self.lock_stores(&before, effects)?;
         let identity = Zeroizing::new(stores[0].keys().identity_material());
-        stores[0].load_state()?;
+        let revision = stores[0].load_state()?.revision;
         let present = stores
             .iter()
             .enumerate()
@@ -621,6 +670,7 @@ impl Accounts {
                 return Err(AcquisitionError::InvalidInput);
             }
         }
+        authorize(&before, revision, &self.manifest(&before, effects)?)?;
         let mut key = Zeroizing::new(vec![0; 32]);
         OsRng.fill_bytes(&mut key);
         after.identity_commitment = CensusKeys::rotated(
@@ -745,21 +795,37 @@ impl Accounts {
                         .and_then(|s| s.to_str())
                         .ok_or(AcquisitionError::Storage)?,
                 )?;
-                let state = match self.intent(&id)?.ok_or(AcquisitionError::Storage)? {
-                    Intent::Creating { .. } => LifecycleState::Creating,
-                    Intent::Replacing { .. } => LifecycleState::Replacing,
-                    Intent::Forgetting { .. } => LifecycleState::Forgetting,
-                    Intent::Rotating { .. } => LifecycleState::Rotating,
-                    Intent::Forgotten { .. } => LifecycleState::Forgotten,
-                };
+                let state = self.intent(&id)?.ok_or(AcquisitionError::Storage)?.state();
                 result.push(Recovery { account: id, state });
             }
         }
         Ok(result)
     }
     pub fn recover(&self, id: &AccountId, effects: &Path) -> Result<(), AcquisitionError> {
+        self.recover_reviewed(id, effects, |_, _, _| Ok(()))
+    }
+    pub(crate) fn recover_reviewed(
+        &self,
+        id: &AccountId,
+        effects: &Path,
+        authorize: impl FnOnce(&Account, LifecycleState, &[u8]) -> Result<(), AcquisitionError>,
+    ) -> Result<(), AcquisitionError> {
         let _lease = self.lock_account(id)?;
-        match self.intent(id)? {
+        self.require_no_restore(id)?;
+        let intent = self.intent(id)?;
+        if let Some(pending) = &intent {
+            if !matches!(pending, Intent::Forgotten { .. }) {
+                let bytes = Zeroizing::new(
+                    serde_json::to_vec(pending).map_err(|_| AcquisitionError::Storage)?,
+                );
+                authorize(
+                    pending.account().ok_or(AcquisitionError::Storage)?,
+                    pending.state(),
+                    &bytes,
+                )?;
+            }
+        }
+        match intent {
             None | Some(Intent::Forgotten { .. }) => Ok(()),
             Some(Intent::Creating { account }) => {
                 if self.metadata_path(id).exists() {

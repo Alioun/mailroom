@@ -39,12 +39,15 @@ assert.equal(view.report.rows[6].evidence.kind, 'unknown')
 const selection = view.report.rows[0].id, target = 'accounting'
 let preview = await command('preview', { selection, target })
 const oldReceipt = preview.receipt
-const fallback = await command('prepare_mail_app', { selection, target })
-assert.equal(fallback.preview.native_available, false)
-assert.equal(fallback.preview.plan.source.original, preview.plan.source.original)
-assert.equal(fallback.status, 'preparation_only')
-assert.deepEqual(fallback.handoff_request, { kind: 'forward_original', message_id: fallback.preview.plan.source.original.match(/^Message-ID: <([^>]+)>\r$/m)[1], target: fallback.preview.plan.target }, 'Mail-app handoff request names the original and target; nothing launched')
-await command('send', { selection, target, receipt: fallback.preview.receipt, confirmation_action: preview.plan.confirmation_action }, 422)
+for (const mode of ['smtp', 'mail_app']) {
+  const denied = await command('preview', { selection, target, mode }, 403)
+  assert.equal(denied.error, 'Denied: all real-account mutations are locked in this unit', `${mode}: the wired route reaches the write policy, which denies it`)
+  await command('send', { selection, target, receipt: preview.receipt, confirmation_action: preview.plan.confirmation_action, mode }, 403)
+}
+await command('resolve', { send: 'a'.repeat(64), resolution: 'not_sent' }, 403)
+await command('prepare_mail_app', { selection, target }, 422)
+await command('acquire', { selection }, 422)
+await command('send', { selection, target, receipt: 'b'.repeat(64), confirmation_action: preview.plan.confirmation_action }, 422)
 await command('send', { selection, target, receipt: preview.receipt, confirmation_action: 'Send something else' }, 422)
 await command('send', { selection, target, receipt: preview.receipt, confirmation_action: preview.plan.confirmation_action, confirmed: true }, 422)
 await command('send', { selection: view.report.rows[1].id, target, receipt: preview.receipt, confirmation_action: preview.plan.confirmation_action }, 422)
@@ -76,5 +79,5 @@ assert.equal(Object.keys(view.received).length, 1)
 saved = await post('workspace/open', { account })
 await post('workspace/save', { account, revision: saved.revision, input: { ...input, documents: sample.documents } })
 view = await command('open'); assert.equal(view.report.count, 0)
-console.log(`PASS ${gmail ? 'Gmail' : 'IMAP'} invoice HTTP exact MIME/attachment send, named confirmation, altered/replayed/stale/cross-purpose authority denials, seven evidence cases, bulk, body conversion, refresh report/count, role exclusion, native preparation only, acceptance unknown`)
+console.log(`PASS ${gmail ? 'Gmail' : 'IMAP'} invoice HTTP exact MIME/attachment send, named confirmation, altered/replayed/stale/cross-purpose authority denials, seven evidence cases, bulk, body conversion, refresh report/count, role exclusion, wired SMTP and Mail routes denied by policy, acceptance unknown`)
 }

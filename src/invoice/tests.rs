@@ -402,6 +402,12 @@ mod adapters {
             SENDER,
         )
         .unwrap();
+        let id = consent(state, p);
+        store.save_state(state).unwrap();
+        id
+    }
+    /// Confirms `p` through the synthetic boundary and records its intent.
+    fn consent(state: &mut AccountState, p: Preview) -> String {
         let action = p.plan.confirmation_action.clone();
         let mut boundary = crate::confirmation::Boundary::synthetic();
         let plan = confirmation_plan(&p);
@@ -409,9 +415,7 @@ mod adapters {
         let consent = boundary
             .confirm(&handle, &plan, || Ok(plan.clone()))
             .unwrap();
-        let id = record_intent(state, p, &consent, &action).unwrap();
-        store.save_state(state).unwrap();
-        id
+        record_intent(state, p, &consent, &action).unwrap()
     }
     fn timeouts() -> Timeouts {
         Timeouts {
@@ -586,7 +590,7 @@ mod adapters {
             SENDER,
         )
         .unwrap();
-        let id = record_handoff(&mut state, p).unwrap();
+        let id = consent(&mut state, p);
         store.save_state(&mut state).unwrap();
         let recorder = Recorder::default();
         hand_off(&mut state, &id, &recorder).unwrap();
@@ -627,10 +631,159 @@ mod adapters {
             SENDER,
         )
         .unwrap();
-        let id = record_handoff(&mut state, p).unwrap();
+        let id = consent(&mut state, p);
         hand_off(&mut state, &id, &Refusing).unwrap();
         store.save_state(&mut state).unwrap();
         assert_eq!(status(&store, &id).0, Status::NotSent);
+    }
+
+    #[test]
+    fn the_owner_resolves_only_uncertain_sends_and_sees_sent_folder_copies() {
+        use crate::send::Resolution;
+        let (_dir, store, mut state) = fixture();
+        let id = confirmed(&mut state, &store, SendMode::Smtp);
+        assert!(
+            resolve(&mut state, &id, Resolution::Sent).is_err(),
+            "a send still in progress is not resolved"
+        );
+        let mut state = store.load_state().unwrap();
+        assert_eq!(state.invoices.sends[0].status, Status::Uncertain);
+        assert_eq!(sent_evidence(&state)[&id], Vec::<String>::new());
+        let mut sent = state.census.folders["INBOX"].clone();
+        sent.messages.retain(|uid, _| *uid == 1);
+        sent.messages.get_mut(&1).unwrap().headers.direction = crate::census::Direction::Sent;
+        state.census.folders.insert("Gesendet".into(), sent);
+        assert_eq!(
+            sent_evidence(&state)[&id],
+            vec!["Gesendet/1/1".to_owned()],
+            "a Sent copy with the original's Message-ID is offered as evidence"
+        );
+        resolve(&mut state, &id, Resolution::Sent).unwrap();
+        assert_eq!(
+            (
+                &state.invoices.sends[0].status,
+                state.invoices.sends[0].resolved
+            ),
+            (&Status::Completed, Some(Resolution::Sent))
+        );
+        assert!(
+            resolve(&mut state, &id, Resolution::NotSent).is_err(),
+            "a resolved send stays resolved"
+        );
+        assert!(sent_evidence(&state).is_empty());
+        let row = report(&state, Provider::MailboxOrg, true, store.keys())
+            .unwrap()
+            .rows
+            .into_iter()
+            .find(|r| r.id == "INBOX/1/1");
+        assert!(
+            row.is_none(),
+            "an owner-recorded send leaves the missed-invoice report"
+        );
+
+        let (_dir, store, mut state) = fixture();
+        let id = confirmed(&mut state, &store, SendMode::Smtp);
+        drop(state);
+        let mut state = store.load_state().unwrap();
+        resolve(&mut state, &id, Resolution::NotSent).unwrap();
+        store.save_state(&mut state).unwrap();
+        let state = store.load_state().unwrap();
+        assert_eq!(
+            (
+                &state.invoices.sends[0].status,
+                state.invoices.sends[0].resolved
+            ),
+            (&Status::NotSent, Some(Resolution::NotSent))
+        );
+        let row = report(&state, Provider::MailboxOrg, true, store.keys())
+            .unwrap()
+            .rows
+            .into_iter()
+            .find(|r| r.id == "INBOX/1/1")
+            .unwrap();
+        assert!(
+            row.send_available,
+            "a fresh preview and confirmation may send it again"
+        );
+        let again = preview(
+            &state,
+            Provider::MailboxOrg,
+            store.keys(),
+            "INBOX/1/1",
+            "accounting",
+            true,
+            SendMode::Smtp,
+            SENDER,
+        )
+        .unwrap();
+        assert_ne!(
+            again.receipt, id,
+            "the earlier confirmation cannot be reused"
+        );
+
+        let (_dir, store, mut state) = fixture();
+        let p = preview(
+            &state,
+            Provider::MailboxOrg,
+            store.keys(),
+            "INBOX/1/1",
+            "accounting",
+            true,
+            SendMode::SyntheticTransport,
+            SYNTHETIC_SENDER,
+        )
+        .unwrap();
+        let id = consent(&mut state, p);
+        store.save_state(&mut state).unwrap();
+        let mut state = store.load_state().unwrap();
+        assert!(
+            resolve(&mut state, &id, Resolution::NotSent).is_err(),
+            "synthetic sends reconcile against their fixture instead"
+        );
+    }
+
+    #[test]
+    fn wired_modes_name_the_exact_message_bytes_and_need_an_acquired_original() {
+        let (_dir, store, mut state) = fixture();
+        for mode in [SendMode::Smtp, SendMode::MailAppHandoff] {
+            assert!(
+                preview(
+                    &state,
+                    Provider::MailboxOrg,
+                    store.keys(),
+                    "INBOX/1/1",
+                    "accounting",
+                    true,
+                    mode,
+                    SENDER
+                )
+                .is_err(),
+                "a fixture source is not handed to a real adapter"
+            );
+        }
+        acquire(&mut state, &store);
+        let original = state.invoices.sources["INBOX/1/1"].original.clone();
+        for (mode, purpose) in [
+            (SendMode::Smtp, "smtp_send"),
+            (SendMode::MailAppHandoff, "mail_app_handoff"),
+        ] {
+            let p = preview(
+                &state,
+                Provider::MailboxOrg,
+                store.keys(),
+                "INBOX/1/1",
+                "accounting",
+                true,
+                mode,
+                SENDER,
+            )
+            .unwrap();
+            let action = serde_json::to_value(&confirmation_plan(&p).actions[0]).unwrap();
+            assert_eq!(action["purpose"], purpose);
+            assert_eq!(action["target"], "archive@example.net");
+            assert_eq!(action["sending_identity"], SENDER);
+            assert_eq!(action["content_digest"], digest(original.as_bytes()));
+        }
     }
 
     #[test]

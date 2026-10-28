@@ -26,7 +26,7 @@ A dedicated full HMAC binds the account, complete state, source location and Mes
 
 Only server-installed synthetic transport and action-naming synthetic confirmation adapters execute. The server persists intent, independently persists the fake received plan under separately derived encryption keys, and then records observation. Process replacement turns an unobserved intent into uncertainty. Recovery reconciles an exact independently durable fake acknowledgment. A missing acknowledgment stays uncertain and never triggers a blind retry. Completed sends have no Undo. An unfinished invoice operation blocks starting a backlog operation and another invoice send.
 
-The mail-app action returns preparation containing the original MIME and target. It launches nothing. There is no blank compose substitution. A functioning native forward-original integration, true OS confirmation, approved real sending identities, and SMTP are incomplete. The checkbox explicitly confirms a synthetic action only.
+The synthetic checkbox confirms a synthetic action only. There is no blank compose substitution.
 
 ## Real adapters
 
@@ -38,7 +38,13 @@ SMTP submission uses implicit TLS or STARTTLS with certificate verification. A s
 
 The mail-app handoff asks Apple Mail to open its own copy of the message, found by Message-ID, in a forward window with the target filled in. The AppleScript goes to `/usr/bin/osascript -` on stdin with an empty environment, and Finder opens Mail first. The send is recorded as `handed_off`, never as sent. Tests use a recorder that launches nothing. Other mail apps are not supported.
 
-These adapters are reachable only from tests. Production wiring needs the account's password reference and SMTP settings, a secret-flow review and owner approval. `policy::authorize` still denies every send.
+## Production routes
+
+The invoice route's `acquire` action runs original-message acquisition through the account's IMAP login, as a census does. `preview` and `send` with `mode` `smtp` or `mail_app` use the real adapters: SMTP goes to the provider's submission server (`smtp.mailbox.org` or `smtp.gmail.com`, port 465, implicit TLS) with the account login as sending identity and its password reference read by `send::smtp_secret`; the handoff opens Mail. Both need an acquired original. The confirmation boundary names them as `smtp_send` and `mail_app_handoff`, binding account, operation, target, sending identity and the SHA-256 of the exact message bytes. The handoff sends nothing, but no app opens unconfirmed.
+
+Every wired action first asks `send::wiring::Endpoints` for a `policy::WritePermit`, before any repository, credential, confirmation or network access, and every real adapter requires that permit. `policy::authorize` denies every account write, so production answers 403 with the policy's reason. Tests install loopback fakes through `policy::fake_write_permit`, which exists only in test builds and refuses any endpoint off loopback.
+
+`resolve` records the owner's finding for an uncertain SMTP send or handoff as `sent` or `not_sent`, after checking the Sent folder. The route offers census messages in Sent mail with the original's Message-ID as `sent_evidence`, read from the saved census only. Nothing is resent. A send recorded as not sent can be sent again only through a fresh preview and confirmation, whose receipt differs because the state changed. Only an uncertain send can be resolved.
 
 ## Verification and limits
 

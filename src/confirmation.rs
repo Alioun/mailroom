@@ -62,6 +62,30 @@ pub(crate) enum ExactAction {
         effect: String,
         destination: Option<String>,
     },
+    /// One SMTP submission of exact message bytes through the account's server.
+    SmtpSend {
+        account: String,
+        operation: String,
+        target: String,
+        sending_identity: String,
+        content_digest: String,
+    },
+    /// One native HTTPS POST of `List-Unsubscribe=One-Click`; `target` is the URI host.
+    OneClickPost {
+        account: String,
+        operation: String,
+        target: String,
+        sending_identity: String,
+        content_digest: String,
+    },
+    /// Opens a message in the mail app. Sends nothing, but no app opens unconfirmed.
+    MailAppHandoff {
+        account: String,
+        operation: String,
+        target: String,
+        sending_identity: String,
+        content_digest: String,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -96,6 +120,9 @@ fn display(actions: &[ExactAction]) -> String {
         ExactAction::UnsubscribeLocalMail {account, target, sending_identity, receiving_identity, subject, content_digest, ..} => format!("Send this unsubscribe message for account {account} to {target} from {sending_identity}, received at {receiving_identity}. Subject {subject}. Exact content SHA-256 {content_digest}. Success unknown. No Undo."),
         ExactAction::MailboxChange {account, operation, plan_receipt} => format!("{operation} for account {account}. Exact previewed plan receipt {plan_receipt}. Mailbox changes reach the provider."),
         ExactAction::SubscriptionAction {account, subscription, method, receiving_identity, host, content_digest, effect, ..} => format!("Apply synthetic {} for subscription {subscription}, account {account}, received at {receiving_identity}, host {}. Payload SHA-256 {content_digest}. {effect}", serde_json::to_string(method).expect("Method encoding"), host.as_deref().unwrap_or("none")),
+        ExactAction::SmtpSend {account, operation, target, sending_identity, content_digest} => format!("{operation} for account {account}. Send by SMTP to {target} from {sending_identity}. Exact content SHA-256 {content_digest}. Sent mail has no Undo."),
+        ExactAction::OneClickPost {account, operation, target, sending_identity, content_digest} => format!("{operation} for account {account}. One HTTPS POST of List-Unsubscribe=One-Click to {target} for mail received at {sending_identity}. Exact URI SHA-256 {content_digest}. Success unknown. No Undo."),
+        ExactAction::MailAppHandoff {account, operation, target, sending_identity, content_digest} => format!("{operation} for account {account}. Open Mail with a message to {target} from {sending_identity}. Exact content SHA-256 {content_digest}. Nothing is sent unless you send it in Mail."),
     }).collect::<Vec<_>>().join("\n")
 }
 

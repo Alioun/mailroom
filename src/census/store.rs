@@ -40,8 +40,9 @@ const MIN_FRAME_BUDGET: u64 = 64 * 1024;
 /// census folder's `highestmodseq`. 21 adds Gmail `label_provisioning` and
 /// `closed` on backlog runs. 22 adds acquired invoice originals, SMTP and
 /// mail-app send records and their statuses, and SMTP outcomes on unsubscribe
-/// history.
-pub(crate) const SCHEMA: u32 = 22;
+/// history. 23 adds the owner's `resolved` finding on uncertain invoice sends and
+/// local unsubscribe mail.
+pub(crate) const SCHEMA: u32 = 23;
 
 pub struct LocalSecret(Zeroizing<Vec<u8>>);
 
@@ -1357,6 +1358,9 @@ impl EncryptedStore {
         if version < 22 && uses_send_adapters(&state) {
             return Err(CensusError::UnsupportedVersion);
         }
+        if version < 23 && uses_resolutions(&state) {
+            return Err(CensusError::UnsupportedVersion);
+        }
         if version < 21
             && (!state.label_provisioning.is_empty()
                 || state
@@ -1598,6 +1602,16 @@ fn uses_send_adapters(state: &AccountState) -> bool {
                         | unsubscribe::Status::HandedOff
                 )
         })
+}
+
+/// Whether `state` holds anything only schema 23 can express.
+fn uses_resolutions(state: &AccountState) -> bool {
+    state.invoices.sends.iter().any(|s| s.resolved.is_some())
+        || state
+            .unsubscribe
+            .history
+            .iter()
+            .any(|e| e.resolved.is_some())
 }
 
 fn normalize_interrupted(state: &mut AccountState) {

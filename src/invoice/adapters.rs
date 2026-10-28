@@ -1,8 +1,6 @@
 //! The real adapters' side of invoice send-on: acquired originals, SMTP
-//! submission and mail-app handoff. Only tests reach these until production
-//! wiring passes secret-flow review and owner approval; `policy::authorize`
-//! still denies every send.
-#![cfg_attr(not(test), allow(dead_code))]
+//! submission and mail-app handoff. Routes reach the send adapters only with a
+//! `policy::WritePermit`, which `policy::authorize` still denies.
 use super::*;
 
 /// Most acquired originals one account keeps.
@@ -100,14 +98,6 @@ pub(crate) fn submit_smtp(
     };
     send.smtp = Some(outcome);
     Ok(())
-}
-
-/// Records the intent to open a previewed original in the mail app.
-pub(crate) fn record_handoff(state: &mut AccountState, preview: Preview) -> Result<String, String> {
-    if preview.plan.mode != SendMode::MailAppHandoff {
-        return Err("Not a mail-app handoff".into());
-    }
-    push_intent(state, preview)
 }
 
 /// Asks the mail app to open a recorded handoff. Never records the message as sent.

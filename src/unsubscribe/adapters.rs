@@ -1,8 +1,7 @@
 //! The real adapters' side of unsubscribe: the native one-click POST, SMTP
 //! submission of local unsubscribe mail and the mail-app `mailto:` handoff.
-//! Only tests reach these until production wiring passes secret-flow review
-//! and owner approval; `policy::authorize` still denies every unsubscribe.
-#![cfg_attr(not(test), allow(dead_code))]
+//! The route reaches them only with a `policy::WritePermit`, which
+//! `policy::authorize` still denies.
 use super::{safety::Mail, *};
 
 fn intent<'a>(

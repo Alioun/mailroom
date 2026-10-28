@@ -1,7 +1,4 @@
 //! Typed facts read from the exact bytes of one original message.
-//! Only tests reach this until production wiring passes secret-flow review and
-//! owner approval.
-#![cfg_attr(not(test), allow(dead_code))]
 use crate::{
     census::{Direction, HeaderRecord, parse_headers},
     invoice::{Attachment, Body, ContentEvidence},

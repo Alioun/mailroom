@@ -11,6 +11,8 @@ pub(super) mod sieve_transactions;
 pub(super) mod subscription_review;
 pub(super) mod unsubscribe;
 pub(super) mod winddown;
+#[cfg(test)]
+mod wiring_tests;
 use super::{AppState, EmptyRequest};
 use crate::{
     acquisition::{
@@ -39,6 +41,8 @@ pub(super) struct AccountController {
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     ledger: Option<crate::ledger::InstalledLedger>,
     confirmations: Mutex<crate::confirmation::Boundary>,
+    /// The real send, one-click and mail-app adapters, each behind a write permit.
+    writes: crate::send::wiring::Endpoints,
     #[cfg(test)]
     repository_accesses: std::sync::atomic::AtomicUsize,
 }
@@ -118,6 +122,7 @@ impl AccountController {
             } else {
                 crate::confirmation::Boundary::native()
             }),
+            writes: crate::send::wiring::Endpoints::Real,
             #[cfg(test)]
             repository_accesses: std::sync::atomic::AtomicUsize::new(0),
             ledger,
@@ -895,7 +900,35 @@ async fn production_consequential_routes_deny_before_repository_or_confirmation_
         ),
         (
             "invoices",
-            json!({"account":"synthetic-account","command":{"action":"prepare_mail_app","selection":"INBOX/1/1","target":"accounting"}}),
+            json!({"account":"synthetic-account","command":{"action":"preview","selection":"INBOX/1/1","target":"accounting","mode":"smtp"}}),
+        ),
+        (
+            "invoices",
+            json!({"account":"synthetic-account","command":{"action":"preview","selection":"INBOX/1/1","target":"accounting","mode":"mail_app"}}),
+        ),
+        (
+            "invoices",
+            json!({"account":"synthetic-account","command":{"action":"send","selection":"INBOX/1/1","target":"accounting","receipt":"a".repeat(64),"confirmation_action":"yes","mode":"smtp"}}),
+        ),
+        (
+            "invoices",
+            json!({"account":"synthetic-account","command":{"action":"send","selection":"INBOX/1/1","target":"accounting","receipt":"a".repeat(64),"confirmation_action":"yes","mode":"mail_app"}}),
+        ),
+        (
+            "invoices",
+            json!({"account":"synthetic-account","command":{"action":"resolve","send":"a".repeat(64),"resolution":"not_sent"}}),
+        ),
+        (
+            "invoices",
+            json!({"account":"synthetic-account","command":{"action":"recover","send":"a".repeat(64)}}),
+        ),
+        (
+            "unsubscribe",
+            json!({"account":"synthetic-account","command":{"action":"resolve","entry":"a".repeat(64),"resolution":"sent","as_of":1792886400_i64}}),
+        ),
+        (
+            "unsubscribe",
+            json!({"account":"synthetic-account","command":{"action":"recover","entry":"a".repeat(64),"as_of":1792886400_i64}}),
         ),
         (
             "unsubscribe",
@@ -930,7 +963,23 @@ async fn production_consequential_routes_deny_before_repository_or_confirmation_
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path} {body}");
+        let wired = body["command"]["mode"].is_string()
+            || body["command"]["action"] == "resolve"
+            || (path == "unsubscribe" && body["command"]["action"] != "recover");
+        let answer: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        if wired {
+            assert_eq!(
+                answer["error"],
+                policy::authorize(Operation::SendMessage).reason,
+                "{path} {body}: the route reached the write policy, which denied it"
+            );
+        }
         assert_eq!(
             state
                 .accounts

@@ -380,6 +380,15 @@ impl Accounts {
     pub(crate) fn password(&self, account: &Account) -> Result<SecretValue, AcquisitionError> {
         self.backend.get(&account.password_ref)
     }
+    /// The account's SMTP login: its user, backend and password reference, never the password.
+    /// Only `send::smtp_secret` reads the password through it, after TLS is up.
+    pub(crate) fn smtp_login<'a>(&'a self, account: &'a Account) -> crate::send::smtp::Login<'a> {
+        crate::send::smtp::Login {
+            user: &account.login,
+            backend: self.backend.as_ref(),
+            reference: &account.password_ref,
+        }
+    }
     pub fn store(&self, account: &Account) -> Result<EncryptedStore, AcquisitionError> {
         let lease = self.lock_account(&account.id)?;
         self.require_ready(&account.id)?;

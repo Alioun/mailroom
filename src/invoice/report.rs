@@ -195,6 +195,11 @@ pub(crate) fn report(
                     && s.status != Status::NotSent
             });
             let handoff = match send.map(|s| (&s.status, &s.plan.mode)) {
+                Some((Status::Completed, _))
+                    if send.unwrap().resolved == Some(crate::send::Resolution::Sent) =>
+                {
+                    "owner_recorded_sent"
+                }
                 Some((Status::Completed, SendMode::SyntheticTransport))
                     if config
                         .targets
@@ -252,7 +257,11 @@ pub(crate) fn report(
                     ..
                 }
             ) || matches!(&evidence, ContentEvidence::Known { attachments, .. } if !attachments.is_empty() && !supported(attachments));
-            if !matches!(handoff, "synthetic_handoff" | "smtp_accepted") || possible_unusable {
+            if !matches!(
+                handoff,
+                "synthetic_handoff" | "smtp_accepted" | "owner_recorded_sent"
+            ) || possible_unusable
+            {
                 if business {
                     report.eligible_business += 1;
                 } else {

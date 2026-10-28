@@ -1,4 +1,5 @@
 mod adapters;
+mod authority;
 mod candidates;
 mod mute;
 pub(crate) mod one_click;
@@ -10,9 +11,8 @@ use crate::{
     acquisition::Provider,
     census::{AccountState, CensusKeys},
 };
-#[allow(unused_imports)]
 pub(crate) use adapters::{hand_off_mailto, post_one_click, submit_local_mail};
-pub(crate) use candidates::{report, source};
+pub(crate) use candidates::{Adapters, Wired, report, source, uris};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -77,6 +77,9 @@ pub struct Entry {
     /// The SMTP server's answer to a local unsubscribe message, reply codes only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smtp: Option<crate::send::smtp::Outcome>,
+    /// What the owner recorded after an uncertain local unsubscribe message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<crate::send::Resolution>,
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -153,6 +156,8 @@ pub struct Preview {
     pub local_mail_confirmation: Option<&'static str>,
     pub proof: Option<crate::rules::proof::Proof>,
     pub scope: &'static str,
+    /// Effects go to the wired real adapters, not the synthetic fixture.
+    pub wired: bool,
     pub(crate) confirmation: Option<crate::confirmation::Request>,
 }
 pub(crate) fn confirmation_plan(preview: &Preview) -> crate::confirmation::Plan {
@@ -162,6 +167,11 @@ pub(crate) fn confirmation_plan(preview: &Preview) -> crate::confirmation::Plan 
             .actions
             .iter()
             .map(|a| {
+                if preview.wired {
+                    if let Some(action) = wired_action(a) {
+                        return action;
+                    }
+                }
                 if a.method != Method::LocalMail {
                     return crate::confirmation::ExactAction::SubscriptionAction {
                         account: a.account.clone(),
@@ -194,20 +204,66 @@ pub(crate) fn confirmation_plan(preview: &Preview) -> crate::confirmation::Plan 
             .collect(),
     }
 }
+/// The exact action the wired adapters perform for `a`, or `None` for local-only actions.
+fn wired_action(a: &ActionPlan) -> Option<crate::confirmation::ExactAction> {
+    use crate::confirmation::ExactAction;
+    let card = a.copy_card.as_ref();
+    let mail = || Some((card?.to.clone()?, card?.from.clone()?));
+    Some(match a.method {
+        Method::OneClick => ExactAction::OneClickPost {
+            account: a.account.clone(),
+            operation: format!("Unsubscribe subscription {} with one click", a.subscription),
+            target: a.host.clone()?,
+            sending_identity: a.recipient.clone(),
+            content_digest: a.payload_digest.clone(),
+        },
+        Method::LocalMail => {
+            let (target, from) = mail()?;
+            ExactAction::SmtpSend {
+                account: a.account.clone(),
+                operation: format!(
+                    "Send the unsubscribe message for subscription {}",
+                    a.subscription
+                ),
+                target,
+                sending_identity: from,
+                content_digest: a.payload_digest.clone(),
+            }
+        }
+        Method::MailAppPreparation => {
+            let (target, from) = mail()?;
+            ExactAction::MailAppHandoff {
+                account: a.account.clone(),
+                operation: format!(
+                    "Open the unsubscribe message for subscription {}",
+                    a.subscription
+                ),
+                target,
+                sending_identity: from,
+                content_digest: a.payload_digest.clone(),
+            }
+        }
+        _ => return None,
+    })
+}
 const CONFIRM: &str = "Confirm exactly these subscription actions (synthetic only)";
 const MAIL_CONFIRM: &str = "Send exactly these unsubscribe messages from the displayed receiving addresses (synthetic adapter, no OS dialog)";
+const WIRED_CONFIRM: &str = "Confirm exactly these subscription actions";
+const WIRED_MAIL_CONFIRM: &str =
+    "Send exactly these unsubscribe messages by SMTP from the displayed receiving addresses";
 const PURPOSE: &[u8] = b"mailroom/unsubscribe-exact-review/v1";
 
-pub(crate) fn preview(
+pub(crate) fn preview<A: Adapters + ?Sized>(
     state: &AccountState,
     provider: Provider,
     keys: &CensusKeys,
     input: &ReviewInput,
-    installed: Option<&InstalledSynthetic>,
+    installed: Option<&A>,
 ) -> Result<Preview, String> {
-    if installed.is_none() {
+    let Some(adapters) = installed else {
         return Err("Production unsubscribe actions are denied".into());
-    }
+    };
+    let wired = adapters.wired();
     if input.selections.is_empty()
         || input.selections.len() > 64
         || state.unsubscribe.history.len() + input.selections.len() > 256
@@ -263,19 +319,23 @@ pub(crate) fn preview(
         };
         match selection.method {
             Method::OneClick => {
-                let post = installed
-                    .ok_or("No synthetic adapter")?
-                    .post(https.ok_or("HTTPS unavailable")?)?;
-                plan.host = Some(post.host().into());
-                plan.payload_digest = post.request_digest();
-                plan.effect = "One synthetic POST of List-Unsubscribe=One-Click, Content-Type application/x-www-form-urlencoded, no cookies/referrer or redirects; HTTP status is not unsubscribe success. No Undo.".into();
+                let (host, digest) = adapters.bind_post(https.ok_or("HTTPS unavailable")?)?;
+                plan.host = Some(host);
+                plan.payload_digest = digest;
+                plan.effect = if wired { "One native POST of List-Unsubscribe=One-Click, Content-Type application/x-www-form-urlencoded, no cookies/referrer or redirects, public addresses only; HTTP status is not unsubscribe success. No Undo." } else { "One synthetic POST of List-Unsubscribe=One-Click, Content-Type application/x-www-form-urlencoded, no cookies/referrer or redirects; HTTP status is not unsubscribe success. No Undo." }.into();
             }
             Method::LocalMail | Method::MailAppPreparation => {
                 let mail =
                     safety::Mail::parse(mailto.ok_or("Mailto unavailable")?, &row.recipient)?;
                 plan.payload_digest = mail.digest();
                 plan.host = mail.to.split_once('@').map(|(_, h)| h.into());
-                plan.effect = if selection.method == Method::LocalMail { "One synthetic mail handoff after additional action-naming confirmation. Unsubscribe success unknown. No Undo." } else { "Preparation only. Nothing opens or sends." }.into();
+                plan.effect = match (selection.method == Method::LocalMail, wired) {
+                    (true, true) => "One SMTP submission from the receiving address after additional action-naming confirmation. Unsubscribe success unknown. No Undo.",
+                    (true, false) => "One synthetic mail handoff after additional action-naming confirmation. Unsubscribe success unknown. No Undo.",
+                    (false, true) => "Opens this message in Mail after confirmation. Nothing is sent unless the person sends it.",
+                    (false, false) => "Preparation only. Nothing opens or sends.",
+                }
+                .into();
                 plan.copy_card = Some(CopyCard {
                     uri: None,
                     to: Some(mail.to),
@@ -323,20 +383,24 @@ pub(crate) fn preview(
             &proposed,
             provider,
             input.as_of,
-            installed.is_some(),
+            adapters.trusted_recipients(),
         )?)
     } else {
         None
     };
     let payload = zeroize::Zeroizing::new(
-        serde_json::to_vec(&(SEMANTICS, state, provider, input, &actions, &proof))
+        serde_json::to_vec(&(SEMANTICS, state, provider, input, &actions, &proof, wired))
             .map_err(|_| "Review encoding")?,
     );
     let receipt = keys.binding_for(PURPOSE, &payload);
     let local_mail_confirmation = actions
         .iter()
         .any(|a| a.method == Method::LocalMail)
-        .then_some(MAIL_CONFIRM);
+        .then_some(if wired {
+            WIRED_MAIL_CONFIRM
+        } else {
+            MAIL_CONFIRM
+        });
     Ok(Preview {
         account: state.census.account.as_str().into(),
         state_revision: state.revision,
@@ -344,10 +408,11 @@ pub(crate) fn preview(
         semantics: SEMANTICS,
         actions,
         receipt,
-        confirmation_action: CONFIRM,
+        confirmation_action: if wired { WIRED_CONFIRM } else { CONFIRM },
         local_mail_confirmation,
         proof,
         scope: "Subscriptions are approved separately for each account, receiving address and mailing list. Sender grouping grants no authority.",
+        wired,
         confirmation: None,
     })
 }
@@ -370,7 +435,7 @@ pub(crate) fn confirm(
             .ct_eq(receipt.as_bytes())
             .unwrap_u8()
             != 1
-        || action != CONFIRM
+        || action != preview.confirmation_action
         || preview
             .local_mail_confirmation
             .is_some_and(|s| mail_action != Some(s))
@@ -414,6 +479,7 @@ pub(crate) fn confirm(
             http_status: None,
             success: "unknown".into(),
             smtp: None,
+            resolved: None,
         });
         ids.push(id);
     }
@@ -456,5 +522,29 @@ pub(crate) fn observe(
         }
         _ => entry.status = Status::Uncertain,
     }
+    Ok(())
+}
+
+/// Records the owner's finding for an uncertain local unsubscribe message. Nothing
+/// is sent again; a message recorded as not sent needs a fresh review.
+pub(crate) fn resolve(
+    state: &mut AccountState,
+    id: &str,
+    resolution: crate::send::Resolution,
+) -> Result<(), String> {
+    let entry = state
+        .unsubscribe
+        .history
+        .iter_mut()
+        .find(|e| e.id == id)
+        .ok_or("Unknown unsubscribe action")?;
+    if entry.status != Status::Uncertain || entry.method != Method::LocalMail {
+        return Err("Only an uncertain unsubscribe message can be resolved".into());
+    }
+    entry.status = match resolution {
+        crate::send::Resolution::Sent => Status::Submitted,
+        crate::send::Resolution::NotSent => Status::NotSent,
+    };
+    entry.resolved = Some(resolution);
     Ok(())
 }

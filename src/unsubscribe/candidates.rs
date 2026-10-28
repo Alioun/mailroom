@@ -57,6 +57,69 @@ pub struct Report {
     pub rows: Vec<Candidate>,
     pub warnings: Vec<String>,
 }
+/// Where a review's authority and effects come from: the synthetic fixture, or
+/// the wired real adapters behind the write policy.
+pub(crate) trait Adapters {
+    /// Whether recipient evidence is trusted. Only synthetic fixtures establish it so far.
+    fn trusted_recipients(&self) -> bool;
+    fn authentication(&self, h: &HeaderRecord) -> String;
+    fn one_click_authorized(&self, authentication: &str) -> bool;
+    fn original_survives(&self, h: &HeaderRecord) -> bool;
+    /// The host and payload digest a one-click POST to `raw` is bound to.
+    fn bind_post(&self, raw: &str) -> Result<(String, String), String>;
+    /// Whether effects go to the wired real adapters.
+    fn wired(&self) -> bool;
+}
+impl Adapters for InstalledSynthetic {
+    fn trusted_recipients(&self) -> bool {
+        true
+    }
+    fn authentication(&self, h: &HeaderRecord) -> String {
+        InstalledSynthetic::authentication(self, h)
+    }
+    fn one_click_authorized(&self, authentication: &str) -> bool {
+        authentication == "synthetic_provider_pass_both_same_signature"
+    }
+    fn original_survives(&self, h: &HeaderRecord) -> bool {
+        InstalledSynthetic::original_survives(self, h)
+    }
+    fn bind_post(&self, raw: &str) -> Result<(String, String), String> {
+        let post = self.post(raw)?;
+        Ok((post.host().into(), post.request_digest()))
+    }
+    fn wired(&self) -> bool {
+        false
+    }
+}
+/// The wired adapters. One-click authority comes from the census's recorded
+/// provider Authentication-Results under `authserv`.
+pub(crate) struct Wired<'a> {
+    pub trusted_recipients: bool,
+    pub authserv: Option<&'a str>,
+}
+impl Adapters for Wired<'_> {
+    fn trusted_recipients(&self) -> bool {
+        self.trusted_recipients
+    }
+    fn authentication(&self, h: &HeaderRecord) -> String {
+        super::authority::one_click(h, self.authserv).into()
+    }
+    fn one_click_authorized(&self, authentication: &str) -> bool {
+        authentication == super::authority::PASS
+    }
+    fn original_survives(&self, h: &HeaderRecord) -> bool {
+        !h.evidence
+            .keys()
+            .any(|k| k.starts_with("x-simplelogin-") || k.starts_with("x-anonaddy-"))
+    }
+    fn bind_post(&self, raw: &str) -> Result<(String, String), String> {
+        Ok((safety::Endpoint::parse(raw)?.host, digest(raw.as_bytes())))
+    }
+    fn wired(&self) -> bool {
+        true
+    }
+}
+
 pub(crate) fn uris(h: &HeaderRecord) -> Vec<String> {
     let Some(values) = h.evidence.get("list-unsubscribe").filter(|v| v.len() == 1) else {
         return Vec::new();
@@ -105,12 +168,12 @@ fn arrival(m: &MessageRecord) -> Option<i64> {
         .ok()
         .map(|d| d.timestamp())
 }
-pub(crate) fn report(
+pub(crate) fn report<A: Adapters + ?Sized>(
     state: &AccountState,
     provider: Provider,
     keys: &CensusKeys,
     as_of: i64,
-    installed: Option<&InstalledSynthetic>,
+    installed: Option<&A>,
 ) -> Result<Report, String> {
     let census = &state.census;
     let base = census
@@ -260,7 +323,8 @@ pub(crate) fn report(
             .keys()
             .any(|k| k.starts_with("x-simplelogin-") || k.starts_with("x-anonaddy-"))
             || installed.is_some_and(|a| a.original_survives(h));
-        let recipient_known = installed.is_some() && h.delivered_to.len() == 1;
+        let recipient_known =
+            installed.is_some_and(|a| a.trusted_recipients()) && h.delivered_to.len() == 1;
         let mut methods = vec![Method::Keep];
         let urls = uris(h);
         let valid_https = urls
@@ -271,7 +335,7 @@ pub(crate) fn report(
             methods.push(Method::BrowserPreparation);
             if recipient_known
                 && list_known
-                && authentication == "synthetic_provider_pass_both_same_signature"
+                && installed.is_some_and(|a| a.one_click_authorized(&authentication))
                 && originals
                 && h.evidence
                     .get("list-unsubscribe-post")

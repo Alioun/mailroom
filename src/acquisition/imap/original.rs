@@ -1,7 +1,4 @@
 //! Read-only acquisition of one original message.
-//! Only tests reach this until production wiring passes secret-flow review and
-//! owner approval.
-#![cfg_attr(not(test), allow(dead_code))]
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +96,35 @@ impl ReadOnlyImap {
     }
 }
 
+impl super::super::Accounts {
+    /// Reads the census message `folder/uidvalidity/uid` read-only through the
+    /// account's IMAP login, as a census does, and parses it. The password goes
+    /// only to the approved IMAP LOGIN and is dropped once the session is open.
+    pub(crate) fn acquire_original(
+        &self,
+        account: &super::super::Account,
+        folder: &str,
+        uidvalidity: u32,
+        uid: u32,
+    ) -> Result<crate::original::Original, String> {
+        let permit = crate::policy::read_permit(account.provider).map_err(|e| e.to_string())?;
+        let password = self.password(account).map_err(|e| e.to_string())?;
+        let session =
+            self.connect_read(&permit, &account.login, &password, Cancellation::default());
+        drop(password);
+        let raw = session
+            .map_err(|e| e.to_string())?
+            .fetch_original(folder, uidvalidity, uid, crate::original::LIMIT)
+            .map_err(|e| match e {
+                OriginalError::Changed => "Folder or UIDVALIDITY changed".to_owned(),
+                OriginalError::Missing => "Message no longer on the server".to_owned(),
+                OriginalError::TooLarge => "Original exceeds the size limit".to_owned(),
+                OriginalError::Transport(e) => e.to_string(),
+            })?;
+        crate::original::Original::parse(raw).map_err(|_| "Original cannot be parsed".into())
+    }
+}
+
 fn examined_validity(examined: &Reply) -> Result<u32, AcquisitionError> {
     let read_only = matches!(
         imap_proto::parser::parse_response(&examined.done),
@@ -131,7 +157,7 @@ fn examined_validity(examined: &Reply) -> Result<u32, AcquisitionError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::{collections::BTreeSet, net::TcpListener, thread};
 
@@ -139,14 +165,27 @@ mod tests {
 
     /// A one-connection IMAP fake holding one message whose flags it changes
     /// exactly as a server would: a non-PEEK body fetch or a STORE sets `\Seen`.
-    struct Fake {
-        address: std::net::SocketAddr,
-        identity: crate::fake_tls::Identity,
-        log: Arc<Mutex<(Vec<String>, BTreeSet<String>)>>,
+    pub(crate) struct Fake {
+        pub(crate) address: std::net::SocketAddr,
+        pub(crate) identity: crate::fake_tls::Identity,
+        pub(crate) log: Arc<Mutex<(Vec<String>, BTreeSet<String>)>>,
         worker: thread::JoinHandle<()>,
     }
     impl Fake {
         fn start(validity: u32, size: usize) -> Self {
+            Self::serve(
+                validity,
+                BTreeMap::from([(7, MESSAGE.to_vec())]),
+                Some(size),
+            )
+        }
+        /// Serves each of `messages` under its UID in INBOX and `Geschäftlich`.
+        /// `size` overrides the reported RFC822.SIZE.
+        pub(crate) fn serve(
+            validity: u32,
+            messages: BTreeMap<u32, Vec<u8>>,
+            size: Option<usize>,
+        ) -> Self {
             let identity = crate::fake_tls::identity("localhost");
             let config = identity.clone();
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -176,15 +215,29 @@ mod tests {
                         format!("* LIST () \"/\" \"INBOX\"\r\n* LIST () \"/\" \"Gesch&AOQ-ftlich\"\r\n{tag} OK\r\n").into()
                     } else if command.starts_with("EXAMINE") {
                         format!("* 1 EXISTS\r\n* OK [UIDVALIDITY {validity}] v\r\n{tag} OK [READ-ONLY] done\r\n").into()
-                    } else if command == "UID FETCH 7 (UID RFC822.SIZE)" {
-                        format!("* 1 FETCH (UID 7 RFC822.SIZE {size})\r\n{tag} OK\r\n").into()
-                    } else if command.starts_with("UID FETCH 7 (UID BODY") {
+                    } else if let Some((uid, message)) = command
+                        .strip_prefix("UID FETCH ")
+                        .and_then(|rest| rest.split_once(' '))
+                        .and_then(|(uid, _)| uid.parse::<u32>().ok())
+                        .and_then(|uid| messages.get(&uid).map(|m| (uid, m)))
+                        .filter(|_| command.ends_with("(UID RFC822.SIZE)"))
+                    {
+                        let size = size.unwrap_or(message.len());
+                        format!("* 1 FETCH (UID {uid} RFC822.SIZE {size})\r\n{tag} OK\r\n").into()
+                    } else if let Some((uid, message)) = command
+                        .strip_prefix("UID FETCH ")
+                        .and_then(|rest| rest.split_once(' '))
+                        .and_then(|(uid, _)| uid.parse::<u32>().ok())
+                        .and_then(|uid| messages.get(&uid).map(|m| (uid, m)))
+                        .filter(|_| command.contains("(UID BODY"))
+                    {
                         if !command.contains("PEEK") {
                             s.1.insert("\\Seen".into());
                         }
-                        let mut r = format!("* 1 FETCH (UID 7 BODY[] {{{}}}\r\n", MESSAGE.len())
-                            .into_bytes();
-                        r.extend_from_slice(MESSAGE);
+                        let mut r =
+                            format!("* 1 FETCH (UID {uid} BODY[] {{{}}}\r\n", message.len())
+                                .into_bytes();
+                        r.extend_from_slice(&message);
                         r.extend_from_slice(format!(")\r\n{tag} OK\r\n").as_bytes());
                         r
                     } else if command.starts_with("UID FETCH") {
@@ -223,11 +276,39 @@ mod tests {
             )
             .unwrap()
         }
-        fn finish(self) -> (Vec<String>, BTreeSet<String>) {
+        pub(crate) fn finish(self) -> (Vec<String>, BTreeSet<String>) {
             self.worker.join().unwrap();
             let log = self.log.lock().unwrap();
             (log.0.clone(), log.1.clone())
         }
+    }
+
+    /// The commands and flag changes of every connection an installed factory opened.
+    pub(crate) type Logs = Arc<Mutex<Vec<Arc<Mutex<(Vec<String>, BTreeSet<String>)>>>>>;
+
+    /// Installs an IMAP factory that opens a fresh fake serving `messages` from
+    /// INBOX at `validity` for each connection.
+    pub(crate) fn install(
+        repo: &mut super::super::super::Accounts,
+        validity: u32,
+        messages: BTreeMap<u32, Vec<u8>>,
+    ) -> Logs {
+        let logs: Logs = Arc::default();
+        let record = logs.clone();
+        repo.imap_factory = Some(Arc::new(move |permit, login, password, cancel| {
+            let fake = Fake::serve(validity, messages.clone(), None);
+            record.lock().unwrap().push(fake.log.clone());
+            ReadOnlyImap::open(
+                TcpStream::connect(fake.address).unwrap(),
+                "localhost",
+                fake.identity.connector(),
+                login,
+                password,
+                cancel,
+                permit.provider() == Provider::Gmail,
+            )
+        }));
+        logs
     }
 
     #[test]

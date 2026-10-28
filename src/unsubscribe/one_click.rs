@@ -5,7 +5,6 @@
 //! request carries exactly the one-click form: no cookies, no referrer, never
 //! GET. A redirect is recorded as its status and never followed. Only the
 //! status code and the URI host leave this module.
-#![cfg_attr(not(test), allow(dead_code))]
 use super::safety::{BoundPost, Endpoint};
 use serde::{Deserialize, Serialize};
 use std::{

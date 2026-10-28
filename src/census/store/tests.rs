@@ -522,6 +522,7 @@ fn v4_migration_defaults_unsubscribe_and_flag_coverage_without_inventing_authori
             http_status: None,
             success: "unknown".into(),
             smtp: None,
+            resolved: None,
         });
     store.save_state(&mut migrated).unwrap();
     let census = store.load().unwrap();
@@ -632,4 +633,53 @@ fn schema_21_files_stay_readable_and_refuse_send_adapter_records() {
         store.load_state().is_ok(),
         "older records keep their meaning"
     );
+}
+
+#[test]
+fn schema_22_files_stay_readable_and_refuse_owner_resolutions() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = AccountId::new("resolution-migration").unwrap();
+    let store = EncryptedStore::new(
+        dir.path().into(),
+        CensusKeys::derive(&LocalSecret::random(), &id),
+    )
+    .unwrap();
+    store.save(&Census::new(id)).unwrap();
+    let state = store.load_state().unwrap();
+    let entry = |resolved: Option<&str>| {
+        let mut entry = serde_json::json!({
+            "id": "e", "subscription": "s", "sender_key": "news@example.test", "method": "local_mail",
+            "time": 1792886400, "status": "not_sent", "host": "example.test", "payload_digest": "d",
+            "source_ids": [], "http_status": null, "success": "unknown",
+        });
+        if let Some(resolved) = resolved {
+            entry["resolved"] = resolved.into();
+        }
+        let mut with_entry = serde_json::to_value(&state).unwrap();
+        with_entry["unsubscribe"]["history"] = serde_json::json!([entry]);
+        with_entry.to_string()
+    };
+    for (version, resolved, readable) in [
+        (22, None, true),
+        (22, Some("not_sent"), false),
+        (23, Some("not_sent"), true),
+    ] {
+        store
+            .stage_snapshot(version, &entry(resolved))
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        let loaded = store.load_state();
+        assert_eq!(loaded.is_ok(), readable, "{version} {resolved:?}");
+        if let Ok(mut loaded) = loaded {
+            assert_eq!(
+                loaded.unsubscribe.history[0].resolved,
+                resolved.map(|_| crate::send::Resolution::NotSent)
+            );
+            store.save_state(&mut loaded).unwrap();
+            assert_eq!(store.schema_version().unwrap(), crate::census::SCHEMA);
+        } else {
+            assert!(matches!(loaded, Err(CensusError::UnsupportedVersion)));
+        }
+    }
 }

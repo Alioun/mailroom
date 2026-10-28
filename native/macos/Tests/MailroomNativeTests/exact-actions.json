@@ -65,6 +65,39 @@
     "plan_receipt": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
    },
    "display": "Create the previewed folders for account invented-account. Exact previewed plan receipt dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd. Mailbox changes reach the provider."
+  },
+  {
+   "action": {
+    "purpose": "smtp_send",
+    "account": "invented-account",
+    "operation": "Send this invoice",
+    "target": "target@example.test",
+    "sending_identity": "sender@example.test",
+    "content_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "display": "Send this invoice for account invented-account. Send by SMTP to target@example.test from sender@example.test. Exact content SHA-256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb. Sent mail has no Undo."
+  },
+  {
+   "action": {
+    "purpose": "one_click_post",
+    "account": "invented-account",
+    "operation": "Unsubscribe with one click",
+    "target": "list.example.test",
+    "sending_identity": "alias@example.test",
+    "content_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "display": "Unsubscribe with one click for account invented-account. One HTTPS POST of List-Unsubscribe=One-Click to list.example.test for mail received at alias@example.test. Exact URI SHA-256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb. Success unknown. No Undo."
+  },
+  {
+   "action": {
+    "purpose": "mail_app_handoff",
+    "account": "invented-account",
+    "operation": "Forward this invoice in Mail",
+    "target": "target@example.test",
+    "sending_identity": "sender@example.test",
+    "content_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "display": "Forward this invoice in Mail for account invented-account. Open Mail with a message to target@example.test from sender@example.test. Exact content SHA-256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb. Nothing is sent unless you send it in Mail."
   }
  ],
  "outcome": {

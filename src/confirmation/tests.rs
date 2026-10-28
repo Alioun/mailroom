@@ -288,6 +288,27 @@ fn display_and_authentication_match_the_swift_helper_fixture() {
             operation: "Create the previewed folders".into(),
             plan_receipt: "d".repeat(64),
         },
+        ExactAction::SmtpSend {
+            account: "invented-account".into(),
+            operation: "Send this invoice".into(),
+            target: "target@example.test".into(),
+            sending_identity: "sender@example.test".into(),
+            content_digest: "b".repeat(64),
+        },
+        ExactAction::OneClickPost {
+            account: "invented-account".into(),
+            operation: "Unsubscribe with one click".into(),
+            target: "list.example.test".into(),
+            sending_identity: "alias@example.test".into(),
+            content_digest: "b".repeat(64),
+        },
+        ExactAction::MailAppHandoff {
+            account: "invented-account".into(),
+            operation: "Forward this invoice in Mail".into(),
+            target: "target@example.test".into(),
+            sending_identity: "sender@example.test".into(),
+            content_digest: "b".repeat(64),
+        },
     ];
     let cases = fixture["actions"].as_array().unwrap();
     assert_eq!(cases.len(), actions.len());

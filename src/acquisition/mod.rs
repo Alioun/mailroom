@@ -64,6 +64,8 @@ impl std::error::Error for AcquisitionError {}
 #[cfg(test)]
 pub(crate) use accounts::process_tests::persistent_accounts as persistent_test_accounts;
 #[cfg(test)]
+pub(crate) use imap::original::tests::{Logs as OriginalLogs, install as install_original_fake};
+#[cfg(test)]
 pub(crate) use imap::tests::install_provider_fixture;
 #[cfg(test)]
 pub(crate) use managesieve::tests::Fake as SieveFake;

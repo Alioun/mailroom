@@ -44,6 +44,12 @@ public struct ExactAction: Decodable, Sendable {
             let method = try required(method)
             guard method.allSatisfy({ $0.isASCII && ($0.isLowercase || $0 == "_") }) else { throw Denied() }
             return "Apply synthetic \"\(method)\" for subscription \(try required(subscription)), account \(account), received at \(try required(receiving_identity)), host \(host ?? "none"). Payload SHA-256 \(try required(content_digest)). \(try required(effect))"
+        case "smtp_send":
+            return "\(try required(operation)) for account \(account). Send by SMTP to \(try required(target)) from \(try required(sending_identity)). Exact content SHA-256 \(try required(content_digest)). Sent mail has no Undo."
+        case "one_click_post":
+            return "\(try required(operation)) for account \(account). One HTTPS POST of List-Unsubscribe=One-Click to \(try required(target)) for mail received at \(try required(sending_identity)). Exact URI SHA-256 \(try required(content_digest)). Success unknown. No Undo."
+        case "mail_app_handoff":
+            return "\(try required(operation)) for account \(account). Open Mail with a message to \(try required(target)) from \(try required(sending_identity)). Exact content SHA-256 \(try required(content_digest)). Nothing is sent unless you send it in Mail."
         default:
             throw Denied()
         }

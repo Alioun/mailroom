@@ -587,11 +587,41 @@ async fn backlog_routes_install_no_production_write_authority() {
 
 #[tokio::test]
 async fn production_invoice_commands_fail_before_account_or_credential_access() {
-    for command in [
-        serde_json::json!({"action":"preview", "selection":"INBOX/1/1", "target":"accounting"}),
-        serde_json::json!({"action":"prepare_mail_app", "selection":"INBOX/1/1", "target":"accounting"}),
-        serde_json::json!({"action":"send", "selection":"INBOX/1/1", "target":"accounting", "receipt":"0".repeat(64), "confirmation_action":"Send exactly this invoice"}),
-        serde_json::json!({"action":"recover", "send":"0".repeat(64)}),
+    const POLICY: &str = "Denied: all real-account mutations are locked in this unit";
+    const FIXTURE: &str = "The synthetic invoice transport exists only in the fixture";
+    for (command, reason) in [
+        (
+            serde_json::json!({"action":"preview", "selection":"INBOX/1/1", "target":"accounting"}),
+            FIXTURE,
+        ),
+        (
+            serde_json::json!({"action":"send", "selection":"INBOX/1/1", "target":"accounting", "receipt":"0".repeat(64), "confirmation_action":"Send exactly this invoice"}),
+            FIXTURE,
+        ),
+        (
+            serde_json::json!({"action":"recover", "send":"0".repeat(64)}),
+            FIXTURE,
+        ),
+        (
+            serde_json::json!({"action":"preview", "selection":"INBOX/1/1", "target":"accounting", "mode":"smtp"}),
+            POLICY,
+        ),
+        (
+            serde_json::json!({"action":"preview", "selection":"INBOX/1/1", "target":"accounting", "mode":"mail_app"}),
+            POLICY,
+        ),
+        (
+            serde_json::json!({"action":"send", "selection":"INBOX/1/1", "target":"accounting", "receipt":"0".repeat(64), "confirmation_action":"Send exactly this invoice", "mode":"smtp"}),
+            POLICY,
+        ),
+        (
+            serde_json::json!({"action":"send", "selection":"INBOX/1/1", "target":"accounting", "receipt":"0".repeat(64), "confirmation_action":"Send exactly this invoice", "mode":"mail_app"}),
+            POLICY,
+        ),
+        (
+            serde_json::json!({"action":"resolve", "send":"0".repeat(64), "resolution":"not_sent"}),
+            POLICY,
+        ),
     ] {
         let body = serde_json::json!({"account":"nonexistent-no-credentials", "command":command})
             .to_string();
@@ -603,10 +633,16 @@ async fn production_invoice_commands_fail_before_account_or_credential_access() 
             "application/json",
         )
         .await;
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{command}");
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert!(String::from_utf8_lossy(&body).contains("No production invoice"));
+        assert!(String::from_utf8_lossy(&body).contains(reason), "{command}");
     }
+    let response = request("/api/accounts/invoices", r#"{"account":"nonexistent", "command":{"action":"prepare_mail_app", "selection":"x", "target":"x"}}"#, None, server::ADDRESS, "application/json").await;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the preparation-only path is gone"
+    );
     let response = request("/api/accounts/invoices", r#"{"account":"nonexistent", "command":{"action":"send", "selection":"x", "target":"x", "receipt":"x", "confirmation_action":"x", "synthetic":true}}"#, None, server::ADDRESS, "application/json").await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
@@ -618,6 +654,7 @@ async fn production_unsubscribe_denies_before_account_and_credential_access() {
         serde_json::json!({"action":"preview","input":input}),
         serde_json::json!({"action":"confirm","input":input,"receipt":"0".repeat(64),"confirmation_action":"fake","mail_confirmation_action":null}),
         serde_json::json!({"action":"recover","entry":"fake","as_of":1792886400_i64}),
+        serde_json::json!({"action":"resolve","entry":"fake","resolution":"sent","as_of":1792886400_i64}),
     ] {
         let response = request(
             "/api/accounts/unsubscribe",

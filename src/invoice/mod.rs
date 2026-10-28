@@ -8,8 +8,7 @@ use crate::{
     census::{AccountState, CensusKeys},
     rules,
 };
-#[allow(unused_imports)]
-pub(crate) use adapters::{hand_off, record_handoff, record_original, submit_smtp};
+pub(crate) use adapters::{hand_off, record_original, submit_smtp};
 pub(crate) use report::report;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -120,6 +119,9 @@ pub struct Send {
     /// The SMTP server's answer, reply codes only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smtp: Option<crate::send::smtp::Outcome>,
+    /// What the owner recorded after an uncertain outcome. Absent for every other send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<crate::send::Resolution>,
 }
 #[derive(Serialize)]
 pub struct Row {
@@ -158,19 +160,41 @@ pub struct Preview {
     pub(crate) confirmation: Option<crate::confirmation::Request>,
 }
 pub(crate) fn confirmation_plan(preview: &Preview) -> crate::confirmation::Plan {
+    use crate::confirmation::ExactAction;
     let p = &preview.plan;
-    crate::confirmation::Plan {
-        exact_receipt: preview.receipt.clone(),
-        actions: vec![crate::confirmation::ExactAction::InvoiceSend {
+    // The real adapters name the exact bytes they hand over; the receipt binds the rest.
+    let message = || digest(p.source.original.as_bytes());
+    let action = match p.mode {
+        SendMode::Smtp => ExactAction::SmtpSend {
             account: p.account.clone(),
-            revision: p.state_revision,
-            report_version: p.report_version.clone(),
-            target_name: p.target_name.clone(),
+            operation: format!("Send invoice {} to {}", p.selection, p.target_name),
             target: p.target.clone(),
             sending_identity: p.sending_address.clone(),
-            source: p.selection.clone(),
-            content_digest: p.content_digest.clone(),
-        }],
+            content_digest: message(),
+        },
+        SendMode::MailAppHandoff => ExactAction::MailAppHandoff {
+            account: p.account.clone(),
+            operation: format!("Forward invoice {} to {}", p.selection, p.target_name),
+            target: p.target.clone(),
+            sending_identity: p.sending_address.clone(),
+            content_digest: message(),
+        },
+        SendMode::SyntheticTransport | SendMode::NativeForwardPreparationOnly => {
+            ExactAction::InvoiceSend {
+                account: p.account.clone(),
+                revision: p.state_revision,
+                report_version: p.report_version.clone(),
+                target_name: p.target_name.clone(),
+                target: p.target.clone(),
+                sending_identity: p.sending_address.clone(),
+                source: p.selection.clone(),
+                content_digest: p.content_digest.clone(),
+            }
+        }
+    };
+    crate::confirmation::Plan {
+        exact_receipt: preview.receipt.clone(),
+        actions: vec![action],
     }
 }
 fn digest(value: &[u8]) -> String {
@@ -205,30 +229,13 @@ pub(crate) fn preview(
     {
         return Err("Selection is not an eligible current report row".into());
     }
-    let source_id = if provider == Provider::Gmail {
-        state
-            .census
-            .folders
-            .iter()
-            .find_map(|(name, f)| {
-                f.messages
-                    .values()
-                    .find(|m| {
-                        m.gmail_message_id
-                            .as_ref()
-                            .is_some_and(|id| format!("gmail/{id}") == selection)
-                    })
-                    .map(|m| format!("{name}/{}/{}", f.uidvalidity, m.uid))
-            })
-            .ok_or("Source missing")?
-    } else {
-        selection.into()
-    };
+    let (folder, uidvalidity, uid) = census_location(state, provider, selection)?;
+    let source_id = format!("{folder}/{uidvalidity}/{uid}");
     let source = state
         .invoices
         .sources
         .get(&source_id)
-        .filter(|s| synthetic || s.acquired)
+        .filter(|s| s.acquired || (fixture_mode && synthetic))
         .ok_or("Original content unavailable")?
         .clone();
     let folder = state
@@ -283,6 +290,34 @@ pub(crate) fn preview(
     })
 }
 
+/// The census folder, UIDVALIDITY and UID of a report row. Gmail rows name the
+/// message by its Gmail ID, so any folder holding it serves.
+pub(crate) fn census_location(
+    state: &AccountState,
+    provider: Provider,
+    selection: &str,
+) -> Result<(String, u32, u32), String> {
+    state
+        .census
+        .folders
+        .iter()
+        .find_map(|(name, f)| {
+            f.messages
+                .values()
+                .find(|m| {
+                    if provider == Provider::Gmail {
+                        m.gmail_message_id
+                            .as_ref()
+                            .is_some_and(|id| format!("gmail/{id}") == selection)
+                    } else {
+                        format!("{name}/{}/{}", f.uidvalidity, m.uid) == selection
+                    }
+                })
+                .map(|m| (name.clone(), f.uidvalidity, m.uid))
+        })
+        .ok_or_else(|| "Source missing".into())
+}
+
 /// Records send intent for a plan the confirmation boundary approved and revalidated.
 pub(crate) fn record_intent(
     state: &mut AccountState,
@@ -294,7 +329,7 @@ pub(crate) fn record_intent(
         let receipt = consent.receipt();
         if !matches!(
             preview.plan.mode,
-            SendMode::SyntheticTransport | SendMode::Smtp
+            SendMode::SyntheticTransport | SendMode::Smtp | SendMode::MailAppHandoff
         ) || action != preview.plan.confirmation_action
             || receipt.len() != 64
             || preview
@@ -323,8 +358,66 @@ pub(super) fn push_intent(state: &mut AccountState, preview: Preview) -> Result<
         plan: preview.plan,
         status: Status::Intent,
         smtp: None,
+        resolved: None,
     });
     Ok(id)
+}
+
+/// Records the owner's finding for an uncertain SMTP send or mail-app handoff.
+/// Nothing is sent again: a send recorded as not sent needs a fresh preview and
+/// confirmation, whose receipt differs because this state changed.
+pub(crate) fn resolve(
+    state: &mut AccountState,
+    id: &str,
+    resolution: crate::send::Resolution,
+) -> Result<(), String> {
+    let send = state
+        .invoices
+        .sends
+        .iter_mut()
+        .find(|s| s.id == id)
+        .ok_or("Unknown invoice operation")?;
+    if send.status != Status::Uncertain
+        || !matches!(send.plan.mode, SendMode::Smtp | SendMode::MailAppHandoff)
+    {
+        return Err("Only an uncertain send can be resolved".into());
+    }
+    send.status = match resolution {
+        crate::send::Resolution::Sent => Status::Completed,
+        crate::send::Resolution::NotSent => Status::NotSent,
+    };
+    send.resolved = Some(resolution);
+    Ok(())
+}
+
+/// Census messages in the account's Sent mail with the same Message-ID as each
+/// uncertain send's original, as `folder/uidvalidity/uid`. Read from the saved
+/// census only; a fresh census shows a copy saved after the send.
+pub(crate) fn sent_evidence(state: &AccountState) -> BTreeMap<String, Vec<String>> {
+    state
+        .invoices
+        .sends
+        .iter()
+        .filter(|s| s.status == Status::Uncertain)
+        .map(|s| {
+            let matches = state
+                .census
+                .folders
+                .iter()
+                .flat_map(|(name, f)| {
+                    f.messages
+                        .values()
+                        .filter(|m| {
+                            m.headers.direction == crate::census::Direction::Sent
+                                && m.headers.message_id_hash.is_some()
+                                && m.headers.message_id_hash == s.plan.source.message_id_hash
+                        })
+                        .map(move |m| format!("{name}/{}/{}", f.uidvalidity, m.uid))
+                })
+                .collect();
+            (s.id.clone(), matches)
+        })
+        .collect()
 }
 
 /// What the mail app is asked to open for `plan`.

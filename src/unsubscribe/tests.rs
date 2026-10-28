@@ -87,10 +87,16 @@ fn exact_candidates_flags_classification_dates_and_subscription_boundaries() {
     assert_eq!(row.read_share, Some(0.0));
     assert_eq!(row.rank, 1);
     assert!(row.methods.contains(&Method::OneClick));
-    let real = report(&state, Provider::MailboxOrg, store.keys(), 1792886400, None)
-        .unwrap()
-        .rows
-        .remove(0);
+    let real = report(
+        &state,
+        Provider::MailboxOrg,
+        store.keys(),
+        1792886400,
+        None::<&InstalledSynthetic>,
+    )
+    .unwrap()
+    .rows
+    .remove(0);
     assert!(!real.methods.contains(&Method::OneClick));
     assert!(!real.recommended);
     let original = state.clone();

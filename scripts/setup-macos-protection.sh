@@ -298,6 +298,8 @@ no_outside_config() {
 allowed() {
   local opened="status=keychain_unavailable:1 status=unhardened:1 status=core_dumps_enabled:1"
   case "$1" in
+    add) echo "status=created:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=no_tty:1 status=invalid_input:1 status=mismatch:1 status=cancelled:1 status=denied:1 status=recovery_required:1 status=core_dumps_enabled:1" ;;
+    replace-password) echo "status=replaced:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=no_tty:1 status=invalid_input:1 status=mismatch:1 status=cancelled:1 status=denied:1 status=recovery_required:1 status=core_dumps_enabled:1" ;;
     native-check) echo "outcome=approved:0 outcome=cancelled:0 outcome=denied:1 outcome=unavailable:1" ;;
     status) echo "status=ok:0 status=missing:1 status=other_binary:1 status=changed:1 status=denied:1 status=failed:1 $opened" ;;
     probe) echo "status=ok:0 status=denied:1 status=missing:1 status=changed:1 status=other_binary:1 status=failed:1 $opened" ;;
@@ -345,7 +347,7 @@ expected_references() {
 RESULT=""; REFS=""; DROPPED=0
 mailroom() {
   local command="$1" output code=0 line results=0 known listed=""
-  [[ "$1" == keychain ]] && command="${2:-}"
+  [[ "$1" == keychain || "$1" == account ]] && command="${2:-}"
   RESULT="status=unverified_launch"; REFS=""; DROPPED=0
   trusted_path "$LIBEXEC/mailroom" || return 0
   "$CODESIGN" --verify --strict -R="cdhash H\"$MAILROOM_CDHASH\"" "$LIBEXEC/mailroom" >/dev/null 2>&1 || return 0
@@ -504,7 +506,7 @@ case "${1:-}" in
     printf '%s\n' \
       'Build phase (owner): 1. check the frozen copy; 2. build and sign with the installed toolchains, then print the identities.' \
       "Install phase (root): 1. check the frozen copy; 2. copy the signed outputs into a fresh root-owned $LIBEXEC after checking the typed identities." \
-      "Owner phase: 1. check the frozen copy and installation; 2. approve then cancel an invented action; 3. move each account's keys from an earlier build; 4. migrate and verify legacy passwords; 5. enter missing passwords; 6. check the prompt at every password read."
+      "Owner phase: 1. check the frozen copy and installation; 2. approve then cancel an invented action; 3. optionally create one local account with hidden entry and exact native consent; 4. move each account's keys from an earlier build; 5. migrate and verify legacy passwords; 6. enter missing passwords; 7. optionally replace a saved password with exact native consent; 8. check the prompt at every password read."
     return 0 ;;
   --digest) tree_digest "$frozen"; return 0 ;;
   build) phase=build; shift ;;
@@ -601,7 +603,7 @@ finish
 }
 
 owner_phase() {
-TOTAL_STAGES=6
+TOTAL_STAGES=8
 local frozen="$1" reference class id all_ok=1
 /bin/mkdir -p "$(/usr/bin/dirname "$RECORDS")" && : >"$RECORDS"
 banner "Mailroom native confirmation and Keychain setup"
@@ -618,6 +620,20 @@ step "First: read the dialog, click Approve, then authenticate."
 mailroom native-check; expect native_approve outcome=approved "$RESULT" || { stop_incomplete; return 1; }
 step "Second: click Cancel."
 mailroom native-check; expect native_cancel outcome=cancelled "$RESULT" || { stop_incomplete; return 1; }
+
+stage "Optionally add a local account"
+say "Account setup saves local metadata and a protected credential. It does not connect to a provider."
+say "The installed binary reads the login and password privately from this terminal."
+say "Read the native dialog carefully. Cancelling publishes no account or credential."
+if confirm_no "Add one local account now? Skip if the account is already saved."; then
+  local provider
+  ask provider "Provider: mailbox_org or gmail" mailbox_org
+  case "$provider" in mailbox_org|gmail) ;; *) expect account_provider supported unsupported || { stop_incomplete; return 1; } ;; esac
+  mailroom account add "$provider"
+  expect account_add status=created "$RESULT" || { stop_incomplete; return 1; }
+  say "Local account saved. Provider connectivity is unverified."
+fi
+expected_references || { expect account_metadata readable unreadable || stop_incomplete; return 1; }
 
 mailroom keychain refs; expect account_refs status=ok "$RESULT" || { stop_incomplete; return 1; }
 mailroom keychain legacy; expect legacy_list status=ok "$RESULT" || { stop_incomplete; return 1; }
@@ -672,6 +688,21 @@ while read -r reference class <&3; do
   mailroom keychain enroll "$reference"
   expect "enroll $reference" status=ok "$RESULT" || { stop_incomplete; return 1; }
 done 3<<<"$EXPECTED"
+
+stage "Optionally replace a saved password"
+say "Replacement preserves local rules, decisions and history. Provider connectivity becomes unverified."
+if [[ -n "$ACCOUNTS" ]] && confirm_no "Replace one saved password now?"; then
+  local selected
+  say "Saved account IDs:"
+  printf '%s' "$ACCOUNTS"
+  ask selected "Account ID" ""
+  if [[ ! "$selected" =~ ^[A-Za-z0-9-]{1,64}$ || $'\n'"$ACCOUNTS" != *$'\n'"$selected"$'\n'* ]]; then
+    expect account_selection saved unknown || { stop_incomplete; return 1; }
+  fi
+  mailroom account replace-password "$selected"
+  expect password_replace status=replaced "$RESULT" || { stop_incomplete; return 1; }
+  expected_references || { expect account_metadata readable unreadable || stop_incomplete; return 1; }
+fi
 
 stage "Check the prompt at every access"
 while read -r reference class <&3; do

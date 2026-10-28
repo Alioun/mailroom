@@ -17,6 +17,8 @@ unsafe extern "C" {
         flags: std::ffi::c_int,
     ) -> *mut std::ffi::c_char;
 }
+mod setup;
+
 const RPP_REQUIRE_TTY: std::ffi::c_int = 0x02;
 
 fn record(line: &str, success: bool) -> u8 {
@@ -59,7 +61,7 @@ pub(crate) fn parse(arguments: &[String]) -> Option<Options<'_>> {
     Some(options)
 }
 
-/// Runs `mailroom keychain …` or `mailroom native-check`. Returns the process exit code.
+/// Runs the fixed-record owner CLI. Returns the process exit code.
 pub fn run(arguments: &[String]) -> u8 {
     if !crate::native::core_dumps_disabled() {
         return status("core_dumps_enabled", false);
@@ -69,6 +71,7 @@ pub fn run(arguments: &[String]) -> u8 {
     };
     match (options.positional.as_slice(), &options.keychain) {
         (["native-check"], None) if options.config.is_none() => native_check(),
+        (["account", tail @ ..], None) if options.config.is_none() => setup::run(tail),
         (["keychain", "refs"], None) => references(options.config),
         (["keychain", command, tail @ ..], keychain_path) => {
             let usable = match (*command, tail) {

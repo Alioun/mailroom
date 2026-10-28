@@ -12,7 +12,7 @@ Install Rust with Cargo and Node.js 22.12 or newer with npm. From this checkout,
 
 Open <http://127.0.0.1:4173>. The launcher installs locked UI dependencies, builds the UI and Rust binary, and starts the server. Stop it with Ctrl+C. Use this exact URL because the server rejects other Host headers.
 
-New production connections are locked until protected credential installation is implemented. The owner-run `./scripts/connect-account.sh` walkthrough cannot complete a new connection during this gate. Existing saved-account reads on macOS also require the protected credential adapter, which remains unavailable. No account settings change. No agent runs credentialed steps. The macOS credential adapter is denied until application-specific trust and per-access approval are implemented and verified. The OS adapters and actual provider behavior have not been validated with real accounts.
+Real account setup belongs to the approved frozen macOS installation described in [Native confirmation and protected Keychain credentials](docs/macos-confirmation.md). Its owner wizard offers hidden terminal entry and exact native consent for adding a local account or replacing its password. A checkout build cannot use that path without the protection requirements. Local creation leaves connectivity unverified. Actual terminal, Keychain, helper and provider acceptance remain owner-run work. The connection walkthrough captures no credentials and uses the saved-account interface. Provider writes remain held.
 
 For fake-only account verification, start the built binary with `./target/debug/mailroom --synthetic-accounts`. This mode uses temporary encrypted files, fake credentials and 100 invented headers. It cannot connect to a provider or the OS backend. The UI labels the mode explicitly.
 
@@ -61,7 +61,7 @@ Inspect the [owner-run recovery wizard](scripts/recovery-wizard.sh) with `bash s
 
 ## Account boundary
 
-[Local account lifecycle](docs/account-lifecycle.md) adds synthetic-only password replacement, interrupted-creation cleanup, exact local forgetting and safe key generations. New production connections and lifecycle changes remain unavailable until protected credential installation is implemented. The existing connection wizard cannot complete a new production connection during this gate.
+[Local account lifecycle](docs/account-lifecycle.md) adds synthetic-only password replacement, interrupted-creation cleanup, exact local forgetting and safe key generations. The protected owner CLI adds local account creation and password replacement. Other real lifecycle controls remain held. Actual installation and credential access still require exact approval and owner-run verification.
 
 Read-only adapters use fixed provider TLS endpoints. There are no write-enable flags or caller-supplied source URLs. The central policy denies rule upload and activation, folder creation, moves, flags, forwarding changes, sends and unsubscribe requests. The new proof route reads the saved census under the existing account-operation lock. It assigns no recipient trust or forwarding authority.
 

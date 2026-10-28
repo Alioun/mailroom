@@ -309,6 +309,20 @@ fn display_and_authentication_match_the_swift_helper_fixture() {
             sending_identity: "alias@example.test".into(),
             content_digest: "b".repeat(64),
         },
+        ExactAction::LocalAccount {
+            account: "invented-account".into(),
+            operation: LocalAccountOperation::Create,
+            provider: crate::acquisition::Provider::Gmail,
+            login: "owner@example.test".into(),
+            plan_receipt: "f".repeat(64),
+        },
+        ExactAction::LocalAccount {
+            account: "invented-account".into(),
+            operation: LocalAccountOperation::ReplacePassword,
+            provider: crate::acquisition::Provider::MailboxOrg,
+            login: "owner@example.test".into(),
+            plan_receipt: "f".repeat(64),
+        },
     ];
     let cases = fixture["actions"].as_array().unwrap();
     assert_eq!(cases.len(), actions.len());

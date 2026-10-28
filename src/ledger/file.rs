@@ -1,5 +1,7 @@
 use super::{Document, Snapshot, digest, encode, validate};
 #[cfg(unix)]
+use crate::private_fs::no_granting_acl;
+#[cfg(unix)]
 use std::os::{
     fd::{AsRawFd, FromRawFd},
     unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
@@ -209,55 +211,6 @@ fn private_directory(file: &File) -> Result<(), String> {
         return Err(ERROR.into());
     }
     no_granting_acl(file)
-}
-#[cfg(target_os = "macos")]
-fn no_granting_acl(file: &File) -> Result<(), String> {
-    use std::ffi::{c_int, c_void};
-    unsafe extern "C" {
-        fn acl_get_fd_np(fd: c_int, kind: c_int) -> *mut c_void;
-        fn acl_valid(acl: *mut c_void) -> c_int;
-        fn acl_get_entry(acl: *mut c_void, which: c_int, entry: *mut *mut c_void) -> c_int;
-        fn acl_get_tag_type(entry: *mut c_void, tag: *mut c_int) -> c_int;
-        fn acl_free(object: *mut c_void) -> c_int;
-    }
-    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), 0x100) };
-    if acl.is_null() {
-        return if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
-            Ok(())
-        } else {
-            Err(ERROR.into())
-        };
-    }
-    let result = (|| {
-        if unsafe { acl_valid(acl) } != 0 {
-            return Err(ERROR.into());
-        }
-        let mut entry = std::ptr::null_mut();
-        let mut which = 0;
-        loop {
-            if unsafe { acl_get_entry(acl, which, &mut entry) } != 0 {
-                // macOS returns EINVAL at the end, including for an empty valid ACL.
-                return if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL)
-                    && unsafe { acl_valid(acl) } == 0
-                {
-                    Ok(())
-                } else {
-                    Err(ERROR.into())
-                };
-            }
-            let mut tag = 0;
-            if unsafe { acl_get_tag_type(entry, &mut tag) } != 0 || tag != 2 {
-                return Err(ERROR.into());
-            }
-            which = -1;
-        }
-    })();
-    unsafe { acl_free(acl) };
-    result
-}
-#[cfg(all(unix, not(target_os = "macos")))]
-fn no_granting_acl(_: &File) -> Result<(), String> {
-    Ok(())
 }
 #[cfg(unix)]
 fn open_at(directory: &File, name: &str, flags: i32, mode: u32) -> Result<File, String> {

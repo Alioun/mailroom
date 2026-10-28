@@ -98,6 +98,28 @@
     "content_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
    },
    "display": "Open the unsubscribe message for subscription sub-3 for account invented-account. Open a new message in Mail to leave@list.example.test from alias@example.test with the confirmed subject and body. Fields SHA-256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb. Nothing is sent unless you send it in Mail."
+  },
+  {
+   "action": {
+    "purpose": "local_account",
+    "account": "invented-account",
+    "operation": "create",
+    "provider": "gmail",
+    "login": "owner@example.test",
+    "plan_receipt": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+   },
+   "display": "Create a local account for owner@example.test at Gmail, account invented-account. Store the credential privately. No provider connection or setting change. Exact local plan receipt ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff."
+  },
+  {
+   "action": {
+    "purpose": "local_account",
+    "account": "invented-account",
+    "operation": "replace_password",
+    "provider": "mailbox_org",
+    "login": "owner@example.test",
+    "plan_receipt": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+   },
+   "display": "Replace the stored password for owner@example.test at mailbox.org, account invented-account. Store the credential privately. No provider connection or setting change. Exact local plan receipt ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff."
   }
  ],
  "outcome": {

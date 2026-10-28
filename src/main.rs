@@ -7,7 +7,7 @@ fn main() -> std::process::ExitCode {
     #[cfg(target_os = "macos")]
     if matches!(
         arguments.first().map(String::as_str),
-        Some("keychain" | "native-check")
+        Some("keychain" | "native-check" | "account")
     ) {
         return std::process::ExitCode::from(mailroom::owner::run(&arguments));
     }

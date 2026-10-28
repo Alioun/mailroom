@@ -315,7 +315,25 @@ impl Accounts {
         login: String,
         password: &SecretValue,
     ) -> Result<Account, AcquisitionError> {
-        self.create_transaction(provider, login, password)
+        self.create_transaction(provider, login, password, |_| Ok(()))
+    }
+    pub(crate) fn create_reviewed(
+        &self,
+        provider: Provider,
+        login: String,
+        password: &SecretValue,
+        authorize: impl FnOnce(&Account) -> Result<(), AcquisitionError>,
+    ) -> Result<Account, AcquisitionError> {
+        self.create_transaction(provider, login, password, |account| {
+            if self
+                .list()?
+                .iter()
+                .any(|a| a.provider == provider && a.login.eq_ignore_ascii_case(&account.login))
+            {
+                return Err(AcquisitionError::InvalidInput);
+            }
+            authorize(account)
+        })
     }
     fn metadata_path(&self, id: &AccountId) -> PathBuf {
         self.paths.config.join(format!("{}.json", id.as_str()))

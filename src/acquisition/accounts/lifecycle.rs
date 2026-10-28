@@ -293,6 +293,7 @@ impl Accounts {
         provider: Provider,
         login: String,
         password: &SecretValue,
+        authorize: impl FnOnce(&Account) -> Result<(), AcquisitionError>,
     ) -> Result<Account, AcquisitionError> {
         let _installation = self.lock_installation()?;
         validate_password(password)?;
@@ -324,6 +325,7 @@ impl Accounts {
             provider,
             login,
         };
+        authorize(&a)?;
         self.record(&a.id, &Intent::Creating { account: a.clone() })?;
         let mut key = Zeroizing::new(vec![0; 32]);
         OsRng.fill_bytes(&mut key);
@@ -360,12 +362,21 @@ impl Accounts {
         id: &AccountId,
         password: &SecretValue,
     ) -> Result<(), AcquisitionError> {
+        self.replace_password_reviewed(id, password, |_, _, _| Ok(()))
+    }
+    pub(crate) fn replace_password_reviewed(
+        &self,
+        id: &AccountId,
+        password: &SecretValue,
+        authorize: impl FnOnce(&Account, &AccountState, &CensusKeys) -> Result<(), AcquisitionError>,
+    ) -> Result<(), AcquisitionError> {
         validate_password(password)?;
         let _lease = self.lock_account(id)?;
         self.require_ready(id)?;
         let before = self.load_metadata(id)?;
         let _store = self.open_store(&before, &self.paths.data, 0)?;
-        _store.load_state()?;
+        let saved = _store.load_state()?;
+        authorize(&before, &saved, _store.keys())?;
         let mut after = before.clone();
         after.password_ref = format!("{}-password-{}", id.as_str(), nonce());
         after.connection = ConnectionState::Unverified;

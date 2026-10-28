@@ -12,6 +12,8 @@ pub(crate) mod native;
 pub(crate) mod original;
 #[cfg(target_os = "macos")]
 pub mod owner;
+#[cfg(unix)]
+mod private_fs;
 
 /// Sets and verifies a zero core-file limit. Call before anything can hold a secret.
 pub fn disable_core_dumps() -> bool {

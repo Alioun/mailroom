@@ -16,6 +16,13 @@ const LIFETIME: Duration = Duration::from_secs(300);
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "purpose", rename_all = "snake_case")]
 pub(crate) enum ExactAction {
+    LocalAccount {
+        account: String,
+        operation: LocalAccountOperation,
+        provider: crate::acquisition::Provider,
+        login: String,
+        plan_receipt: String,
+    },
     Recovery {
         account: String,
         operation: String,
@@ -89,6 +96,21 @@ pub(crate) enum ExactAction {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LocalAccountOperation {
+    Create,
+    ReplacePassword,
+}
+impl LocalAccountOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Create => "Create a local account",
+            Self::ReplacePassword => "Replace the stored password",
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Plan {
     pub actions: Vec<ExactAction>,
@@ -116,6 +138,7 @@ fn random() -> [u8; 32] {
 }
 fn display(actions: &[ExactAction]) -> String {
     actions.iter().map(|a| match a {
+        ExactAction::LocalAccount {account, operation, provider, login, plan_receipt} => format!("{} for {login} at {}, account {account}. Store the credential privately. No provider connection or setting change. Exact local plan receipt {plan_receipt}.", operation.label(), match provider { crate::acquisition::Provider::Gmail => "Gmail", crate::acquisition::Provider::MailboxOrg => "mailbox.org" }),
         ExactAction::Recovery {account, operation, manifest_digest, consequences} => format!("{operation} for account {account}. Exact recovery plan SHA-256 {manifest_digest}. {consequences}"),
         ExactAction::InvoiceSend {account, target_name, target, sending_identity, content_digest, ..} => format!("Send this invoice for account {account} to {target_name} <{target}> from {sending_identity}. Exact content SHA-256 {content_digest}. No Undo."),
         ExactAction::UnsubscribeLocalMail {account, target, sending_identity, receiving_identity, subject, content_digest, ..} => format!("Send this unsubscribe message for account {account} to {target} from {sending_identity}, received at {receiving_identity}. Subject {subject}. Exact content SHA-256 {content_digest}. Success unknown. No Undo."),

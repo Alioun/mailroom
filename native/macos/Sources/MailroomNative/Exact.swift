@@ -10,6 +10,8 @@ public struct ExactAction: Decodable, Sendable {
     let purpose: String
     let account: String
     let operation: String?
+    let provider: String?
+    let login: String?
     let manifest_digest: String?
     let consequences: String?
     let target_name: String?
@@ -32,6 +34,20 @@ public struct ExactAction: Decodable, Sendable {
     /// The exact sentence the Rust core derives for the same action.
     public func display() throws -> String {
         switch purpose {
+        case "local_account":
+            let label: String
+            switch try required(operation) {
+            case "create": label = "Create a local account"
+            case "replace_password": label = "Replace the stored password"
+            default: throw Denied()
+            }
+            let service: String
+            switch try required(provider) {
+            case "gmail": service = "Gmail"
+            case "mailbox_org": service = "mailbox.org"
+            default: throw Denied()
+            }
+            return "\(label) for \(try required(login)) at \(service), account \(account). Store the credential privately. No provider connection or setting change. Exact local plan receipt \(try required(plan_receipt))."
         case "recovery":
             return "\(try required(operation)) for account \(account). Exact recovery plan SHA-256 \(try required(manifest_digest)). \(try required(consequences))"
         case "invoice_send":

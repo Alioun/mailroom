@@ -92,7 +92,7 @@ pub(in crate::server) async fn handle(
     body: Result<Json<Request>, JsonRejection>,
 ) -> Response {
     if !state.accounts.synthetic() {
-        return (StatusCode::FORBIDDEN, Json(json!({"error":"Recovery creation and restoration denied before credential/native access. Protected native launch and Keychain implementation are missing.","production_available":false}))).into_response();
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"Recovery creation and restoration denied before credential/native access. Protected recovery setup and validation are required.","production_available":false}))).into_response();
     }
     let request = match input(body) {
         Ok(v) => v,

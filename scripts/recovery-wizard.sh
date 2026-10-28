@@ -212,7 +212,7 @@ run_wizard() {
 TOTAL_STAGES=5
 if [[ "${1:-}" == "--plan" ]]; then
   printf '%s\n' \
-    '1. Verify protected native launch, authenticated IPC and Keychain implementation before real recovery.' \
+    '1. Verify protected native launch, authenticated IPC and Keychain access before real recovery.' \
     '2. Privately generate and separately store a random 256-bit recovery key through the future protected adapter.' \
     '3. Review the exact selected account set, optional authoritative ledger, captured resources, boundary and exclusions; approve creation once.' \
     '4. Keep the completed encrypted bundle outside this Mac, apart from its key, and verify local authentication in an isolated installation.' \
@@ -227,7 +227,7 @@ fi
 ENV_FILE=/dev/null
 banner "Encrypted recovery acceptance prerequisites"
 stage "Establish protected local access"
-say "Native executable continuity, authenticated IPC and protected Keychain are missing implementation."
+say "Real recovery requires verified protected installation, native launch, authenticated IPC and Keychain access."
 say "Complete those boundaries and owner-run verification before handling any real recovery key or bundle."
 pause "Record this unmet prerequisite privately."
 stage "Hold the recovery key separately"
@@ -237,7 +237,7 @@ say "Keep the key apart from the encrypted bundle. This wizard requests and reco
 pause "Record your separate storage arrangement privately."
 stage "Review the exact capture"
 say "Review every selected account, schema, generation, revision, capture time and exact resource hashes."
-say "Approve this exact plan once through protected native confirmation after that implementation is accepted."
+say "Approve this exact plan once through protected native confirmation after the protected recovery setup is accepted."
 say "Authoritative ledger inclusion is optional and initially unchecked. Review its exact bytes and source version. Provider passwords and external mail effects are excluded."
 pause "Record that real capture remains blocked."
 stage "Verify outside this installation"

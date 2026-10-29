@@ -133,7 +133,11 @@ impl Readback {
     }
 }
 
+mod compensation;
 mod deletion;
+pub use compensation::{
+    CompensationConflict, CompensationPreview, ExtraCopyPlan, OwnedDeletedPlan,
+};
 use deletion::check_observation;
 pub use deletion::{Deletion, FlagChange, FlagEvidence, FlagIntent, PendingClear, StoreResult};
 

@@ -124,6 +124,13 @@ impl CopyWorker<'_> {
             }
             _ => (),
         }
+        let view = match self.work {
+            CopyWork::File => crate::census::ProtocolStateView::Persisted,
+            CopyWork::Reconcile => crate::census::ProtocolStateView::Interrupted,
+        };
+        if !self.store.checkpoint_matches(self.saved, view)? {
+            return Err(invalid());
+        }
         self.repo.validate_copy_authority(
             self.account,
             self.store,

@@ -3,7 +3,7 @@ use super::*;
 mod records;
 pub use records::{
     CheckpointChange, CleanupNext, CleanupSlot, ClearNext, CompensationEvidence,
-    CompensationResolution,
+    CompensationResolution, DependentCleanupPlan,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

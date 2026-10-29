@@ -27,6 +27,7 @@ pub use backlog::compensation_review::{
     CopyCompensationActions, CopyCompensationObservation, CopyCompensationRequest,
     CopyCompensationReview,
 };
+pub use backlog::dependent_cleanup::{DependentCleanupRequest, DependentCleanupReview};
 pub use scan::{Cancellation, ScanProgress};
 use serde::Serialize;
 

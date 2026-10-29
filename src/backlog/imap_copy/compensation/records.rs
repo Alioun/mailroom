@@ -1,6 +1,7 @@
 use super::*;
 
 mod after_clear;
+pub use after_clear::DependentCleanupPlan;
 mod checkpoints;
 pub use checkpoints::CheckpointChange;
 mod decode;

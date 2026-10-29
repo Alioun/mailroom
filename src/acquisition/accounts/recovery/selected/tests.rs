@@ -921,6 +921,17 @@ fn selected_compensation_histories_and_ciphertexts_restore_exactly_under_hold() 
         let store = repo.store(&repo.load(id).unwrap()).unwrap();
         let mut saved = store.load_state().unwrap();
         saved.protocol_backlog.runs = vec![compensation_fixture(id, stage)];
+        for entry in &mut saved.protocol_backlog.runs[0].compensation {
+            entry.after_clear_approvals = entry
+                .evidence
+                .dependent_clears()
+                .map(|clear| crate::backlog::protocol::DependentCleanupApproval {
+                    clear,
+                    receipt: "a".repeat(64),
+                    binding: "b".repeat(64),
+                })
+                .collect();
+        }
         store.save_state(&mut saved).unwrap();
         expected.push((
             serde_json::to_vec(&saved.protocol_backlog).unwrap(),

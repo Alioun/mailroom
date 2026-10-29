@@ -48,6 +48,7 @@ pub struct SavedCopyCompensationCheckpoints<'a> {
 }
 
 fn approval(store: &EncryptedStore, run: &Run) -> Result<String, AcquisitionError> {
+    super::dependent_cleanup::approved_dependencies(store, run)?;
     let plans: Vec<_> = run
         .compensation
         .iter()
@@ -56,6 +57,7 @@ fn approval(store: &EncryptedStore, run: &Run) -> Result<String, AcquisitionErro
                 entry.forward,
                 entry.evidence.forward(),
                 entry.evidence.preview(),
+                &entry.after_clear_approvals,
             )
         })
         .collect();
@@ -95,7 +97,6 @@ impl Accounts {
             || current.plan.topology != *topology
             || current.undo_receipt.is_none()
             || current.closed.is_some()
-            || current.compensation[entry].evidence.has_dependent_cleanup()
         {
             return Err(invalid());
         }

@@ -119,6 +119,7 @@ impl Accounts {
                 .sum::<usize>();
             actions.conflicts += preview.conflicts().len();
             compensation.push(Compensation {
+                after_clear_approvals: Vec::new(),
                 forward: *forward,
                 evidence: CompensationEvidence::new(evidence.clone(), preview).map_err(failure)?,
             });

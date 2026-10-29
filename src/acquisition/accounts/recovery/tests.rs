@@ -978,6 +978,17 @@ fn compensation_history_survives_single_recovery_without_execution_authority() {
         let store = repo.store(&account).unwrap();
         let mut saved = store.load_state().unwrap();
         saved.protocol_backlog.runs = vec![compensation_fixture(&account.id, stage)];
+        for entry in &mut saved.protocol_backlog.runs[0].compensation {
+            entry.after_clear_approvals = entry
+                .evidence
+                .dependent_clears()
+                .map(|clear| crate::backlog::protocol::DependentCleanupApproval {
+                    clear,
+                    receipt: "a".repeat(64),
+                    binding: "b".repeat(64),
+                })
+                .collect();
+        }
         store.save_state(&mut saved).unwrap();
         let expected = serde_json::to_vec(&saved.protocol_backlog).unwrap();
         let ciphertext = fs::read(store.path()).unwrap();

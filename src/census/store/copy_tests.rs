@@ -371,6 +371,74 @@ fn encrypted_dependent_cleanup_keeps_each_prerequisite_and_uncertain_effect_on_r
 }
 
 #[test]
+fn dependent_approvals_require_schema_twenty_nine_and_preserve_legacy_absence() {
+    use protocol::{CompensationPhase as P, DependentCleanupApproval, compensation_fixture};
+    let (_root, store, original) = fixture();
+    let mut current = original.clone();
+    let mut run = compensation_fixture(&current.census.account, P::AfterClearPrepared);
+    run.compensation[0]
+        .after_clear_approvals
+        .push(DependentCleanupApproval {
+            clear: 0,
+            receipt: "a".repeat(64),
+            binding: "b".repeat(64),
+        });
+    current.protocol_backlog.runs = vec![run];
+    for version in 1..29 {
+        snapshot(&store, version, &current);
+        assert!(
+            matches!(store.load_state(), Err(CensusError::UnsupportedVersion)),
+            "base {version}"
+        );
+    }
+    snapshot(&store, 29, &current);
+    assert!(store.load_state().unwrap().protocol_backlog == current.protocol_backlog);
+    for version in 18..29 {
+        snapshot(&store, version, &original);
+        append(
+            &store,
+            &original,
+            patch::Patch::Replace {
+                value: serde_json::to_value(&current.protocol_backlog).unwrap(),
+            },
+        );
+        assert!(
+            matches!(store.load_state(), Err(CensusError::UnsupportedVersion)),
+            "frame {version}"
+        );
+    }
+    current.protocol_backlog.runs[0].compensation[0]
+        .after_clear_approvals
+        .clear();
+    snapshot(&store, 28, &current);
+    assert!(store.load_state().unwrap().protocol_backlog == current.protocol_backlog);
+    assert!(
+        serde_json::to_value(&current.protocol_backlog).unwrap()["runs"][0]["compensation"][0]
+            .get("after_clear_approvals")
+            .is_none()
+    );
+    let mut next = current.clone();
+    next.protocol_backlog.runs[0].compensation[0]
+        .after_clear_approvals
+        .push(DependentCleanupApproval {
+            clear: 0,
+            receipt: "a".repeat(64),
+            binding: "b".repeat(64),
+        });
+    let before = serde_json::to_value(&current.protocol_backlog).unwrap();
+    let after = serde_json::to_value(&next.protocol_backlog).unwrap();
+    snapshot(&store, 28, &current);
+    append(&store, &current, patch::diff(&before, &after).unwrap());
+    assert!(matches!(
+        store.load_state(),
+        Err(CensusError::UnsupportedVersion)
+    ));
+    snapshot(&store, 29, &current);
+    append(&store, &current, patch::diff(&before, &after).unwrap());
+    assert!(store.load_state().unwrap().protocol_backlog == next.protocol_backlog);
+}
+
+#[test]
 fn old_schema_cannot_append_a_dependent_plan_to_existing_compensation() {
     use protocol::{CompensationPhase as P, compensation_fixture};
     let (_root, store, mut state) = fixture();

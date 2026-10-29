@@ -6,6 +6,16 @@ use crate::backlog::imap_copy::{CompensationEvidence, CompensationResolution as 
 pub struct Compensation {
     pub forward: usize,
     pub evidence: CompensationEvidence,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after_clear_approvals: Vec<DependentCleanupApproval>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DependentCleanupApproval {
+    pub clear: usize,
+    pub receipt: String,
+    pub binding: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -111,6 +121,16 @@ pub(super) fn validate(run: &Run) -> Result<(), CensusError> {
                 != Some(entry.evidence.forward())
         {
             return Err(CensusError::Storage);
+        }
+        let mut clears = BTreeSet::new();
+        for approval in &entry.after_clear_approvals {
+            if !clears.insert(approval.clear)
+                || entry.evidence.dependent_plan(approval.clear).is_none()
+                || !digest(&approval.receipt)
+                || !digest(&approval.binding)
+            {
+                return Err(CensusError::Storage);
+            }
         }
     }
     Ok(())

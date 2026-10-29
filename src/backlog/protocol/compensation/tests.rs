@@ -201,6 +201,7 @@ pub(crate) fn fixture(account: &AccountId, phase: Phase) -> Run {
         }
     }
     run.compensation = vec![Compensation {
+        after_clear_approvals: Vec::new(),
         forward: 0,
         evidence,
     }];

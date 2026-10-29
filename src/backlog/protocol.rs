@@ -11,7 +11,7 @@ pub use batch::{Batch, COPY_SEMANTICS};
 mod compensation;
 #[cfg(test)]
 pub(crate) use compensation::tests::{Phase as CompensationPhase, fixture as compensation_fixture};
-pub use compensation::{Compensation, CompensationCounts};
+pub use compensation::{Compensation, CompensationCounts, DependentCleanupApproval};
 
 /// Retained runs with a full per-message journal. Q27 compacts finished runs
 /// 90 days after completion, so this bounds runs started within 90 days.
@@ -98,6 +98,12 @@ pub struct Closure {
     pub at: u64,
     pub receipt: String,
 }
+fn digest(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 impl Closure {
     pub(crate) fn valid(&self, status: Status) -> bool {
         matches!(status, Status::Conflict | Status::Undone)
@@ -338,11 +344,6 @@ impl Journal {
     }
     pub fn validate(&self, account: &AccountId) -> Result<(), CensusError> {
         let invalid = || CensusError::Storage;
-        let digest = |s: &str| {
-            s.len() == 64
-                && s.bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        };
         if self.runs.len() > HISTORY
             || self.runs.iter().filter(|r| !r.settled()).count() > 1
             || self.summaries.len() > retention::SUMMARIES

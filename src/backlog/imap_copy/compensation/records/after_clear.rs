@@ -1,5 +1,24 @@
 use super::*;
 
+#[derive(Serialize)]
+pub struct DependentCleanupPlan<'a> {
+    clear: usize,
+    prerequisite: &'a PendingClear,
+    source: &'a Readback,
+    destination: &'a Readback,
+    plans: &'a [ExtraCopyPlan],
+    conflicts: &'a BTreeSet<Uid>,
+}
+
+impl DependentCleanupPlan<'_> {
+    pub fn plans(&self) -> &[ExtraCopyPlan] {
+        self.plans
+    }
+    pub fn conflicts(&self) -> &BTreeSet<Uid> {
+        self.conflicts
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(super) struct AfterClear {
     pub(super) clear: usize,
@@ -11,6 +30,22 @@ pub(super) struct AfterClear {
 }
 
 impl CompensationEvidence {
+    pub fn dependent_clears(&self) -> impl Iterator<Item = usize> + '_ {
+        self.after_clear.iter().map(|entry| entry.clear)
+    }
+
+    pub fn dependent_plan(&self, clear: usize) -> Option<DependentCleanupPlan<'_>> {
+        let entry = self.after_clear.iter().find(|entry| entry.clear == clear)?;
+        Some(DependentCleanupPlan {
+            clear,
+            prerequisite: self.clear(clear)?,
+            source: &entry.source,
+            destination: &entry.destination,
+            plans: &entry.plans,
+            conflicts: &entry.conflicts,
+        })
+    }
+
     pub fn cleanup_slots(&self) -> impl Iterator<Item = CleanupSlot> + '_ {
         (0..self.cleanup.len())
             .map(CleanupSlot::Initial)

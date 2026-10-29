@@ -25,6 +25,7 @@ pub(super) mod compensation_checkpoints;
 pub(super) mod compensation_review;
 pub(super) mod copy_checkpoints;
 pub(super) mod copy_worker;
+pub(super) mod dependent_cleanup;
 
 fn invalid() -> AcquisitionError {
     AcquisitionError::InvalidInput

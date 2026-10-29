@@ -151,6 +151,12 @@ async fn protected_compensation_status_exposes_counts_and_keeps_actions_held() {
         Phase::Cleared,
         Phase::RestorePrepared,
         Phase::Restored,
+        Phase::AfterClearPrepared,
+        Phase::AfterClearStoreUncertain,
+        Phase::AfterClearMarked,
+        Phase::AfterClearExpungeUncertain,
+        Phase::AfterClearCleaned,
+        Phase::AfterClearConflict,
     ] {
         let store = repo.store(&account).unwrap();
         let mut saved = store.load_state().unwrap();

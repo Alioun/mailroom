@@ -4,7 +4,7 @@ use crate::{
     census::AccountId,
 };
 
-fn prepared(stage: Stage) -> CompensationEvidence {
+pub(super) fn prepared(stage: Stage) -> CompensationEvidence {
     let e = run(&AccountId::new("compensation-records").unwrap(), stage).batches[0]
         .as_copy()
         .unwrap()
@@ -27,7 +27,7 @@ fn prepared(stage: Stage) -> CompensationEvidence {
     CompensationEvidence::new(e, preview).unwrap()
 }
 
-fn flagged(intent: &FlagIntent) -> (StoreResult, Readback) {
+pub(super) fn flagged(intent: &FlagIntent) -> (StoreResult, Readback) {
     let mut after = intent.before().clone();
     after.highest_modseq = seq(after.highest_modseq.get() + 10);
     for current in after.messages.values_mut() {
@@ -55,7 +55,7 @@ fn flagged(intent: &FlagIntent) -> (StoreResult, Readback) {
     (result, after)
 }
 
-fn empty(read: &Readback) -> Readback {
+pub(super) fn empty(read: &Readback) -> Readback {
     Readback::new(
         read.identity.clone(),
         seq(read.highest_modseq.get() + 10),
@@ -67,15 +67,26 @@ fn empty(read: &Readback) -> Readback {
 fn mark_cleanup(record: &mut CompensationEvidence, index: usize) -> Readback {
     let plan = record.preview().cleanup()[index].clone();
     let command = record
-        .begin_cleanup(index, plan.retained(), plan.deletion().before())
+        .begin_cleanup(
+            CleanupSlot::Initial(index),
+            plan.retained(),
+            plan.deletion().before(),
+        )
         .unwrap();
     assert_eq!(command, plan.deletion().command());
     *record = roundtrip(record);
-    assert_eq!(record.cleanup_next(index), Ok(CleanupNext::ObserveStore));
+    assert_eq!(
+        record.cleanup_next(CleanupSlot::Initial(index)),
+        Ok(CleanupNext::ObserveStore)
+    );
     let (ack, after) = flagged(plan.deletion());
-    record.record_cleanup_store(index, ack).unwrap();
+    record
+        .record_cleanup_store(CleanupSlot::Initial(index), ack)
+        .unwrap();
     *record = roundtrip(record);
-    record.observe_cleanup_store(index, after.clone()).unwrap();
+    record
+        .observe_cleanup_store(CleanupSlot::Initial(index), after.clone())
+        .unwrap();
     *record = roundtrip(record);
     after
 }
@@ -87,7 +98,10 @@ fn each_cleanup_checkpoint_reopens_without_repeating_store_or_expunge() {
     let retained = record.preview().cleanup()[0].retained().clone();
     let initial = record.clone();
     let after = mark_cleanup(&mut record, 0);
-    assert_eq!(record.cleanup_next(0), Ok(CleanupNext::Expunge));
+    assert_eq!(
+        record.cleanup_next(CleanupSlot::Initial(0)),
+        Ok(CleanupNext::Expunge)
+    );
     assert!(
         record
             .resolutions()
@@ -96,28 +110,40 @@ fn each_cleanup_checkpoint_reopens_without_repeating_store_or_expunge() {
     );
     let before_retry = serde_json::to_vec(&record).unwrap();
     let target = record.preview().cleanup()[0].deletion().before().clone();
-    assert!(record.begin_cleanup(0, &retained, &target).is_err());
+    assert!(
+        record
+            .begin_cleanup(CleanupSlot::Initial(0), &retained, &target)
+            .is_err()
+    );
     assert_eq!(serde_json::to_vec(&record).unwrap(), before_retry);
     assert_eq!(
         record
-            .begin_cleanup_expunge(0, retained.clone(), after.clone())
+            .begin_cleanup_expunge(CleanupSlot::Initial(0), retained.clone(), after.clone())
             .unwrap(),
         "UID EXPUNGE 60,64"
     );
     record = roundtrip(&record);
-    assert_eq!(record.cleanup_next(0), Ok(CleanupNext::ObserveExpunge));
+    assert_eq!(
+        record.cleanup_next(CleanupSlot::Initial(0)),
+        Ok(CleanupNext::ObserveExpunge)
+    );
     assert!(
         record
-            .begin_cleanup_expunge(0, retained.clone(), after.clone())
+            .begin_cleanup_expunge(CleanupSlot::Initial(0), retained.clone(), after.clone())
             .is_err()
     );
-    record.record_cleanup_expunge(0, Completion::Lost).unwrap();
-    record = roundtrip(&record);
     record
-        .observe_cleanup_final(0, retained.clone(), empty(&after))
+        .record_cleanup_expunge(CleanupSlot::Initial(0), Completion::Lost)
         .unwrap();
     record = roundtrip(&record);
-    assert_eq!(record.cleanup_next(0), Ok(CleanupNext::Complete));
+    record
+        .observe_cleanup_final(CleanupSlot::Initial(0), retained.clone(), empty(&after))
+        .unwrap();
+    record = roundtrip(&record);
+    assert_eq!(
+        record.cleanup_next(CleanupSlot::Initial(0)),
+        Ok(CleanupNext::Complete)
+    );
     assert!(record.fully_reversed());
     assert!(
         record
@@ -171,7 +197,11 @@ fn partial_cleanup_store_allows_only_the_certified_subset_to_finish() {
     let mut record = prepared(Stage::Copied);
     let plan = record.preview().cleanup()[0].clone();
     record
-        .begin_cleanup(0, plan.retained(), plan.deletion().before())
+        .begin_cleanup(
+            CleanupSlot::Initial(0),
+            plan.retained(),
+            plan.deletion().before(),
+        )
         .unwrap();
     let (mut ack, mut after) = flagged(plan.deletion());
     if let StoreResult::Tagged {
@@ -186,10 +216,17 @@ fn partial_cleanup_store_allows_only_the_certified_subset_to_finish() {
     after
         .messages
         .insert(uid(64), plan.deletion().before().messages[&uid(64)].clone());
-    record.record_cleanup_store(0, ack).unwrap();
-    record.observe_cleanup_store(0, after.clone()).unwrap();
+    record
+        .record_cleanup_store(CleanupSlot::Initial(0), ack)
+        .unwrap();
+    record
+        .observe_cleanup_store(CleanupSlot::Initial(0), after.clone())
+        .unwrap();
     record = roundtrip(&record);
-    assert_eq!(record.cleanup_next(0), Ok(CleanupNext::Expunge));
+    assert_eq!(
+        record.cleanup_next(CleanupSlot::Initial(0)),
+        Ok(CleanupNext::Expunge)
+    );
     assert_eq!(
         record.resolutions()[&uid(8)],
         CompensationResolution::Conflict
@@ -198,14 +235,16 @@ fn partial_cleanup_store_allows_only_the_certified_subset_to_finish() {
     let target = after.subset(&[uid(60)].into());
     assert_eq!(
         record
-            .begin_cleanup_expunge(0, retained.clone(), target.clone())
+            .begin_cleanup_expunge(CleanupSlot::Initial(0), retained.clone(), target.clone())
             .unwrap(),
         "UID EXPUNGE 60"
     );
     record = roundtrip(&record);
-    record.record_cleanup_expunge(0, Completion::Lost).unwrap();
     record
-        .observe_cleanup_final(0, retained, empty(&target))
+        .record_cleanup_expunge(CleanupSlot::Initial(0), Completion::Lost)
+        .unwrap();
+    record
+        .observe_cleanup_final(CleanupSlot::Initial(0), retained, empty(&target))
         .unwrap();
     record = roundtrip(&record);
     assert_eq!(
@@ -216,7 +255,10 @@ fn partial_cleanup_store_allows_only_the_certified_subset_to_finish() {
         record.resolutions()[&uid(8)],
         CompensationResolution::Conflict
     );
-    assert_eq!(record.cleanup_next(0), Ok(CleanupNext::Conflict));
+    assert_eq!(
+        record.cleanup_next(CleanupSlot::Initial(0)),
+        Ok(CleanupNext::Conflict)
+    );
     assert!(!record.fully_reversed());
 }
 
@@ -225,17 +267,28 @@ fn lost_store_acknowledgments_never_establish_cleanup_or_clear_ownership() {
     let mut cleanup = prepared(Stage::Copied);
     let plan = cleanup.preview().cleanup()[0].clone();
     cleanup
-        .begin_cleanup(0, plan.retained(), plan.deletion().before())
+        .begin_cleanup(
+            CleanupSlot::Initial(0),
+            plan.retained(),
+            plan.deletion().before(),
+        )
         .unwrap();
     cleanup = roundtrip(&cleanup);
     let (_, after) = flagged(plan.deletion());
-    cleanup.record_cleanup_store(0, StoreResult::Lost).unwrap();
-    cleanup.observe_cleanup_store(0, after.clone()).unwrap();
+    cleanup
+        .record_cleanup_store(CleanupSlot::Initial(0), StoreResult::Lost)
+        .unwrap();
+    cleanup
+        .observe_cleanup_store(CleanupSlot::Initial(0), after.clone())
+        .unwrap();
     cleanup = roundtrip(&cleanup);
-    assert_eq!(cleanup.cleanup_next(0), Ok(CleanupNext::Conflict));
+    assert_eq!(
+        cleanup.cleanup_next(CleanupSlot::Initial(0)),
+        Ok(CleanupNext::Conflict)
+    );
     assert!(
         cleanup
-            .begin_cleanup_expunge(0, plan.retained().clone(), after)
+            .begin_cleanup_expunge(CleanupSlot::Initial(0), plan.retained().clone(), after)
             .is_err()
     );
     assert!(!cleanup.fully_reversed());
@@ -304,12 +357,15 @@ fn changed_or_missing_originals_and_changed_copies_deny_cleanup_before_expunge()
         let before = serde_json::to_vec(&record).unwrap();
         assert!(
             record
-                .begin_cleanup_expunge(0, source, destination)
+                .begin_cleanup_expunge(CleanupSlot::Initial(0), source, destination)
                 .is_err(),
             "{mutation}"
         );
         assert_eq!(serde_json::to_vec(&record).unwrap(), before);
-        assert_eq!(record.cleanup_next(0), Ok(CleanupNext::Expunge));
+        assert_eq!(
+            record.cleanup_next(CleanupSlot::Initial(0)),
+            Ok(CleanupNext::Expunge)
+        );
     }
 }
 
@@ -319,14 +375,16 @@ fn cleanup_final_observation_records_missing_originals_as_conflict_without_retry
     let after = mark_cleanup(&mut record, 0);
     let retained = record.preview().cleanup()[0].retained().clone();
     record
-        .begin_cleanup_expunge(0, retained.clone(), after.clone())
+        .begin_cleanup_expunge(CleanupSlot::Initial(0), retained.clone(), after.clone())
         .unwrap();
-    record.record_cleanup_expunge(0, Completion::Lost).unwrap();
+    record
+        .record_cleanup_expunge(CleanupSlot::Initial(0), Completion::Lost)
+        .unwrap();
     record = roundtrip(&record);
     let mut changed = retained.clone();
     changed.messages.remove(&uid(4));
     record
-        .observe_cleanup_final(0, changed, empty(&after))
+        .observe_cleanup_final(CleanupSlot::Initial(0), changed, empty(&after))
         .unwrap();
     record = roundtrip(&record);
     assert_eq!(
@@ -337,9 +395,16 @@ fn cleanup_final_observation_records_missing_originals_as_conflict_without_retry
         record.resolutions()[&uid(8)],
         CompensationResolution::ExtraCopyRemoved
     );
-    assert_eq!(record.cleanup_next(0), Ok(CleanupNext::Conflict));
+    assert_eq!(
+        record.cleanup_next(CleanupSlot::Initial(0)),
+        Ok(CleanupNext::Conflict)
+    );
     assert!(!record.fully_reversed());
-    assert!(record.begin_cleanup_expunge(0, retained, after).is_err());
+    assert!(
+        record
+            .begin_cleanup_expunge(CleanupSlot::Initial(0), retained, after)
+            .is_err()
+    );
 }
 
 #[test]
@@ -347,7 +412,9 @@ fn substituted_compensation_plans_slots_and_owned_effects_fail_decoding() {
     let mut record = prepared(Stage::Copied);
     let after = mark_cleanup(&mut record, 0);
     let retained = record.preview().cleanup()[0].retained().clone();
-    record.begin_cleanup_expunge(0, retained, after).unwrap();
+    record
+        .begin_cleanup_expunge(CleanupSlot::Initial(0), retained, after)
+        .unwrap();
     for mutation in [
         "semantics",
         "preview-target",
@@ -412,12 +479,14 @@ fn compensation_replay_rejects_regressed_history_and_omitted_effect_evidence() {
     let marked = record.clone();
     let retained = record.preview().cleanup()[0].retained().clone();
     record
-        .begin_cleanup_expunge(0, retained.clone(), after.clone())
+        .begin_cleanup_expunge(CleanupSlot::Initial(0), retained.clone(), after.clone())
         .unwrap();
     let attempted = roundtrip(&record);
-    record.record_cleanup_expunge(0, Completion::Lost).unwrap();
     record
-        .observe_cleanup_final(0, retained, empty(&after))
+        .record_cleanup_expunge(CleanupSlot::Initial(0), Completion::Lost)
+        .unwrap();
+    record
+        .observe_cleanup_final(CleanupSlot::Initial(0), retained, empty(&after))
         .unwrap();
     let completed = roundtrip(&record);
     for prior in [&initial, &marked, &attempted] {

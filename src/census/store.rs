@@ -44,7 +44,7 @@ const MIN_FRAME_BUDGET: u64 = 64 * 1024;
 /// local unsubscribe mail. 24 adds explicit OR sender sets to persisted
 /// rule artifacts used by exports and backlog plans. 25 adds separate unmatched
 /// archive intent. 26 adds tagged COPY phase journals with exact decimal MODSEQ.
-pub(crate) const SCHEMA: u32 = 27;
+pub(crate) const SCHEMA: u32 = 28;
 
 pub struct LocalSecret(Zeroizing<Vec<u8>>);
 
@@ -1200,6 +1200,13 @@ impl EncryptedStore {
         if account != self.keys.account.as_str() {
             return Err(CensusError::AccountMismatch);
         }
+        if version < 28 {
+            let raw: serde_json::Value =
+                serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?;
+            if after_clear_fields(&raw) {
+                return Err(CensusError::UnsupportedVersion);
+            }
+        }
         if version < 27 {
             let raw: serde_json::Value =
                 serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?;
@@ -1352,6 +1359,13 @@ impl EncryptedStore {
             if Some(frame.revision) != state.revision.checked_add(1) {
                 return Err(CensusError::Storage);
             }
+            if version < 28
+                && after_clear_fields(
+                    &serde_json::to_value(&frame.fields).map_err(|_| CensusError::Storage)?,
+                )
+            {
+                return Err(CensusError::UnsupportedVersion);
+            }
             if version < 27
                 && compensation_fields(
                     &serde_json::to_value(&frame.fields).map_err(|_| CensusError::Storage)?,
@@ -1383,6 +1397,9 @@ impl EncryptedStore {
             }
         }
         for (name, value) in patched {
+            if version < 28 && after_clear_fields(&value) {
+                return Err(CensusError::UnsupportedVersion);
+            }
             if version < 27 && compensation_fields(&value) {
                 return Err(CensusError::UnsupportedVersion);
             }
@@ -1654,6 +1671,16 @@ fn uses_resolutions(state: &AccountState) -> bool {
             .history
             .iter()
             .any(|e| e.resolved.is_some())
+}
+
+fn after_clear_fields(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(fields) => fields
+            .iter()
+            .any(|(key, value)| key == "after_clear" || after_clear_fields(value)),
+        serde_json::Value::Array(items) => items.iter().any(after_clear_fields),
+        _ => false,
+    }
 }
 
 fn compensation_fields(value: &serde_json::Value) -> bool {

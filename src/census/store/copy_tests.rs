@@ -303,3 +303,94 @@ fn summary_frame_cannot_smuggle_nonzero_removed_copies_into_schema_twenty_six() 
         Err(CensusError::UnsupportedVersion)
     ));
 }
+
+#[test]
+fn dependent_cleanup_requires_schema_twenty_eight_in_snapshots_and_frames() {
+    use protocol::{CompensationPhase as P, compensation_fixture};
+    let (_root, store, original) = fixture();
+    let mut current = original.clone();
+    current.protocol_backlog.runs = vec![compensation_fixture(
+        &current.census.account,
+        P::AfterClearPrepared,
+    )];
+    for version in 1..28 {
+        snapshot(&store, version, &current);
+        assert!(
+            matches!(store.load_state(), Err(CensusError::UnsupportedVersion)),
+            "base {version}"
+        );
+    }
+    snapshot(&store, 28, &current);
+    assert!(store.load_state().unwrap().protocol_backlog == current.protocol_backlog);
+    for version in 18..28 {
+        snapshot(&store, version, &original);
+        append(
+            &store,
+            &original,
+            patch::Patch::Replace {
+                value: serde_json::to_value(&current.protocol_backlog).unwrap(),
+            },
+        );
+        assert!(
+            matches!(store.load_state(), Err(CensusError::UnsupportedVersion)),
+            "frame {version}"
+        );
+    }
+    current.protocol_backlog.runs = vec![compensation_fixture(&current.census.account, P::Cleared)];
+    snapshot(&store, 27, &current);
+    assert!(store.load_state().unwrap().protocol_backlog == current.protocol_backlog);
+}
+
+#[test]
+fn encrypted_dependent_cleanup_keeps_each_prerequisite_and_uncertain_effect_on_reopen() {
+    use protocol::{CompensationPhase as P, compensation_fixture};
+    let (_root, store, mut state) = fixture();
+    for phase in [
+        P::Cleared,
+        P::AfterClearPrepared,
+        P::AfterClearStoreUncertain,
+        P::AfterClearMarked,
+        P::AfterClearExpungeUncertain,
+        P::AfterClearCleaned,
+    ] {
+        state.protocol_backlog.runs = vec![compensation_fixture(&state.census.account, phase)];
+        store.save_state(&mut state).unwrap();
+        decoded::forget(&store.path());
+        let reopened = store.load_state().unwrap();
+        assert!(
+            reopened.protocol_backlog == state.protocol_backlog,
+            "{phase:?}"
+        );
+        let evidence = &reopened.protocol_backlog.runs[0].compensation[0].evidence;
+        assert_eq!(evidence.clear(0).unwrap().verified().len(), 2);
+        assert_eq!(
+            evidence.fully_reversed(),
+            matches!(phase, P::AfterClearCleaned)
+        );
+    }
+}
+
+#[test]
+fn old_schema_cannot_append_a_dependent_plan_to_existing_compensation() {
+    use protocol::{CompensationPhase as P, compensation_fixture};
+    let (_root, store, mut state) = fixture();
+    state.protocol_backlog.runs = vec![compensation_fixture(&state.census.account, P::Cleared)];
+    snapshot(&store, 27, &state);
+    assert!(store.load_state().is_ok());
+    let before = serde_json::to_value(&state.protocol_backlog).unwrap();
+    let mut after = state.clone();
+    after.protocol_backlog.runs = vec![compensation_fixture(
+        &state.census.account,
+        P::AfterClearPrepared,
+    )];
+    let change = patch::diff(
+        &before,
+        &serde_json::to_value(after.protocol_backlog).unwrap(),
+    )
+    .unwrap();
+    append(&store, &state, change);
+    assert!(matches!(
+        store.load_state(),
+        Err(CensusError::UnsupportedVersion)
+    ));
+}

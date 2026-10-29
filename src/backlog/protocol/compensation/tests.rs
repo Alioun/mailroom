@@ -1,6 +1,6 @@
 use super::*;
 use crate::backlog::{
-    imap_copy::{FlagChange, FlagIntent, ModSeq, Readback, StoreResult},
+    imap_copy::{CleanupSlot, FlagChange, FlagIntent, ModSeq, Readback, StoreResult},
     protocol::tests::{Stage, run},
 };
 
@@ -15,6 +15,12 @@ pub(crate) enum Phase {
     Cleared,
     RestorePrepared,
     Restored,
+    AfterClearPrepared,
+    AfterClearStoreUncertain,
+    AfterClearMarked,
+    AfterClearExpungeUncertain,
+    AfterClearCleaned,
+    AfterClearConflict,
 }
 
 fn seq(n: u64) -> ModSeq {
@@ -58,6 +64,17 @@ fn flagged(intent: &FlagIntent) -> (StoreResult, Readback) {
 }
 
 pub(crate) fn fixture(account: &AccountId, phase: Phase) -> Run {
+    if matches!(
+        phase,
+        Phase::AfterClearPrepared
+            | Phase::AfterClearStoreUncertain
+            | Phase::AfterClearMarked
+            | Phase::AfterClearExpungeUncertain
+            | Phase::AfterClearCleaned
+            | Phase::AfterClearConflict
+    ) {
+        return after_clear_fixture(account, phase);
+    }
     let stage = match phase {
         Phase::ClearUncertain | Phase::Cleared => Stage::Marked,
         Phase::RestorePrepared | Phase::Restored => Stage::Filed,
@@ -139,19 +156,31 @@ pub(crate) fn fixture(account: &AccountId, phase: Phase) -> Run {
         _ => {
             let plan = evidence.preview().cleanup()[0].clone();
             evidence
-                .begin_cleanup(0, plan.retained(), plan.deletion().before())
+                .begin_cleanup(
+                    CleanupSlot::Initial(0),
+                    plan.retained(),
+                    plan.deletion().before(),
+                )
                 .unwrap();
             if !matches!(phase, Phase::StoreUncertain) {
                 let (ack, after) = flagged(plan.deletion());
-                evidence.record_cleanup_store(0, ack).unwrap();
-                evidence.observe_cleanup_store(0, after.clone()).unwrap();
+                evidence
+                    .record_cleanup_store(CleanupSlot::Initial(0), ack)
+                    .unwrap();
+                evidence
+                    .observe_cleanup_store(CleanupSlot::Initial(0), after.clone())
+                    .unwrap();
                 if matches!(phase, Phase::ExpungeUncertain | Phase::Cleaned) {
                     evidence
-                        .begin_cleanup_expunge(0, plan.retained().clone(), after.clone())
+                        .begin_cleanup_expunge(
+                            CleanupSlot::Initial(0),
+                            plan.retained().clone(),
+                            after.clone(),
+                        )
                         .unwrap();
                     if matches!(phase, Phase::Cleaned) {
                         evidence
-                            .record_cleanup_expunge(0, Completion::Lost)
+                            .record_cleanup_expunge(CleanupSlot::Initial(0), Completion::Lost)
                             .unwrap();
                         let empty = Readback::new(
                             after.identity().clone(),
@@ -160,7 +189,11 @@ pub(crate) fn fixture(account: &AccountId, phase: Phase) -> Run {
                         )
                         .unwrap();
                         evidence
-                            .observe_cleanup_final(0, plan.retained().clone(), empty)
+                            .observe_cleanup_final(
+                                CleanupSlot::Initial(0),
+                                plan.retained().clone(),
+                                empty,
+                            )
                             .unwrap();
                     }
                 }
@@ -172,6 +205,61 @@ pub(crate) fn fixture(account: &AccountId, phase: Phase) -> Run {
         evidence,
     }];
     run.undo_receipt = Some("3".repeat(64));
+    run.status = super::outcome(&run);
+    run.stamp(1793260800);
+    Journal {
+        runs: vec![run.clone()],
+        summaries: vec![],
+    }
+    .validate(account)
+    .unwrap();
+    run
+}
+
+fn after_clear_fixture(account: &AccountId, phase: Phase) -> Run {
+    let mut run = fixture(account, Phase::Cleared);
+    let evidence = &mut run.compensation[0].evidence;
+    let mut source = evidence.clear(0).unwrap().readback().unwrap().clone();
+    if matches!(phase, Phase::AfterClearConflict) {
+        let mut messages = source.messages().clone();
+        messages.remove(&Uid::new(4).unwrap());
+        source =
+            Readback::new(source.identity().clone(), source.highest_modseq(), messages).unwrap();
+    }
+    let destination = evidence.preview().destination().clone();
+    let slot = evidence
+        .prepare_after_clear(0, source, destination)
+        .unwrap()[0];
+    let plan = evidence.cleanup_plan(slot).unwrap().clone();
+    if !matches!(phase, Phase::AfterClearPrepared) {
+        evidence
+            .begin_cleanup(slot, plan.retained(), plan.deletion().before())
+            .unwrap();
+        if !matches!(phase, Phase::AfterClearStoreUncertain) {
+            let (ack, after) = flagged(plan.deletion());
+            evidence.record_cleanup_store(slot, ack).unwrap();
+            evidence.observe_cleanup_store(slot, after.clone()).unwrap();
+            if !matches!(phase, Phase::AfterClearMarked) {
+                evidence
+                    .begin_cleanup_expunge(slot, plan.retained().clone(), after.clone())
+                    .unwrap();
+                if !matches!(phase, Phase::AfterClearExpungeUncertain) {
+                    evidence
+                        .record_cleanup_expunge(slot, Completion::Lost)
+                        .unwrap();
+                    let empty = Readback::new(
+                        after.identity().clone(),
+                        seq(after.highest_modseq().get() + 10),
+                        Default::default(),
+                    )
+                    .unwrap();
+                    evidence
+                        .observe_cleanup_final(slot, plan.retained().clone(), empty)
+                        .unwrap();
+                }
+            }
+        }
+    }
     run.status = super::outcome(&run);
     run.stamp(1793260800);
     Journal {
@@ -330,4 +418,36 @@ fn restored_filing_keeps_its_own_count_and_current_flags_in_retention() {
     assert_eq!(journal.summaries[0].restored, 2);
     assert_eq!(journal.summaries[0].copies_removed, 0);
     journal.validate(&account).unwrap();
+}
+
+#[test]
+fn dependent_cleanup_status_retention_and_closure_follow_the_actual_effects() {
+    let account = AccountId::new("after-clear-account").unwrap();
+    for (phase, status) in [
+        (Phase::AfterClearPrepared, Status::Stopped),
+        (Phase::AfterClearStoreUncertain, Status::Uncertain),
+        (Phase::AfterClearMarked, Status::Stopped),
+        (Phase::AfterClearExpungeUncertain, Status::Uncertain),
+        (Phase::AfterClearCleaned, Status::Undone),
+        (Phase::AfterClearConflict, Status::Conflict),
+    ] {
+        let run = fixture(&account, phase);
+        assert_eq!(run.status, status);
+        assert_eq!(run.finished(), status == Status::Undone);
+        assert_eq!(run.closable(), status == Status::Conflict);
+        assert_eq!(run.compensation_counts().restored, 0);
+        let mut journal = Journal {
+            runs: vec![run.clone()],
+            summaries: vec![],
+        };
+        assert_eq!(journal.compact(u64::MAX), status == Status::Undone);
+        if status == Status::Undone {
+            assert_eq!(journal.summaries[0].applied, 0);
+            assert_eq!(journal.summaries[0].restored, 0);
+            assert_eq!(journal.summaries[0].copies_removed, 2);
+        } else {
+            assert!(journal.runs == vec![run]);
+        }
+        journal.validate(&account).unwrap();
+    }
 }

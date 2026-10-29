@@ -913,10 +913,11 @@ fn selected_compensation_histories_and_ciphertexts_restore_exactly_under_hold() 
     use crate::backlog::protocol::{CompensationPhase as Phase, compensation_fixture};
     let (root, repo, ids, ledger) = fixture();
     let mut expected = vec![];
-    for (id, stage) in ids
-        .iter()
-        .zip([Phase::Cleaned, Phase::Restored, Phase::Cleared])
-    {
+    for (id, stage) in ids.iter().zip([
+        Phase::AfterClearCleaned,
+        Phase::AfterClearExpungeUncertain,
+        Phase::AfterClearConflict,
+    ]) {
         let store = repo.store(&repo.load(id).unwrap()).unwrap();
         let mut saved = store.load_state().unwrap();
         saved.protocol_backlog.runs = vec![compensation_fixture(id, stage)];

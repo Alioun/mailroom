@@ -1,7 +1,14 @@
 use super::*;
 
+mod after_clear;
 mod decode;
 mod progress;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CleanupSlot {
+    Initial(usize),
+    AfterClear { clear: usize, group: usize },
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Semantics {
@@ -56,6 +63,8 @@ pub struct CompensationEvidence {
     restore: Option<CopyEvidence>,
     cleanup: Vec<CleanupRecord>,
     clear: Vec<Option<PendingClear>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    after_clear: Vec<after_clear::AfterClear>,
 }
 
 fn retained_for(
@@ -99,6 +108,7 @@ impl CompensationEvidence {
             cleanup: vec![CleanupRecord::default(); preview.cleanup.len()],
             clear: vec![None; preview.clear.len()],
             preview,
+            after_clear: Vec::new(),
         })
     }
     pub fn forward(&self) -> &CopyEvidence {
@@ -116,8 +126,10 @@ impl CompensationEvidence {
         self.restore = Some(evidence);
         Ok(())
     }
-    pub fn cleanup(&self, index: usize) -> Option<&Deletion> {
-        self.cleanup.get(index).and_then(|r| r.deletion.as_ref())
+    pub fn cleanup(&self, slot: CleanupSlot) -> Option<&Deletion> {
+        self.cleanup_entry(slot)
+            .ok()
+            .and_then(|(_, r)| r.deletion.as_ref())
     }
     pub fn clear(&self, index: usize) -> Option<&PendingClear> {
         self.clear.get(index).and_then(Option::as_ref)
@@ -125,16 +137,11 @@ impl CompensationEvidence {
 
     pub fn begin_cleanup(
         &mut self,
-        index: usize,
+        slot: CleanupSlot,
         source: &Readback,
         destination: &Readback,
     ) -> Result<String, InvalidEvidence> {
-        let plan = self
-            .preview
-            .cleanup
-            .get(index)
-            .ok_or(InvalidEvidence::Bounds)?;
-        let record = self.cleanup.get_mut(index).ok_or(InvalidEvidence::Bounds)?;
+        let (plan, record) = self.cleanup_entry_mut(slot)?;
         if record.deletion.is_some() {
             return Err(InvalidEvidence::Phase);
         }
@@ -148,42 +155,36 @@ impl CompensationEvidence {
         Ok(plan.deletion.command())
     }
 
-    fn cleanup_mut(&mut self, index: usize) -> Result<&mut Deletion, InvalidEvidence> {
-        self.cleanup
-            .get_mut(index)
-            .ok_or(InvalidEvidence::Bounds)?
+    fn cleanup_mut(&mut self, slot: CleanupSlot) -> Result<&mut Deletion, InvalidEvidence> {
+        self.cleanup_entry_mut(slot)?
+            .1
             .deletion
             .as_mut()
             .ok_or(InvalidEvidence::Phase)
     }
     pub fn record_cleanup_store(
         &mut self,
-        index: usize,
+        slot: CleanupSlot,
         result: StoreResult,
     ) -> Result<(), InvalidEvidence> {
-        self.cleanup_mut(index)?.record_store_result(result)
+        self.cleanup_mut(slot)?.record_store_result(result)
     }
     pub fn observe_cleanup_store(
         &mut self,
-        index: usize,
+        slot: CleanupSlot,
         destination: Readback,
     ) -> Result<(), InvalidEvidence> {
-        self.cleanup_mut(index)?.observe_store(destination)
+        self.cleanup_mut(slot)?.observe_store(destination)
     }
     pub fn begin_cleanup_expunge(
         &mut self,
-        index: usize,
+        slot: CleanupSlot,
         source: Readback,
         destination: Readback,
     ) -> Result<String, InvalidEvidence> {
-        let plan = self
-            .preview
-            .cleanup
-            .get(index)
-            .ok_or(InvalidEvidence::Bounds)?;
+        let (plan, record) = self.cleanup_entry_mut(slot)?;
         let expected = retained_for(plan, &destination.messages.keys().copied().collect())?;
         require_retained(&expected, &source)?;
-        let record = self.cleanup.get_mut(index).ok_or(InvalidEvidence::Bounds)?;
         let command = record
             .deletion
             .as_mut()
@@ -194,19 +195,19 @@ impl CompensationEvidence {
     }
     pub fn record_cleanup_expunge(
         &mut self,
-        index: usize,
+        slot: CleanupSlot,
         completion: Completion,
     ) -> Result<(), InvalidEvidence> {
-        self.cleanup_mut(index)?
+        self.cleanup_mut(slot)?
             .record_expunge_completion(completion)
     }
     pub fn observe_cleanup_final(
         &mut self,
-        index: usize,
+        slot: CleanupSlot,
         source: Readback,
         destination: Readback,
     ) -> Result<(), InvalidEvidence> {
-        let record = self.cleanup.get_mut(index).ok_or(InvalidEvidence::Bounds)?;
+        let (_, record) = self.cleanup_entry_mut(slot)?;
         check_observation(
             record
                 .final_retained
@@ -250,6 +251,9 @@ impl CompensationEvidence {
         Ok(command)
     }
     fn clear_mut(&mut self, index: usize) -> Result<&mut PendingClear, InvalidEvidence> {
+        if self.after_clear.iter().any(|entry| entry.clear == index) {
+            return Err(InvalidEvidence::Phase);
+        }
         self.clear
             .get_mut(index)
             .ok_or(InvalidEvidence::Bounds)?

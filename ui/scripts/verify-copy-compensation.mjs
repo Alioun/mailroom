@@ -7,13 +7,15 @@ import { svelte } from '@sveltejs/vite-plugin-svelte'
 import ts from 'typescript'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
-const audit = `${root}.audit/imap-copy-account-compensation/`
+const auditName = process.argv[2] ?? 'imap-copy-account-compensation'
+assert.ok(['imap-copy-account-compensation', 'imap-copy-after-clear'].includes(auditName))
+const audit = `${root}.audit/${auditName}/`
 await mkdir(`${audit}render`, { recursive: true })
 const log = await readFile(`${audit}compensation-router.log`, 'utf8')
 const match = log.match(/MAILROOM_COMPENSATION_ROUTER_FIXTURE (.+)/)
 assert.ok(match, 'The real protected Router must produce the fixture')
 const fixture = JSON.parse(match[1])
-assert.equal(fixture.fixtures.length, 10)
+assert.equal(fixture.fixtures.length, auditName === 'imap-copy-after-clear' ? 16 : 10)
 for (const name of ['api', 'invoice-diagnostics', 'acquisition-evidence', 'proposal-diagnostics']) {
   const source = await readFile(`${root}ui/src/${name}.ts`, 'utf8')
   const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText
@@ -43,6 +45,25 @@ for (const entry of fixture.fixtures) {
   } else {
     assert.deepEqual(view.journal.runs[0].compensation, entry.view.journal.runs[0].compensation)
     assert.equal(view.journal.runs[0].batches[0].copy_journal.before.messages['4'].modseq, '9007199254740993')
+    if (entry.stage.startsWith('AfterClear')) {
+      const run = view.journal.runs[0]
+      assert.equal(run.compensation.restored, 0)
+      assert.equal(run.compensation.deleted_cleared, 0)
+      if (entry.stage === 'AfterClearCleaned') {
+        assert.equal(run.status, 'undone')
+        assert.equal(run.compensation.copies_removed, 2)
+      } else if (entry.stage === 'AfterClearConflict') {
+        assert.equal(run.status, 'conflict')
+        assert.equal(run.compensation.copies_removed, 1)
+        assert.equal(run.compensation.conflicts, 1)
+      } else if (entry.stage.endsWith('Uncertain')) {
+        assert.equal(run.status, 'uncertain')
+        assert.equal(run.compensation.uncertain, 2)
+      } else {
+        assert.equal(run.status, 'stopped')
+        assert.equal(run.compensation.pending, 2)
+      }
+    }
     if (entry.stage === 'Cleared') {
       assert.equal(view.journal.runs[0].status, 'stopped')
       assert.equal(view.journal.runs[0].compensation.deleted_cleared, 2)

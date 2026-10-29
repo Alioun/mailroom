@@ -1,8 +1,8 @@
 use super::*;
 
 impl CompensationEvidence {
-    pub fn cleanup_next(&self, index: usize) -> Result<CleanupNext, InvalidEvidence> {
-        let record = self.cleanup.get(index).ok_or(InvalidEvidence::Bounds)?;
+    pub fn cleanup_next(&self, slot: CleanupSlot) -> Result<CleanupNext, InvalidEvidence> {
+        let (plan, record) = self.cleanup_entry(slot)?;
         let Some(effect) = &record.deletion else {
             return Ok(CleanupNext::Start);
         };
@@ -17,14 +17,11 @@ impl CompensationEvidence {
                 return Ok(CleanupNext::ObserveExpunge);
             }
             let removed = effect.removed();
-            let complete = self.preview.cleanup[index]
-                .originals
-                .iter()
-                .all(|(uid, target)| {
-                    removed.contains(target)
-                        && record.final_retained.as_ref().unwrap().messages.get(uid)
-                            == self.preview.cleanup[index].retained.messages.get(uid)
-                });
+            let complete = plan.originals.iter().all(|(uid, target)| {
+                removed.contains(target)
+                    && record.final_retained.as_ref().unwrap().messages.get(uid)
+                        == plan.retained.messages.get(uid)
+            });
             return Ok(if complete {
                 CleanupNext::Complete
             } else {
@@ -80,7 +77,28 @@ impl CompensationEvidence {
                 }
             }
         }
-        for (plan, record) in self.preview.cleanup.iter().zip(&self.cleanup) {
+        for (plan, effect) in self.preview.clear.iter().zip(&self.clear) {
+            let verified = effect
+                .as_ref()
+                .map(PendingClear::verified)
+                .unwrap_or_default();
+            for uid in plan.clear.before.messages.keys() {
+                result.insert(
+                    *uid,
+                    match effect {
+                        None => R::Unattempted,
+                        Some(e) if e.result().is_none() || e.readback().is_none() => R::Uncertain,
+                        Some(_) if verified.contains_key(uid) => R::DeletedCleared,
+                        Some(_) => R::Conflict,
+                    },
+                );
+            }
+        }
+        for entry in &self.after_clear {
+            result.extend(entry.conflicts.iter().map(|uid| (*uid, R::Conflict)));
+        }
+        for slot in self.cleanup_slots() {
+            let (plan, record) = self.cleanup_entry(slot).expect("recorded cleanup slot");
             let verified = record
                 .deletion
                 .as_ref()
@@ -132,23 +150,6 @@ impl CompensationEvidence {
                     },
                 };
                 result.insert(*original, resolution);
-            }
-        }
-        for (plan, effect) in self.preview.clear.iter().zip(&self.clear) {
-            let verified = effect
-                .as_ref()
-                .map(PendingClear::verified)
-                .unwrap_or_default();
-            for uid in plan.clear.before.messages.keys() {
-                result.insert(
-                    *uid,
-                    match effect {
-                        None => R::Unattempted,
-                        Some(e) if e.result().is_none() || e.readback().is_none() => R::Uncertain,
-                        Some(_) if verified.contains_key(uid) => R::DeletedCleared,
-                        Some(_) => R::Conflict,
-                    },
-                );
             }
         }
         result

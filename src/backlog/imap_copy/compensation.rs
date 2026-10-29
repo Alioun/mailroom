@@ -1,7 +1,9 @@
 use super::*;
 
 mod records;
-pub use records::{CleanupNext, ClearNext, CompensationEvidence, CompensationResolution};
+pub use records::{
+    CleanupNext, CleanupSlot, ClearNext, CompensationEvidence, CompensationResolution,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

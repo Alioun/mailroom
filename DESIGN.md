@@ -49,6 +49,8 @@ Use the native sans-serif stack for interface text. Keep headings upright. Monos
 
 The page has a maximum width of 1200px with 40px side padding. Below 680px, use 20px padding, stack the sample controls, and show decisions as compact message rows. Keep copy actions separate from filing destinations.
 
+The saved-account workspace opens the selected census automatically. Loading, errors and retry belong to the selected account; delayed results must not restore an earlier account. Task links point to the census, rules and address policy, existing mail, invoices, subscriptions, wind-down, then setup and recovery. Keep task contents mounted while using those links so navigation does not discard an exact review. Setup controls and raw saved headers follow the everyday tasks. Account activity names the account whose job it describes.
+
 ## Elevation & Depth
 
 Use borders and surface colors. There are no shadows.

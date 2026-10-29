@@ -133,3 +133,12 @@ progress { display: block; width: 100%; max-width: 560px; height: 16px; margin-t
 
 .local-download { border-top: 1px solid var(--line); margin-top: 24px; padding-top: 20px; }
 .local-download label { display: block; margin: 12px 0; }
+
+.account-tasks { display: flex; flex-wrap: wrap; gap: 4px 16px; border-block: 1px solid var(--line); margin-top: 24px; padding-block: 8px; }
+.account-tasks a { display: inline-flex; align-items: center; min-height: 44px; color: var(--accent); font-size: 14px; font-weight: 600; text-decoration-thickness: 1px; }
+.account-tasks a:hover { text-decoration-thickness: 2px; }
+.account-task { min-width: 0; scroll-margin-top: 24px; }
+.account-task:focus-visible { outline: 3px solid #1c7086; outline-offset: 6px; }
+.account-setup { border-top: 1px solid var(--line); padding-top: 30px; margin-top: 30px; }
+.workspace-state { margin-block: 24px; }
+.workspace-state button { margin-top: 12px; }

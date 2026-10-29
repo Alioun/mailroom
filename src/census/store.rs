@@ -43,7 +43,7 @@ const MIN_FRAME_BUDGET: u64 = 64 * 1024;
 /// history. 23 adds the owner's `resolved` finding on uncertain invoice sends and
 /// local unsubscribe mail. 24 adds explicit OR sender sets to persisted
 /// rule artifacts used by exports and backlog plans.
-pub(crate) const SCHEMA: u32 = 24;
+pub(crate) const SCHEMA: u32 = 25;
 
 pub struct LocalSecret(Zeroizing<Vec<u8>>);
 
@@ -1365,6 +1365,9 @@ impl EncryptedStore {
         if version < 24 && uses_sender_sets(&state) {
             return Err(CensusError::UnsupportedVersion);
         }
+        if version < 25 && uses_archive(&state) {
+            return Err(CensusError::UnsupportedVersion);
+        }
         if version < 21
             && (!state.label_provisioning.is_empty()
                 || state
@@ -1618,6 +1621,16 @@ fn uses_resolutions(state: &AccountState) -> bool {
             .any(|e| e.resolved.is_some())
 }
 
+fn uses_archive(state: &AccountState) -> bool {
+    state
+        .backlog
+        .iter()
+        .map(|r| &r.plan)
+        .chain(state.protocol_backlog.runs.iter().map(|r| &r.plan.filing))
+        .chain(state.gmail_backlog.runs.iter().map(|r| &r.plan.filing))
+        .any(|p| p.options.intent == crate::backlog::Intent::ArchiveUnmatched)
+}
+
 fn uses_sender_sets(state: &AccountState) -> bool {
     use crate::rules::{config::Condition, program::EffectiveDefinition};
     state
@@ -1780,7 +1793,7 @@ mod tests {
     }
 
     #[test]
-    fn old_schema_rejects_protocol_semantics_inside_a_valid_legacy_plan() {
+    fn old_schemas_reject_protocol_and_archive_semantics_in_base_and_frames() {
         let root = tempfile::tempdir().unwrap();
         let input: crate::engine::PreviewInput =
             serde_json::from_str(include_str!("../../tests/fixtures/pre-core-sample.json"))
@@ -1838,6 +1851,57 @@ mod tests {
             .unwrap()
             .persist(store.path())
             .unwrap();
+        assert!(matches!(
+            store.load_state(),
+            Err(CensusError::UnsupportedVersion)
+        ));
+        let original: AccountState = serde_json::from_value(legacy).unwrap();
+        let mut archived = original.clone();
+        archived.backlog[0].plan.options.intent = crate::backlog::Intent::ArchiveUnmatched;
+        archived.backlog[0].plan.options.scope = crate::backlog::Scope::Inbox;
+        for version in [18, 21, 24] {
+            store
+                .stage_snapshot(version, &serde_json::to_string(&archived).unwrap())
+                .unwrap()
+                .persist(store.path())
+                .unwrap();
+            assert!(matches!(
+                store.load_state(),
+                Err(CensusError::UnsupportedVersion)
+            ));
+        }
+        store
+            .stage_snapshot(SCHEMA, &serde_json::to_string(&archived).unwrap())
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(store.load_state().unwrap().backlog).unwrap(),
+            serde_json::to_value(&archived.backlog).unwrap()
+        );
+        store
+            .stage_snapshot(24, &serde_json::to_string(&original).unwrap())
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        let mut loaded = store.load_state().unwrap();
+        assert_eq!(
+            loaded.backlog[0].plan.options.intent,
+            crate::backlog::Intent::Sort
+        );
+        let file = fs::read(store.path()).unwrap();
+        let cipher = Aes256Gcm::new_from_slice(store.keys().encryption.as_ref()).unwrap();
+        let decoded = log::decode(&cipher, store.keys().account.as_str(), &file).unwrap();
+        store.persisted.borrow_mut().as_mut().unwrap().tail = Some(Tail {
+            base_tag: decoded.base_tag,
+            base_len: decoded.base_len,
+            valid_end: decoded.valid_end,
+            next_sequence: 0,
+        });
+        loaded.backlog = archived.backlog;
+        store.save_state(&mut loaded).unwrap();
+        assert!(fs::metadata(store.path()).unwrap().len() > decoded.valid_end);
+        decoded::forget(&store.path());
         assert!(matches!(
             store.load_state(),
             Err(CensusError::UnsupportedVersion)

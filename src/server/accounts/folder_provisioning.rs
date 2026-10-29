@@ -3,11 +3,21 @@ use super::*;
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
-    Preview {},
-    Confirm { receipt: String, confirmed: bool },
+    Preview {
+        #[serde(default)]
+        intent: crate::backlog::Intent,
+    },
+    Confirm {
+        receipt: String,
+        confirmed: bool,
+        #[serde(default)]
+        intent: crate::backlog::Intent,
+    },
     Status {},
     Cancel {},
-    Reconcile { operation: String },
+    Reconcile {
+        operation: String,
+    },
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -125,17 +135,36 @@ fn execute(
     .map_err(|_| AcquisitionError::InvalidInput)?;
     ledger_fresh(&saved, guard.as_ref()).map_err(|_| AcquisitionError::InvalidInput)?;
     match &request.command {
-        Action::Preview {} => Ok(json!(
-            repo.folder_preview(&account, &store, &saved, cancel)?
+        Action::Preview { intent } => Ok(json!(
+            repo.folder_preview_for(&account, &store, &saved, *intent, cancel)?
         )),
-        Action::Confirm { receipt, confirmed } => {
+        Action::Confirm {
+            receipt,
+            confirmed,
+            intent,
+        } => {
             if !confirmed {
                 return Err(AcquisitionError::InvalidInput);
             }
-            mailbox_consent(&state, &account.id, "Create the previewed folders", receipt)?;
-            repo.folder_confirm(&account, &store, &mut saved, receipt, cancel, |s| {
-                ledger_fresh(s, guard.as_ref())
-            })?;
+            mailbox_consent(
+                &state,
+                &account.id,
+                if *intent == crate::backlog::Intent::ArchiveUnmatched {
+                    "Create the previewed archive folders"
+                } else {
+                    "Create the previewed folders"
+                },
+                receipt,
+            )?;
+            repo.folder_confirm_for(
+                &account,
+                &store,
+                &mut saved,
+                receipt,
+                *intent,
+                cancel,
+                |s| ledger_fresh(s, guard.as_ref()),
+            )?;
             Ok(json!({"journal":saved.folder_provisioning}))
         }
         Action::Reconcile { operation } => {

@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import ArchiveOffer from './ArchiveOffer.svelte'
+  import { archiveCopy, archiveReason } from './archive-copy'
   import { readAccountStatus, openProtocolBacklog, previewProtocolBacklog, previewProtocolUndo, protocolAction, type ProtocolView, type ProtocolPreview, type ProtocolUndo, type BacklogOptions } from './api'
   import UndoRetention from './UndoRetention.svelte'
   import CloseRun from './CloseRun.svelte'
@@ -9,6 +11,7 @@
     de: { title: 'Bestand sortieren', source: 'Synthetisches Protokollpostfach. Schreibzugriff auf echte Konten bleibt gesperrt. Empfängernachweise werden separat installiert.', preview: 'Genaue Protokolländerungen anzeigen', confirm: 'Ich bestätige diese genauen UID-MOVE-Änderungen', start: 'Protokollbestand sortieren', reload: 'Gespeicherte Protokollabläufe laden', cancel: 'Sortierung abbrechen', reconcile: 'Nur Beobachtungen abgleichen', resume: 'Nie versuchten Rest fortsetzen', undoPreview: 'Bedingtes Rückgängigmachen prüfen', undoConfirm: 'Ich bestätige diese genauen umgekehrten UID-MOVE-Änderungen', undo: 'Geeignete Protokolländerungen rückgängig machen', resumeUndo: 'Bestätigten umgekehrten Rest fortsetzen', scope: 'Umfang', inbox: 'Nur Posteingang', unfiled: 'Posteingang und unsortierte Nachrichten', every: 'Erweitert: alle Ordner', protect: 'Markierte Nachrichten schützen', changes: 'geeignete Änderungen', conflicts: 'Konflikte', report: 'Genaue lokale Identitäten und Protokollnachweise', journal: 'Verschlüsseltes Protokolljournal', error: 'Aktion abgelehnt. Journal neu laden und frische Vorschau anfordern. Vorhandene Nachweise bleiben erhalten.', wait: 'Ablauf aktiv. Abbrechen stoppt neue Stapel und behält abgeschlossene Änderungen. Ein übertragener Befehl kann ungewiss bleiben.', stopped: 'Stopp gespeichert. Fortsetzen erfolgt ausdrücklich. Rückgängigmachen benötigt eine eigene Vorschau und Bestätigung.', mapping: 'Geprüfte COPYUID-Zuordnung', completion: 'Befehlsabschluss', readback: 'Identitätsprüfung gespeichert', attempted: 'Versucht', pending: 'Nie versucht', hold: 'Wiederhergestelltes Konto bleibt gesperrt. Quelle und Freigabe werden nicht wiederhergestellt.', approval: 'Gespeicherter Nachweis', observation: 'Nachweis aus frischer Beobachtung', empty: 'Keine Protokollabläufe.' },
   }
   let t = $derived(text[lang])
+  let archiveText = $derived(archiveCopy(lang))
   let scope = $state<BacklogOptions['scope']>('inbox_unfiled')
   let protect = $state(true)
   let view = $state<ProtocolView | null>(null)
@@ -26,11 +29,11 @@
   $effect(() => { workspaceRevision; invalidate() })
   async function act(fn: () => Promise<void>) { busy = true; error = ''; try { await fn() } catch { error = t.error } finally { busy = false } }
   async function load() { invalidate(); view = await openProtocolBacklog(account) }
-  async function plan(selected: string[] | null = null) { invalidate(); const revision = workspaceRevision; const result = await previewProtocolBacklog(account, { scope, protect_flagged: protect, selected }); if (revision === workspaceRevision) preview = result }
+  async function plan(selected: string[] | null = null, intent: NonNullable<BacklogOptions['intent']> = 'sort') { invalidate(); const revision = workspaceRevision; const result = await previewProtocolBacklog(account, { scope: intent === 'archive_unmatched' ? 'inbox' : scope, protect_flagged: protect, selected, intent }); if (revision === workspaceRevision) preview = result }
   async function select(name: string, checked: boolean) {
     if (!preview) return
     const selected = Object.entries(preview.operation.plan.filing.groups).filter(([key, group]) => key === name ? checked : group.selected).map(([key]) => key)
-    await plan(selected)
+    await plan(selected, preview.operation.plan.filing.options.intent)
   }
   async function watch() {
     running = true
@@ -69,21 +72,23 @@
   <label>{t.scope}<select bind:value={scope} disabled={busy || running} onchange={invalidate}><option value="inbox_unfiled">{t.unfiled}</option><option value="inbox">{t.inbox}</option><option value="every_folder">{t.every}</option></select></label>
   <label><input type="checkbox" bind:checked={protect} disabled={busy || running} onchange={invalidate} />{t.protect}</label>
   <div class="actions"><button disabled={busy || running || !view?.installed || view?.recovery_hold} onclick={() => act(() => plan())}>{t.preview}</button><button disabled={busy || running} onclick={() => act(load)}>{t.reload}</button><button disabled={cancelling || !view?.installed || view?.recovery_hold} onclick={cancel}>{t.cancel}</button></div>
+  {#if view?.journal.runs.some(run => run.status === 'complete')}<ArchiveOffer {account} {lang} disabled={busy || running || !view.installed || view.recovery_hold} folders={true} onpreview={() => act(() => plan(null, 'archive_unmatched'))} />{/if}
   {#if error}<p role="alert">{error}</p>{/if}
   {#if running || cancelling}<p role="status">{t.wait} · {savedCount}</p>{/if}
   {#if preview}
+    {#if preview.operation.plan.filing.options.intent === 'archive_unmatched'}<h4>{archiveText.title}</h4>{/if}
     <p>{preview.operation.plan.filing.changes.length} {t.changes}</p>
     <p>{preview.operation.plan.filing.artifact.identity}</p>
     <p>{t.approval} · {preview.operation.plan.saved_proof}</p><p>{t.observation} · {preview.operation.plan.execution_proof}</p>
     {#each Object.entries(preview.operation.plan.filing.groups) as [name, group]}<label><input type="checkbox" checked={group.selected} disabled={busy} onchange={event => { const checked = event.currentTarget.checked; void act(() => select(name, checked)) }} />{name} · {group.count}</label>{/each}
-    {#each Object.entries(preview.operation.plan.filing.excluded) as [reason, count]}<p>{reason} · {count}</p>{/each}
+    {#each Object.entries(preview.operation.plan.filing.excluded) as [reason, count]}<p>{archiveReason(lang, reason)} · {count}</p>{/each}
     {#each preview.operation.plan.filing.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}
     <details><summary>{t.report}</summary><pre>{preview.operation.plan.filing.artifact.executable}</pre>{#each preview.operation.batches as b}<p>{b.intent.source.name.decoded} / {b.intent.source.uidvalidity} / {Object.keys(b.intent.messages).join(', ')} → {b.intent.destination.name.decoded} / {b.intent.destination.uidvalidity}</p>{/each}</details>
-    <label><input type="checkbox" bind:checked={confirmed} disabled={busy || running} />{t.confirm}</label><button disabled={busy || running || !confirmed} onclick={() => act(start)}>{t.start}</button>
+    <label><input type="checkbox" bind:checked={confirmed} disabled={busy || running} />{preview.operation.plan.filing.options.intent === 'archive_unmatched' ? archiveText.confirm : t.confirm}</label><button disabled={busy || running || !confirmed} onclick={() => act(start)}>{preview.operation.plan.filing.options.intent === 'archive_unmatched' ? archiveText.start : t.start}</button>
   {/if}
   <h4>{t.journal}</h4>
   {#each view?.journal.runs ?? [] as run (run.id)}
-    <article data-protocol-run={run.id}><p class="run-state">{run.status}</p><UndoRetention {lang} days={view?.undo_window_days ?? 90} deadline={view?.undo_deadlines.find(d => d.run === run.id)} undone={run.status === 'undone'} />{#if run.stop_requested}<p>{t.stopped}</p>{/if}
+    <article data-protocol-run={run.id}>{#if run.plan.filing.options.intent === 'archive_unmatched'}<p>{archiveText.title}</p>{/if}<p class="run-state">{run.status}</p><UndoRetention {lang} days={view?.undo_window_days ?? 90} deadline={view?.undo_deadlines.find(d => d.run === run.id)} undone={run.status === 'undone'} />{#if run.stop_requested}<p>{t.stopped}</p>{/if}
       {#if run.undo_receipt}<p>{run.undo_conflicts} {t.conflicts}</p>{/if}
       <CloseRun kind="protocol" {account} {run} {lang} closable={view?.closable.includes(run.id) ?? false} disabled={busy || running || !view?.installed || !!view?.recovery_hold} onchange={() => act(load)} />
       {#if !run.closed}<button disabled={busy || running || !view?.installed || view?.recovery_hold} onclick={() => act(async () => { invalidate(); await protocolAction(account, { action: 'reconcile', run: run.id }); await load() })}>{t.reconcile}</button>{/if}

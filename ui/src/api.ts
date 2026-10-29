@@ -151,7 +151,7 @@ export async function downloadSieve(account: string, receipt: string) {
   return z.object({ filename: z.literal('rules.sieve'), sieve: z.string(), identity: z.string(), workspace: workspaceView }).parse(await accountPost('proof/download', { account, receipt, confirmed: true }))
 }
 
-const backlogOptions = z.object({ scope: z.enum(['inbox_unfiled', 'inbox', 'every_folder']), protect_flagged: z.boolean(), selected: z.array(z.string()).nullable() })
+const backlogOptions = z.object({ scope: z.enum(['inbox_unfiled', 'inbox', 'every_folder']), protect_flagged: z.boolean(), selected: z.array(z.string()).nullable(), intent: z.enum(['sort', 'archive_unmatched']).optional() })
 const backlogIdentity = z.object({ folder: z.string(), uidvalidity: z.number(), uid: z.number(), message_id_hash: z.string(), gmail_id: z.string().nullable() })
 const backlogOperation = z.discriminatedUnion('kind', [z.object({ kind: z.literal('imap'), method: z.enum(['uid_move', 'copy_uid_expunge']) }), z.object({ kind: z.literal('gmail'), add: z.array(z.string()), remove: z.array(z.string()) })])
 const backlogPlan = z.object({
@@ -295,7 +295,7 @@ export async function previewProtocolUndo(account: string, run: string): Promise
 
 const gmailLabel = z.object({ decoded: z.string(), wire: z.string() })
 const gmailSnapshot = z.object({ gmail_id: z.string(), message_id_hash: z.string(), size: z.number(), internal_date: z.string(), flags: z.array(z.string()), labels: z.array(z.string()) })
-const gmailIntent = z.object({ purpose: moveIntent.shape.purpose, context: moveMailbox, destination: gmailLabel, messages: z.record(z.string(), gmailSnapshot) })
+const gmailIntent = z.object({ archive_only: z.boolean().optional(), purpose: moveIntent.shape.purpose, context: moveMailbox, destination: gmailLabel, messages: z.record(z.string(), gmailSnapshot) })
 const gmailStep = z.object({ kind: z.enum(['add_label', 'remove_inbox', 'restore_inbox', 'remove_label']), uids: z.array(z.number().int().positive()), attempted: z.boolean(), completion: moveEvidence.shape.completion, readback: z.object({ identity: moveMailbox, messages: z.record(z.string(), gmailSnapshot) }).nullable() })
 const gmailBatch = z.object({ intent: gmailIntent, steps: z.array(gmailStep) })
 const gmailReverse = z.object({ forward: z.number().int().nonnegative(), batch: gmailBatch })

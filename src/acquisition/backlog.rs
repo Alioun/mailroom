@@ -290,7 +290,10 @@ impl Accounts {
             ),
         };
         let receipt = store.keys().binding_for(
-            b"mailroom/imap-backlog-start/v2",
+            plan.filing.options.intent.purpose(
+                b"mailroom/imap-backlog-start/v2",
+                b"mailroom/imap-backlog-archive/v1",
+            ),
             &crate::census::binding::bound(|| serde_json::to_vec(&(saved, &plan, &batches)))
                 .map_err(failure)?,
         );

@@ -184,11 +184,22 @@ impl Accounts {
             }
         })
     }
+    #[cfg(test)]
     pub(crate) fn folder_preview(
         &self,
         account: &Account,
         store: &EncryptedStore,
         saved: &AccountState,
+        cancel: Cancellation,
+    ) -> Result<Preview, AcquisitionError> {
+        self.folder_preview_for(account, store, saved, crate::backlog::Intent::Sort, cancel)
+    }
+    pub(crate) fn folder_preview_for(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &AccountState,
+        intent: crate::backlog::Intent,
         cancel: Cancellation,
     ) -> Result<Preview, AcquisitionError> {
         self.folder_source(account)?;
@@ -207,7 +218,23 @@ impl Accounts {
         let context = self.provision_context(Target::Folders, account, store)?;
         let mut session = self.creator(Target::Folders, account, store, cancel)?;
         let before = session.observe().map_err(protocol)?;
-        let plan = FolderPlan::build(p.proof.artifact.folders(), &before).map_err(protocol)?;
+        let leaves = if intent == crate::backlog::Intent::ArchiveUnmatched {
+            let filing = crate::backlog::protocol::project(
+                saved,
+                &saved.census,
+                &p.proof,
+                crate::backlog::Options {
+                    scope: crate::backlog::Scope::Inbox,
+                    intent,
+                    ..Default::default()
+                },
+            )
+            .map_err(|_| invalid())?;
+            filing.changes.into_iter().map(|c| c.destination).collect()
+        } else {
+            p.proof.artifact.folders().clone()
+        };
+        let plan = FolderPlan::build(&leaves, &before).map_err(protocol)?;
         let proof = serde_json::json!({"gate":p.proof.gate,"semantics":p.proof.semantics,"pins":p.proof.pins,"warnings":p.proof.warnings,"runtime_cross_check":p.proof.runtime_cross_check,"recipient_evidence":p.proof.artifact.context().recipient_evidence,"capabilities":p.proof.artifact.context().capabilities,"context_binding":self.workspace_context(account, store)?.binding()});
         let payload = zeroize::Zeroizing::new(
             serde_json::to_vec(&(
@@ -224,7 +251,7 @@ impl Accounts {
         session.logout();
         Ok(prepared(
             store,
-            PURPOSE,
+            intent.purpose(PURPOSE, b"mailroom/exact-archive-folder-create/v1"),
             &payload,
             context,
             p.proof.artifact.identity().into(),
@@ -291,6 +318,7 @@ impl Accounts {
             LABEL_LIMITATIONS,
         ))
     }
+    #[cfg(test)]
     pub(crate) fn folder_confirm(
         &self,
         account: &Account,
@@ -300,7 +328,28 @@ impl Accounts {
         cancel: Cancellation,
         fresh: impl Fn(&AccountState) -> Result<(), String>,
     ) -> Result<(), AcquisitionError> {
-        let p = self.folder_preview(account, store, saved, cancel.clone())?;
+        self.folder_confirm_for(
+            account,
+            store,
+            saved,
+            receipt,
+            crate::backlog::Intent::Sort,
+            cancel,
+            fresh,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn folder_confirm_for(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &mut AccountState,
+        receipt: &str,
+        intent: crate::backlog::Intent,
+        cancel: Cancellation,
+        fresh: impl Fn(&AccountState) -> Result<(), String>,
+    ) -> Result<(), AcquisitionError> {
+        let p = self.folder_preview_for(account, store, saved, intent, cancel.clone())?;
         self.provision_confirm(
             Target::Folders,
             account,

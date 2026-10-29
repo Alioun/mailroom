@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import ArchiveOffer from './ArchiveOffer.svelte'
+  import { archiveCopy, archiveReason } from './archive-copy'
   import ProtocolBacklog from './ProtocolBacklog.svelte'
   import GmailBacklog from './GmailBacklog.svelte'
   import { openBacklog, previewBacklog, startBacklog, advanceBacklog, resumeBacklog, stopBacklog, previewBacklogUndo, undoBacklog, resumeBacklogUndo, type BacklogOptions, type BacklogPreview, type BacklogView, type BacklogUndoPreview } from './api'
@@ -9,6 +11,7 @@
     de: { title: 'Bestand sortieren', source: 'Die Simulation ändert nur das installierte synthetische Postfach. Echte Konten können nicht ausgeführt werden. Flags bleiben erhalten. Keine Buchhaltungskopien werden gesendet.', scope: 'Umfang', inbox: 'Nur Posteingang', unfiled: 'Posteingang und unsortierte Nachrichten', every: 'Erweitert: alle Ordner', protect: 'Markierte Nachrichten schützen', preview: 'Genaue Bestandsänderungen anzeigen', confirm: 'Ich bestätige diese genauen synthetischen Postfachänderungen', start: 'Synthetischen Bestand sortieren', reload: 'Gespeicherte Sortierungen laden', resume: 'Gespeicherte synthetische Sortierung fortsetzen', undoPreview: 'Bedingtes Rückgängigmachen prüfen', undoConfirm: 'Ich bestätige dieses bedingte Rückgängigmachen', undo: 'Geeignete synthetische Änderungen rückgängig machen', resumeUndo: 'Bestätigtes Rückgängigmachen fortsetzen', changes: 'geeignete Änderungen', unmatched: 'ohne Zuordnung', review: 'zu prüfen', exclusions: 'Ausnahmen', stopped: 'Ordner, die die Engine nicht mehr füllt', detail: 'Genaue lokale Änderungen und Identitäten', runs: 'Verschlüsseltes Ablaufjournal', applied: 'angewendet', restored: 'wiederhergestellt', conflict: 'Konflikte', eligible: 'zum Rückgängigmachen geeignet', cancel: 'Sortierung abbrechen', cancelling: 'Abbrechen angefordert. Der aktuelle Stapel wird noch geprüft und kann abgeschlossen werden.', cancelled: 'Sortierung angehalten. Abgeschlossene Änderungen bleiben erhalten. Fortsetzen erfolgt ausdrücklich. Rückgängigmachen benötigt eine eigene Vorschau und Bestätigung.', cancelHelp: 'Abbrechen stoppt neue Sortierstapel und behält abgeschlossene Änderungen. Ein bereits gestarteter Stapel kann abgeschlossen werden. Rückgängigmachen wird separat bestätigt.', uncertainEffects: 'Einige Änderungen sind ungewiss. Abbrechen beweist nicht, dass sie ausgeblieben sind. Vor dem Rückgängigmachen ausdrücklich fortsetzen und abgleichen.', cancelError: 'Abbrechen konnte nicht bestätigt werden. Gespeicherte Sortierung vor dem Fortsetzen neu laden und prüfen.', error: 'Aktion abgelehnt. Vorschau erneuern oder gespeicherte Sortierung fortsetzen. Vorhandene Dateien bleiben erhalten.', conditional: 'Rückgängigmachen stellt nur weiterhin geeignete Änderungen an der gespeicherten Identität und am Ziel wieder her. Andere Labels und aktuelle Flags bleiben erhalten.', labels: 'Ursprüngliche Labels', flags: 'Erhaltene Flags', add: 'Labels hinzufügen', remove: 'Labels entfernen', reports: 'Lokaler Ablaufbericht', completed: 'abgeschlossen', running: 'läuft', prepared: 'vorbereitet', stoppedState: 'angehalten', uncertain: 'ungewiss', failed: 'fehlgeschlagen' },
   }
   let t = $derived(strings[lang])
+  let archiveText = $derived(archiveCopy(lang))
   let scope = $state<BacklogOptions['scope']>('inbox_unfiled')
   let protect = $state(true)
   let preview = $state<BacklogPreview | null>(null)
@@ -27,11 +30,11 @@
   function invalidate() { preview = null; confirmation = false; undoPreview = null; undoConfirmation = false }
   async function act(fn: () => Promise<void>) { busy = true; error = ''; try { await fn() } catch { error = t.error } finally { busy = false } }
   async function load() { view = await openBacklog(account) }
-  async function plan(selected: string[] | null = null) { confirmation = false; undoPreview = null; preview = await previewBacklog(account, { scope, protect_flagged: protect, selected }) }
+  async function plan(selected: string[] | null = null, intent: NonNullable<BacklogOptions['intent']> = 'sort') { confirmation = false; undoPreview = null; preview = await previewBacklog(account, { scope: intent === 'archive_unmatched' ? 'inbox' : scope, protect_flagged: protect, selected, intent }) }
   async function select(destination: string, checked: boolean) {
     if (!preview) return
     const selected = Object.entries(preview.plan.groups).filter(([name, group]) => name === destination ? checked : group.selected).map(([name]) => name)
-    await plan(selected)
+    await plan(selected, preview.plan.options.intent)
   }
   async function drive(id: string) {
     driveRun = id
@@ -81,22 +84,24 @@
   <label>{t.scope}<select bind:value={scope} disabled={working} onchange={invalidate}><option value="inbox_unfiled">{t.unfiled}</option><option value="inbox">{t.inbox}</option><option value="every_folder">{t.every}</option></select></label>
   <label><input type="checkbox" bind:checked={protect} disabled={working} onchange={invalidate} />{t.protect}</label>
   <div class="actions"><button disabled={working} onclick={() => act(() => plan())}>{t.preview}</button><button disabled={working} onclick={() => act(load)}>{t.reload}</button></div>
+  {#if view?.runs.some(run => run.status === 'completed')}<ArchiveOffer {account} {lang} disabled={working} folders={false} onpreview={() => act(() => plan(null, 'archive_unmatched'))} />{/if}
   {#if error}<p role="alert">{error}</p>{/if}
   {#if preview}
+    {#if preview.plan.options.intent === 'archive_unmatched'}<h4>{archiveText.title}</h4>{/if}
     <p>{preview.plan.changes.length} {t.changes} · {preview.plan.unmatched} {t.unmatched} · {preview.plan.review} {t.review}</p>
     <p class="help">{preview.plan.source} · {preview.plan.artifact.identity}</p>
     {#each Object.entries(preview.plan.groups) as [destination, group] (destination)}
       <div class="destination"><label><input type="checkbox" checked={group.selected} disabled={working} onchange={(event) => { const checked = event.currentTarget.checked; void act(() => select(destination, checked)) }} />{destination} · {group.count}</label><p>{group.top_senders.map(([sender, count]) => `${sender} (${count})`).join(', ')}</p></div>
     {/each}
-    <h4>{t.exclusions}</h4>{#each Object.entries(preview.plan.excluded) as [reason, count]}<p>{reason} · {count}</p>{/each}
+    <h4>{t.exclusions}</h4>{#each Object.entries(preview.plan.excluded) as [reason, count]}<p>{archiveReason(lang, reason)} · {count}</p>{/each}
     <h4>{t.stopped}</h4><p>{preview.plan.stopped_folders.join(', ') || '0'}</p>
     {#each preview.plan.diagnostics as diagnostic}<p class="help">{diagnostic}</p>{/each}
     <details><summary>{t.detail}</summary>{#each preview.plan.changes as change}<p>{change.source.folder} / {change.source.uidvalidity} / {change.source.uid} → {change.destination} · {change.sender} · {t.flags}: {change.flags.join(', ')} · {change.operation.kind}</p><p>Message-ID hash {change.source.message_id_hash} · Gmail ID {change.source.gmail_id ?? '?'}</p><p>{t.labels}: {change.original_labels.join(', ')}</p>{#if change.operation.kind === 'gmail'}<p>{t.add}: {change.operation.add.join(', ')} · {t.remove}: {change.operation.remove.join(', ')}</p>{/if}{/each}</details>
-    {#if preview.execution_available}<div class="confirmation"><label><input type="checkbox" bind:checked={confirmation} disabled={working} />{t.confirm}</label><button class="primary" disabled={working || !confirmation} onclick={() => act(start)}>{t.start}</button></div>{/if}
+    {#if preview.execution_available}<div class="confirmation"><label><input type="checkbox" bind:checked={confirmation} disabled={working} />{preview.plan.options.intent === 'archive_unmatched' ? archiveText.confirm : t.confirm}</label><button class="primary" disabled={working || !confirmation} onclick={() => act(start)}>{preview.plan.options.intent === 'archive_unmatched' ? archiveText.start : t.start}</button></div>{/if}
   {/if}
   <h4>{t.runs}</h4>
   {#each view?.runs ?? [] as run (run.id)}
-    <article data-run={run.id}>
+    <article data-run={run.id}>{#if run.plan.options.intent === 'archive_unmatched'}<p>{archiveText.title}</p>{/if}
       <p class="run-state">{run.status === 'stopped' ? t.stoppedState : t[run.status]} · {run.outcomes.filter(o => o.state === 'applied').length} / {run.outcomes.length} {t.applied} · {run.undo.filter(u => u.state === 'restored').length} {t.restored} · {run.outcomes.filter(o => o.state === 'conflict').length + run.undo.filter(u => u.state === 'conflict').length} {t.conflict}</p>
       {#if !run.undo_requested && ['prepared', 'running', 'uncertain'].includes(run.status)}<button disabled={cancelling !== null} onclick={() => cancel(run.id)}>{t.cancel}</button>{/if}
       {#if cancelling === run.id}<p role="status">{t.cancelling}</p>{:else if run.status === 'stopped' && !run.undo_requested}<p role="status">{t.cancelled}</p>{/if}

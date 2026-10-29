@@ -462,14 +462,15 @@ impl Accounts {
             let label = topology.get(&destination).ok_or_else(invalid)?.name.clone();
             let entries: Vec<_> = messages.into_iter().collect();
             for chunk in entries.chunks(crate::backlog::BATCH_LIMIT) {
-                let intent = LabelIntent::new(
-                    Purpose::Filing {
-                        protect_flagged: filing.options.protect_flagged,
-                    },
-                    identity.clone(),
-                    label.clone(),
-                    chunk.iter().cloned().collect(),
-                )
+                let purpose = Purpose::Filing {
+                    protect_flagged: filing.options.protect_flagged,
+                };
+                let messages = chunk.iter().cloned().collect();
+                let intent = if filing.options.intent == crate::backlog::Intent::ArchiveUnmatched {
+                    LabelIntent::archive(purpose, identity.clone(), messages)
+                } else {
+                    LabelIntent::new(purpose, identity.clone(), label.clone(), messages)
+                }
                 .ok_or_else(invalid)?;
                 batches.push(LabelBatch::forward(intent).map_err(failure)?);
             }
@@ -488,7 +489,10 @@ impl Accounts {
             ),
         };
         let receipt = store.keys().binding_for(
-            b"mailroom/gmail-backlog-start/v2",
+            plan.filing.options.intent.purpose(
+                b"mailroom/gmail-backlog-start/v2",
+                b"mailroom/gmail-backlog-archive/v1",
+            ),
             &crate::census::binding::bound(|| serde_json::to_vec(&(saved, &plan, &batches)))
                 .map_err(failure)?,
         );
@@ -870,12 +874,20 @@ impl Accounts {
             if messages.is_empty() {
                 continue;
             }
-            let intent = LabelIntent::new(
-                Purpose::ConditionalUndo,
-                b.intent().context().clone(),
-                b.intent().destination().clone(),
-                messages,
-            )
+            let intent = if b.intent().archive_only() {
+                LabelIntent::archive(
+                    Purpose::ConditionalUndo,
+                    b.intent().context().clone(),
+                    messages,
+                )
+            } else {
+                LabelIntent::new(
+                    Purpose::ConditionalUndo,
+                    b.intent().context().clone(),
+                    b.intent().destination().clone(),
+                    messages,
+                )
+            }
             .ok_or_else(invalid)?;
             reverse.push(Reverse {
                 forward,

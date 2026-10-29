@@ -1,3 +1,4 @@
+mod archive;
 pub mod gmail_journal;
 pub mod gmail_label;
 pub mod imap_move;
@@ -35,6 +36,23 @@ pub struct Options {
     pub scope: Scope,
     pub protect_flagged: bool,
     pub selected: Option<BTreeSet<String>>,
+    #[serde(default, skip_serializing_if = "Intent::is_sort")]
+    pub intent: Intent,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Intent {
+    #[default]
+    Sort,
+    ArchiveUnmatched,
+}
+impl Intent {
+    fn is_sort(&self) -> bool {
+        *self == Self::Sort
+    }
+    pub(crate) fn purpose(self, sort: &'static [u8], archive: &'static [u8]) -> &'static [u8] {
+        if self == Self::Sort { sort } else { archive }
+    }
 }
 impl Default for Options {
     fn default() -> Self {
@@ -42,6 +60,7 @@ impl Default for Options {
             scope: Scope::InboxUnfiled,
             protect_flagged: true,
             selected: None,
+            intent: Intent::Sort,
         }
     }
 }
@@ -197,7 +216,18 @@ pub(crate) fn preview(
         stopped_folders: BTreeSet::new(),
         diagnostics: proof.warnings.clone(),
     };
-    project(&mut plan, census, &proof, installed)?;
+    project(
+        &mut plan,
+        census,
+        &proof,
+        installed,
+        state
+            .workspace
+            .as_ref()
+            .ok_or("Workspace required")?
+            .input
+            .as_of,
+    )?;
     let payload = zeroize::Zeroizing::new(
         serde_json::to_vec(&(
             SEMANTICS,
@@ -210,7 +240,12 @@ pub(crate) fn preview(
         ))
         .map_err(|_| "Cannot bind backlog plan")?,
     );
-    let receipt = keys.binding_for(PURPOSE, &payload);
+    let receipt = keys.binding_for(
+        plan.options
+            .intent
+            .purpose(PURPOSE, b"mailroom/backlog-archive/v1"),
+        &payload,
+    );
     let execution_available = mailbox.is_some()
         && plan.proof_gate != "blocked"
         && !plan.changes.is_empty()
@@ -547,8 +582,12 @@ fn project(
     census: &Census,
     proof: &proof::Proof,
     installed: Option<&SyntheticMailbox>,
+    as_of: i64,
 ) -> Result<(), String> {
     let provider = plan.provider;
+    if plan.options.intent == Intent::ArchiveUnmatched && plan.options.scope != Scope::Inbox {
+        return Err("Archiving is a separate Inbox-only plan".into());
+    }
     if provider != Provider::Gmail
         && plan.options.scope == Scope::InboxUnfiled
         && !census
@@ -595,10 +634,14 @@ fn project(
             } else {
                 roles.contains("archive")
             };
-            let in_scope = match plan.options.scope {
-                Scope::Inbox => inbox,
-                Scope::InboxUnfiled => inbox || unfiled,
-                Scope::EveryFolder => true,
+            let in_scope = if plan.options.intent == Intent::ArchiveUnmatched {
+                inbox
+            } else {
+                match plan.options.scope {
+                    Scope::Inbox => inbox,
+                    Scope::InboxUnfiled => inbox || unfiled,
+                    Scope::EveryFolder => true,
+                }
             };
             let reason = if excluded {
                 Some("excluded_role")
@@ -629,11 +672,25 @@ fn project(
             if d.review {
                 plan.review += 1;
             }
-            if matches!(d.destination, proof::Destination::Inbox) {
+            let archive = plan.options.intent == Intent::ArchiveUnmatched;
+            let destination;
+            let dest = if archive {
+                match archive::destination(census, provider, m, d, as_of) {
+                    Ok(value) => {
+                        destination = value;
+                        destination.as_str()
+                    }
+                    Err(reason) => {
+                        *plan.excluded.entry(reason.into()).or_default() += 1;
+                        continue;
+                    }
+                }
+            } else if matches!(d.destination, proof::Destination::Inbox) {
                 plan.unmatched += 1;
                 continue;
-            }
-            let dest = d.destination.label();
+            } else {
+                d.destination.label()
+            };
             if folder == dest && provider != Provider::Gmail {
                 *plan.excluded.entry("already_filed".into()).or_default() += 1;
                 continue;
@@ -650,7 +707,7 @@ fn project(
                     *plan.excluded.entry("missing_gmail_id".into()).or_default() += 1;
                     continue;
                 }
-                let add = if labels.contains(dest) {
+                let add = if archive || labels.contains(dest) {
                     BTreeSet::new()
                 } else {
                     BTreeSet::from([dest.into()])

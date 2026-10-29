@@ -83,6 +83,16 @@ Gmail offers no conditional label store. Another client can change labels or fla
 - `node ui/scripts/verify-gmail-label-backlog.mjs` drives the built English and narrow German controls through save, proof, preview, forward, replacement, Reconcile, Undo, live Cancel and explicit Resume, then German label creation and closing a conflicted run.
 - `src/acquisition/gmail_backlog/tests.rs` covers lost, partial and BAD responses, races before and after the final read, changed UIDs, label case, missing labels and the 500-UID batch.
 
+## Separate old unmatched-mail archive
+
+After a completed sorting run, the local interface offers a separate, initially unchecked archive choice. `Options.intent` is `archive_unmatched`; ordinary sorting omits the field and retains its historical receipt shape. Archive previews require Inbox-only scope and use separate confirmation purposes for synthetic filing, protocol MOVE, Gmail labels and archive-folder creation.
+
+Only an unmatched Inbox decision with no recipient review hold qualifies. Its IMAP `INTERNALDATE` must be strictly older than twelve calendar months at the saved workspace's as-of time. The year comes from that arrival date. Missing or invalid arrival dates do not fall back to header Date. Future and boundary-date messages remain excluded. Existing rule decisions, unknown or mixed recipient roles, protected Flagged messages and excluded or Deleted messages retain their normal protections.
+
+Mailbox.org requires a unique discovered archive role whose exact root is `Archive` or `Archiv`. Destinations are year children such as `Archiv/2024`. Missing children require a separate exact folder preview and confirmation; MOVE never creates them. Gmail requires the discovered All Mail context and removes only Inbox. An archive label batch cannot add or remove a user label, and its conditional Undo can only restore Inbox. Current flags and unrelated labels remain unchanged.
+
+The archive intent and populated history survive encrypted reopening and selected recovery under schema 25. Restoration retains the read-only hold and does not resume actions. Protocol, browser and real-provider archive acceptance remain outstanding where the sandbox prevents listeners or native execution.
+
 ## Remaining limits
 
-COPY fallback and the separate unchecked unmatched-mail archive offer remain unimplemented. Gmail label execution is fixture-only. Production source installation and actual provider acceptance remain unavailable. Native confirmation, protected Keychain access, independent Sieve execution and whole-personal-workflow readiness are separate gates. Controls support English and narrow German layouts. Backend diagnostic reason codes remain partly English. Local fixture results grant no real-account write authority.
+COPY fallback remains unimplemented. Gmail label execution is fixture-only. Production source installation and actual provider acceptance remain unavailable. Native confirmation, protected Keychain access, independent Sieve execution and whole-personal-workflow readiness are separate gates. Controls support English and narrow German layouts. Backend diagnostic reason codes remain partly English. Local fixture results grant no real-account write authority.

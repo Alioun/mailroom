@@ -260,3 +260,65 @@ fn reverse_steps_restore_inbox_before_removing_the_added_label() {
         "Each member needs a reverse step"
     );
 }
+
+#[test]
+fn archive_only_removes_inbox_and_undo_only_restores_it() {
+    let before = snapshot("2001", &[INBOX, "Unrelated"], &["\\Answered"]);
+    let archive = LabelIntent::archive(
+        Purpose::Filing {
+            protect_flagged: true,
+        },
+        context(11),
+        [(uid(4), before.clone())].into(),
+    )
+    .unwrap();
+    let mut b = LabelBatch::forward(archive).unwrap();
+    assert_eq!(
+        b.steps().iter().map(|s| s.kind).collect::<Vec<_>>(),
+        [StepKind::RemoveInbox]
+    );
+    assert_eq!(
+        b.expected(0)[&uid(4)].1.labels,
+        ["Unrelated".to_owned()].into()
+    );
+    assert_eq!(b.expected(0)[&uid(4)].1.flags, before.flags);
+    b.begin_attempt(0).unwrap();
+    assert_eq!(b.outcomes(0)[&uid(4)], Outcome::Uncertain);
+    assert!(
+        b.begin_attempt(0).is_err(),
+        "An uncertain command cannot be retried"
+    );
+    b.record_completion(0, ok()).unwrap();
+    b.observe(0, readback(&b, 0, |_, _| {})).unwrap();
+    assert_eq!(b.outcomes(0)[&uid(4)], Outcome::Verified);
+    let mut current = b.expected(0)[&uid(4)].1.clone();
+    current.flags.insert("\\Seen".into());
+    current.labels.insert("Later".into());
+    let undo = LabelIntent::archive(
+        Purpose::ConditionalUndo,
+        context(11),
+        [(uid(4), current.clone())].into(),
+    )
+    .unwrap();
+    assert!(LabelBatch::reverse(undo.clone(), [uid(4)].into(), [uid(4)].into()).is_err());
+    let reverse = LabelBatch::reverse(undo, [uid(4)].into(), BTreeSet::new()).unwrap();
+    assert_eq!(
+        reverse.steps().iter().map(|s| s.kind).collect::<Vec<_>>(),
+        [StepKind::RestoreInbox]
+    );
+    current.labels.insert(INBOX.into());
+    assert_eq!(reverse.expected(0)[&uid(4)].1, current);
+    assert_eq!(
+        serde_json::from_value::<LabelBatch>(serde_json::to_value(&b).unwrap()).unwrap(),
+        b
+    );
+    let mut wrong = serde_json::to_value(&b).unwrap();
+    wrong["intent"]["destination"] = serde_json::to_value(label()).unwrap();
+    assert!(serde_json::from_value::<LabelBatch>(wrong).is_err());
+    let mut wrong = serde_json::to_value(&b).unwrap();
+    wrong["steps"][0]["kind"] = "add_label".into();
+    assert!(serde_json::from_value::<LabelBatch>(wrong).is_err());
+    let legacy = serde_json::to_value(batch()).unwrap();
+    assert!(legacy["intent"].get("archive_only").is_none());
+    assert!(serde_json::from_value::<LabelBatch>(legacy).is_ok());
+}

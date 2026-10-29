@@ -510,6 +510,17 @@ pub(crate) fn project(
         stopped_folders: Default::default(),
         diagnostics: proof.warnings.clone(),
     };
-    super::project(&mut plan, census, proof, None)?;
+    super::project(
+        &mut plan,
+        census,
+        proof,
+        None,
+        state
+            .workspace
+            .as_ref()
+            .ok_or("Workspace required")?
+            .input
+            .as_of,
+    )?;
     Ok(plan)
 }

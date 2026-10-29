@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import ArchiveOffer from './ArchiveOffer.svelte'
+  import { archiveCopy, archiveReason } from './archive-copy'
   import { readAccountStatus, openGmailBacklog, previewGmailBacklog, previewGmailUndo, gmailAction, type GmailView, type GmailPreview, type GmailUndo, type GmailOutcome, type BacklogOptions } from './api'
   import UndoRetention from './UndoRetention.svelte'
   import CloseRun from './CloseRun.svelte'
@@ -11,6 +13,7 @@
     de: { title: 'Gmail-Bestand sortieren', source: 'Synthetische Gmail-Labelquelle. Schreibzugriff auf echte Konten bleibt gesperrt. Empfängernachweise werden separat installiert. Nachrichten bleiben in „Alle Nachrichten“; nur Labels ändern sich.', preview: 'Genaue Labeländerungen anzeigen', confirm: 'Ich bestätige diese genauen Labeländerungen: Ziellabel hinzufügen, dann nur den Posteingang entfernen', start: 'Gmail-Bestand sortieren', reload: 'Gespeicherte Labelabläufe laden', cancel: 'Sortierung abbrechen', reconcile: 'Nur Beobachtungen abgleichen', resume: 'Nie versuchten Rest fortsetzen', undoPreview: 'Bedingtes Rückgängigmachen prüfen', undoConfirm: 'Ich bestätige: Posteingang wiederherstellen und nur die von diesem Ablauf hinzugefügten Labels entfernen', undo: 'Geeignete Labeländerungen rückgängig machen', resumeUndo: 'Bestätigten Rest des Rückgängigmachens fortsetzen', scope: 'Umfang', inbox: 'Nur Posteingang', unfiled: 'Posteingang und Nachrichten ohne Label', every: 'Erweitert: alle Labels', protect: 'Markierte Nachrichten schützen', changes: 'geeignete Änderungen', conflicts: 'Konflikte', report: 'Genaue lokale Identitäten und Labelnachweise', journal: 'Verschlüsseltes Labeljournal', error: 'Aktion abgelehnt. Journal neu laden und frische Vorschau anfordern. Vorhandene Nachweise bleiben erhalten.', wait: 'Ablauf aktiv. Abbrechen stoppt neue Labelschritte und behält abgeschlossene Änderungen. Ein übertragener Befehl kann ungewiss bleiben.', stopped: 'Stopp gespeichert. Fortsetzen erfolgt ausdrücklich. Rückgängigmachen benötigt eine eigene Vorschau und Bestätigung.', hold: 'Wiederhergestelltes Konto bleibt gesperrt. Quelle und Freigabe werden nicht wiederhergestellt.', approval: 'Gespeicherter Nachweis', observation: 'Nachweis aus frischer Beobachtung', empty: 'Keine Labelabläufe.', attempted: 'Versucht', never: 'Nie versucht', completion: 'Befehlsabschluss', readback: 'Prüfung gespeichert', context: 'Alle Nachrichten', missingLabel: 'Fehlendes Label {name} für {count} Nachrichten: unten erstellen, bevor sie sortiert werden. Kein Labelbefehl erstellt Labels.', blockedLabel: 'Label {name} für {count} Nachrichten kann nicht erstellt werden: Ein Label, das sich nur in Groß- und Kleinschreibung unterscheidet, ein reservierter Name oder der Systembereich steht im Weg. Mailroom benennt Labels nie um und verwendet sie nicht ersatzweise; diese Nachrichten bleiben unsortiert.', excluded: { missing_label: 'fehlendes Label' }, step: { add_label: 'Label hinzufügen', remove_inbox: 'Posteingang entfernen', restore_inbox: 'Posteingang wiederherstellen', remove_label: 'Hinzugefügtes Label entfernen' }, outcome: { pending: 'nie versucht', verified: 'geprüft', changed: 'angewendet, weitere Änderungen gesehen', unapplied: 'nicht angewendet', uncertain: 'ungewiss', conflict: 'Konflikt' } },
   }
   let t = $derived(text[lang])
+  let archiveText = $derived(archiveCopy(lang))
   let scope = $state<BacklogOptions['scope']>('inbox_unfiled')
   let protect = $state(true)
   let view = $state<GmailView | null>(null)
@@ -29,11 +32,11 @@
   $effect(() => { workspaceRevision; invalidate() })
   async function act(fn: () => Promise<void>) { busy = true; error = ''; try { await fn() } catch { error = t.error } finally { busy = false } }
   async function load() { invalidate(); view = await openGmailBacklog(account) }
-  async function plan(selected: string[] | null = null) { invalidate(); const revision = workspaceRevision; const result = await previewGmailBacklog(account, { scope, protect_flagged: protect, selected }); if (revision === workspaceRevision) preview = result }
+  async function plan(selected: string[] | null = null, intent: NonNullable<BacklogOptions['intent']> = 'sort') { invalidate(); const revision = workspaceRevision; const result = await previewGmailBacklog(account, { scope: intent === 'archive_unmatched' ? 'inbox' : scope, protect_flagged: protect, selected, intent }); if (revision === workspaceRevision) preview = result }
   async function select(name: string, checked: boolean) {
     if (!preview) return
     const selected = Object.entries(preview.operation.plan.filing.groups).filter(([key, group]) => key === name ? checked : group.selected).map(([key]) => key)
-    await plan(selected)
+    await plan(selected, preview.operation.plan.filing.options.intent)
   }
   async function watch() {
     running = true
@@ -77,24 +80,26 @@
   <label>{t.scope}<select bind:value={scope} disabled={busy || running} onchange={invalidate}><option value="inbox_unfiled">{t.unfiled}</option><option value="inbox">{t.inbox}</option><option value="every_folder">{t.every}</option></select></label>
   <label><input type="checkbox" bind:checked={protect} disabled={busy || running} onchange={invalidate} />{t.protect}</label>
   <div class="actions"><button disabled={busy || running || !view?.installed || view?.recovery_hold} onclick={() => act(() => plan())}>{t.preview}</button><button disabled={busy || running} onclick={() => act(load)}>{t.reload}</button><button disabled={cancelling || !view?.installed || view?.recovery_hold} onclick={cancel}>{t.cancel}</button></div>
+  {#if view?.journal.runs.some(run => run.status === 'complete')}<ArchiveOffer {account} {lang} disabled={busy || running || !view.installed || view.recovery_hold} folders={false} onpreview={() => act(() => plan(null, 'archive_unmatched'))} />{/if}
   {#if error}<p role="alert">{error}</p>{/if}
   {#if running || cancelling}<p role="status">{t.wait} · {savedCount}</p>{/if}
   {#if preview}
+    {#if preview.operation.plan.filing.options.intent === 'archive_unmatched'}<h4>{archiveText.title}</h4>{/if}
     <p class="change-count">{preview.operation.plan.filing.changes.length} {t.changes}</p>
     <p>{preview.operation.plan.filing.artifact.identity}</p>
     <p>{t.approval} · {preview.operation.plan.saved_proof}</p><p>{t.observation} · {preview.operation.plan.execution_proof}</p>
     {#each Object.entries(preview.operation.plan.filing.groups) as [name, group]}<label><input type="checkbox" checked={group.selected} disabled={busy} onchange={event => { const checked = event.currentTarget.checked; void act(() => select(name, checked)) }} />{name} · {group.count}</label>{/each}
-    {#each Object.entries(preview.operation.plan.filing.excluded) as [reason, count]}<p>{reason === 'missing_label' ? t.excluded.missing_label : reason} · {count}</p>{/each}
+    {#each Object.entries(preview.operation.plan.filing.excluded) as [reason, count]}<p>{reason === 'missing_label' ? t.excluded.missing_label : archiveReason(lang, reason)} · {count}</p>{/each}
     {#each preview.operation.plan.filing.diagnostics.filter(d => !preview?.missing_labels.some(m => d.includes(m.name))) as diagnostic}<p>{diagnostic}</p>{/each}
     {#each preview.missing_labels as m}<p class="missing-label" data-blocked={m.blocked ?? ''}>{(m.blocked ? t.blockedLabel : t.missingLabel).replace('{name}', m.name).replace('{count}', String(m.messages))}</p>{/each}
 
     <details><summary>{t.report}</summary>{#each preview.operation.batches as b}{#each b.steps as s}<p class="planned-step">{t.context} / {b.intent.context.uidvalidity} / {s.uids.join(', ')} · {t.step[s.kind]} · {b.intent.destination.decoded}</p>{/each}{/each}</details>
-    <label><input type="checkbox" bind:checked={confirmed} disabled={busy || running} />{t.confirm}</label><button disabled={busy || running || !confirmed} onclick={() => act(start)}>{t.start}</button>
+    <label><input type="checkbox" bind:checked={confirmed} disabled={busy || running} />{preview.operation.plan.filing.options.intent === 'archive_unmatched' ? archiveText.confirm : t.confirm}</label><button disabled={busy || running || !confirmed} onclick={() => act(start)}>{preview.operation.plan.filing.options.intent === 'archive_unmatched' ? archiveText.start : t.start}</button>
   {/if}
   {#if preview?.missing_labels.some(m => !m.blocked) || labelHistory.length}<GmailLabels {account} {lang} offer={preview?.missing_labels.some(m => !m.blocked) ?? false} options={preview?.operation.plan.filing.options ?? { scope, protect_flagged: protect, selected: null }} history={labelHistory} limitations={view?.label_limitations ?? ''} disabled={busy || running || !view?.installed || !!view?.recovery_hold} onchange={() => act(async () => { const selected = preview?.operation.plan.filing.options.selected ?? null; await load(); await plan(selected) })} onreload={() => act(load)} />{/if}
   <h4>{t.journal}</h4>
   {#each view?.journal.runs ?? [] as run (run.id)}
-    <article data-gmail-run={run.id}><p class="run-state">{run.status}</p><UndoRetention {lang} days={view?.undo_window_days ?? 90} deadline={view?.undo_deadlines.find(d => d.run === run.id)} undone={run.status === 'undone'} />{#if run.stop_requested}<p>{t.stopped}</p>{/if}
+    <article data-gmail-run={run.id}>{#if run.plan.filing.options.intent === 'archive_unmatched'}<p>{archiveText.title}</p>{/if}<p class="run-state">{run.status}</p><UndoRetention {lang} days={view?.undo_window_days ?? 90} deadline={view?.undo_deadlines.find(d => d.run === run.id)} undone={run.status === 'undone'} />{#if run.stop_requested}<p>{t.stopped}</p>{/if}
       {#if run.undo_receipt}<p>{run.undo_conflicts} {t.conflicts}</p>{/if}
       <CloseRun kind="gmail" {account} {run} {lang} closable={view?.closable.includes(run.id) ?? false} disabled={busy || running || !view?.installed || !!view?.recovery_hold} onchange={() => act(load)} />
       {#if !run.closed}<button disabled={busy || running || !view?.installed || view?.recovery_hold} onclick={() => act(async () => { invalidate(); await gmailAction(account, { action: 'reconcile', run: run.id }); await load() })}>{t.reconcile}</button>{/if}

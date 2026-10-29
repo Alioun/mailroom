@@ -651,3 +651,6 @@ fn synthetic_uidnext_survives_empty_folders_undo_restart_and_a_new_run() {
     advance(&store, &mut state, &mut mailbox, &next_id).unwrap();
     assert!(state.backlog[1].outcomes.iter().all(|outcome| matches!(outcome, Outcome::Applied { observation } if observation.destination.uid > 2)));
 }
+
+#[path = "archive_tests.rs"]
+mod archive_tests;

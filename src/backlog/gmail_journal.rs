@@ -352,6 +352,7 @@ fn valid_run(r: &Run, account: &AccountId) -> bool {
             != (Purpose::Filing {
                 protect_flagged: filing.options.protect_flagged,
             })
+            || i.archive_only() != (filing.options.intent == super::Intent::ArchiveUnmatched)
             || r.plan
                 .topology
                 .get(&i.context().name.decoded)
@@ -371,7 +372,7 @@ fn valid_run(r: &Run, account: &AccountId) -> bool {
             }
             count += 1;
             let label = &i.destination().decoded;
-            let add: BTreeSet<String> = if m.labels.contains(label) {
+            let add: BTreeSet<String> = if i.archive_only() || m.labels.contains(label) {
                 BTreeSet::new()
             } else {
                 [label.clone()].into()
@@ -418,6 +419,7 @@ fn valid_run(r: &Run, account: &AccountId) -> bool {
             || i.purpose() != Purpose::ConditionalUndo
             || i.context() != f.intent().context()
             || i.destination() != f.intent().destination()
+            || i.archive_only() != f.intent().archive_only()
         {
             return false;
         }
@@ -499,6 +501,17 @@ pub(crate) fn project(
         stopped_folders: Default::default(),
         diagnostics: proof.warnings.clone(),
     };
-    super::project(&mut plan, census, proof, None)?;
+    super::project(
+        &mut plan,
+        census,
+        proof,
+        None,
+        state
+            .workspace
+            .as_ref()
+            .ok_or("Workspace required")?
+            .input
+            .as_of,
+    )?;
     Ok(plan)
 }

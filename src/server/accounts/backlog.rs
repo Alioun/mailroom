@@ -107,3 +107,7 @@ pub(in crate::server) async fn handle(
         Ok(Err(_)) | Err(_) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error":"Backlog action rejected. Refresh the preview or recover the saved run. Existing files are retained."}))).into_response(),
     }
 }
+
+#[cfg(test)]
+#[path = "backlog_archive_tests.rs"]
+mod archive_tests;

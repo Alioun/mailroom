@@ -723,7 +723,7 @@ fn selected_schema_twenty_four_preserves_sender_sets_exports_and_recovery_hold()
         state
     };
     let (manifest, bundle) = capture(&repo, &ids[..1], &ledger, root.path());
-    assert_eq!(manifest.accounts[0].state_schema, 24);
+    assert_eq!(manifest.accounts[0].state_schema, crate::census::SCHEMA);
     let fresh_root = tempfile::tempdir().unwrap();
     let fresh = persistent_accounts(fresh_root.path());
     let preview = fresh
@@ -757,4 +757,91 @@ fn selected_schema_twenty_four_preserves_sender_sets_exports_and_recovery_hold()
             .iter()
             .all(|d| d.review && d.copies.is_empty() && !d.mark_read)
     );
+}
+
+#[test]
+fn selected_archive_history_preserves_exact_intent_and_restores_read_only() {
+    let (root, repo, ids, ledger) = fixture();
+    let account = repo.load(&ids[0]).unwrap();
+    let store = repo.store(&account).unwrap();
+    let mut saved = store.load_state().unwrap();
+    let mut input: crate::engine::PreviewInput =
+        serde_json::from_str(include_str!("../../../../../examples/sample.json")).unwrap();
+    input.context.account = ids[0].as_str().into();
+    input.messages.truncate(1);
+    input.messages[0].headers = "From: person@unmatched.example.test\r\nTo: owner@home.example.test\r\nDelivered-To: owner@home.example.test\r\nSubject: Personal note\r\nMessage-ID: <recovery-archive@example.test>\r\n\r\n".into();
+    input.messages[0].current_folder = "INBOX".into();
+    let mut census = crate::engine::synthetic_census(&input).unwrap();
+    census
+        .folder_roles
+        .insert("Archiv".into(), ["archive".into()].into());
+    for m in census
+        .folders
+        .get_mut("INBOX")
+        .unwrap()
+        .messages
+        .values_mut()
+    {
+        m.internal_date = "01-May-2024 00:00:00 +0000".into();
+        m.flags = ["\\Answered".into()].into();
+    }
+    saved.census = census.clone().into();
+    saved.workspace = Some(crate::rules::workspace::Workspace {
+        revision: 1,
+        input: crate::rules::workspace::WorkspaceInput {
+            documents: input.documents,
+            pins: vec![],
+            as_of: input.as_of,
+            baseline: crate::rules::proof::Baseline::Current,
+        },
+    });
+    store.save_state(&mut saved).unwrap();
+    let mut mailbox = crate::backlog::SyntheticMailbox::open(
+        &root.path().join("archive-effects"),
+        &store,
+        &census,
+    )
+    .unwrap();
+    let preview = crate::backlog::preview(
+        &saved,
+        Provider::MailboxOrg,
+        store.keys(),
+        crate::backlog::Options {
+            scope: crate::backlog::Scope::Inbox,
+            intent: crate::backlog::Intent::ArchiveUnmatched,
+            ..Default::default()
+        },
+        Some(&mailbox),
+    )
+    .unwrap();
+    assert_eq!(preview.plan.changes.len(), 1);
+    let receipt = preview.receipt.clone();
+    let run = crate::backlog::start(&mut saved, preview, &receipt).unwrap();
+    store.save_state(&mut saved).unwrap();
+    crate::backlog::advance(&store, &mut saved, &mut mailbox, &run).unwrap();
+    assert_eq!(saved.backlog[0].status, crate::backlog::Status::Completed);
+    let expected = serde_json::to_vec(&saved.backlog).unwrap();
+    let captured_bytes = fs::read(store.path()).unwrap();
+    drop(store);
+    let (_, bundle) = capture(&repo, &ids[..1], &ledger, root.path());
+    let fresh_root = tempfile::tempdir().unwrap();
+    let fresh = persistent_accounts(fresh_root.path());
+    let target = InstalledLedger::install(fresh_root.path().join("ledger")).unwrap();
+    fs::remove_file(fresh_root.path().join("ledger/addresses.yaml")).unwrap();
+    let preview = fresh
+        .selected_restore_preview(&bundle, &secret(), true, Some(&target))
+        .unwrap();
+    assert_eq!(
+        preview.manifest.accounts[0].state_schema,
+        crate::census::SCHEMA
+    );
+    fresh
+        .selected_restore(&bundle, &secret(), &preview, Some(&target), |_| Ok(()))
+        .unwrap();
+    let restored = fresh.store(&fresh.load(&ids[0]).unwrap()).unwrap();
+    let mut reopened = restored.load_state().unwrap();
+    assert_eq!(serde_json::to_vec(&reopened.backlog).unwrap(), expected);
+    assert_eq!(captured_bytes, fs::read(restored.path()).unwrap());
+    assert!(restored.recovery_pending());
+    assert!(restored.save_state(&mut reopened).is_err());
 }

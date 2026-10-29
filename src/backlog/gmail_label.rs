@@ -89,6 +89,11 @@ pub struct LabelIntent {
     context: MailboxIdentity,
     destination: ExactName,
     messages: BTreeMap<Uid, Snapshot>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    archive_only: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Deserialize)]
@@ -98,13 +103,24 @@ struct RawIntent {
     context: MailboxIdentity,
     destination: ExactName,
     messages: BTreeMap<Uid, Snapshot>,
+    #[serde(default)]
+    archive_only: bool,
 }
 
 impl TryFrom<RawIntent> for LabelIntent {
     type Error = &'static str;
     fn try_from(raw: RawIntent) -> Result<Self, Self::Error> {
-        Self::new(raw.purpose, raw.context, raw.destination, raw.messages)
-            .ok_or("Invalid Gmail label intent")
+        if raw.archive_only && raw.destination != raw.context.name {
+            return Err("Invalid archive target");
+        }
+        Self::build(
+            raw.purpose,
+            raw.context,
+            raw.destination,
+            raw.messages,
+            raw.archive_only,
+        )
+        .ok_or("Invalid Gmail label intent")
     }
 }
 
@@ -123,11 +139,30 @@ impl LabelIntent {
         destination: ExactName,
         messages: BTreeMap<Uid, Snapshot>,
     ) -> Option<Self> {
+        Self::build(purpose, context, destination, messages, false)
+    }
+    pub fn archive(
+        purpose: Purpose,
+        context: MailboxIdentity,
+        messages: BTreeMap<Uid, Snapshot>,
+    ) -> Option<Self> {
+        Self::build(purpose, context.clone(), context.name, messages, true)
+    }
+    pub fn archive_only(&self) -> bool {
+        self.archive_only
+    }
+    fn build(
+        purpose: Purpose,
+        context: MailboxIdentity,
+        destination: ExactName,
+        messages: BTreeMap<Uid, Snapshot>,
+        archive_only: bool,
+    ) -> Option<Self> {
         let ids: BTreeSet<_> = messages.values().map(|m| &m.gmail_id).collect();
         let valid = !messages.is_empty()
             && messages.len() <= LIMIT
             && ids.len() == messages.len()
-            && user_label(&destination)
+            && (if archive_only { destination == context.name } else { user_label(&destination) })
             && ExactName::from_wire(&context.name.wire).is_ok_and(|n| n == context.name)
             && messages.values().all(|m| {
                 m.validate()
@@ -138,6 +173,7 @@ impl LabelIntent {
             context,
             destination,
             messages,
+            archive_only,
         })
     }
     pub fn purpose(&self) -> Purpose {
@@ -293,7 +329,7 @@ impl LabelBatch {
         let add = intent
             .messages
             .iter()
-            .filter(|(_, m)| !m.labels.contains(label))
+            .filter(|(_, m)| !intent.archive_only && !m.labels.contains(label))
             .map(|(u, _)| *u)
             .collect();
         let remove = intent
@@ -333,6 +369,9 @@ impl LabelBatch {
         let mut position = 0;
         let mut covered = BTreeSet::new();
         for (kind, uids) in &plan {
+            if intent.archive_only && matches!(kind, StepKind::AddLabel | StepKind::RemoveLabel) {
+                return Err(Invalid::Phase);
+            }
             let Some(at) = order[position..].iter().position(|k| k == kind) else {
                 return Err(Invalid::Phase);
             };

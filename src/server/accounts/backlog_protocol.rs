@@ -469,7 +469,11 @@ fn execute(
                 mailbox_consent(
                     state,
                     &account.id,
-                    "Apply the previewed Gmail label changes",
+                    if options.intent == crate::backlog::Intent::ArchiveUnmatched {
+                        "Archive the previewed old unmatched Inbox messages"
+                    } else {
+                        "Apply the previewed Gmail label changes"
+                    },
                     receipt,
                 )?;
                 repo.gmail_confirm(
@@ -540,7 +544,11 @@ fn execute(
             mailbox_consent(
                 state,
                 &account.id,
-                "Move the previewed backlog messages",
+                if options.intent == crate::backlog::Intent::ArchiveUnmatched {
+                    "Archive the previewed old unmatched Inbox messages"
+                } else {
+                    "Move the previewed backlog messages"
+                },
                 receipt,
             )?;
             repo.backlog_confirm(

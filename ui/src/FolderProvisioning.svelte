@@ -3,7 +3,7 @@
   import { folderCommand, folderStatus, folderPreview, folderReconcile, type FolderView, type FolderPreview } from './folder-provisioning-api'
   import { localFetch } from './api'
   import { z } from 'zod'
-  let { account, lang }: { account: string; lang: 'en' | 'de' } = $props()
+  let { account, lang, intent = 'sort', onChanged }: { account: string; lang: 'en' | 'de'; intent?: 'sort' | 'archive_unmatched'; onChanged?: () => void } = $props()
   const strings = {
     en: { title: 'Synthetic IMAP folder provisioning', empty: 'The saved artifact emits no filing destinations. No CREATE is authorized by this review.', record: 'Record the empty folder plan', open: 'Open folder history', preview: 'Review exact folders', confirm: 'Create these synthetic folders', approval: 'I reviewed every exact decoded and wire name and the possible server effects.', cancel: 'Stop further folder commands', reconcile: 'Reconcile folders without creating', existing: 'Existing', missing: 'Missing, CREATE planned', ancestor: 'Ancestor', leaf: 'Filing leaf', decoded: 'Exact folder', wire: 'IMAP wire name', private: 'Show private folder names', hide: 'Hide private folder names', ack: 'Acknowledged', readback: 'Readback', error: 'Folder operation rejected or interrupted. Open history and reconcile before renewed exact review.', running: 'Synthetic folder operation running', proof: 'Saved-workspace proof', synthetic: 'Explicit synthetic recipient evidence installed. This fixture fact grants no provider trust.', conservative: 'Recipient evidence is unknown. Filing remains conservative.', held: 'Restored account remains read-only.', unavailable: 'Production and read-only installations deny folder creation. A separately installed synthetic create source is required.', limitations: 'Emitted filing destinations need not be reachable under saved-account recipient authority. Creating visible folders proves neither delivery nor attribution. The supported mapping uses an empty personal prefix and slash hierarchy. Another editor can remove a parent after the final check; the server may recreate parents or subscribe folders implicitly. No automatic retry, continuation, cleanup, rule deployment or native confirmation.', fresh: 'Uncertainty or absence requires explicit reconciliation and renewed exact approval. Reconciliation never creates folders.', yes: 'Yes', no: 'No', none: 'Not observed', statuses: { running: 'Running', complete: 'Visible postconditions observed', refused: 'Refused', uncertain: 'Uncertain', stopped: 'Stopped', conflict: 'Conflict', fresh_review: 'Fresh exact review required' }, outcomes: { intent: 'Intent persisted', acknowledged: 'Command acknowledged', observed: 'Visible state observed', refused: 'Refused', uncertain: 'Uncertain', conflict: 'Conflict', absent: 'Absent now, history unknown' } },
     de: { title: 'Synthetische IMAP-Ordneranlage', empty: 'Das gespeicherte Artefakt enthält keine Ablageziele. Diese Prüfung erlaubt keinen CREATE-Befehl.', record: 'Leeren Ordnerplan festhalten', open: 'Ordnerverlauf öffnen', preview: 'Exakte Ordner prüfen', confirm: 'Diese synthetischen Ordner anlegen', approval: 'Ich habe alle exakten Ordnernamen, Übertragungsnamen und möglichen Serverfolgen geprüft.', cancel: 'Weitere Ordnerbefehle stoppen', reconcile: 'Ordner ohne Anlage abgleichen', existing: 'Vorhanden', missing: 'Fehlt, CREATE geplant', ancestor: 'Übergeordneter Ordner', leaf: 'Ablageziel', decoded: 'Exakter Ordner', wire: 'IMAP-Übertragungsname', private: 'Private Ordnernamen anzeigen', hide: 'Private Ordnernamen ausblenden', ack: 'Bestätigt', readback: 'Rücklesen', error: 'Ordneranlage abgelehnt oder unterbrochen. Verlauf öffnen und vor erneuter exakter Prüfung abgleichen.', running: 'Synthetische Ordneranlage läuft', proof: 'Nachweis des gespeicherten Arbeitsstands', synthetic: 'Explizite synthetische Empfängerbelege installiert. Dieser Testbeleg schafft kein Anbietervertrauen.', conservative: 'Empfängerbelege sind unbekannt. Die Ablage bleibt konservativ.', held: 'Wiederhergestelltes Konto bleibt schreibgeschützt.', unavailable: 'Produktive und reine Leseinstallationen verweigern die Ordneranlage. Eine separat installierte synthetische Anlagequelle ist erforderlich.', limitations: 'Ausgegebene Ablageziele müssen mit der konservativen Empfängerberechtigung nicht erreichbar sein. Sichtbare Ordner beweisen weder Zustellung noch Verursachung. Unterstützt werden ein leeres persönliches Präfix und Schrägstriche. Andere Editoren können Elternordner nach der letzten Prüfung löschen. Der Server kann sie neu anlegen oder Ordner automatisch abonnieren. Keine automatische Wiederholung, Fortsetzung, Bereinigung, Regelaktivierung oder native Bestätigung.', fresh: 'Ungewissheit oder Abwesenheit erfordern ausdrücklichen Abgleich und erneute exakte Freigabe. Der Abgleich legt keine Ordner an.', yes: 'Ja', no: 'Nein', none: 'Nicht beobachtet', statuses: { running: 'Läuft', complete: 'Sichtbare Nachbedingungen beobachtet', refused: 'Abgelehnt', uncertain: 'Ungewiss', stopped: 'Gestoppt', conflict: 'Konflikt', fresh_review: 'Erneute exakte Prüfung erforderlich' }, outcomes: { intent: 'Absicht gespeichert', acknowledged: 'Befehl bestätigt', observed: 'Sichtbarer Zustand beobachtet', refused: 'Abgelehnt', uncertain: 'Ungewiss', conflict: 'Konflikt', absent: 'Jetzt abwesend, Verlauf ungewiss' } },
@@ -25,7 +25,7 @@
       const status = z.object({ job: z.object({ progress: z.object({ state: z.string() }) }).nullable() }).parse(await response.json())
       if (!alive) return
       if (status.job?.progress.state === 'running') timer = setTimeout(() => void poll(), 200)
-      else { view = await folderStatus(account); running = false }
+      else { view = await folderStatus(account); running = false; onChanged?.() }
     } catch { if (alive) { error = t.error; running = false } }
   }
   async function act(action: 'open' | 'preview' | 'confirm' | 'cancel' | 'reconcile', operation?: string) {
@@ -33,18 +33,18 @@
     try {
       if (action === 'confirm' && preview && approved) {
         const p = preview; preview = null; approved = false
-        await folderCommand(account, { action: 'confirm', receipt: p.receipt, confirmed: true })
+        await folderCommand(account, { action: 'confirm', receipt: p.receipt, confirmed: true, intent })
         running = true; void poll()
       } else if (action === 'cancel') await folderCommand(account, { action: 'cancel' })
       else if (action === 'reconcile' && operation) { preview = null; approved = false; view = await folderReconcile(account, operation) }
-      else if (action === 'preview') { approved = false; preview = await folderPreview(account) }
+      else if (action === 'preview') { approved = false; preview = await folderPreview(account, intent) }
       else if (action === 'open') { preview = null; approved = false; view = await folderStatus(account) }
     } catch { error = t.error; preview = null; approved = false }
     finally { busy = false }
   }
 </script>
 <section class="folder-provisioning" aria-label={t.title}>
-  <h3>{t.title}</h3><p>{t.unavailable}</p>
+  <h3>{intent === 'archive_unmatched' ? (lang === 'en' ? 'Archive folders for old unmatched mail' : 'Archivordner für alte unzugeordnete Nachrichten') : t.title}</h3><p>{t.unavailable}</p>
   <div class="actions"><button disabled={!account || busy || running} onclick={() => act('open')}>{t.open}</button><button disabled={!view?.installed || view.recovery_hold || busy || running} onclick={() => act('preview')}>{t.preview}</button><button disabled={!running || busy} onclick={() => act('cancel')}>{t.cancel}</button></div>
   {#if error}<p role="alert">{error}</p>{/if}{#if running}<p role="status">{t.running}</p>{/if}
   {#if view?.recovery_hold}<p>{t.held}</p>{/if}

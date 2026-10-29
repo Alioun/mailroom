@@ -1,6 +1,7 @@
 mod archive;
 pub mod gmail_journal;
 pub mod gmail_label;
+pub mod imap_copy;
 pub mod imap_move;
 pub mod protocol;
 pub mod retention;

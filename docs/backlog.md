@@ -93,6 +93,16 @@ Mailbox.org requires a unique discovered archive role whose exact root is `Archi
 
 The archive intent and populated history survive encrypted reopening and selected recovery under schema 25. Restoration retains the read-only hold and does not resume actions. Protocol, browser and real-provider archive acceptance remain outstanding where the sandbox prevents listeners or native execution.
 
+## COPY fallback evidence core
+
+`backlog::imap_copy` models COPY, conditional flag changes and exact UID EXPUNGE as separate effects. This module is not connected to account journals, transport workers, HTTP routes or UI. The existing protocol workflow still requires MOVE. Its account schema remains 25.
+
+The core reuses the validated transfer identities and COPYUID parser. Versioned observations require a nonzero per-message MODSEQ and a persistent mailbox HIGHESTMODSEQ. Source deletion requires a validated mapped copy whose flags, arrival date, size and Message-ID hash match. Fresh source observations determine STORE groups with one actual MODSEQ per group. The command adds only `\Deleted` with UNCHANGEDSINCE. MODIFIED members, missing acknowledgments, missing returned MODSEQs and later metadata changes cannot establish ownership.
+
+UID EXPUNGE requires another exact observation of the recorded owned flags and MODSEQs and an unchanged mapped copy. The core records the restricted UID set before returning the command. Final source absence and mapped destination metadata establish observed filing. Lost acknowledgments never make an attempted COPY or expunge repeatable. UID EXPUNGE has no MODSEQ condition, so the final-read/effect race remains.
+
+Copy-only Undo preparation targets the extra destination copy without copying it back. A pending Deleted clear has its own conditional intent and retains the exact acknowledged ownership record. It removes only that flag. Reopening serialized evidence performs no effect or compensation. The core tests use memory-backed independent effects and serialization at phase boundaries. They do not establish TLS behavior, process-crash durability or application recovery acceptance.
+
 ## Remaining limits
 
-COPY fallback remains unimplemented. Gmail label execution is fixture-only. Production source installation and actual provider acceptance remain unavailable. Native confirmation, protected Keychain access, independent Sieve execution and whole-personal-workflow readiness are separate gates. Controls support English and narrow German layouts. Backend diagnostic reason codes remain partly English. Local fixture results grant no real-account write authority.
+COPY fallback execution remains unavailable. Gmail label execution is fixture-only. Production source installation and actual provider acceptance remain unavailable. Native confirmation, protected Keychain access, independent Sieve execution and whole-personal-workflow readiness are separate gates. Controls support English and narrow German layouts. Backend diagnostic reason codes remain partly English. Local fixture results grant no real-account write authority.

@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, collections::BTreeSet, num::NonZeroU32};
 pub const LIMIT: usize = 500;
 const CODE_LIMIT: usize = 16 * 1024;
 
-fn uid_map<'de, D: serde::Deserializer<'de>, V: Deserialize<'de>>(
+pub(super) fn uid_map<'de, D: serde::Deserializer<'de>, V: Deserialize<'de>>(
     deserializer: D,
 ) -> Result<BTreeMap<Uid, V>, D::Error> {
     struct Visitor<V>(std::marker::PhantomData<V>);
@@ -115,7 +115,7 @@ pub struct Metadata {
 }
 
 impl Metadata {
-    fn validate(&self) -> Result<(), InvalidEvidence> {
+    pub(super) fn validate(&self) -> Result<(), InvalidEvidence> {
         if self.message_id_hash.is_empty()
             || self.message_id_hash.len() > 128
             || !self.message_id_hash.bytes().all(|b| b.is_ascii_graphic())
@@ -275,7 +275,7 @@ impl TryFrom<RawMapping> for CopyUidMapping {
     }
 }
 
-fn uid_set(text: &str) -> Result<Vec<Uid>, InvalidEvidence> {
+pub(super) fn uid_set(text: &str) -> Result<Vec<Uid>, InvalidEvidence> {
     fn number(value: &str) -> Result<u32, InvalidEvidence> {
         if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) || value.len() > 10 {
             return Err(InvalidEvidence::Mapping);
@@ -498,6 +498,9 @@ impl MoveEvidence {
             MappingEvidence::Validated { mapping } => Some(mapping),
             _ => None,
         }
+    }
+    pub(super) fn mapping_rejected(&self) -> bool {
+        matches!(self.mapping, MappingEvidence::Rejected { .. })
     }
     pub fn completion(&self) -> Option<&Completion> {
         self.completion.as_ref()

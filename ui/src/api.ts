@@ -193,7 +193,7 @@ const invoiceReport = z.object({ version: z.string(), semantics: z.string(), rev
 const resolution = z.enum(['sent', 'not_sent'])
 const invoiceSend = z.object({ id: z.string(), plan: invoicePlan, status: z.enum(['intent', 'uncertain', 'completed', 'not_sent', 'handed_off']), resolved: resolution.optional() })
 const invoiceView = z.object({ report: invoiceReport, sends: z.array(invoiceSend), synthetic: z.boolean(), targets: z.array(z.string()).default([]), sent_evidence: z.record(z.string(), z.array(z.string())).default({}) })
-const exactConfirmation = z.object({ request_id: z.string().length(64), protocol: z.literal('mailroom-exact-action-v1'), plan_digest: z.string().length(64), display: z.string(), expires_after_seconds: z.number(), synthetic: z.literal(true) })
+const exactConfirmation = z.object({ request_id: z.string().length(64), protocol: z.literal('mailroom-exact-action-v1'), plan_digest: z.string().length(64), display: z.string(), expires_after_seconds: z.number(), synthetic: z.boolean() })
 const invoicePreview = z.object({ plan: invoicePlan, receipt: z.string().length(64), native_available: z.literal(false), confirmation: exactConfirmation.nullable() })
 export type InvoiceView = z.infer<typeof invoiceView>
 export type InvoicePreview = z.infer<typeof invoicePreview>
@@ -220,7 +220,7 @@ export async function recoverUnsubscribe(account: string, entry: string, as_of: 
 export async function resolveUnsubscribe(account: string, entry: string, outcome: Resolution, as_of: number): Promise<UnsubscribeView> { return unsubscribeView.parse(await accountPost('unsubscribe', { account, command: { action: 'resolve', entry, resolution: outcome, as_of } })) }
 
 const subscriptionReviewInput = unsubscribeInput.extend({ selections: z.array(z.object({ account: z.string(), subscription: z.string(), method: unsubscribeMethod })) })
-const subscriptionReviewView = z.object({ accounts: z.array(unsubscribeView.extend({ account: z.string() })), synthetic: z.boolean(), q20_scope: z.literal('separate_subscriptions') })
+const subscriptionReviewView = z.object({ accounts: z.array(unsubscribeView.extend({ account: z.string() })), synthetic: z.boolean(), review_available: z.boolean(), q20_scope: z.literal('separate_subscriptions') })
 const subscriptionReviewPreview = z.object({ confirmation: exactConfirmation, previews: z.array(unsubscribePreview), receipt: z.string().length(64), confirmation_action: z.string(), local_mail_confirmation: z.string().nullable() })
 export type SubscriptionReviewInput = z.infer<typeof subscriptionReviewInput>
 export type SubscriptionReviewView = z.infer<typeof subscriptionReviewView>

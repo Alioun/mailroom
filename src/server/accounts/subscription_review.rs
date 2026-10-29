@@ -1,11 +1,21 @@
 use super::*;
 use crate::{
     census::{AccountState, EncryptedStore},
-    unsubscribe::{self, Folders, InstalledSynthetic, Method, Preview, ReviewInput, Selection},
+    unsubscribe::{
+        self, Folders, InstalledSynthetic, Method, Preview, ReviewInput, Selection, Wired,
+    },
 };
 use std::collections::{BTreeMap, BTreeSet};
 use subtle::ConstantTimeEq;
 const CONFIRM: &str = "Confirm exactly this list of separate subscription actions (synthetic only)";
+const WIRED_CONFIRM: &str = "Confirm exactly this list of separate subscription actions";
+fn confirmation_action(state: &AppState) -> &'static str {
+    if super::unsubscribe::wired(state) {
+        WIRED_CONFIRM
+    } else {
+        CONFIRM
+    }
+}
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Target {
@@ -45,7 +55,7 @@ struct AccountReview {
     account: Account,
     store: EncryptedStore,
     saved: AccountState,
-    installed: InstalledSynthetic,
+    installed: Option<InstalledSynthetic>,
     preview: Preview,
 }
 fn confirmation_plan(reviews: &[AccountReview], receipt: &str) -> crate::confirmation::Plan {
@@ -58,6 +68,7 @@ fn confirmation_plan(reviews: &[AccountReview], receipt: &str) -> crate::confirm
     }
 }
 fn revalidate(
+    state: &AppState,
     reviews: &[AccountReview],
     input: &Input,
     guard: Option<&crate::ledger::file::LockedLedger<'_>>,
@@ -82,6 +93,10 @@ fn revalidate(
                 .collect(),
             folders: input.folders.clone(),
         };
+        let wiring = Wired {
+            trusted_recipients: state.accounts.synthetic(),
+            authserv: state.accounts.writes.authserv(r.account.provider),
+        };
         previews.push((
             &r.account.id,
             unsubscribe::preview(
@@ -89,7 +104,7 @@ fn revalidate(
                 r.account.provider,
                 r.store.keys(),
                 &single,
-                Some(&r.installed),
+                super::unsubscribe::pick(super::unsubscribe::wired(state), &wiring, &r.installed),
             )?,
         ));
     }
@@ -134,9 +149,7 @@ fn prepare(
         .accounts
         .repository()
         .map_err(|_| "Account repository unavailable")?;
-    let AccountSource::Synthetic { mailboxes, .. } = &state.accounts.source else {
-        return Err("No production unsubscribe authority".into());
-    };
+    let wired = super::unsubscribe::wired(state);
     let mut reviews = Vec::new();
     for (id, selections) in selected {
         let account = repo
@@ -159,7 +172,16 @@ fn prepare(
                 .map_err(|e| e.to_string())?,
             guard,
         )?;
-        let installed = InstalledSynthetic::open(mailboxes, &store, &saved)?;
+        let installed = match &state.accounts.source {
+            AccountSource::Synthetic { mailboxes, .. } if !wired => {
+                Some(InstalledSynthetic::open(mailboxes, &store, &saved)?)
+            }
+            _ => None,
+        };
+        let wiring = Wired {
+            trusted_recipients: state.accounts.synthetic(),
+            authserv: state.accounts.writes.authserv(account.provider),
+        };
         let single = ReviewInput {
             as_of: input.as_of,
             selections,
@@ -170,7 +192,7 @@ fn prepare(
             account.provider,
             store.keys(),
             &single,
-            Some(&installed),
+            super::unsubscribe::pick(wired, &wiring, &installed),
         )?;
         reviews.push(AccountReview {
             account,
@@ -198,6 +220,7 @@ fn prepare(
     Ok((reviews, receipt))
 }
 fn view(state: &AppState, as_of: i64) -> Result<serde_json::Value, String> {
+    let wired = super::unsubscribe::wired(state);
     let repo = state
         .accounts
         .repository()
@@ -235,22 +258,26 @@ fn view(state: &AppState, as_of: i64) -> Result<serde_json::Value, String> {
             continue;
         }
         let installed = match &state.accounts.source {
-            AccountSource::Synthetic { mailboxes, .. } => {
+            AccountSource::Synthetic { mailboxes, .. } if !wired => {
                 Some(InstalledSynthetic::open(mailboxes, &store, &saved)?)
             }
             _ => None,
+        };
+        let wiring = Wired {
+            trusted_recipients: state.accounts.synthetic(),
+            authserv: state.accounts.writes.authserv(account.provider),
         };
         let report = unsubscribe::report(
             &saved,
             account.provider,
             store.keys(),
             as_of,
-            installed.as_ref(),
+            super::unsubscribe::pick(wired, &wiring, &installed),
         )?;
-        accounts.push(json!({"account":account.id,"report":report,"history":saved.unsubscribe.history,"mutes":saved.unsubscribe.mutes,"synthetic":installed.is_some(),"production_available":false,"q20_scope":"separate_subscriptions"}));
+        accounts.push(json!({"account":account.id,"report":report,"history":saved.unsubscribe.history,"mutes":saved.unsubscribe.mutes,"synthetic":installed.is_some(),"wired":wired,"production_available":false,"q20_scope":"separate_subscriptions"}));
     }
     Ok(
-        json!({"accounts":accounts,"synthetic":state.accounts.synthetic(),"q20_scope":"separate_subscriptions"}),
+        json!({"accounts":accounts,"synthetic":!wired,"review_available":!wired || state.accounts.writes.permit(Operation::Unsubscribe).is_ok(),"q20_scope":"separate_subscriptions"}),
     )
 }
 pub(in crate::server) async fn handle(
@@ -261,9 +288,17 @@ pub(in crate::server) async fn handle(
         Ok(v) => v,
         Err(e) => return e,
     };
-    if !state.accounts.synthetic() && !matches!(request.command, Action::Open { .. }) {
-        return (StatusCode::FORBIDDEN,Json(json!({"error":"Production subscription actions remain denied before credential access"}))).into_response();
-    }
+    let permit =
+        if super::unsubscribe::wired(&state) && !matches!(request.command, Action::Open { .. }) {
+            match state.accounts.writes.permit(Operation::Unsubscribe) {
+                Ok(permit) => Some(permit),
+                Err(reason) => {
+                    return (StatusCode::FORBIDDEN, Json(json!({"error":reason}))).into_response();
+                }
+            }
+        } else {
+            None
+        };
     match tokio::task::spawn_blocking(move || {
         let _operation=state.accounts.operation.lock().expect("account operation");
         if state.accounts.job.lock().expect("account job").as_ref().is_some_and(|j|j.progress.state==ScanState::Running) {return Err("Wait for census completion".to_owned());}
@@ -274,16 +309,19 @@ pub(in crate::server) async fn handle(
                 let (reviews,receipt)=prepare(&state,&input,ledger_guard.as_ref())?;
                 let mail=reviews.iter().find_map(|r|r.preview.local_mail_confirmation);
                 let (handle,request)=state.accounts.confirmations.lock().expect("confirmations").offer(confirmation_plan(&reviews,&receipt))?;
-                return Ok(json!({"previews":reviews.iter().map(|r|&r.preview).collect::<Vec<_>>(),"receipt":handle,"confirmation_action":CONFIRM,"local_mail_confirmation":mail,"confirmation":request}));
+                return Ok(json!({"previews":reviews.iter().map(|r|&r.preview).collect::<Vec<_>>(),"receipt":handle,"confirmation_action":confirmation_action(&state),"local_mail_confirmation":mail,"confirmation":request}));
             },
             Action::Confirm {input,receipt,confirmation_action,mail_confirmation_action}=>{
                 let (mut reviews,current)=prepare(&state,&input,ledger_guard.as_ref())?;
-                if confirmation_action!=CONFIRM || reviews.iter().any(|r|r.preview.local_mail_confirmation.is_some_and(|a|mail_confirmation_action.as_deref()!=Some(a))) {return Err("Exact multi-account subscription list changed".into());}
+                if confirmation_action!=self::confirmation_action(&state) || reviews.iter().any(|r|r.preview.local_mail_confirmation.is_some_and(|a|mail_confirmation_action.as_deref()!=Some(a))) {return Err("Exact multi-account subscription list changed".into());}
                 let current_plan=confirmation_plan(&reviews,&current);
                 let consent=state.accounts.confirmations.lock().expect("confirmations").confirm(&receipt,&current_plan,|| {
-                    revalidate(&reviews,&input,ledger_guard.as_ref())
+                    revalidate(&state,&reviews,&input,ledger_guard.as_ref())
                 })?;
                 if consent.receipt().as_bytes().ct_eq(current.as_bytes()).unwrap_u8()!=1 {return Err("Exact subscription receipt changed".into());}
+                let executions = reviews.iter().map(|r| {
+                    permit.as_ref().map(|p| super::unsubscribe::PreparedWired::new(&state, p, r.account.provider, &r.preview)).transpose()
+                }).collect::<Result<Vec<_>, _>>()?;
                 let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| "Invalid clock")?.as_secs() as i64;
                 let mut intents=Vec::new();
                 for r in &mut reviews {
@@ -293,14 +331,20 @@ pub(in crate::server) async fn handle(
                 }
                 for r in &mut reviews { r.store.save_state(&mut r.saved).map_err(|_| "Persist exact subscription intents")?; }
                 unsubscribe::boundary("before");
-                for (r,ids) in reviews.iter_mut().zip(intents) {
+                let repo = state.accounts.repository().map_err(|_| "Account repository unavailable")?;
+                for ((r,ids),execution) in reviews.iter_mut().zip(intents).zip(executions) {
+                    if let Some(execution) = execution {
+                        execution.execute(&repo, &r.account, &r.store, &mut r.saved, &r.preview, &ids, input.as_of)?;
+                        continue;
+                    }
                     for (id,action) in ids.iter().zip(&r.preview.actions) {
                         if matches!(action.method,Method::OneClick|Method::LocalMail) {
                             let entry=r.saved.unsubscribe.history.iter().find(|e|&e.id==id).ok_or("Missing intent")?;
                             let source=unsubscribe::source(&r.saved,&action.source).ok_or("Source changed")?;
-                            r.installed.submit(id,entry,source,&action.recipient)?;
+                            let installed = r.installed.as_mut().ok_or("No installed fake transport")?;
+                            installed.submit(id,entry,source,&action.recipient)?;
                             unsubscribe::boundary("effect");
-                            unsubscribe::observe(&mut r.saved,&r.installed,id)?;
+                            unsubscribe::observe(&mut r.saved,installed,id)?;
                             r.store.save_state(&mut r.saved).map_err(|_| "Persist effect observation")?;
                         }
                     }

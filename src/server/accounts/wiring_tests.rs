@@ -640,3 +640,339 @@ fn dummy_password_never_reaches_child_output_on_any_wired_path() {
     secret_free(&output.stdout, "child stdout");
     secret_free(&output.stderr, "child stderr");
 }
+
+fn handoff_endpoints() -> Fake {
+    Fake {
+        smtp: None,
+        network: https::network(&[], &[]),
+        https: "127.0.0.1:1".parse().unwrap(),
+        tls: native_tls::TlsConnector::new().unwrap(),
+        launcher: Recorder::default(),
+        authserv: Some("mx.fake.test".into()),
+        timeouts: Timeouts::default(),
+    }
+}
+
+fn second_account(f: &Fixture) -> Account {
+    let account = f
+        .repo
+        .create(
+            Provider::MailboxOrg,
+            "second@example.test".into(),
+            &SecretValue::new(DUMMY.as_bytes().to_vec()),
+        )
+        .unwrap();
+    f.repo.connection_observed(&account.id, true).unwrap();
+    acquisition::synthetic::scan(&f.repo, &account.id, Cancellation::default(), |_| {}).unwrap();
+    let account = f.repo.load(&account.id).unwrap();
+    let store = f.repo.store(&account).unwrap();
+    let mut saved = store.load_state().unwrap();
+    saved.workspace = f
+        .repo
+        .store(&f.account)
+        .unwrap()
+        .load_state()
+        .unwrap()
+        .workspace;
+    store.save_state(&mut saved).unwrap();
+    account
+}
+
+async fn combined(
+    app: &Arc<AppState>,
+    command: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    post(app, "subscription-review", json!({"command":command})).await
+}
+
+fn combined_input(view: &serde_json::Value, method: &str) -> serde_json::Value {
+    let selections: Vec<_> = view["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            let row = subscription(a, "team@home.example.test", "<offers.shop.example>");
+            json!({"account":a["account"],"subscription":row["id"],"method":method})
+        })
+        .collect();
+    json!({"as_of":AS_OF,"selections":selections,"folders":{"personal":"Muted","business":"Quiet"}})
+}
+
+fn combined_confirm(input: &serde_json::Value, preview: &serde_json::Value) -> serde_json::Value {
+    json!({"action":"confirm","input":input,"receipt":preview["receipt"],"confirmation_action":preview["confirmation_action"],"mail_confirmation_action":preview["local_mail_confirmation"]})
+}
+
+#[tokio::test]
+async fn combined_wired_handoffs_are_separate_durable_and_single_use() {
+    let f = fixture(true);
+    let other = second_account(&f);
+    let app = app(&f, handoff_endpoints());
+    let (status, view) = combined(&app, json!({"action":"open","as_of":AS_OF})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(view["review_available"], true);
+    assert_eq!(view["synthetic"], false);
+    assert_eq!(view["accounts"].as_array().unwrap().len(), 2);
+    for a in view["accounts"].as_array().unwrap() {
+        assert_eq!(a["wired"], true);
+        assert_eq!(a["synthetic"], false);
+        assert!(
+            methods(subscription(
+                a,
+                "team@home.example.test",
+                "<offers.shop.example>"
+            ))
+            .contains(&"mail_app_preparation")
+        );
+    }
+    let input = combined_input(&view, "mail_app_preparation");
+    let (status, preview) = combined(&app, json!({"action":"preview","input":input})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(recorded(&app).is_empty());
+    let display = preview["confirmation"]["display"].as_str().unwrap();
+    for id in [&f.account.id, &other.id] {
+        assert!(display.contains(id.as_str()));
+    }
+    assert!(
+        display.contains(
+            "Open a new message in Mail to leave@shop.example from team@home.example.test"
+        )
+    );
+    assert_eq!(preview["previews"].as_array().unwrap().len(), 2);
+    let (status, done) = combined(&app, combined_confirm(&input, &preview)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(recorded(&app).len(), 2);
+    for a in done["accounts"].as_array().unwrap() {
+        let history = a["history"].as_array().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["status"], "handed_off");
+        assert_eq!(
+            history[0]["subscription"],
+            subscription(a, "team@home.example.test", "<offers.shop.example>")["id"]
+        );
+    }
+    for a in [&f.account, &other] {
+        let store = f.repo.store(a).unwrap();
+        let saved = store.load_state().unwrap();
+        assert_eq!(saved.unsubscribe.history.len(), 1);
+        assert_eq!(
+            saved.unsubscribe.history[0].status,
+            crate::unsubscribe::Status::HandedOff
+        );
+    }
+    assert_eq!(
+        combined(&app, combined_confirm(&input, &preview)).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(recorded(&app).len(), 2);
+    files_secret_free(f.root.path());
+    let mut display_fixture = json!({"view":view,"preview":preview,"done":done});
+    for preview in display_fixture["preview"]["previews"]
+        .as_array_mut()
+        .unwrap()
+    {
+        for action in preview["actions"].as_array_mut().unwrap() {
+            if let Some(card) = action["copy_card"].as_object_mut() {
+                card.insert("body".into(), serde_json::Value::Null);
+                card.insert("uri".into(), serde_json::Value::Null);
+            }
+        }
+    }
+    let encoded = serde_json::to_vec(&display_fixture).unwrap();
+    secret_free(&encoded, "UI fixture export");
+    for sentinel in [
+        "synthetic-mail-token",
+        "synthetic-private-token",
+        "synthetic-relay-token",
+    ] {
+        assert!(
+            !encoded
+                .windows(sentinel.len())
+                .any(|w| w == sentinel.as_bytes()),
+            "Private unsubscribe value in UI fixture export"
+        );
+    }
+    println!("MAILROOM_COMBINED_REVIEW_FIXTURE {}", display_fixture);
+}
+
+#[tokio::test]
+async fn combined_wired_preflight_failure_saves_no_account_intents() {
+    let f = fixture(true);
+    second_account(&f);
+    let app = app(&f, handoff_endpoints());
+    let (_, view) = combined(&app, json!({"action":"open","as_of":AS_OF})).await;
+    let mut input = combined_input(&view, "mail_app_preparation");
+    input["selections"][1]["method"] = json!("local_mail");
+    let (status, preview) = combined(&app, json!({"action":"preview","input":input})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        combined(&app, combined_confirm(&input, &preview)).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert!(recorded(&app).is_empty());
+    for a in f.repo.list().unwrap() {
+        assert!(
+            f.repo
+                .store(&a)
+                .unwrap()
+                .load_state()
+                .unwrap()
+                .unsubscribe
+                .history
+                .is_empty()
+        );
+    }
+    files_secret_free(f.root.path());
+}
+
+#[tokio::test]
+async fn combined_wired_changed_account_or_selection_denies_all_effects() {
+    let f = fixture(true);
+    let other = second_account(&f);
+    let app = app(&f, handoff_endpoints());
+    let (_, view) = combined(&app, json!({"action":"open","as_of":AS_OF})).await;
+    let input = combined_input(&view, "mail_app_preparation");
+    let (_, preview) = combined(&app, json!({"action":"preview","input":input})).await;
+    let mut altered = input.clone();
+    altered["selections"].as_array_mut().unwrap().pop();
+    assert_eq!(
+        combined(&app, combined_confirm(&altered, &preview)).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let (_, preview) = combined(&app, json!({"action":"preview","input":input})).await;
+    {
+        let store = f.repo.store(&other).unwrap();
+        let mut saved = store.load_state().unwrap();
+        saved.workspace.as_mut().unwrap().revision += 1;
+        store.save_state(&mut saved).unwrap();
+    }
+    assert_eq!(
+        combined(&app, combined_confirm(&input, &preview)).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert!(recorded(&app).is_empty());
+    for a in f.repo.list().unwrap() {
+        assert!(
+            f.repo
+                .store(&a)
+                .unwrap()
+                .load_state()
+                .unwrap()
+                .unsubscribe
+                .history
+                .is_empty()
+        );
+    }
+    files_secret_free(f.root.path());
+}
+
+#[tokio::test]
+async fn combined_wired_confirmation_failure_saves_no_intents() {
+    struct Cancel;
+    impl crate::confirmation::Backend for Cancel {
+        fn available(&self) -> Result<(), String> {
+            Ok(())
+        }
+        fn synthetic(&self) -> bool {
+            false
+        }
+        fn exchange(&mut self, _: &[u8], _: &[u8; 32]) -> Result<Vec<u8>, String> {
+            Err(crate::confirmation::CANCELLED.into())
+        }
+    }
+    let f = fixture(true);
+    second_account(&f);
+    let app = app(&f, handoff_endpoints());
+    *app.accounts.confirmations.lock().unwrap() =
+        crate::confirmation::Boundary::with_backend(Box::new(Cancel));
+    let (_, view) = combined(&app, json!({"action":"open","as_of":AS_OF})).await;
+    let input = combined_input(&view, "mail_app_preparation");
+    let (status, preview) = combined(&app, json!({"action":"preview","input":input})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(preview["confirmation"]["synthetic"], false);
+    assert_eq!(
+        combined(&app, combined_confirm(&input, &preview)).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert!(recorded(&app).is_empty());
+    for a in f.repo.list().unwrap() {
+        assert!(
+            f.repo
+                .store(&a)
+                .unwrap()
+                .load_state()
+                .unwrap()
+                .unsubscribe
+                .history
+                .is_empty()
+        );
+    }
+    files_secret_free(f.root.path());
+}
+
+#[tokio::test]
+async fn account_wired_handoff_uses_shared_executor_without_network() {
+    let f = fixture(true);
+    let app = app(&f, handoff_endpoints());
+    let (_, view) = unsubscribe(&app, &f, json!({"action":"open","as_of":AS_OF})).await;
+    let row = subscription(&view, "team@home.example.test", "<offers.shop.example>");
+    let (status, _, done) = confirm_unsubscribe(
+        &app,
+        &f,
+        json!([{"subscription":row["id"],"method":"mail_app_preparation"}]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(done["history"][0]["status"], "handed_off");
+    assert_eq!(recorded(&app).len(), 1);
+    files_secret_free(f.root.path());
+}
+
+#[tokio::test]
+async fn combined_wired_one_click_resolver_failure_is_recorded_without_retry() {
+    let f = fixture(true);
+    let other = second_account(&f);
+    let app = app(&f, handoff_endpoints());
+    let (_, view) = combined(&app, json!({"action":"open","as_of":AS_OF})).await;
+    let mut input = combined_input(&view, "keep");
+    for target in input["selections"].as_array_mut().unwrap() {
+        if target["account"] == json!(f.account.id) {
+            target["method"] = json!("one_click");
+        }
+    }
+    let (status, preview) = combined(&app, json!({"action":"preview","input":input})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, done) = combined(&app, combined_confirm(&input, &preview)).await;
+    assert_eq!(status, StatusCode::OK);
+    for a in done["accounts"].as_array().unwrap() {
+        let entry = &a["history"][0];
+        assert_eq!(
+            entry["status"],
+            if a["account"] == json!(f.account.id) {
+                "not_sent"
+            } else {
+                "kept"
+            }
+        );
+        assert!(!entry.to_string().contains("synthetic-private-token"));
+    }
+    assert!(recorded(&app).is_empty());
+    if let Endpoints::Fake(fake) = &app.accounts.writes {
+        assert!(fake.network.dialed.lock().unwrap().is_empty());
+    }
+    assert_eq!(
+        f.repo
+            .store(&other)
+            .unwrap()
+            .load_state()
+            .unwrap()
+            .unsubscribe
+            .history
+            .len(),
+        1
+    );
+    assert_eq!(
+        combined(&app, combined_confirm(&input, &preview)).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    files_secret_free(f.root.path());
+}

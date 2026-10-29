@@ -981,6 +981,7 @@ async fn production_consequential_routes_deny_before_repository_or_confirmation_
         assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path} {body}");
         let wired = body["command"]["mode"].is_string()
             || body["command"]["action"] == "resolve"
+            || path == "subscription-review"
             || (path == "unsubscribe" && body["command"]["action"] != "recover");
         let answer: serde_json::Value = serde_json::from_slice(
             &axum::body::to_bytes(response.into_body(), 1 << 20)

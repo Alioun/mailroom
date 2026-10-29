@@ -59,8 +59,8 @@ try {
   await row.getByText('Authentication · synthetic_provider_pass_both_same_signature · synthetic_delivered_to', { exact: true }).waitFor()
   await row.screenshot({ path: `${artifacts}/sender-group-separate-subscriptions.png` })
   const review = region.getByRole('button', { name: 'Preview selected subscription actions', exact: true })
-  const confirm = region.getByRole('checkbox', { name: 'Confirm this exact synthetic action list', exact: true })
-  const apply = region.getByRole('button', { name: 'Apply exactly this synthetic list', exact: true })
+  const confirm = region.getByRole('checkbox', { name: 'Confirm this exact action list', exact: true })
+  const apply = region.getByRole('button', { name: 'Apply exactly this list', exact: true })
   const refresh = async () => {
     await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/accounts/subscription-review') && r.request().postDataJSON().command.action === 'open'), region.getByRole('button', { name: 'Refresh subscription facts', exact: true }).click()])
     await page.waitForFunction(() => !Array.from(document.querySelectorAll('.unsubscribe button')).find(b => b.textContent === 'Refresh subscription facts')?.disabled)

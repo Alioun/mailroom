@@ -32,7 +32,10 @@ pub(in crate::server) struct Request {
     account: AccountId,
     command: Action,
 }
-fn pick<'a>(
+pub(super) fn wired(state: &AppState) -> bool {
+    !state.accounts.synthetic() || state.accounts.writes.fake()
+}
+pub(super) fn pick<'a>(
     wired: bool,
     wiring: &'a Wired<'a>,
     installed: &'a Option<InstalledSynthetic>,
@@ -41,6 +44,108 @@ fn pick<'a>(
         Some(wiring)
     } else {
         installed.as_ref().map(|i| i as &dyn Adapters)
+    }
+}
+pub(super) struct PreparedWired<'a> {
+    writes: &'a crate::send::wiring::Endpoints,
+    permit: &'a policy::WritePermit,
+    server: Option<crate::send::smtp::Server>,
+    one_click: Option<(
+        &'a dyn unsubscribe::one_click::Network,
+        native_tls::TlsConnector,
+        std::time::Duration,
+    )>,
+}
+impl<'a> PreparedWired<'a> {
+    pub(super) fn new(
+        state: &'a AppState,
+        permit: &'a policy::WritePermit,
+        provider: Provider,
+        preview: &unsubscribe::Preview,
+    ) -> Result<Self, String> {
+        let writes = &state.accounts.writes;
+        let method = |m| preview.actions.iter().any(|a| a.method == m);
+        Ok(Self {
+            writes,
+            permit,
+            server: method(unsubscribe::Method::LocalMail)
+                .then(|| writes.smtp(permit, provider))
+                .transpose()?,
+            one_click: method(unsubscribe::Method::OneClick)
+                .then(|| writes.one_click(permit))
+                .transpose()?,
+        })
+    }
+    pub(super) fn execute(
+        &self,
+        repo: &Accounts,
+        account: &Account,
+        store: &crate::census::EncryptedStore,
+        saved: &mut crate::census::AccountState,
+        preview: &unsubscribe::Preview,
+        ids: &[String],
+        as_of: i64,
+    ) -> Result<(), String> {
+        for (id, action) in ids.iter().zip(&preview.actions) {
+            if !matches!(
+                action.method,
+                unsubscribe::Method::OneClick
+                    | unsubscribe::Method::LocalMail
+                    | unsubscribe::Method::MailAppPreparation
+            ) {
+                continue;
+            }
+            let uris = unsubscribe::uris(
+                &unsubscribe::source(saved, &action.source)
+                    .ok_or("Source changed")?
+                    .headers,
+            );
+            let uri = |scheme: &str| {
+                uris.iter()
+                    .find(|u| u.starts_with(scheme))
+                    .cloned()
+                    .ok_or("Exact URI missing")
+            };
+            match action.method {
+                unsubscribe::Method::OneClick => {
+                    let (network, tls, timeout) =
+                        self.one_click.as_ref().ok_or("One-click network")?;
+                    unsubscribe::post_one_click(
+                        saved,
+                        id,
+                        &uri("https://")?,
+                        *network,
+                        tls,
+                        *timeout,
+                    )?;
+                }
+                unsubscribe::Method::LocalMail => {
+                    unsubscribe::submit_local_mail(
+                        saved,
+                        id,
+                        &uri("mailto:")?,
+                        &action.recipient,
+                        as_of,
+                        self.server.as_ref().ok_or("Submission server")?,
+                        &repo.smtp_login(account),
+                        self.writes.timeouts(),
+                    )?;
+                }
+                unsubscribe::Method::MailAppPreparation => unsubscribe::hand_off_mailto(
+                    saved,
+                    id,
+                    &uri("mailto:")?,
+                    &action.recipient,
+                    self.writes.launcher(self.permit)?,
+                )?,
+                _ => continue,
+            }
+            unsubscribe::boundary("effect");
+            store
+                .save_state(saved)
+                .map_err(|_| "Persist unsubscribe effect")?;
+        }
+        Ok(())
     }
 }
 pub(in crate::server) async fn handle(
@@ -53,7 +158,7 @@ pub(in crate::server) async fn handle(
     };
     // Production and installed fakes use the wired real adapters; the fixture
     // server otherwise keeps its synthetic adapter.
-    let wired = !state.accounts.synthetic() || state.accounts.writes.fake();
+    let wired = wired(&state);
     let permit = match &request.command {
         Action::Open { .. } => None,
         Action::Recover { .. } if wired => return (StatusCode::FORBIDDEN, Json(json!({"error":"Wired unsubscribe effects are resolved by the owner, not reconciled against a fixture"}))).into_response(),
@@ -97,33 +202,12 @@ pub(in crate::server) async fn handle(
                     unsubscribe::preview(&latest, account.provider, store.keys(), &input, pick(wired, &wiring, &installed)).map(|p| unsubscribe::confirmation_plan(&p))
                 })?;
                 if let Some(permit) = permit.as_ref() {
-                    let writes = &state.accounts.writes;
-                    let method = |m: unsubscribe::Method| preview.actions.iter().any(|a| a.method == m);
-                    // Resolved before any intent is saved, so a missing server leaves nothing uncertain.
-                    let server = if method(unsubscribe::Method::LocalMail) { Some(writes.smtp(permit, account.provider)?) } else { None };
-                    let one_click = if method(unsubscribe::Method::OneClick) { Some(writes.one_click(permit)?) } else { None };
+                    let execution = PreparedWired::new(&state, permit, account.provider, &preview)?;
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| "Invalid clock")?.as_secs() as i64;
                     let ids = unsubscribe::confirm(&mut saved, &preview, consent.receipt(), &confirmation_action, mail_confirmation_action.as_deref(), now)?;
                     store.save_state(&mut saved).map_err(|_| "Persist unsubscribe intent")?;
                     unsubscribe::boundary("before");
-                    for (id, action) in ids.iter().zip(preview.actions.iter()) {
-                        let uris = unsubscribe::uris(&unsubscribe::source(&saved, &action.source).ok_or("Source changed")?.headers);
-                        let uri = |scheme: &str| uris.iter().find(|u| u.starts_with(scheme)).cloned().ok_or("Exact URI missing");
-                        match action.method {
-                            unsubscribe::Method::OneClick => {
-                                let (network, tls, timeout) = one_click.as_ref().ok_or("One-click network")?;
-                                unsubscribe::post_one_click(&mut saved, id, &uri("https://")?, *network, tls, *timeout)?;
-                            }
-                            unsubscribe::Method::LocalMail => {
-                                let server = server.as_ref().ok_or("Submission server")?;
-                                unsubscribe::submit_local_mail(&mut saved, id, &uri("mailto:")?, &action.recipient, input.as_of, server, &repo.smtp_login(&account), writes.timeouts())?;
-                            }
-                            unsubscribe::Method::MailAppPreparation => unsubscribe::hand_off_mailto(&mut saved, id, &uri("mailto:")?, &action.recipient, writes.launcher(permit)?)?,
-                            _ => continue,
-                        }
-                        unsubscribe::boundary("effect");
-                        store.save_state(&mut saved).map_err(|_| "Persist unsubscribe effect")?;
-                    }
+                    execution.execute(&repo, &account, &store, &mut saved, &preview, &ids, input.as_of)?;
                     let report = unsubscribe::report(&saved, account.provider, store.keys(), input.as_of, pick(wired, &wiring, &installed))?;
                     return Ok(json!({"report":report,"history":saved.unsubscribe.history,"mutes":saved.unsubscribe.mutes,"synthetic":false,"wired":true,"production_available":false,"q20_scope":"separate_subscriptions"}));
                 }

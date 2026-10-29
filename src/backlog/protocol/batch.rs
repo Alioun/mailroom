@@ -39,6 +39,15 @@ impl Batch {
     pub fn is_copy(&self) -> bool {
         matches!(self, Self::Copy(_))
     }
+    pub fn resumable(&self) -> bool {
+        match self {
+            Self::Move(e) => !e.attempted() || super::verified(self),
+            Self::Copy(b) => {
+                let next = b.evidence.next_action();
+                !next.needs_observation() && next != crate::backlog::imap_copy::NextAction::Conflict
+            }
+        }
+    }
     pub fn as_copy(&self) -> Option<&CopyEvidence> {
         match self {
             Self::Copy(b) => Some(&b.evidence),

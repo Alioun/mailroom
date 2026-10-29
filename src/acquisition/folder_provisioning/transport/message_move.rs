@@ -116,6 +116,14 @@ pub(in crate::acquisition) struct Connection {
     capabilities: BTreeSet<String>,
 }
 
+pub(in crate::acquisition) trait CopyCheckpoints {
+    fn validate_intent(
+        &mut self,
+        evidence: &crate::backlog::imap_copy::CopyEvidence,
+    ) -> Result<(), Error>;
+    fn save(&mut self, evidence: &crate::backlog::imap_copy::CopyEvidence) -> Result<(), Error>;
+}
+
 impl Connection {
     pub(in crate::acquisition) fn connect(
         permit: &BacklogPermit<'_>,

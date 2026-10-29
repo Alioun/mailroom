@@ -1,6 +1,9 @@
 use super::*;
 use crate::backlog::imap_copy::Resolution;
 
+#[path = "filing_tests.rs"]
+mod filing;
+
 fn permitted(source: &InstalledSource) -> BacklogPermit<'_> {
     source
         .permit(

@@ -5,6 +5,7 @@ use crate::backlog::imap_copy::{
 use std::cell::RefCell;
 
 mod effects;
+mod filing;
 
 trait Commands {
     fn source(&self) -> &str;

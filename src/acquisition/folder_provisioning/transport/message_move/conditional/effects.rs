@@ -17,6 +17,21 @@ impl<I: Commands> Conditional<'_, I> {
         ))
     }
 
+    pub(super) fn pending_deletions(
+        &mut self,
+        evidence: &CopyEvidence,
+    ) -> Result<Vec<PreparedDelete>, Error> {
+        let intent = evidence.intent();
+        let mapping = evidence.copy().mapping().ok_or(Error::Unsupported)?;
+        let source = intent.messages().keys().copied().collect();
+        let destination = mapping.pairs().values().copied().collect();
+        let (source, destination) =
+            self.pair(intent.source(), &source, intent.destination(), &destination)?;
+        evidence
+            .prepare_deletions(&source, &destination)
+            .map_err(|_| Error::Unstable)
+    }
+
     pub(super) fn copy(
         &mut self,
         permit: &BacklogPermit<'_>,

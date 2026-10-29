@@ -266,7 +266,70 @@ pub enum Resolution {
     Conflict,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NextAction {
+    Copy,
+    ObserveCopy,
+    PrepareDeletion,
+    ObserveStore(usize),
+    Expunge(usize),
+    ObserveExpunge(usize),
+    Complete,
+    Conflict,
+}
+
+impl NextAction {
+    pub fn needs_observation(self) -> bool {
+        matches!(
+            self,
+            Self::ObserveCopy | Self::ObserveStore(_) | Self::ObserveExpunge(_)
+        )
+    }
+}
+
 impl CopyEvidence {
+    pub fn next_action(&self) -> NextAction {
+        if !self.copy.attempted() {
+            return NextAction::Copy;
+        }
+        if self.readback.is_none() {
+            return NextAction::ObserveCopy;
+        }
+        for (index, batch) in self.deletions.iter().enumerate() {
+            let deletion = &batch.evidence;
+            if deletion.flag.result.is_none() || deletion.flag.readback.is_none() {
+                return NextAction::ObserveStore(index);
+            }
+            if let Some(expunge) = &deletion.expunge {
+                if expunge.completion.is_none()
+                    || expunge.readback.is_none()
+                    || batch.final_destination.is_none()
+                {
+                    return NextAction::ObserveExpunge(index);
+                }
+            }
+        }
+        for (index, batch) in self.deletions.iter().enumerate() {
+            if batch.evidence.expunge.is_none() && !batch.evidence.flag.verified().is_empty() {
+                return NextAction::Expunge(index);
+            }
+        }
+        let resolutions = self.resolutions();
+        if resolutions
+            .values()
+            .any(|r| matches!(r, Resolution::CopyOnly { .. }))
+        {
+            NextAction::PrepareDeletion
+        } else if resolutions
+            .values()
+            .all(|r| matches!(r, Resolution::Filed { .. }))
+        {
+            NextAction::Complete
+        } else {
+            NextAction::Conflict
+        }
+    }
+
     pub fn new(intent: MoveIntent, before: Readback) -> Result<Self, InvalidEvidence> {
         if before.identity != *intent.source()
             || before.plain().messages != *intent.messages()
@@ -619,3 +682,6 @@ impl CopyEvidence {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod progress_tests;

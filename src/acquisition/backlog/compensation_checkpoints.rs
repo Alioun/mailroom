@@ -235,5 +235,38 @@ impl SavedCopyCompensationCheckpoints<'_> {
     }
 }
 
+impl crate::acquisition::folder_provisioning::transport::message_move::CompensationCheckpoints
+    for SavedCopyCompensationCheckpoints<'_>
+{
+    type Intent = DurableCompensationIntent;
+
+    fn persist_intent(&mut self, evidence: &CompensationEvidence) -> Result<Self::Intent, Failure> {
+        SavedCopyCompensationCheckpoints::persist_intent(self, evidence)
+    }
+
+    fn consume_intent(&mut self, intent: Self::Intent, source: &str) -> Result<(), Failure> {
+        if self.work != CopyCompensationWork::Execute {
+            return Err(Failure::Unsupported);
+        }
+        self.validate_authority().map_err(|_| Failure::Unstable)?;
+        self.same_slot().map_err(|_| Failure::Unstable)?;
+        let run = &self.saved.protocol_backlog.runs[self.run];
+        if intent.account != self.account.id
+            || intent.run != run.id
+            || intent.forward != run.compensation[self.entry].forward
+            || intent.revision != self.saved.revision
+            || intent.evidence != self.previous
+            || source != run.plan.binding.source
+        {
+            return Err(Failure::Unstable);
+        }
+        Ok(())
+    }
+
+    fn observe(&mut self, evidence: &CompensationEvidence) -> Result<(), Failure> {
+        SavedCopyCompensationCheckpoints::observe(self, evidence)
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -1,7 +1,7 @@
 use super::*;
 
 impl<I: Commands> Conditional<'_, I> {
-    fn pair(
+    pub(super) fn pair(
         &mut self,
         source: &MailboxIdentity,
         source_uids: &BTreeSet<Uid>,

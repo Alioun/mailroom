@@ -548,3 +548,76 @@ fn concurrent_revision_and_expiry_prevent_new_intents_without_discarding_local_h
         assert_eq!(serde_json::to_vec(&*writer.saved).unwrap(), state);
     }
 }
+
+#[test]
+fn consumed_intents_require_exact_current_slot_source_and_fresh_authority() {
+    use crate::acquisition::folder_provisioning::transport::message_move::CompensationCheckpoints;
+    for mutation in [
+        "none",
+        "source",
+        "revision",
+        "run",
+        "account",
+        "evidence",
+        "freshness",
+        "concurrent",
+    ] {
+        let (_root, repo, account, store, mut saved) =
+            fixture(Phase::Prepared, CopyCompensationWork::Execute);
+        let (id, topology, mut evidence, work) = scope(&saved, CopyCompensationWork::Execute);
+        let source = saved.protocol_backlog.runs[0].plan.binding.source.clone();
+        let current = Cell::new(true);
+        let fresh = |_: &AccountState| {
+            if current.get() {
+                Ok(())
+            } else {
+                Err("changed context".into())
+            }
+        };
+        let mut writer = repo
+            .copy_compensation_checkpoints(
+                &account,
+                &store,
+                &mut saved,
+                CopyCompensationSlot {
+                    run: &id,
+                    forward: 0,
+                    work,
+                },
+                &topology,
+                &fresh,
+            )
+            .unwrap();
+        let slot = CleanupSlot::Initial(0);
+        let plan = evidence.cleanup_plan(slot).unwrap().clone();
+        evidence
+            .begin_cleanup(slot, plan.retained(), plan.deletion().before())
+            .unwrap();
+        let mut token = writer.persist_intent(&evidence).unwrap();
+        let mut selected_source = source;
+        match mutation {
+            "none" => (),
+            "source" => selected_source.push('x'),
+            "revision" => token.revision += 1,
+            "run" => token.run.push('x'),
+            "account" => token.account = AccountId::new("wrong-account").unwrap(),
+            "evidence" => {
+                let (ack, _) = flagged(plan.deletion());
+                token.evidence.record_cleanup_store(slot, ack).unwrap();
+            }
+            "freshness" => current.set(false),
+            "concurrent" => {
+                let mut other = store.load_state().unwrap();
+                store.save_state(&mut other).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = std::fs::read(store.path()).unwrap();
+        assert_eq!(
+            writer.consume_intent(token, &selected_source).is_ok(),
+            mutation == "none",
+            "{mutation}"
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+    }
+}

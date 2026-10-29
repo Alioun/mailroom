@@ -130,6 +130,19 @@ pub(in crate::acquisition) trait CopyCheckpoints {
     fn save(&mut self, evidence: &crate::backlog::imap_copy::CopyEvidence) -> Result<(), Error>;
 }
 
+pub(in crate::acquisition) trait CompensationCheckpoints {
+    type Intent;
+    fn persist_intent(
+        &mut self,
+        evidence: &crate::backlog::imap_copy::CompensationEvidence,
+    ) -> Result<Self::Intent, Error>;
+    fn consume_intent(&mut self, intent: Self::Intent, source: &str) -> Result<(), Error>;
+    fn observe(
+        &mut self,
+        evidence: &crate::backlog::imap_copy::CompensationEvidence,
+    ) -> Result<(), Error>;
+}
+
 impl Connection {
     pub(in crate::acquisition) fn connect(
         permit: &BacklogPermit<'_>,

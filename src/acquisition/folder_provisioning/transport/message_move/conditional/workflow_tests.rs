@@ -2,6 +2,8 @@ use super::*;
 use crate::backlog::imap_move::{MoveIntent, Purpose};
 use std::{collections::VecDeque, rc::Rc};
 
+#[path = "compensation_tests.rs"]
+mod compensation;
 #[path = "effects_tests.rs"]
 mod effects;
 

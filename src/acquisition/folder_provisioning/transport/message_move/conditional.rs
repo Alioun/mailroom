@@ -4,6 +4,8 @@ use crate::backlog::imap_copy::{
 };
 use std::cell::RefCell;
 
+mod effects;
+
 trait Commands {
     fn source(&self) -> &str;
     fn flight(&mut self, steps: Vec<Step<'_>>) -> Result<Vec<Result<(), Error>>, Error>;
@@ -198,6 +200,44 @@ impl<'a> StoreReply<'a> {
 }
 
 impl<I: Commands> Conditional<'_, I> {
+    fn authorize(&self, permit: &BacklogPermit<'_>) -> Result<(), Error> {
+        if self.io.source() != permit.0.identity()
+            || permit.0.authority != "fixture-message-copy/v1"
+            || self.capabilities.contains("MOVE")
+            || !self.capabilities.contains("UIDPLUS")
+            || !self.capabilities.contains("CONDSTORE")
+        {
+            return Err(Error::Unsupported);
+        }
+        Ok(())
+    }
+
+    fn select_source(&mut self, before: &Readback) -> Result<(), Error> {
+        let highest = RefCell::new(None);
+        self.io
+            .flight(vec![select(before.identity(), &highest, 0)?])?
+            .pop()
+            .ok_or(Error::Protocol)??;
+        if highest
+            .into_inner()
+            .is_none_or(|value| value < before.highest_modseq())
+        {
+            return Err(Error::Unstable);
+        }
+        Ok(())
+    }
+
+    fn exchange(
+        &mut self,
+        command: Vec<u8>,
+        handler: impl FnMut(&[Token], bool) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        self.io
+            .flight(vec![Step::new(command, handler)])?
+            .pop()
+            .ok_or(Error::Protocol)?
+    }
+
     fn readbacks(
         &mut self,
         requests: &[(&MailboxIdentity, &BTreeSet<Uid>)],
@@ -242,14 +282,7 @@ impl<I: Commands> Conditional<'_, I> {
         prepared: PreparedDelete,
         mut persist: impl FnMut(&CopyEvidence) -> Result<(), Error>,
     ) -> Result<usize, Error> {
-        if self.io.source() != permit.0.identity()
-            || permit.0.authority != "fixture-message-copy/v1"
-            || self.capabilities.contains("MOVE")
-            || !self.capabilities.contains("UIDPLUS")
-            || !self.capabilities.contains("CONDSTORE")
-        {
-            return Err(Error::Unsupported);
-        }
+        self.authorize(permit)?;
         let intent = prepared.intent().clone();
         let source: BTreeSet<_> = intent.before().messages().keys().copied().collect();
         let destination: BTreeSet<_> = prepared.destination().messages().keys().copied().collect();
@@ -264,37 +297,21 @@ impl<I: Commands> Conditional<'_, I> {
         {
             return Err(Error::Unstable);
         }
-        let highest = RefCell::new(None);
-        self.io
-            .flight(vec![select(intent.before().identity(), &highest, 0)?])?
-            .pop()
-            .ok_or(Error::Protocol)??;
-        if highest
-            .into_inner()
-            .is_none_or(|value| value < intent.before().highest_modseq())
-        {
-            return Err(Error::Unstable);
-        }
+        self.select_source(intent.before())?;
         let index = evidence
             .begin_delete(prepared)
             .map_err(|_| Error::Unsupported)?;
         persist(evidence)?;
         let mut reply = StoreReply::new(&intent);
-        let result = self
-            .io
-            .flight(vec![Step::new(
-                intent.command().into_bytes(),
-                |row, tagged| {
-                    if let Some(result) = reply.observe(row, tagged)? {
-                        evidence
-                            .record_store_result(index, result)
-                            .map_err(|_| Error::Protocol)?;
-                        persist(evidence)?;
-                    }
-                    Ok(())
-                },
-            )])
-            .and_then(|mut results| results.pop().ok_or(Error::Protocol)?);
+        let result = self.exchange(intent.command().into_bytes(), |row, tagged| {
+            if let Some(result) = reply.observe(row, tagged)? {
+                evidence
+                    .record_store_result(index, result)
+                    .map_err(|_| Error::Protocol)?;
+                persist(evidence)?;
+            }
+            Ok(())
+        });
         if evidence
             .deletions()
             .nth(index)

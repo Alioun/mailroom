@@ -366,6 +366,12 @@ impl Deletion {
     pub fn flag(&self) -> &FlagEvidence {
         &self.flag
     }
+    pub fn expunge_before(&self) -> Option<&Readback> {
+        self.expunge.as_ref().map(|e| &e.before)
+    }
+    pub fn expunge_completion(&self) -> Option<&Completion> {
+        self.expunge.as_ref().and_then(|e| e.completion.as_ref())
+    }
     pub fn record_store_result(&mut self, result: StoreResult) -> Result<(), InvalidEvidence> {
         if self.expunge.is_some() {
             return Err(InvalidEvidence::Phase);

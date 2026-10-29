@@ -2,6 +2,9 @@ use super::*;
 use crate::backlog::imap_move::{MoveIntent, Purpose};
 use std::{collections::VecDeque, rc::Rc};
 
+#[path = "effects_tests.rs"]
+mod effects;
+
 struct Flight {
     event: &'static str,
     commands: Vec<String>,

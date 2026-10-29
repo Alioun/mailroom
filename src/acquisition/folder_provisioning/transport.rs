@@ -30,6 +30,7 @@ const PROGRESS_CREDIT: Duration = Duration::from_secs(5);
 
 pub(in crate::acquisition) mod gmail_label;
 pub(in crate::acquisition) mod message_move;
+mod wire;
 
 struct Endpoint<'a> {
     address: SocketAddr,
@@ -167,6 +168,14 @@ impl<'a> Step<'a> {
                 Ok(())
             }
         })
+    }
+}
+impl wire::Bytes for Session {
+    fn byte(&mut self) -> Result<u8, Error> {
+        Session::byte(self)
+    }
+    fn remaining(&self) -> usize {
+        self.remaining
     }
 }
 fn guard(cancel: &Cancellation, end: Instant) -> Result<(), Error> {
@@ -363,155 +372,8 @@ impl Session {
         }
     }
     fn row(&mut self) -> Result<Vec<Token>, Error> {
-        let mut tokens = vec![];
-        let mut next = self.byte()?;
-        let mut depth = 0usize;
-        loop {
-            if tokens.len() >= 512 {
-                return Err(Error::Limit);
-            }
-            match next {
-                b' ' => {
-                    next = self.byte()?;
-                    continue;
-                }
-                b'\r' => {
-                    if self.byte()? != b'\n' || depth != 0 {
-                        return Err(Error::Protocol);
-                    }
-                    return Ok(tokens);
-                }
-                b'(' => {
-                    depth += 1;
-                    if depth > 8 {
-                        return Err(Error::Limit);
-                    }
-                    tokens.push(Token::Open);
-                    next = self.byte()?;
-                }
-                b')' => {
-                    depth = depth.checked_sub(1).ok_or(Error::Protocol)?;
-                    tokens.push(Token::Close);
-                    next = self.byte()?;
-                }
-                b'"' => {
-                    let mut value = vec![];
-                    loop {
-                        let b = self.byte()?;
-                        if b == b'"' {
-                            break;
-                        }
-                        let b = if b == b'\\' {
-                            let b = self.byte()?;
-                            if !matches!(b, b'"' | b'\\') {
-                                return Err(Error::Protocol);
-                            }
-                            b
-                        } else {
-                            b
-                        };
-                        if !(0x20..=0x7e).contains(&b) {
-                            return Err(Error::Protocol);
-                        }
-                        value.push(b);
-                        if value.len() > 2048 {
-                            return Err(Error::Limit);
-                        }
-                    }
-                    tokens.push(Token::String(value));
-                    next = self.byte()?;
-                    if !matches!(next, b' ' | b')' | b'\r') {
-                        return Err(Error::Protocol);
-                    }
-                }
-                b'{' => {
-                    let mut digits = vec![];
-                    loop {
-                        let b = self.byte()?;
-                        if b == b'}' {
-                            break;
-                        }
-                        if !b.is_ascii_digit() || digits.len() >= 6 {
-                            return Err(Error::Protocol);
-                        }
-                        digits.push(b);
-                    }
-                    let n: usize = std::str::from_utf8(&digits)
-                        .map_err(|_| Error::Protocol)?
-                        .parse()
-                        .map_err(|_| Error::Protocol)?;
-                    if n > 2048 || n > self.remaining {
-                        return Err(Error::Limit);
-                    }
-                    if self.byte()? != b'\r' || self.byte()? != b'\n' {
-                        return Err(Error::Protocol);
-                    }
-                    let mut value = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        value.push(self.byte()?);
-                    }
-                    tokens.push(Token::String(value));
-                    next = self.byte()?;
-                    if !matches!(next, b' ' | b')' | b'\r') {
-                        return Err(Error::Protocol);
-                    }
-                }
-                b if b.is_ascii_graphic() && !matches!(b, b'"' | b'{' | b'}') => {
-                    let mut value = vec![b];
-                    loop {
-                        let b = self.byte()?;
-                        if matches!(b, b' ' | b'(' | b')' | b'\r') {
-                            next = b;
-                            break;
-                        }
-                        if !b.is_ascii_graphic()
-                            || matches!(b, b'"' | b'{' | b'}')
-                            || value.len() >= 256
-                        {
-                            return Err(Error::Protocol);
-                        }
-                        value.push(b);
-                    }
-                    tokens.push(Token::Atom(
-                        String::from_utf8(value).map_err(|_| Error::Protocol)?,
-                    ));
-                    if tokens.len() == 2
-                        && matches!(tokens[1].atom(), Some("OK" | "NO" | "BAD" | "BYE"))
-                        && next == b' '
-                    {
-                        let mut text = vec![];
-                        loop {
-                            let b = self.byte()?;
-                            if b == b'\r' {
-                                if self.byte()? != b'\n' {
-                                    return Err(Error::Protocol);
-                                }
-                                break;
-                            }
-                            if b == 0 || b == b'\n' || text.len() >= 8192.max(self.code_limit + 1) {
-                                return Err(Error::Limit);
-                            }
-                            text.push(b);
-                        }
-                        if text.first() == Some(&b'[') {
-                            let close = text
-                                .iter()
-                                .position(|b| *b == b']')
-                                .ok_or(Error::Protocol)?;
-                            if close > self.code_limit || !text[..=close].is_ascii() {
-                                return Err(Error::Protocol);
-                            }
-                            tokens.push(Token::Atom(
-                                String::from_utf8(text[..=close].to_vec())
-                                    .map_err(|_| Error::Protocol)?,
-                            ));
-                        }
-                        return Ok(tokens);
-                    }
-                }
-                _ => return Err(Error::Protocol),
-            }
-        }
+        let code_limit = self.code_limit;
+        wire::row(self, code_limit)
     }
     fn status(row: &[Token], index: usize) -> Result<(), Error> {
         let status = row

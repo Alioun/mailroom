@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 #[cfg(test)]
 mod codec_tests;
+mod conditional;
 mod metadata;
 mod selection;
 

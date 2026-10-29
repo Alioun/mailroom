@@ -12,6 +12,7 @@ pub(super) struct Selection {
     validity: Option<UidValidity>,
     writable: bool,
     persistence: Persistence,
+    completed: bool,
 }
 impl Selection {
     pub(super) fn new(mailbox: &MailboxIdentity) -> Self {
@@ -20,10 +21,11 @@ impl Selection {
             validity: None,
             writable: false,
             persistence: Persistence::Unknown,
+            completed: false,
         }
     }
     pub(super) fn observe(&mut self, row: &[Token], tagged: bool) -> Result<(), Error> {
-        if row.len() < 2 {
+        if self.completed || row.len() < 2 {
             return Err(Error::Protocol);
         }
         if let Some(status) = row.get(1).and_then(Token::atom) {
@@ -98,7 +100,14 @@ impl Selection {
             if self.validity != Some(self.expected) || !self.writable {
                 return Err(Error::Unstable);
             }
+            self.completed = true;
         }
         Ok(())
+    }
+    pub(super) fn persistent(&self) -> Result<ModSeq, Error> {
+        match (self.completed, self.persistence) {
+            (true, Persistence::Persistent(value)) => Ok(value),
+            _ => Err(Error::Unsupported),
+        }
     }
 }

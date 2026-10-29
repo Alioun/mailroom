@@ -103,6 +103,9 @@ impl Readback {
     pub fn identity(&self) -> &MailboxIdentity {
         &self.identity
     }
+    pub fn highest_modseq(&self) -> ModSeq {
+        self.highest_modseq
+    }
     pub fn messages(&self) -> &BTreeMap<Uid, VersionedMetadata> {
         &self.messages
     }
@@ -131,8 +134,8 @@ impl Readback {
 }
 
 mod deletion;
+use deletion::check_observation;
 pub use deletion::{Deletion, FlagChange, FlagEvidence, FlagIntent, PendingClear, StoreResult};
-use deletion::{check_observation, wire_uids};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -148,6 +151,9 @@ pub struct PreparedDelete {
     destination: Readback,
 }
 impl PreparedDelete {
+    pub fn destination(&self) -> &Readback {
+        &self.destination
+    }
     pub fn intent(&self) -> &FlagIntent {
         &self.intent
     }

@@ -601,3 +601,50 @@ fn recovery_owner_interrupted_restore_requires_new_exact_consent_before_resuming
     assert!(store.save_state(&mut store.load_state().unwrap()).is_err());
     assert!(fresh.password(&restored).is_err());
 }
+
+#[test]
+fn recovery_owner_without_ledger_preserves_first_start_ledger_bootstrap() {
+    let (_root, repo) = repository();
+    let a = account(&repo, 1);
+    perform(
+        &repo,
+        Command::Capture {
+            accounts: vec![a.id.clone()],
+            ledger: false,
+        },
+        &mut input(true),
+        &mut approve(),
+    )
+    .unwrap();
+    let (id, path) = bundle(&repo);
+    let (_fresh_root, fresh) = repository();
+    transfer(&fresh, &id, &path);
+    perform(
+        &fresh,
+        Command::Restore {
+            bundle: id,
+            ledger: false,
+        },
+        &mut input(false),
+        &mut approve(),
+    )
+    .unwrap();
+    assert!(fresh.load(&a.id).is_ok());
+    assert!(!fresh.paths.data.join("ledger/addresses.yaml").exists());
+    let installed = InstalledLedger::install_under(&fresh.paths.data).unwrap();
+    assert!(
+        installed.lock().unwrap().read().is_ok(),
+        "Normal startup must still initialize the disabled empty ledger after ledger-excluded recovery"
+    );
+}
+
+#[test]
+fn recovery_owner_failed_resume_preserves_first_start_ledger_bootstrap() {
+    let (_root, repo) = repository();
+    assert!(perform(&repo, Command::Resume, &mut input(false), &mut approve()).is_err());
+    let installed = InstalledLedger::install_under(&repo.paths.data).unwrap();
+    assert!(
+        installed.lock().unwrap().read().is_ok(),
+        "A failed recovery action must not prevent normal ledger initialization"
+    );
+}

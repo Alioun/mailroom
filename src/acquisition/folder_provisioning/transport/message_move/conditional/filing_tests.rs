@@ -494,6 +494,35 @@ impl crate::acquisition::backlog::copy_worker::CopyTransport for WorkerTransport
 }
 
 #[test]
+fn saved_worker_rejects_unsaved_resume_over_a_durable_stop_before_admission() {
+    use crate::acquisition::backlog::{copy_checkpoints::tests::fixture, copy_worker::CopyWork};
+    use crate::backlog::protocol::Status;
+    for mutation in ["status", "stop"] {
+        let (_root, mut repo, account, store, mut saved) = fixture(initial());
+        saved.protocol_backlog.runs[0].status = Status::Stopped;
+        saved.protocol_backlog.runs[0].stop_requested = true;
+        store.save_state(&mut saved).unwrap();
+        let id = saved.protocol_backlog.runs[0].id.clone();
+        let accesses = repo.track_credential_accesses();
+        let before = std::fs::read(store.path()).unwrap();
+        match mutation {
+            "status" => saved.protocol_backlog.runs[0].status = Status::Running,
+            "stop" => saved.protocol_backlog.runs[0].stop_requested = false,
+            _ => unreachable!(),
+        }
+        assert!(
+            repo.copy_worker(&account, &store, &mut saved, &id, CopyWork::File, &|_| Ok(
+                ()
+            ))
+            .is_err(),
+            "unsaved {mutation} must not replace durable Stop"
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+        assert_eq!(accesses.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
 fn saved_worker_starts_files_and_stamps_completion_through_the_actual_checkpoint_adapter() {
     use crate::acquisition::backlog::{copy_checkpoints::tests::fixture, copy_worker::CopyWork};
     use crate::backlog::protocol::Status;

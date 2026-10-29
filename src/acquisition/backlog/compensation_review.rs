@@ -84,11 +84,7 @@ impl Accounts {
             return Err(invalid());
         }
         self.validate_copy_authority(account, store, saved, &run.plan.binding, &fresh)?;
-        let durable = store.load_state()?;
-        let encode = |value: &AccountState| {
-            crate::census::binding::bound(|| serde_json::to_vec(value)).map_err(failure)
-        };
-        if encode(saved)? != encode(&durable)? {
+        if !store.checkpoint_matches(saved, crate::census::ProtocolStateView::Persisted)? {
             return Err(invalid());
         }
         let attempted: Vec<_> = run
@@ -180,4 +176,4 @@ impl Accounts {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::acquisition) mod tests;

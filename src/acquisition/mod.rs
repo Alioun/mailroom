@@ -19,6 +19,10 @@ pub(crate) use accounts::recovery;
 pub use accounts::{
     Account, AccountPaths, Accounts, CredentialBackend, OsCredentials, Provider, SecretValue,
 };
+pub use backlog::compensation_checkpoints::{
+    CopyCompensationSlot, CopyCompensationWork, DurableCompensationIntent,
+    SavedCopyCompensationCheckpoints,
+};
 pub use backlog::compensation_review::{
     CopyCompensationActions, CopyCompensationObservation, CopyCompensationRequest,
     CopyCompensationReview,

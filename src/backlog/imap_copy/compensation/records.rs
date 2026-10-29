@@ -1,6 +1,8 @@
 use super::*;
 
 mod after_clear;
+mod checkpoints;
+pub use checkpoints::CheckpointChange;
 mod decode;
 mod progress;
 

@@ -92,6 +92,9 @@ impl Accounts {
             fresh,
         };
         checkpoints.validate_authority()?;
+        checkpoints
+            .same_slot(&checkpoints.previous)
+            .map_err(failure)?;
         Ok(checkpoints)
     }
 }
@@ -117,6 +120,18 @@ impl SavedCopyCheckpoints<'_> {
             || evidence.intent() != self.previous.intent()
             || evidence.before() != self.previous.before()
             || approval(self.store, current).map_err(|_| Failure::Unstable)? != self.approval
+        {
+            return Err(Failure::Unstable);
+        }
+        let view = if self.filing {
+            crate::census::ProtocolStateView::Persisted
+        } else {
+            crate::census::ProtocolStateView::Interrupted
+        };
+        if !self
+            .store
+            .checkpoint_matches(self.saved, view)
+            .map_err(|_| Failure::Unstable)?
         {
             return Err(Failure::Unstable);
         }

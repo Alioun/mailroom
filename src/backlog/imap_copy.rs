@@ -136,8 +136,9 @@ impl Readback {
 mod compensation;
 mod deletion;
 pub use compensation::{
-    CleanupNext, CleanupSlot, ClearNext, CompensationConflict, CompensationEvidence,
-    CompensationPreview, CompensationResolution, ExtraCopyPlan, OwnedDeletedPlan,
+    CheckpointChange, CleanupNext, CleanupSlot, ClearNext, CompensationConflict,
+    CompensationEvidence, CompensationPreview, CompensationResolution, ExtraCopyPlan,
+    OwnedDeletedPlan,
 };
 use deletion::check_observation;
 pub use deletion::{Deletion, FlagChange, FlagEvidence, FlagIntent, PendingClear, StoreResult};

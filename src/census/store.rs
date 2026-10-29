@@ -46,6 +46,12 @@ const MIN_FRAME_BUDGET: u64 = 64 * 1024;
 /// archive intent. 26 adds tagged COPY phase journals with exact decimal MODSEQ.
 pub(crate) const SCHEMA: u32 = 28;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProtocolStateView {
+    Persisted,
+    Interrupted,
+}
+
 pub struct LocalSecret(Zeroizing<Vec<u8>>);
 
 impl LocalSecret {
@@ -1079,6 +1085,25 @@ impl EncryptedStore {
         let state = self.read_state()?;
         self.loaded.set(true);
         Ok(state)
+    }
+
+    /// Execution compares raw status. Read-only reconciliation can compare
+    /// the protocol status produced by reopening an interrupted run.
+    pub(crate) fn checkpoint_matches(
+        &self,
+        expected: &AccountState,
+        view: ProtocolStateView,
+    ) -> Result<bool, CensusError> {
+        let (_, mut durable) = self.read_raw()?;
+        let mut candidate = expected.clone();
+        if view == ProtocolStateView::Interrupted {
+            durable.protocol_backlog.interrupted();
+            candidate.protocol_backlog.interrupted();
+        }
+        let encode = |state: &AccountState| {
+            super::binding::bound(|| serde_json::to_vec(state)).map_err(|_| CensusError::Storage)
+        };
+        Ok(encode(&candidate)? == encode(&durable)?)
     }
 
     pub(crate) fn schema_version(&self) -> Result<u32, CensusError> {

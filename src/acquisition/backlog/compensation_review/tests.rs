@@ -11,7 +11,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-fn fixture(
+pub(in crate::acquisition) fn fixture(
     phase: Phase,
 ) -> (
     tempfile::TempDir,
@@ -404,6 +404,20 @@ fn a_review_with_only_conflicts_cannot_be_confirmed_as_work() {
         .is_err()
     );
     assert_eq!(unchanged(&store, &saved), before);
+}
+
+#[test]
+fn unsaved_stopping_does_not_enable_compensation_review() {
+    let (_root, repo, account, store, mut saved, request) = fixture(Phase::Prepared);
+    saved.protocol_backlog.runs[0].status = Status::Running;
+    saved.protocol_backlog.runs[0].stop_requested = false;
+    store.save_state(&mut saved).unwrap();
+    let interrupted = store.load_state().unwrap();
+    assert_eq!(interrupted.protocol_backlog.runs[0].status, Status::Stopped);
+    assert!(
+        repo.review_copy_compensation(&account, &store, &interrupted, &request, |_| Ok(()))
+            .is_err()
+    );
 }
 
 #[test]

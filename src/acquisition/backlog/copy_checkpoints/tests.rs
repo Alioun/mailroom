@@ -124,6 +124,29 @@ fn exact_account_intent_and_observation_survive_encrypted_reopen() {
 }
 
 #[test]
+fn unsaved_resume_does_not_admit_a_forward_copy_checkpoint_writer() {
+    let (_root, repo, account, store, mut saved) = fixture(evidence(Stage::Prepared));
+    let id = saved.protocol_backlog.runs[0].id.clone();
+    let topology = saved.protocol_backlog.runs[0].plan.topology.clone();
+    let mut stopped = saved.clone();
+    stopped.protocol_backlog.runs[0].status = Status::Stopped;
+    stopped.protocol_backlog.runs[0].stop_requested = true;
+    store.save_state(&mut stopped).unwrap();
+    saved.revision = stopped.revision;
+    assert!(
+        repo.copy_checkpoints(
+            &account,
+            &store,
+            &mut saved,
+            CopySlot::Filing { run: &id, batch: 0 },
+            &topology,
+            &|_| Ok(())
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn stale_local_authority_and_topology_never_admit_a_checkpoint_writer() {
     for mutation in [
         "source",
@@ -292,7 +315,7 @@ fn observation_only_checkpoint_cannot_authorize_an_effect_or_override_a_run_hold
 }
 
 #[test]
-fn failed_revision_checked_save_preserves_the_callers_last_acknowledged_checkpoint() {
+fn concurrent_revision_is_denied_before_replacing_the_callers_last_acknowledged_checkpoint() {
     let (_root, repo, account, store, mut saved) = fixture(evidence(Stage::Prepared));
     let topology = saved.protocol_backlog.runs[0].plan.topology.clone();
     let id = saved.protocol_backlog.runs[0].id.clone();
@@ -313,7 +336,7 @@ fn failed_revision_checked_save_preserves_the_callers_last_acknowledged_checkpoi
         intent.begin_copy(&intent.before().clone()).unwrap();
         checkpoints.validate_intent(&intent).unwrap();
         store.save_state(&mut concurrent).unwrap();
-        assert_eq!(checkpoints.save(&intent), Err(Failure::Limit));
+        assert_eq!(checkpoints.save(&intent), Err(Failure::Unstable));
         assert_eq!(checkpoints.previous.next_action(), NextAction::Copy);
     }
     assert_eq!(serde_json::to_vec(&saved).unwrap(), before);

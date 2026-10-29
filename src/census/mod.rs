@@ -13,6 +13,7 @@ mod store;
 pub use headers::{HEADER_FIELDS, parse_headers};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+pub(crate) use store::ProtocolStateView;
 #[cfg(test)]
 pub(crate) use store::io;
 pub use store::{AccountState, CensusKeys, EncryptedStore, LocalSecret};

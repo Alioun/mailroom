@@ -970,6 +970,7 @@ fn copy_command_quotes_the_validated_exact_destination_name() {
 }
 
 mod after_clear;
+mod checkpoints;
 mod compensation;
 mod compensation_records;
 mod effects;

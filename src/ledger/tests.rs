@@ -7,10 +7,73 @@ use crate::{
 };
 use std::{
     fs,
-    os::unix::fs::{PermissionsExt, symlink},
+    os::unix::fs::{MetadataExt, PermissionsExt, symlink},
 };
 fn entry(address: &str) -> Entry {
     serde_json::from_value(serde_json::json!({"address":address,"service":"Synthetic distinct service","folder":"Purchases","first_seen":"owner supplied historical value","status":"active","note":"private synthetic note","owner_extension":{"keep":[1,"two"]}})).unwrap()
+}
+
+#[test]
+fn recovery_reservation_preserves_initialization_and_the_stable_lock() {
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let reserved = InstalledLedger::recovery_under(root.path()).unwrap();
+    assert!(reserved.lock().unwrap().raw().unwrap().is_none());
+    let lock_path = root.path().join("ledger/addresses.lock");
+    let before = fs::metadata(&lock_path).unwrap();
+    drop(reserved);
+    let reopened = InstalledLedger::recovery_under(root.path()).unwrap();
+    assert!(reopened.lock().unwrap().raw().unwrap().is_none());
+    drop(reopened);
+
+    let installed = InstalledLedger::install_under(root.path()).unwrap();
+    let snapshot = installed.lock().unwrap().read().unwrap();
+    assert!(!snapshot.document.enabled);
+    assert!(snapshot.document.entries.is_empty());
+    let after = fs::metadata(&lock_path).unwrap();
+    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+    drop(installed);
+
+    fs::remove_file(root.path().join("ledger/addresses.yaml")).unwrap();
+    let installed = InstalledLedger::install_under(root.path()).unwrap();
+    assert!(installed.lock().unwrap().read().is_err());
+    assert!(!root.path().join("ledger/addresses.yaml").exists());
+}
+
+#[test]
+fn restored_authority_is_never_recreated_after_its_owner_file_disappears() {
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let reserved = InstalledLedger::recovery_under(root.path()).unwrap();
+    let mut document = Document::default();
+    document.entries.push(entry("dummy@signup.example.test"));
+    let bytes = encode(&document).unwrap();
+    {
+        let guard = reserved.lock().unwrap();
+        guard.restore_exact(None, &bytes).unwrap();
+        guard.restore_exact(Some(&digest(&bytes)), &bytes).unwrap();
+        assert_eq!(guard.read().unwrap().document.entries.len(), 1);
+    }
+    drop(reserved);
+    let ledger_path = root.path().join("ledger/addresses.yaml");
+    fs::remove_file(&ledger_path).unwrap();
+    let reopened = InstalledLedger::recovery_under(root.path()).unwrap();
+    assert!(reopened.lock().unwrap().read().is_err());
+    drop(reopened);
+    let installed = InstalledLedger::install_under(root.path()).unwrap();
+    assert!(installed.lock().unwrap().read().is_err());
+    assert!(!ledger_path.exists());
+}
+
+#[test]
+fn incomplete_recovery_reservation_cannot_authorize_initialization() {
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let reserved = InstalledLedger::recovery_under(root.path()).unwrap();
+    drop(reserved);
+    fs::write(root.path().join("ledger/addresses.lock"), b"incomplete").unwrap();
+    assert!(InstalledLedger::install_under(root.path()).is_err());
+    assert!(!root.path().join("ledger/addresses.yaml").exists());
 }
 fn state(root: &std::path::Path, id: &str) -> (EncryptedStore, AccountState) {
     let account = AccountId::new(id).unwrap();

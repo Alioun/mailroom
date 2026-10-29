@@ -4,7 +4,7 @@ use crate::private_fs::no_granting_acl;
 #[cfg(unix)]
 use std::os::{
     fd::{AsRawFd, FromRawFd},
-    unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt},
 };
 use std::{
     fs::{self, File, OpenOptions},
@@ -13,6 +13,14 @@ use std::{
 };
 
 const ERROR: &str = "Private ledger unavailable or unsafe. Retain files and restore the installed private directory; no paths can be selected by a request";
+#[cfg(unix)]
+const RESERVED: &[u8] = b"mailroom-ledger-reserved-v1\n";
+#[cfg(unix)]
+#[derive(PartialEq, Eq)]
+enum Authority {
+    Reserved,
+    Established,
+}
 pub struct InstalledLedger {
     directory: PathBuf,
     #[cfg(unix)]
@@ -116,12 +124,15 @@ impl InstalledLedger {
             identity: (m.dev(), m.ino()),
         };
         installed.open_directory()?;
-        let existed = installed
-            .directory
-            .join("addresses.lock")
-            .try_exists()
-            .map_err(|_| ERROR)?;
-        let lock = open_at(&dir, "addresses.lock", libc::O_RDWR | libc::O_CREAT, 0o600)?;
+        let (lock, created) = match open_at(
+            &dir,
+            "addresses.lock",
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+            0o600,
+        ) {
+            Ok(lock) => (lock, true),
+            Err(_) => (open_at(&dir, "addresses.lock", libc::O_RDWR, 0)?, false),
+        };
         private_regular(&lock)?;
         lock.try_lock()
             .map_err(|_| "Private ledger is in use by another account or process")?;
@@ -130,7 +141,17 @@ impl InstalledLedger {
             directory: dir,
             lock,
         };
-        if !existed && initialize {
+        let absent = guard.raw()?.is_none();
+        if created && !initialize && absent {
+            guard.lock.write_all_at(RESERVED, 0).map_err(|_| ERROR)?;
+            guard.lock.sync_all().map_err(|_| ERROR)?;
+        }
+        if created {
+            guard.directory.sync_all().map_err(|_| ERROR)?;
+        }
+        let first_start = created || guard.authority()? == Authority::Reserved;
+        if initialize && first_start && absent {
+            guard.establish_authority()?;
             let bytes = encode(&Document::default())?;
             match open_at(
                 &guard.directory,
@@ -149,8 +170,9 @@ impl InstalledLedger {
                     guard.read()?;
                 }
             }
-        } else if guard.raw()?.is_some() {
+        } else if !absent {
             guard.read()?;
+            guard.establish_authority()?;
         }
         drop(guard);
         Ok(installed)
@@ -255,6 +277,33 @@ fn private_regular(file: &File) -> Result<(), String> {
 }
 impl LockedLedger<'_> {
     #[cfg(unix)]
+    fn authority(&self) -> Result<Authority, String> {
+        let length = self.lock.metadata().map_err(|_| ERROR)?.len();
+        if length == 0 {
+            return Ok(Authority::Established);
+        }
+        if length != RESERVED.len() as u64 {
+            return Err(ERROR.into());
+        }
+        let mut bytes = [0; RESERVED.len()];
+        self.lock.read_exact_at(&mut bytes, 0).map_err(|_| ERROR)?;
+        if bytes != RESERVED {
+            return Err(ERROR.into());
+        }
+        Ok(Authority::Reserved)
+    }
+    #[cfg(unix)]
+    fn establish_authority(&self) -> Result<(), String> {
+        if self.authority()? == Authority::Reserved {
+            self.check_identity()?;
+            // Retire initialization permission before publishing owner authority. Its later
+            // disappearance must never cause an automatic empty-ledger replacement.
+            self.lock.set_len(0).map_err(|_| ERROR)?;
+            self.lock.sync_all().map_err(|_| ERROR)?;
+        }
+        Ok(())
+    }
+    #[cfg(unix)]
     fn check_identity(&self) -> Result<(), String> {
         let directory = self.installed.open_directory()?;
         let current = open_at(&directory, "addresses.lock", libc::O_RDWR, 0)?;
@@ -329,6 +378,7 @@ impl LockedLedger<'_> {
             decode_recovery_bytes(bytes)?;
             let current = self.raw()?;
             if current.as_deref() == Some(bytes) {
+                self.establish_authority()?;
                 return Ok(());
             }
             if current.as_ref().map(|b| digest(b)).as_deref() != expected || current.is_some() {
@@ -353,6 +403,7 @@ impl LockedLedger<'_> {
             if self.raw()?.is_some() {
                 return Err("Ledger appeared during recovery".into());
             }
+            self.establish_authority()?;
             let from = std::ffi::CString::new(name.as_str()).map_err(|_| ERROR)?;
             let fd = self.directory.as_raw_fd();
             // Exclusive rename preserves the one-link guard across process death.
@@ -403,6 +454,7 @@ impl LockedLedger<'_> {
                     "Private ledger changed outside this review. Reload and review again".into(),
                 );
             }
+            self.establish_authority()?;
             let name = format!(".addresses-{:032x}.tmp", rand::random::<u128>());
             let mut staged = open_at(
                 &self.directory,

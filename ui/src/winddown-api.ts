@@ -2,6 +2,9 @@ import { z } from 'zod'
 import { countObservation } from './acquisition-evidence'
 import { localFetch } from './api'
 const settings = z.object({ winding_down: z.boolean(), comparisons: z.record(z.string(), z.array(z.string())) })
+export const senderCategory = z.enum(['money', 'contracts', 'orders', 'travel', 'social', 'newsletters'])
+const count = z.number().int().nonnegative()
+const senderCatalog = z.object({ release: z.string(), license: z.literal('CC0-1.0'), rows: count, categories: z.record(senderCategory, count), missing_categories: z.array(senderCategory), missing_countries: z.array(z.string()), seed_complete: z.boolean(), stale_rows: count, future_rows: count, service_reviews: count, unusable_service_reviews: count })
 const row = z.object({
   id: z.string(), sender: z.string().nullable(), domain: z.string().nullable(),
   group: z.enum(['people', 'service', 'bulk', 'unresolved']), status: z.enum(['waiting', 'moved', 'dismissed', 'quiet', 'bulk', 'unresolved']),
@@ -11,7 +14,7 @@ const row = z.object({
   migration: z.array(z.object({ message_identity: z.string(), account: z.string(), address: z.string(), message_date: z.number(), evidence: z.string() })),
   reasons: z.array(z.string()), settings_link: z.string().nullable(), service_associations: z.array(z.string()),
 })
-export const reportSchema = z.object({ version: z.string(), semantics: z.string(), census_analysis: z.string(), sender_data_version: z.string(), ledger_version: z.string(), account: z.string(), as_of: z.number(), boundary: z.number(), settings,
+export const reportSchema = z.object({ version: z.string(), semantics: z.string(), census_analysis: z.string(), sender_data_version: z.string(), sender_catalog: senderCatalog.optional(), ledger_version: z.string(), account: z.string(), as_of: z.number(), boundary: z.number(), settings,
   sources: z.array(z.object({ account: z.string(), revision: z.number(), census_version: z.string(), complete: z.boolean(), owned_addresses: z.array(z.string()), spam_count: z.number().nullable(), spam_observation: countObservation.nullable(), coverage_since: z.number().nullable(), coverage_through: z.number().nullable() })),
   rows: z.array(row), counts: z.record(z.string(), z.number()), blockers: z.array(z.string()), verdict: z.string(), effects: z.string(),
 })

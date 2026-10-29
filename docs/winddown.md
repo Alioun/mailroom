@@ -37,7 +37,13 @@ The report recommends only an owner retirement review when designation, selected
 
 The installed private `addresses.yaml` remains authoritative. Wind-down consumes its current reviewed projection and content version. It neither edits the ledger nor copies an editable ledger into its own aggregate. Service associations explain local observations. Ledger membership and retired filing status establish neither ownership, migration nor alias disabling. External source edits invalidate confirmations without requiring a manual ledger refresh.
 
-`SenderData` is an installed, reviewed and versioned catalog. Transactional classification and settings links come from that catalog. The generic catalog is empty. The test-only fixture installs a synthetic reviewed service and settings link. No personal data is a public default. Missing links show the observed domain as text. Links with credentials, query strings, fragments or a non-HTTPS scheme fall back to the domain. The interface never launches or fetches them. A production sender-data installation remains later integration work.
+The report loads the bundled CC0 release from `data/`. Its bounded parser validates the release version, CSV columns, registrable domains, countries, priorities, provenance, checked dates and public HTTPS settings links. The report binds the exact release bytes, including license and provenance text. Any change invalidates outstanding report confirmations. The source release fixes the catalog; this interface accepts no alternate file path or mutable catalog upload.
+
+The current seed has no sender rows. The English and German interface, local file and terminal output show its incomplete category and country coverage. They also show stale or future rows and unusable service reviews. Recorded coverage counts do not independently prove human review. Curating the first list and integrating category lists, the optional UT1 package and the accounting-tool table remain unfinished. [SOURCES.md](../data/SOURCES.md) defines the data contract and its remaining work.
+
+Transactional classification additionally requires a current explicit entry in `transactional-services.csv` and a current sender review. Category membership alone is insufficient. Reviews become stale after two calendar years at the report's explicit as-of time. Missing, stale or future reviews leave service classification unresolved. Retained historical rows use current catalog links and lose their service classification when the corresponding review is unavailable. Wind-down semantics version 2 binds this behavior.
+
+Missing links show the observed domain as text. Links with credentials, query strings, fragments or a non-HTTPS scheme are refused. The interface never launches or fetches them. Test-only fixtures can install synthetic reviewed services and settings links. No personal data or invented sender review is a public default.
 
 ## Durable decisions and disclosure
 

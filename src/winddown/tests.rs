@@ -29,6 +29,178 @@ fn snapshot() -> Snapshot {
         document: Default::default(),
     }
 }
+
+#[test]
+fn bundled_catalog_projection_binds_reviews_and_refreshes_historical_links() {
+    const EMPTY: &str = "domain,country,priority,settings_url,source,checked\n";
+    const SERVICES: &str = "domain,source,checked\n";
+    let root = tempfile::tempdir().unwrap();
+    let (store, mut saved) = fixture(root.path(), "catalog", Provider::MailboxOrg);
+    let record = saved
+        .census
+        .folders
+        .get_mut("INBOX")
+        .unwrap()
+        .messages
+        .get_mut(&1)
+        .unwrap();
+    record.headers = crate::census::parse_headers(b"From: alerts@example.com\r\nTo: owner@example.test\r\nSubject: Receipt\r\nAuto-Submitted: auto-generated\r\nDate: Fri, 23 Oct 2026 12:00:00 +0000\r\nMessage-ID: <catalog-fixture@example.test>\r\n\r\n", Direction::Received).unwrap();
+    let money =
+        format!("{EMPTY}example.com,DE,1,https://example.com/settings,contrib,2026-10-01\n");
+    let services = format!("{SERVICES}example.com,contrib,2026-10-01\n");
+    let data = |notes: &str, services: &str, as_of| {
+        crate::sender_data::Catalog::parse(crate::sender_data::Package {
+            release: "schema: 1\nversion: 1.0.0\nreleased: 2026-10-29\nlicense: CC0-1.0\n",
+            license: "SPDX-License-Identifier: CC0-1.0",
+            sources: notes,
+            categories: [&money, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY],
+            services,
+        })
+        .unwrap()
+        .winddown(as_of)
+        .unwrap()
+    };
+    let reviewed = data("Synthetic fixture provenance", &services, synthetic::AS_OF);
+    let unreviewed = data("Synthetic fixture provenance", SERVICES, synthetic::AS_OF);
+    let sender = "alerts@example.com";
+    let report = derive(
+        &source(&saved, &store, Provider::MailboxOrg),
+        &[],
+        &snapshot(),
+        &reviewed,
+        synthetic::AS_OF,
+    )
+    .unwrap();
+    assert_eq!(row(&report, sender).group, Group::Service);
+    assert_eq!(
+        row(&report, sender).settings_link.as_deref(),
+        Some("https://example.com/settings")
+    );
+    let uncertain = derive(
+        &source(&saved, &store, Provider::MailboxOrg),
+        &[],
+        &snapshot(),
+        &unreviewed,
+        synthetic::AS_OF,
+    )
+    .unwrap();
+    assert_eq!(row(&uncertain, sender).group, Group::Unresolved);
+    let change = Change::Dismiss {
+        rows: BTreeSet::from([row(&report, sender).id.clone()]),
+        dismissed: true,
+    };
+    let decision = review(
+        &source(&saved, &store, Provider::MailboxOrg),
+        &[],
+        &[],
+        &snapshot(),
+        &reviewed,
+        synthetic::AS_OF,
+        &report.version,
+        &change,
+    )
+    .unwrap();
+    let changed = data(
+        "Changed synthetic provenance only",
+        &services,
+        synthetic::AS_OF,
+    );
+    assert!(
+        review(
+            &source(&saved, &store, Provider::MailboxOrg),
+            &[],
+            &[],
+            &snapshot(),
+            &changed,
+            synthetic::AS_OF,
+            &report.version,
+            &change
+        )
+        .is_err()
+    );
+    let refreshed = derive(
+        &source(&saved, &store, Provider::MailboxOrg),
+        &[],
+        &snapshot(),
+        &changed,
+        synthetic::AS_OF,
+    )
+    .unwrap();
+    assert_ne!(refreshed.version, report.version);
+    assert_ne!(
+        refreshed
+            .export_preview(store.keys(), Disclosure::LocalFile)
+            .receipt,
+        report
+            .export_preview(store.keys(), Disclosure::LocalFile)
+            .receipt
+    );
+    let summary = report.summary(store.keys());
+    assert!(!summary.contains("alerts@example.com"));
+    assert!(!summary.contains("https://example.com/settings"));
+    assert!(!summary.contains("Synthetic fixture provenance"));
+    let stale_as_of = DateTime::parse_from_rfc3339("2028-10-01T00:00:00Z")
+        .unwrap()
+        .timestamp();
+    let stale_data = data("Synthetic fixture provenance", &services, stale_as_of);
+    let stale = derive(
+        &source(&saved, &store, Provider::MailboxOrg),
+        &[],
+        &snapshot(),
+        &stale_data,
+        stale_as_of,
+    )
+    .unwrap();
+    assert_eq!(row(&stale, sender).group, Group::Unresolved);
+    assert!(
+        review(
+            &source(&saved, &store, Provider::MailboxOrg),
+            &[],
+            &[],
+            &snapshot(),
+            &stale_data,
+            stale_as_of,
+            &stale.version,
+            &change,
+        )
+        .is_err(),
+        "Expired service evidence cannot authorize a service dismissal"
+    );
+    saved.winddown.known.insert(
+        row(&report, sender).id.clone(),
+        row(&report, sender).clone(),
+    );
+    saved
+        .census
+        .folders
+        .get_mut("INBOX")
+        .unwrap()
+        .messages
+        .clear();
+    let bundled = crate::sender_data::bundled()
+        .unwrap()
+        .winddown(synthetic::AS_OF)
+        .unwrap();
+    let historical = derive(
+        &source(&saved, &store, Provider::MailboxOrg),
+        &[],
+        &snapshot(),
+        &bundled,
+        synthetic::AS_OF,
+    )
+    .unwrap();
+    assert!(row(&historical, sender).historical);
+    assert_eq!(row(&historical, sender).group, Group::Unresolved);
+    assert!(
+        row(&historical, sender).settings_link.is_none(),
+        "Removed catalog links cannot survive through cached history"
+    );
+    assert!(historical.terminal().contains("Sender catalog"));
+    println!(
+        "MAILROOM_CATALOG_DISPLAY_FIXTURE {}",
+        serde_json::json!({ "reviewed": report, "unreviewed": uncertain, "stale": stale, "historical": historical, "decision": decision })
+    );
+}
 fn source<'a>(
     state: &'a AccountState,
     store: &'a EncryptedStore,

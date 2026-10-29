@@ -22,6 +22,7 @@ pub fn disable_core_dumps() -> bool {
 pub mod policy;
 pub mod rules;
 pub(crate) mod send;
+pub mod sender_data;
 pub mod server;
 pub mod unsubscribe;
 pub mod winddown;

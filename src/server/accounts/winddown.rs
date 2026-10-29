@@ -50,6 +50,7 @@ pub(in crate::server) async fn handle(
     }
     match tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let _operation = state.accounts.operation.lock().expect("account operation");
+        let data = sender_data(request.as_of)?;
         if state.accounts.job.lock().expect("account job").as_ref().is_some_and(|j| j.progress.state == ScanState::Running) { return Err("Wait for census completion".into()); }
         let repo = state.accounts.repository().map_err(|e| e.to_string())?;
         let account = repo.load(&request.account).map_err(|e| e.to_string())?;
@@ -59,7 +60,6 @@ pub(in crate::server) async fn handle(
         let guard = state.accounts.ledger.as_ref().ok_or("No installed ledger")?.lock()?;
         sync_ledger(&mut saved, &store, &repo.workspace_context(&account, &store).map_err(|e| e.to_string())?, Some(&guard))?;
         let ledger = guard.read()?;
-        let data = sender_data();
         let proposed = match &request.command {
             Action::Preview { change: Change::Settings { settings }, .. } | Action::Confirm { change: Change::Settings { settings }, .. } => Some(settings),
             _ => None,
@@ -121,8 +121,10 @@ pub(in crate::server) async fn handle(
         Err(_) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error":"Wind-down action interrupted. Reopen saved state. Preserve files and restore the original key if local state cannot be read."}))).into_response(),
     }
 }
-fn sender_data() -> winddown::SenderData {
-    let data = winddown::SenderData::default();
+fn sender_data(as_of: i64) -> Result<winddown::SenderData, String> {
+    let data = crate::sender_data::bundled()
+        .and_then(|data| data.winddown(as_of))
+        .map_err(|e| e.to_string())?;
     #[cfg(test)]
     let data = if std::env::var("MAILROOM_WINDDOWN_FIXTURE").ok().as_deref() == Some("1") {
         winddown::SenderData {
@@ -134,9 +136,10 @@ fn sender_data() -> winddown::SenderData {
                     settings_link: Some("https://platform.example/settings".into()),
                 },
             )]),
+            catalog: None,
         }
     } else {
         data
     };
-    data
+    Ok(data)
 }

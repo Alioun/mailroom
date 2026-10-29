@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const SEMANTICS: &str = "mailroom/winddown/v1";
+pub const SEMANTICS: &str = "mailroom/winddown/v2";
 pub const EFFECTS: &str = "Local bookkeeping only. Dismissal removes a sender from waiting, not from unresolved evidence. Undismissal restores evidence-derived status. No retirement, forwarding, rule deployment, unsubscribe, alias disabling or sending is authorized.";
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +147,8 @@ pub struct Row {
 pub struct SenderData {
     pub version: String,
     pub reviewed: BTreeMap<String, SenderEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<crate::sender_data::Status>,
 }
 #[derive(Clone, Serialize)]
 pub struct SenderEntry {
@@ -158,6 +160,7 @@ impl Default for SenderData {
         Self {
             version: "sender-data-v1/empty-reviewed-catalog".into(),
             reviewed: BTreeMap::new(),
+            catalog: None,
         }
     }
 }
@@ -184,6 +187,8 @@ pub struct Report {
     pub semantics: &'static str,
     pub census_analysis: &'static str,
     pub sender_data_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_catalog: Option<crate::sender_data::Status>,
     pub ledger_version: String,
     pub account: String,
     pub as_of: i64,
@@ -552,6 +557,15 @@ pub fn derive(
     for (id, known) in &saved.winddown.known {
         if !rows.contains_key(id) {
             let mut row = known.clone();
+            let entry = row.domain.as_ref().and_then(|d| data.reviewed.get(d));
+            row.settings_link = entry
+                .and_then(|s| s.settings_link.clone())
+                .filter(|s| safe_link(s));
+            if row.group == Group::Service && !entry.is_some_and(|s| s.transactional) {
+                row.group = Group::Unresolved;
+                row.reasons
+                    .insert("sender_identity_or_class_unresolved".into());
+            }
             row.historical = true;
             row.migration.clear();
             row.status = if saved.winddown.dismissed.contains(id) {
@@ -605,6 +619,7 @@ pub fn derive(
         semantics: SEMANTICS,
         census_analysis: crate::census::report::ANALYSIS_VERSION,
         sender_data_version: data.version.clone(),
+        sender_catalog: data.catalog.clone(),
         ledger_version: ledger.content_version.clone(),
         account: saved.census.account.as_str().into(),
         as_of,

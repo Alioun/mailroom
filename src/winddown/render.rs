@@ -36,6 +36,12 @@ impl Report {
             self.ledger_version,
             self.version
         ));
+        if let Some(catalog) = &self.sender_catalog {
+            out.push_str(&format!(
+                "Sender catalog {}\n",
+                serde_json::to_string(catalog).expect("catalog")
+            ));
+        }
         out
     }
     pub fn summary(&self, keys: &CensusKeys) -> String {

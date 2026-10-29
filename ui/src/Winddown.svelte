@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SenderCatalog from './SenderCatalog.svelte'
   import { openWinddown, reviewWinddown, confirmWinddown, previewWinddownExport, exportWinddown, type WinddownView, type WinddownReview, type WinddownExport, type WinddownSettings, type WinddownChange, type Disclosure } from './winddown-api'
   let { account, lang, onBulkHandoff }: { account: string; lang: 'en' | 'de'; onBulkHandoff: (senders: string[], asOf: number) => Promise<void> } = $props()
   const strings = {
@@ -106,6 +107,7 @@
     <p role="status">{view.report.verdict === 'evidence_supports_owner_retirement_review' ? t.ready : t.blocked}</p>
     <p>{Object.entries(view.report.counts).map(([key, count]) => `${key} ${count}`).join(' · ')}</p>
     <p>{t.blockers}: {view.report.blockers.map(explain).join(' ') || '0'}</p>
+    {#if view.report.sender_catalog}<SenderCatalog catalog={view.report.sender_catalog} {lang} />{/if}
     <fieldset disabled={busy}>
       <legend>{t.comparisons}</legend><p>{t.comparisonHelp}</p>
       <label><input type="checkbox" bind:checked={settings.winding_down} onchange={reset} />{t.winding}</label>

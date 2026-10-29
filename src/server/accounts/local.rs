@@ -391,6 +391,17 @@ mod tests {
             opened["report"]["sender_data_version"],
             "synthetic-reviewed-sender-data/v1"
         );
+        assert!(
+            opened["report"]["sender_data_version"]
+                .as_str()
+                .unwrap()
+                .starts_with("sender-core-v1/")
+        );
+        let catalog = &opened["report"]["sender_catalog"];
+        assert_eq!(catalog["license"], "CC0-1.0");
+        assert_eq!(catalog["rows"], 0);
+        assert_eq!(catalog["seed_complete"], false);
+        assert_eq!(catalog["missing_categories"].as_array().unwrap().len(), 6);
         let change = json!({"kind":"settings","settings":{"winding_down":true,"comparisons":{}}});
         let (status, reviewed) = winddown(
             &app,

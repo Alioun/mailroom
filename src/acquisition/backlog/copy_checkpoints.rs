@@ -113,7 +113,7 @@ impl SavedCopyCheckpoints<'_> {
             return Err(invalid());
         }
         let source = self.repo.backlog_source(self.account)?;
-        if source.authority != "fixture-message-copy/v1"
+        if source.profile().map_err(failure)? != Profile::Copy
             || !source.address.ip().is_loopback()
             || source.epoch.is_empty()
         {

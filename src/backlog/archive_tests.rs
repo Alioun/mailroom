@@ -94,6 +94,56 @@ fn archive_is_a_separate_receipt_and_preserves_historical_sort_options() {
 }
 
 #[test]
+fn protocol_projection_binds_the_explicit_method_without_changing_filing_choices() {
+    let (_root, store, state, mailbox) = prepared(false);
+    let artifact = archive(&state, &store, &mailbox, false).plan.artifact;
+    let proof = crate::rules::proof::prove(
+        artifact,
+        &mailbox.state.census,
+        state.workspace.as_ref().unwrap().input.as_of,
+        &[],
+        crate::rules::proof::Baseline::Current,
+        None,
+    )
+    .unwrap();
+    let moved = protocol::project(
+        &state,
+        &mailbox.state.census,
+        &proof,
+        archive_options(),
+        MoveMethod::UidMove,
+    )
+    .unwrap();
+    let mut copied = protocol::project(
+        &state,
+        &mailbox.state.census,
+        &proof,
+        archive_options(),
+        MoveMethod::CopyUidExpunge,
+    )
+    .unwrap();
+    assert_eq!(copied.changes.len(), 1);
+    assert_eq!(copied.changes[0].destination, "Archiv/2024");
+    assert_eq!(
+        copied.changes[0].operation,
+        Operation::Imap {
+            method: MoveMethod::CopyUidExpunge
+        }
+    );
+    assert_eq!(copied.semantics, protocol::COPY_SEMANTICS);
+    assert_ne!(copied.source, moved.source);
+    copied.source = moved.source.clone();
+    copied.semantics = moved.semantics.clone();
+    copied.changes[0].operation = Operation::Imap {
+        method: MoveMethod::UidMove,
+    };
+    assert_eq!(
+        serde_json::to_vec(&copied).unwrap(),
+        serde_json::to_vec(&moved).unwrap()
+    );
+}
+
+#[test]
 fn archive_uses_strict_calendar_arrival_boundary_and_never_falls_back_to_header_date() {
     let (_root, store, state, mut mailbox) = prepared(false);
     for (date, eligible) in [
@@ -191,7 +241,14 @@ fn archive_excludes_held_matched_protected_deleted_and_ambiguous_archive_topolog
             None,
         )
         .unwrap();
-        let plan = protocol::project(&state, &census, &proof, archive_options()).unwrap();
+        let plan = protocol::project(
+            &state,
+            &census,
+            &proof,
+            archive_options(),
+            MoveMethod::UidMove,
+        )
+        .unwrap();
         assert!(plan.changes.is_empty(), "{case}");
     }
 }

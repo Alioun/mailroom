@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 mod codec_tests;
 mod conditional;
 mod metadata;
+mod profile;
+pub(in crate::acquisition) use profile::Profile;
 mod selection;
 
 #[derive(Clone)]
@@ -49,7 +51,11 @@ impl InstalledSource {
     pub(in crate::acquisition) fn identity(&self) -> String {
         use sha2::{Digest, Sha256};
         let bytes = serde_json::to_vec(&(
-            "loopback-imap-move-uidplus/v1",
+            if self.profile() == Ok(Profile::Copy) {
+                "loopback-imap-copy-condstore/v1"
+            } else {
+                "loopback-imap-move-uidplus/v1"
+            },
             &self.account,
             &self.login,
             self.address,
@@ -58,7 +64,7 @@ impl InstalledSource {
             &self.epoch,
             &self.authority,
         ))
-        .expect("installed MOVE source");
+        .expect("installed IMAP filing source");
         data_encoding::HEXLOWER.encode(&Sha256::digest(bytes))
     }
 
@@ -73,7 +79,7 @@ impl InstalledSource {
             || binding.credential_key_recovery.is_empty()
             || binding.workspace.is_empty()
             || binding.topology.is_empty()
-            || self.authority != "fixture-message-move/v1"
+            || self.profile().is_err()
             || self.epoch.is_empty()
             || !self.address.ip().is_loopback()
             || self.login.is_empty()
@@ -131,6 +137,7 @@ impl Connection {
         cancel: Cancellation,
     ) -> Result<Self, Error> {
         let source = permit.0;
+        let profile = source.profile()?;
         let mut io = Session::open(
             Endpoint {
                 address: source.address,
@@ -146,9 +153,7 @@ impl Connection {
         )?;
         io.code_limit = 16 * 1024;
         let capabilities = io.capabilities()?;
-        if !capabilities.contains("MOVE") || !capabilities.contains("UIDPLUS") {
-            return Err(Error::Unsupported);
-        }
+        profile.validate_capabilities(&capabilities)?;
         Ok(Self { io, capabilities })
     }
 
@@ -275,6 +280,7 @@ impl Connection {
         mut persist: impl FnMut(&MoveEvidence) -> Result<(), Error>,
     ) -> Result<(), Error> {
         if self.io.source != permit.0.identity()
+            || permit.0.profile()? != Profile::Move
             || evidence.attempted()
             || evidence.completion().is_some()
             || evidence.mapping().is_some()

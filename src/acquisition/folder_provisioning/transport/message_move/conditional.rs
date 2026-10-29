@@ -202,15 +202,10 @@ impl<'a> StoreReply<'a> {
 
 impl<I: Commands> Conditional<'_, I> {
     fn authorize(&self, permit: &BacklogPermit<'_>) -> Result<(), Error> {
-        if self.io.source() != permit.0.identity()
-            || permit.0.authority != "fixture-message-copy/v1"
-            || self.capabilities.contains("MOVE")
-            || !self.capabilities.contains("UIDPLUS")
-            || !self.capabilities.contains("CONDSTORE")
-        {
+        if self.io.source() != permit.0.identity() || permit.0.profile()? != Profile::Copy {
             return Err(Error::Unsupported);
         }
-        Ok(())
+        Profile::Copy.validate_capabilities(self.capabilities)
     }
 
     fn select_source(&mut self, before: &Readback) -> Result<(), Error> {

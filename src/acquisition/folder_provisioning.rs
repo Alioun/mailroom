@@ -228,6 +228,7 @@ impl Accounts {
                     intent,
                     ..Default::default()
                 },
+                crate::backlog::MoveMethod::UidMove,
             )
             .map_err(|_| invalid())?;
             filing.changes.into_iter().map(|c| c.destination).collect()

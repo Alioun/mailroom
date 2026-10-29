@@ -1,6 +1,8 @@
 use super::{
     Account, Accounts, AcquisitionError, Cancellation,
-    folder_provisioning::transport::message_move::{Connection, InstalledSource, RuntimeBinding},
+    folder_provisioning::transport::message_move::{
+        Connection, InstalledSource, Profile, RuntimeBinding,
+    },
     imap::{MailRead, ReadOnlyImap},
 };
 use crate::{
@@ -18,6 +20,7 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 use subtle::ConstantTimeEq;
 
+mod batches;
 pub(super) mod copy_checkpoints;
 
 fn invalid() -> AcquisitionError {
@@ -103,7 +106,7 @@ impl Accounts {
             ),
         })
     }
-    /// Observes every folder over one MOVE session, which stays open for
+    /// Observes every folder over one filing session, which stays open for
     /// the request, and one read-only session. The topology must not change
     /// while the folders are read, and every folder must still be writable
     /// under the UIDVALIDITY it was read with.
@@ -178,7 +181,7 @@ impl Accounts {
         self.backlog_prepare(account, store, saved, options, cancel)
             .map(|(preview, _)| preview)
     }
-    /// The preview and the MOVE session it observed through, which a confirm
+    /// The preview and the filing session it observed through, which a confirm
     /// goes on to use.
     fn backlog_prepare(
         &self,
@@ -199,7 +202,7 @@ impl Accounts {
         if !saved_proof.download_available {
             return Err(invalid());
         }
-        let (topology, observed, connection) =
+        let (topology, observed, mut connection) =
             self.backlog_observe(account, store, saved, &binding, cancel)?;
         let input = &saved.workspace.as_ref().ok_or_else(invalid)?.input;
         let baseline = if input.baseline == proof::Baseline::Previous {
@@ -219,7 +222,9 @@ impl Accounts {
         if execution.gate == "blocked" {
             return Err(invalid());
         }
-        let filing = model::project(saved, &observed, &execution, options).map_err(failure)?;
+        let profile = self.backlog_source(account)?.profile().map_err(failure)?;
+        let filing = model::project(saved, &observed, &execution, options, profile.method())
+            .map_err(failure)?;
         #[cfg(test)]
         if let Some(root) = std::env::var_os("MAILROOM_MOVE_FIXTURE") {
             std::fs::write(
@@ -231,59 +236,19 @@ impl Accounts {
             )
             .unwrap();
         }
-        let mut grouped: BTreeMap<(String, String), BTreeMap<Uid, Metadata>> = BTreeMap::new();
-        for c in &filing.changes {
-            let m = &observed.folders[&c.source.folder].messages[&c.source.uid];
-            grouped
-                .entry((c.source.folder.clone(), c.destination.clone()))
-                .or_default()
-                .insert(
-                    Uid::new(m.uid).map_err(failure)?,
-                    Metadata {
-                        message_id_hash: c.source.message_id_hash.clone(),
-                        size: u32::try_from(m.size).map_err(failure)?,
-                        internal_date: m.internal_date.clone(),
-                        flags: m.flags.clone(),
-                    },
-                );
-        }
-        let mut batches = vec![];
-        for ((src, dst), messages) in grouped {
-            let identity = |name: &str| -> Result<MailboxIdentity, AcquisitionError> {
-                Ok(MailboxIdentity {
-                    name: topology
-                        .get(name)
-                        .filter(|m| m.selectable())
-                        .ok_or_else(invalid)?
-                        .name
-                        .clone(),
-                    uidvalidity: UidValidity::new(
-                        observed.folders.get(name).ok_or_else(invalid)?.uidvalidity,
-                    )
-                    .map_err(failure)?,
-                })
-            };
-            let entries: Vec<_> = messages.into_iter().collect();
-            for chunk in entries.chunks(crate::backlog::BATCH_LIMIT) {
-                batches.push(
-                    MoveEvidence::intent(
-                        MoveIntent::new(
-                            Purpose::Filing {
-                                protect_flagged: filing.options.protect_flagged,
-                            },
-                            identity(&src)?,
-                            identity(&dst)?,
-                            chunk.iter().cloned().collect(),
-                        )
-                        .map_err(failure)?,
-                    )
-                    .into(),
-                );
-            }
-        }
-        if batches.is_empty() || batches.len() > model::BATCHES {
-            return Err(invalid());
-        }
+        let batches = batches::prepare(&filing, &topology, &observed, profile, |intent| {
+            let empty = BTreeSet::new();
+            let requested = intent.messages().keys().copied().collect();
+            let mut readbacks = connection
+                .conditional_readbacks(&[
+                    (intent.destination(), &empty),
+                    (intent.source(), &requested),
+                ])
+                .map_err(failure)?
+                .into_iter();
+            readbacks.next().ok_or_else(invalid)?.map_err(failure)?;
+            readbacks.next().ok_or_else(invalid)?.map_err(failure)
+        })?;
         let plan = SavedPlan {
             filing,
             binding,
@@ -324,7 +289,11 @@ impl Accounts {
                 receipt,
                 saved: saved_proof,
                 execution,
-                limitations: model::LIMITATIONS,
+                limitations: if profile == Profile::Copy {
+                    model::COPY_PREVIEW_LIMITATIONS
+                } else {
+                    model::LIMITATIONS
+                },
             },
             connection,
         ))
@@ -339,6 +308,9 @@ impl Accounts {
         cancel: Cancellation,
         fresh: impl Fn(&AccountState) -> Result<(), String>,
     ) -> Result<(), AcquisitionError> {
+        if self.backlog_source(account)?.profile().map_err(failure)? != Profile::Move {
+            return Err(invalid());
+        }
         let (p, connection) =
             self.backlog_prepare(account, store, saved, options, cancel.clone())?;
         if !bool::from(p.receipt.as_bytes().ct_eq(receipt.as_bytes()))

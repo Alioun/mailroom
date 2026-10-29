@@ -15,6 +15,7 @@ pub const HISTORY: usize = 512;
 /// Batches per run: 512,000 messages at the 500-message batch limit.
 pub const BATCHES: usize = 1024;
 pub const LIMITATIONS: &str = "Explicit synthetic loopback MOVE/UIDPLUS source only. Saved workspace evidence is installed separately. Filing ignores predicted copies, read changes and keywords. No COPY fallback, Gmail protocol labels or automatic folder creation. MOVE cannot guard atomically against another client changing flags after the final read. Local locks do not exclude other clients. Undo preserves current flags and assigns new UIDs; it is not snapshot rollback. Missing mapping after possible transmission stays uncertain and cannot be retried. Restored accounts remain held.";
+pub const COPY_PREVIEW_LIMITATIONS: &str = "Read-only preview for an explicit synthetic loopback COPY/UIDPLUS/CONDSTORE source. Persistent source versions are bound into each exact batch. Confirmation, account execution and Undo remain held until worker and compensation integration is complete. This preview grants no provider authority. Restored accounts remain held.";
 
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -513,16 +514,27 @@ pub(crate) fn project(
     census: &crate::census::Census,
     proof: &Proof,
     options: Options,
+    method: super::MoveMethod,
 ) -> Result<Plan, String> {
+    let copy = method == super::MoveMethod::CopyUidExpunge;
     let mut plan = Plan {
         account: census.account.as_str().into(),
         provider: crate::acquisition::Provider::MailboxOrg,
-        source: "explicit-synthetic-loopback-imap-move; separate installed workspace evidence"
-            .into(),
+        source: if copy {
+            "explicit-synthetic-loopback-imap-copy; separate installed workspace evidence"
+        } else {
+            "explicit-synthetic-loopback-imap-move; separate installed workspace evidence"
+        }
+        .into(),
         state_revision: state.revision,
         ledger_version: state.ledger.source_version.clone(),
         mailbox_revision: None,
-        semantics: "imap-move-mapping-readback/v1".into(),
+        semantics: if copy {
+            COPY_SEMANTICS
+        } else {
+            "imap-move-mapping-readback/v1"
+        }
+        .into(),
         artifact: proof.artifact.clone(),
         proof_gate: proof.gate.into(),
         options,
@@ -546,6 +558,11 @@ pub(crate) fn project(
             .input
             .as_of,
     )?;
+    for change in &mut plan.changes {
+        change.operation = super::Operation::Imap {
+            method: method.clone(),
+        };
+    }
     Ok(plan)
 }
 

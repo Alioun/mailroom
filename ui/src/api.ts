@@ -1,3 +1,4 @@
+import { invoiceDiagnostic, invoiceHandoff, invoiceRole } from './invoice-diagnostics'
 import { z } from 'zod'
 import { evidenceView } from './acquisition-evidence'
 import { proposalRationale, proposalReason } from './proposal-diagnostics'
@@ -187,8 +188,8 @@ const invoiceAttachment = z.object({ name: z.string(), media_type: z.string(), b
 const invoiceEvidence = z.discriminatedUnion('kind', [z.object({ kind: z.literal('unknown') }), z.object({ kind: z.literal('filename_hint'), names: z.array(z.string()) }), z.object({ kind: z.literal('known'), body: z.enum(['receipt', 'link_only', 'other']), attachments: z.array(invoiceAttachment) })])
 const invoiceSource = z.object({ id: z.string(), folder: z.string(), uidvalidity: z.number(), uid: z.number(), message_id_hash: z.string().nullable(), original: z.string(), evidence: invoiceEvidence })
 const invoicePlan = z.object({ account: z.string(), state_revision: z.number(), report_version: z.string(), selection: z.string(), source: invoiceSource, content_digest: z.string(), target_name: z.string(), target: z.string(), sending_address: z.string(), semantics: z.string(), confirmation_action: z.string(), mode: z.string() })
-const invoiceRow = z.object({ id: z.string(), subject: z.string(), sender: z.string(), role: z.string(), reasons: z.array(z.string()), evidence: invoiceEvidence, predicted_targets: z.array(z.string()), matching_rules: z.array(z.string()), copy_eligibility: z.array(z.object({ rule: z.string(), status: z.string(), reason: z.string() })), handoff: z.string(), accounting_acceptance: z.string(), sender_proposal: z.string().nullable(), send_available: z.boolean() })
-const invoiceReport = z.object({ version: z.string(), semantics: z.string(), revision: z.number(), artifact: z.string().nullable(), complete: z.boolean(), count: z.number(), eligible_business: z.number(), unresolved: z.number(), rows: z.array(invoiceRow), warnings: z.array(z.string()) })
+const invoiceRow = z.object({ id: z.string(), subject: z.string(), sender: z.string(), role: invoiceRole, reasons: z.array(invoiceDiagnostic), evidence: invoiceEvidence, predicted_targets: z.array(z.string()), matching_rules: z.array(z.string()), copy_eligibility: z.array(z.object({ rule: z.string(), status: z.string(), reason: z.string() })), handoff: invoiceHandoff, accounting_acceptance: z.literal('unknown'), sender_proposal: z.string().nullable(), send_available: z.boolean() })
+const invoiceReport = z.object({ version: z.string(), semantics: z.string(), revision: z.number(), artifact: z.string().nullable(), complete: z.boolean(), count: z.number(), eligible_business: z.number(), unresolved: z.number(), rows: z.array(invoiceRow), warnings: z.array(invoiceDiagnostic) })
 const resolution = z.enum(['sent', 'not_sent'])
 const invoiceSend = z.object({ id: z.string(), plan: invoicePlan, status: z.enum(['intent', 'uncertain', 'completed', 'not_sent', 'handed_off']), resolved: resolution.optional() })
 const invoiceView = z.object({ report: invoiceReport, sends: z.array(invoiceSend), synthetic: z.boolean(), targets: z.array(z.string()).default([]), sent_evidence: z.record(z.string(), z.array(z.string())).default({}) })

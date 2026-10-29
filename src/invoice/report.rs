@@ -22,29 +22,25 @@ fn supported(attachments: &[Attachment]) -> bool {
         )
     })
 }
-fn evidence_reasons(e: &ContentEvidence) -> Vec<String> {
+fn evidence_reasons(e: &ContentEvidence) -> Vec<Diagnostic> {
     match e {
-        ContentEvidence::Unknown => vec!["Attachment structure and body content unknown".into()],
-        ContentEvidence::FilenameHint { names } => vec![format!(
-            "Filename hints only; no verified PDF/XML or ZUGFeRD content: {}",
-            names.join(", ")
-        )],
+        ContentEvidence::Unknown => vec![Diagnostic::ContentUnknown],
+        ContentEvidence::FilenameHint { names } => vec![Diagnostic::FilenameHint {
+            names: names.clone(),
+        }],
         ContentEvidence::Known { body, attachments } => {
             let mut reasons = vec![];
             if supported(attachments) {
-                reasons.push("Known synthetic PDF/XML attachment bytes".into());
+                reasons.push(Diagnostic::DocumentContentTypes);
             }
             if !attachments.is_empty() && !supported(attachments) {
-                reasons.push(
-                    "Possible unsupported submission format; Qonto processing unknown".into(),
-                );
+                reasons.push(Diagnostic::UnsupportedFormat);
             }
             if *body == Body::LinkOnly {
-                reasons
-                    .push("Known synthetic link-only content; no invoice document enclosed".into());
+                reasons.push(Diagnostic::LinkOnly);
             }
             if *body == Body::Receipt {
-                reasons.push("Receipt body may be convertible by Qonto; acceptance unknown".into());
+                reasons.push(Diagnostic::ReceiptBody);
             }
             reasons
         }
@@ -94,7 +90,22 @@ pub(crate) fn report(
     synthetic: bool,
     keys: &CensusKeys,
 ) -> Result<Report, String> {
-    let mut report = Report { version: String::new(), semantics: SEMANTICS.into(), revision: state.revision, artifact: None, complete: state.census.acquisition_state == ScanState::Complete, count: 0, eligible_business: 0, unresolved: 0, rows: vec![], warnings: vec!["Prediction and prepared Sieve download do not establish handoff. Real handoff and Qonto acceptance remain unknown.".into(), "Target approval, sender restrictions, encryption, provider recipient provenance and MIME capabilities require independent evidence.".into(), "Keyword automatic copies need the engine's Sieve mime extension and a PDF/XML part. Proof predicts them only for messages whose original was acquired; for the rest the copy stays unknown. A header census cannot establish attachment absence, link-only content or ZUGFeRD.".into()] };
+    let mut report = Report {
+        version: String::new(),
+        semantics: "invoice-report-evidence-v2".into(),
+        revision: state.revision,
+        artifact: None,
+        complete: state.census.acquisition_state == ScanState::Complete,
+        count: 0,
+        eligible_business: 0,
+        unresolved: 0,
+        rows: vec![],
+        warnings: vec![
+            Diagnostic::HandoffUnknown,
+            Diagnostic::IndependentEvidenceRequired,
+            Diagnostic::KeywordMimeRequired,
+        ],
+    };
     if let Some(w) = &state.workspace {
         let mut context = EngineContext::local(
             state.census.account.as_str().into(),
@@ -125,7 +136,10 @@ pub(crate) fn report(
             artifact
                 .omissions()
                 .iter()
-                .map(|o| format!("{}: {}", o.rule, o.reason)),
+                .map(|o| Diagnostic::RuleOmitted {
+                    rule: o.rule.clone(),
+                    detail: o.reason.clone(),
+                }),
         );
         let (_, config) = rules::config::documents(
             &w.input.documents.preset_yaml,
@@ -217,20 +231,17 @@ pub(crate) fn report(
             };
             let mut reasons = evidence_reasons(&evidence);
             if keywords(&d.subject) {
-                reasons.push("Invoice keyword in Subject".into());
+                reasons.push(Diagnostic::InvoiceSubject);
             }
             if !business {
-                reasons.push(
-                    "Recipient role/evidence unresolved; retain Inbox without automatic copy"
-                        .into(),
-                );
+                reasons.push(Diagnostic::RecipientHeld);
             }
             if record.is_some_and(|m| {
                 m.headers.evidence.contains_key("list-id")
                     || (m.headers.evidence.contains_key("list-unsubscribe")
                         && m.headers.evidence.contains_key("list-unsubscribe-post"))
             }) {
-                reasons.push("Bulk evidence excludes keyword automatic copy".into());
+                reasons.push(Diagnostic::BulkExcludesKeywordCopy);
             }
             let matching_rules = d
                 .copy_eligibility
@@ -287,9 +298,7 @@ pub(crate) fn report(
             }
         }
     } else {
-        report
-            .warnings
-            .push("Save a rule workspace to derive invoice roles and copy predictions".into());
+        report.warnings.push(Diagnostic::WorkspaceRequired);
     }
     report.count = report.rows.len();
     report.version = keys.binding_for(
@@ -297,4 +306,73 @@ pub(crate) fn report(
         &serde_json::to_vec(&(&report, state)).map_err(|_| "Report encoding")?,
     );
     Ok(report)
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    #[test]
+    fn evidence_diagnostics_distinguish_observations_from_acceptance() {
+        assert_eq!(
+            evidence_reasons(&ContentEvidence::Unknown),
+            vec![Diagnostic::ContentUnknown]
+        );
+        let names = vec!["<script>fixture</script>.pdf".into()];
+        assert_eq!(
+            evidence_reasons(&ContentEvidence::FilenameHint {
+                names: names.clone()
+            }),
+            vec![Diagnostic::FilenameHint { names }]
+        );
+        for (media_type, expected) in [
+            ("application/pdf", Diagnostic::DocumentContentTypes),
+            ("application/xml", Diagnostic::DocumentContentTypes),
+            ("application/octet-stream", Diagnostic::UnsupportedFormat),
+        ] {
+            let evidence = ContentEvidence::Known {
+                body: Body::Receipt,
+                attachments: vec![Attachment {
+                    name: "fixture".into(),
+                    media_type: media_type.into(),
+                    bytes: vec![0],
+                }],
+            };
+            assert_eq!(
+                evidence_reasons(&evidence),
+                vec![expected, Diagnostic::ReceiptBody]
+            );
+        }
+        assert_eq!(
+            evidence_reasons(&ContentEvidence::Known {
+                body: Body::LinkOnly,
+                attachments: vec![]
+            }),
+            vec![Diagnostic::LinkOnly]
+        );
+        println!(
+            "MAILROOM_INVOICE_DIAGNOSTICS {}",
+            serde_json::json!([
+                Diagnostic::ContentUnknown,
+                Diagnostic::FilenameHint {
+                    names: vec!["<script>fixture</script>.pdf".into()]
+                },
+                Diagnostic::DocumentContentTypes,
+                Diagnostic::UnsupportedFormat,
+                Diagnostic::LinkOnly,
+                Diagnostic::ReceiptBody,
+                Diagnostic::InvoiceSubject,
+                Diagnostic::RecipientHeld,
+                Diagnostic::BulkExcludesKeywordCopy,
+                Diagnostic::HandoffUnknown,
+                Diagnostic::IndependentEvidenceRequired,
+                Diagnostic::KeywordMimeRequired,
+                Diagnostic::WorkspaceRequired,
+                Diagnostic::RuleOmitted {
+                    rule: "user.<script>fixture</script>".into(),
+                    detail: "Required <script>fixture</script> capability unknown".into()
+                },
+            ])
+        );
+    }
 }

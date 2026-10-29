@@ -21,7 +21,7 @@ function imports(code) {
   return code.replace(/(['"])(zod|svelte(?:\/[^'"]+)?)\1/g, (_match, _quote, name) => JSON.stringify(import.meta.resolve(name)))
     .replace(/from '(.\/[^']+)'/g, (_match, name) => `from '${name}.mjs'`)
 }
-for (const name of ['api', 'acquisition-evidence', 'proposal-diagnostics']) {
+for (const name of ['api', 'invoice-diagnostics', 'acquisition-evidence', 'proposal-diagnostics']) {
   const source = await readFile(resolve(root, `ui/src/${name}.ts`), 'utf8')
   const emitted = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }, fileName: `${name}.ts` })
   await writeFile(resolve(output, `${name}.mjs`), imports(emitted.outputText))

@@ -790,3 +790,37 @@ mod adapters {
         );
     }
 }
+
+#[test]
+fn invoice_display_reports_keep_unknown_acceptance_and_exact_diagnostics() {
+    let (_dir, store, mut state) = fixture();
+    let synthetic = report(&state, Provider::MailboxOrg, true, store.keys()).unwrap();
+    let real = report(&state, Provider::MailboxOrg, false, store.keys()).unwrap();
+    for report in [&synthetic, &real] {
+        assert_eq!(report.semantics, "invoice-report-evidence-v2");
+        assert!(
+            report
+                .rows
+                .iter()
+                .all(|r| r.accounting_acceptance == "unknown")
+        );
+        assert!(report.warnings.contains(&Diagnostic::HandoffUnknown));
+        assert!(
+            report
+                .warnings
+                .contains(&Diagnostic::IndependentEvidenceRequired)
+        );
+    }
+    assert!(
+        real.rows
+            .iter()
+            .all(|r| r.reasons.contains(&Diagnostic::ContentUnknown))
+    );
+    state.workspace = None;
+    let missing = report(&state, Provider::MailboxOrg, true, store.keys()).unwrap();
+    assert!(missing.warnings.contains(&Diagnostic::WorkspaceRequired));
+    println!(
+        "MAILROOM_INVOICE_DISPLAY_FIXTURE {}",
+        serde_json::json!({"synthetic": synthetic, "real": real, "missing": missing})
+    );
+}

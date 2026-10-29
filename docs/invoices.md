@@ -53,3 +53,11 @@ Every wired action first asks `send::wiring::Endpoints` for a `policy::WritePerm
 The independent Sieve verifier covers overlapping triggers, destination aliases, and distinct destinations in fresh caches. It does not establish persistent provider cache behavior, expiry, concurrency, actual recipient provenance, or Qonto acceptance. Synthetic proof ordering does not reproduce historical arrival order.
 
 Production wiring of the real adapters, trusted recipient evidence, deployed-engine observations, arbitrary accounting profiles, conflict repair, and scale remain incomplete. Sources are bounded synthetic fixtures. The send history stops at 64 records without pruning. A before-submission crash can leave an uncertain operation blocked until a future inspection workflow exists. Synthetic source reconstruction does not prove real raw-mail preservation. Existing acquisition, report, backlog, provider, and personal-workflow limitations continue. Backlog Cancel stops new sorting batches and retains completed changes. Backlog Undo requires its own preview and confirmation.
+
+## Localized report explanations
+
+The report presentation uses `invoice-report-evidence-v2`. Reasons and warnings are tagged diagnostics, with filenames and omitted-rule details as separate fields. The English and German UI translates the primary explanations, recipient roles, handoff states and census completeness. Unknown diagnostic, handoff, role and acceptance values fail at the frontend boundary. Exact compiler copy details remain available in a labeled English disclosure.
+
+Attachment content types are observations, not proof of valid invoice content or accounting acceptance. General body and format warnings refer to the selected accounting tool. The report always retains unknown accounting acceptance. No tool-specific restriction is inferred. A missing workspace has a different empty state from a report with no candidates.
+
+Report serialization changes its exact receipt binding. Persisted send plans, native action displays and transport semantics are unchanged. A changed report still requires a fresh exact preview, and uncertain sends never gain retry authority. This report-only union adds no persisted account field or recovery format.

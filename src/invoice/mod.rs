@@ -124,13 +124,32 @@ pub struct Send {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved: Option<crate::send::Resolution>,
 }
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Diagnostic {
+    ContentUnknown,
+    FilenameHint { names: Vec<String> },
+    DocumentContentTypes,
+    UnsupportedFormat,
+    LinkOnly,
+    ReceiptBody,
+    InvoiceSubject,
+    RecipientHeld,
+    BulkExcludesKeywordCopy,
+    HandoffUnknown,
+    IndependentEvidenceRequired,
+    KeywordMimeRequired,
+    WorkspaceRequired,
+    RuleOmitted { rule: String, detail: String },
+}
+
 #[derive(Serialize)]
 pub struct Row {
     pub id: String,
     pub subject: String,
     pub sender: String,
     pub role: String,
-    pub reasons: Vec<String>,
+    pub reasons: Vec<Diagnostic>,
     pub evidence: ContentEvidence,
     pub predicted_targets: Vec<String>,
     pub matching_rules: Vec<String>,
@@ -151,7 +170,7 @@ pub struct Report {
     pub eligible_business: usize,
     pub unresolved: usize,
     pub rows: Vec<Row>,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Diagnostic>,
 }
 #[derive(Serialize)]
 pub struct Preview {

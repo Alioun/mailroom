@@ -78,7 +78,7 @@ pub struct CompiledArtifact {
     omissions: Vec<Omission>,
     folders: BTreeSet<String>,
 }
-pub const SEMANTICS: &str = "mailroom-sieve-subset-v6";
+pub const SEMANTICS: &str = "mailroom-sieve-subset-v7";
 /// Content types that count as invoice document evidence for keyword forwards.
 pub const SUPPORTED_INVOICE_TYPES: [&str; 3] = ["application/pdf", "application/xml", "text/xml"];
 
@@ -196,6 +196,15 @@ fn condition(c: &Condition, recipient: &str) -> Test {
             address("from", "domain", "is", value),
             address("from", "domain", "matches", &format!("*.{value}")),
         ]),
+        Condition::SenderSet { addresses, domains } => any(addresses
+            .iter()
+            .map(|a| address("from", "all", "is", a))
+            .chain(
+                domains
+                    .iter()
+                    .map(|d| condition(&Condition::FromDomain { value: d.clone() }, recipient)),
+            )
+            .collect()),
         Condition::ToAddress { value } => address(recipient, "all", "is", value),
         Condition::SubjectContains { value } => header("subject", "contains", value),
         Condition::ListIdExact { value } => header("list-id", "is", value),
@@ -245,6 +254,15 @@ pub fn compile(
     overrides: &Overrides,
     context: &EngineContext,
 ) -> Result<CompiledArtifact, String> {
+    compile_prepared(&super::catalog::load(preset)?, overrides, context)
+}
+
+pub(super) fn compile_prepared(
+    prepared: &super::catalog::Prepared,
+    overrides: &Overrides,
+    context: &EngineContext,
+) -> Result<CompiledArtifact, String> {
+    let preset = &prepared.preset;
     identifier(&preset.id)?;
     identifier(&context.account)?;
     if let EvidenceSource::SyntheticEnvelope { source } = &context.recipient_evidence {
@@ -262,7 +280,7 @@ pub fn compile(
     if preset.major == 0 || overrides.preset != preset.id || overrides.major != preset.major {
         return Err("Override must pin the supplied preset and nonzero major version".into());
     }
-    if preset.rules.len()
+    if prepared.authored_rules
         + overrides.additions.len()
         + overrides.forwards.len()
         + overrides.ledger.len()
@@ -314,6 +332,11 @@ pub fn compile(
     let mut effective = Vec::new();
     let mut rules = Vec::new();
     let mut trace = vec![format!("Preset {}@{}", preset.id, preset.major)];
+    if let Some(version) = &prepared.version {
+        trace.push(format!(
+            "Bundled core sender release {version}; whole lists, independent of census"
+        ));
+    }
     let mut insert = |rule: Rule, origin: &str, priority: u8| -> Result<(), String> {
         validate_rule(&rule)?;
         if !ids.insert(rule.id.clone()) {
@@ -329,10 +352,14 @@ pub fn compile(
         rules.push((priority, origin.to_owned(), rule));
         Ok(())
     };
-    for r in &preset.rules {
+    for (index, r) in preset.rules.iter().enumerate() {
         insert(
             r.clone(),
-            "preset",
+            if index < prepared.authored_rules {
+                "preset"
+            } else {
+                "bundled core sender catalog"
+            },
             match r.stage {
                 Stage::Guard => 0,
                 Stage::From => 4,
@@ -382,7 +409,27 @@ pub fn compile(
         if let Some(v) = &p.when {
             rule.when = v.clone();
         }
-        rule.when.extend(p.extend.clone());
+        let mut constraints = Vec::new();
+        if let Some(Condition::SenderSet { addresses, domains }) = rule
+            .when
+            .iter_mut()
+            .find(|c| matches!(c, Condition::SenderSet { .. }))
+        {
+            for extension in &p.extend {
+                match extension {
+                    Condition::FromAddress { value } => {
+                        addresses.insert(value.clone());
+                    }
+                    Condition::FromDomain { value } => {
+                        domains.insert(value.clone());
+                    }
+                    other => constraints.push(other.clone()),
+                }
+            }
+        } else {
+            constraints = p.extend.clone();
+        }
+        rule.when.extend(constraints);
         if let Some(v) = &p.accounts {
             rule.accounts = v.clone();
         }
@@ -763,6 +810,7 @@ pub fn compile(
     }));
     let binding = serde_json::to_vec(&(
         SEMANTICS,
+        &prepared.version,
         preset,
         overrides,
         context,
@@ -792,6 +840,9 @@ fn add_rule(
     recipient: &str,
 ) -> Result<(), String> {
     if !rule.enabled || !scoped(&rule.accounts, context) {
+        return Ok(());
+    }
+    if rule.when.iter().any(|c| matches!(c, Condition::SenderSet { addresses, domains } if addresses.is_empty() && domains.is_empty())) {
         return Ok(());
     }
     let reason = if rule.when.iter().any(|c| matches!(c, Condition::Attachment)) {

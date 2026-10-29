@@ -3,6 +3,16 @@
   "title": "Preset",
   "type": "object",
   "properties": {
+    "core_senders": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CoreSenders"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "id": {
       "type": "string"
     },
@@ -77,6 +87,35 @@
           "required": [
             "kind",
             "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "addresses": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "uniqueItems": true
+            },
+            "domains": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "uniqueItems": true
+            },
+            "kind": {
+              "type": "string",
+              "const": "sender_set"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
           ]
         },
         {
@@ -195,6 +234,20 @@
             "kind"
           ]
         }
+      ]
+    },
+    "CoreSenders": {
+      "type": "object",
+      "properties": {
+        "major": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "major"
       ]
     },
     "Rule": {

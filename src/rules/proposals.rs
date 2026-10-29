@@ -163,14 +163,24 @@ fn sender_matches(rule: &Rule, sender: &str) -> bool {
         && rule.when.iter().any(|c| {
             matches!(
                 c,
-                Condition::FromAddress { .. } | Condition::FromDomain { .. }
+                Condition::FromAddress { .. }
+                    | Condition::FromDomain { .. }
+                    | Condition::SenderSet { .. }
             )
         })
         && rule.when.iter().all(|c| match c {
             Condition::FromAddress { value } => value == sender,
-            Condition::FromDomain { value } => sender
-                .split_once('@')
-                .is_some_and(|(_, domain)| domain == value),
+            Condition::FromDomain { value } => sender.split_once('@').is_some_and(|(_, domain)| {
+                domain == value || domain.ends_with(&format!(".{value}"))
+            }),
+            Condition::SenderSet { addresses, domains } => {
+                addresses.contains(sender)
+                    || domains.iter().any(|d| {
+                        sender.split_once('@').is_some_and(|(_, domain)| {
+                            domain == d || domain.ends_with(&format!(".{d}"))
+                        })
+                    })
+            }
             Condition::NonBulk => true,
             _ => false,
         })
@@ -273,6 +283,8 @@ pub fn generate(
     let input = &workspace.input;
     let (preset, overrides) =
         config::documents(&input.documents.preset_yaml, &input.documents.override_yaml)?;
+    let prepared = super::catalog::load(&preset)?;
+    let preset = &prepared.preset;
     let current = workspace::preview(state, context, keys)?;
     let account = state.census.account.as_str();
     let generation = identity(&(
@@ -280,6 +292,7 @@ pub fn generate(
         crate::census::report::ANALYSIS_VERSION,
         super::program::SEMANTICS,
         proof::SEMANTICS,
+        &prepared.version,
         account,
         provider,
         normalized_observations(state),

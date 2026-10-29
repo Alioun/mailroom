@@ -3,7 +3,7 @@ use crate::acquisition::Provider;
 use crate::rules::workspace::{self, Workspace, WorkspaceInput};
 fn input() -> WorkspaceInput {
     let sample: serde_json::Value =
-        serde_json::from_str(include_str!("../../../examples/sample.json")).unwrap();
+        serde_json::from_str(include_str!("../../../tests/fixtures/pre-core-sample.json")).unwrap();
     let mut documents: crate::engine::Documents =
         serde_json::from_value(sample["documents"].clone()).unwrap();
     documents.override_yaml = documents.override_yaml.replace(

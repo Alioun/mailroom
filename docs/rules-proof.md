@@ -12,6 +12,16 @@ The generic vocabulary has Money, Contracts, Orders, Travel, Social and Newslett
 
 Approved address mappings override exact domain mappings. Ownership confirmation alone assigns no role. Sign-up domains must already have an explicit personal or business role. Active and retired ledger entries generate recipient rules. A new local part on a classified sign-up domain goes to its configured new-address folder. A classified domain outside the sign-up policy sorts normally.
 
+## Bundled category lists
+
+`core_senders: {major: 1}` in the preset selects the bundled CC0 sender release. A preset without this field keeps its authored rules only. The compiler checks the selected major and prepares one stable From rule per category, named `sender.core.money`, `sender.core.contracts`, `sender.core.orders`, `sender.core.travel`, `sender.core.social` and `sender.core.newsletters`.
+
+Each generated rule contains the category's whole domain list, regardless of the census. `sender_set` matches any exact address or domain member. Domain members also match subdomains. Conditions outside the set remain AND constraints. Sender sets support at most 10,000 members and appear only in From rules. An empty set emits no filing effect or destination.
+
+A patch's `extend` adds From addresses and domains as alternatives within an existing sender set. Other extensions remain AND constraints. Rules without a sender set keep their existing AND extension behavior. An explicit `when` replaces all conditions. Generated rules include `non_bulk`, so an ordinary category patch does not consume bulk mail before the bulk rule. Disabling, account scope and recipient safety still apply.
+
+The exact release binding, including provenance bytes, enters artifact identity, trace and proposal generation. A changed release therefore requires fresh proof and confirmation. Saved artifacts retain their exact lists. Schema 24 introduces their persisted sender-set tags. The bundled seed is empty and explicitly incomplete. Human-curated rows remain required before this is a useful default catalog.
+
 ## Compilation and matching
 
 Role safety runs first. The implemented executable accepts exactly one approved synthetic delivery recipient from Delivered-To or X-Original-To. Unknown roles, missing evidence, multiple recipients and unfiltered roles retain Inbox with internal review status. No Flagged mutation is implied. There is no fallback to To, Cc, relay claims or account ownership.

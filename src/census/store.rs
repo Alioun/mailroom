@@ -41,8 +41,9 @@ const MIN_FRAME_BUDGET: u64 = 64 * 1024;
 /// `closed` on backlog runs. 22 adds acquired invoice originals, SMTP and
 /// mail-app send records and their statuses, and SMTP outcomes on unsubscribe
 /// history. 23 adds the owner's `resolved` finding on uncertain invoice sends and
-/// local unsubscribe mail.
-pub(crate) const SCHEMA: u32 = 23;
+/// local unsubscribe mail. 24 adds explicit OR sender sets to persisted
+/// rule artifacts used by exports and backlog plans.
+pub(crate) const SCHEMA: u32 = 24;
 
 pub struct LocalSecret(Zeroizing<Vec<u8>>);
 
@@ -1361,6 +1362,9 @@ impl EncryptedStore {
         if version < 23 && uses_resolutions(&state) {
             return Err(CensusError::UnsupportedVersion);
         }
+        if version < 24 && uses_sender_sets(&state) {
+            return Err(CensusError::UnsupportedVersion);
+        }
         if version < 21
             && (!state.label_provisioning.is_empty()
                 || state
@@ -1614,6 +1618,35 @@ fn uses_resolutions(state: &AccountState) -> bool {
             .any(|e| e.resolved.is_some())
 }
 
+fn uses_sender_sets(state: &AccountState) -> bool {
+    use crate::rules::{config::Condition, program::EffectiveDefinition};
+    state
+        .exports
+        .iter()
+        .map(|e| &e.artifact)
+        .chain(state.backlog.iter().map(|r| &r.plan.artifact))
+        .chain(
+            state
+                .protocol_backlog
+                .runs
+                .iter()
+                .map(|r| &r.plan.filing.artifact),
+        )
+        .chain(
+            state
+                .gmail_backlog
+                .runs
+                .iter()
+                .map(|r| &r.plan.filing.artifact),
+        )
+        .any(|artifact| {
+            artifact.effective().iter().any(|effective| {
+                matches!(&effective.definition, EffectiveDefinition::Filing { rule }
+                    if rule.when.iter().any(|c| matches!(c, Condition::SenderSet { .. })))
+            })
+        })
+}
+
 fn normalize_interrupted(state: &mut AccountState) {
     normalize_journals(state);
     // An interrupted scan can resume, but reopening cannot imply a running worker.
@@ -1669,10 +1702,89 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
+    fn sender_sets_require_schema_twenty_four_in_base_and_frames() {
+        use crate::rules::{program, proof, workspace};
+        let input: crate::engine::PreviewInput =
+            serde_json::from_str(include_str!("../../examples/sample.json")).unwrap();
+        let census = crate::engine::synthetic_census(&input).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let store = EncryptedStore::new(
+            root.path().into(),
+            CensusKeys::derive(&LocalSecret::random(), &census.account),
+        )
+        .unwrap();
+        let original = AccountState::new(census);
+        let mut current = original.clone();
+        let artifact = crate::engine::artifact(&input.documents, &input.context).unwrap();
+        current.exports.push(workspace::ExportRecord {
+            context_binding: None,
+            semantics: program::SEMANTICS.into(),
+            proof_semantics: proof::SEMANTICS.into(),
+            artifact: artifact.clone(),
+            workspace: workspace::Workspace {
+                revision: 1,
+                input: workspace::WorkspaceInput {
+                    documents: input.documents,
+                    pins: vec![],
+                    as_of: input.as_of,
+                    baseline: proof::Baseline::Current,
+                },
+            },
+            receipt: "a".repeat(64),
+            exported_at: 1,
+            provenance: "Synthetic source-format fixture".into(),
+        });
+        for version in [13, 18, 21, 23] {
+            store
+                .stage_snapshot(version, &serde_json::to_string(&current).unwrap())
+                .unwrap()
+                .persist(store.path())
+                .unwrap();
+            assert!(matches!(
+                store.load_state(),
+                Err(CensusError::UnsupportedVersion)
+            ));
+        }
+        store
+            .stage_snapshot(24, &serde_json::to_string(&current).unwrap())
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        assert_eq!(
+            store.load_state().unwrap().exports[0].artifact.identity(),
+            artifact.identity()
+        );
+        store
+            .stage_snapshot(23, &serde_json::to_string(&original).unwrap())
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        let mut loaded = store.load_state().unwrap();
+        let file = fs::read(store.path()).unwrap();
+        let cipher = Aes256Gcm::new_from_slice(store.keys().encryption.as_ref()).unwrap();
+        let decoded = log::decode(&cipher, store.keys().account.as_str(), &file).unwrap();
+        store.persisted.borrow_mut().as_mut().unwrap().tail = Some(Tail {
+            base_tag: decoded.base_tag,
+            base_len: decoded.base_len,
+            valid_end: decoded.valid_end,
+            next_sequence: 0,
+        });
+        loaded.exports = current.exports;
+        store.save_state(&mut loaded).unwrap();
+        assert!(fs::metadata(store.path()).unwrap().len() > decoded.valid_end);
+        decoded::forget(&store.path());
+        assert!(matches!(
+            store.load_state(),
+            Err(CensusError::UnsupportedVersion)
+        ));
+    }
+
+    #[test]
     fn old_schema_rejects_protocol_semantics_inside_a_valid_legacy_plan() {
         let root = tempfile::tempdir().unwrap();
         let input: crate::engine::PreviewInput =
-            serde_json::from_str(include_str!("../../examples/sample.json")).unwrap();
+            serde_json::from_str(include_str!("../../tests/fixtures/pre-core-sample.json"))
+                .unwrap();
         let census = crate::engine::synthetic_census(&input).unwrap();
         let store = EncryptedStore::new(
             root.path().into(),
@@ -1737,7 +1849,8 @@ mod tests {
         for version in 1..=14 {
             let root = tempfile::tempdir().unwrap();
             let input: crate::engine::PreviewInput =
-                serde_json::from_str(include_str!("../../examples/sample.json")).unwrap();
+                serde_json::from_str(include_str!("../../tests/fixtures/pre-core-sample.json"))
+                    .unwrap();
             let census = crate::engine::synthetic_census(&input).unwrap();
             let store = EncryptedStore::new(
                 root.path().into(),
@@ -1787,7 +1900,8 @@ mod tests {
         for version in 1..=18 {
             let root = tempfile::tempdir().unwrap();
             let input: crate::engine::PreviewInput =
-                serde_json::from_str(include_str!("../../examples/sample.json")).unwrap();
+                serde_json::from_str(include_str!("../../tests/fixtures/pre-core-sample.json"))
+                    .unwrap();
             let census = crate::engine::synthetic_census(&input).unwrap();
             let store = EncryptedStore::new(
                 root.path().into(),
@@ -1857,7 +1971,8 @@ mod tests {
         for version in 1..=13 {
             let root = tempfile::tempdir().unwrap();
             let input: crate::engine::PreviewInput =
-                serde_json::from_str(include_str!("../../examples/sample.json")).unwrap();
+                serde_json::from_str(include_str!("../../tests/fixtures/pre-core-sample.json"))
+                    .unwrap();
             let census = crate::engine::synthetic_census(&input).unwrap();
             let store = EncryptedStore::new(
                 root.path().into(),

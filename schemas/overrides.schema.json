@@ -128,6 +128,35 @@
         {
           "type": "object",
           "properties": {
+            "addresses": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "uniqueItems": true
+            },
+            "domains": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "uniqueItems": true
+            },
+            "kind": {
+              "type": "string",
+              "const": "sender_set"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "kind": {
               "type": "string",
               "const": "to_address"

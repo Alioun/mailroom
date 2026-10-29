@@ -1,5 +1,6 @@
 id: standard
 major: 1
+core_senders: {major: 1}
 renamed:
   studio.old: sender.studio
 rules:

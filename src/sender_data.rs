@@ -227,6 +227,14 @@ impl Catalog {
         self.senders.values()
     }
 
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub fn binding(&self) -> String {
+        format!("sender-core-v1/{}/{}", self.version, self.digest)
+    }
+
     pub fn winddown(&self, as_of: i64) -> Result<SenderData, Error> {
         let day = DateTime::<Utc>::from_timestamp(as_of, 0)
             .ok_or(Error::Date)?
@@ -292,7 +300,7 @@ impl Catalog {
             })
             .collect();
         Ok(SenderData {
-            version: format!("sender-core-v1/{}/{}", self.version, self.digest),
+            version: self.binding(),
             reviewed,
             catalog: Some(status),
         })

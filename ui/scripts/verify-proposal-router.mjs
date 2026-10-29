@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
-const audit = `${root}.audit/proposal-language/`
+const audit = `${root}${process.env.MAILROOM_VERIFY_AUDIT ?? '.audit/proposal-language'}/`
 const builds = (await readFile(process.argv[2] ?? `${audit}test-build.jsonl`, 'utf8')).trim().split('\n').map(JSON.parse)
 assert.deepEqual(builds.at(-1), { reason: 'build-finished', success: true })
 const built = builds.findLast(item => item.reason === 'compiler-artifact' && item.target.name === 'ui_bridge' && item.profile.test && item.executable)

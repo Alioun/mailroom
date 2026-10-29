@@ -673,3 +673,88 @@ fn selected_schema_fourteen_keeps_complete_delivery_state_and_restored_holds() {
             .all(|d| d.review && d.keyword_additions.is_empty())
     );
 }
+
+#[test]
+fn selected_schema_twenty_four_preserves_sender_sets_exports_and_recovery_hold() {
+    use crate::rules::{config, workspace};
+    let (root, repo, ids, ledger) = fixture();
+    let account = repo.load(&ids[0]).unwrap();
+    let before = {
+        let store = repo.store(&account).unwrap();
+        let mut state = store.load_state().unwrap();
+        let input = &mut state.workspace.as_mut().unwrap().input;
+        let (mut preset, mut overrides) =
+            config::documents(&input.documents.preset_yaml, &input.documents.override_yaml)
+                .unwrap();
+        preset.core_senders = Some(config::CoreSenders { major: 1 });
+        input.documents.preset_yaml = serde_yaml_ng::to_string(&preset).unwrap();
+        overrides.patches.push(config::Patch {
+            id: "sender.core.money".into(),
+            enabled: None,
+            folder: None,
+            when: None,
+            extend: vec![config::Condition::FromDomain {
+                value: "recovery.example.test".into(),
+            }],
+            accounts: None,
+            mark_read: None,
+        });
+        input.documents.override_yaml = serde_yaml_ng::to_string(&overrides).unwrap();
+        let context = workspace::WorkspaceContext::local(Provider::MailboxOrg);
+        let preview = workspace::preview(&state, &context, store.keys()).unwrap();
+        workspace::confirm_export(&mut state, &context, store.keys(), &preview.receipt).unwrap();
+        assert!(
+            state
+                .exports
+                .last()
+                .unwrap()
+                .artifact
+                .effective()
+                .iter()
+                .any(|effective| {
+                    matches!(&effective.definition,
+                crate::rules::program::EffectiveDefinition::Filing { rule }
+                if rule.when.iter().any(|condition| matches!(condition,
+                    config::Condition::SenderSet { domains, .. }
+                    if domains.contains("recovery.example.test"))))
+                })
+        );
+        store.save_state(&mut state).unwrap();
+        state
+    };
+    let (manifest, bundle) = capture(&repo, &ids[..1], &ledger, root.path());
+    assert_eq!(manifest.accounts[0].state_schema, 24);
+    let fresh_root = tempfile::tempdir().unwrap();
+    let fresh = persistent_accounts(fresh_root.path());
+    let preview = fresh
+        .selected_restore_preview(&bundle, &secret(), false, None)
+        .unwrap();
+    fresh
+        .selected_restore(&bundle, &secret(), &preview, None, |_| Ok(()))
+        .unwrap();
+    let restored = fresh.load(&ids[0]).unwrap();
+    let store = fresh.store(&restored).unwrap();
+    let after = store.load_state().unwrap();
+    assert_eq!(
+        encoded(&before).unwrap().as_slice(),
+        encoded(&after).unwrap().as_slice()
+    );
+    assert_eq!(
+        after.exports.last().unwrap().artifact.identity(),
+        before.exports.last().unwrap().artifact.identity()
+    );
+    assert!(store.recovery_pending());
+    let context = fresh.workspace_context(&restored, &store).unwrap();
+    let preview = workspace::preview(&after, &context, store.keys()).unwrap();
+    assert_eq!(
+        preview.proof.artifact.context().recipient_evidence,
+        crate::rules::EvidenceSource::Unknown
+    );
+    assert!(
+        preview
+            .proof
+            .decisions
+            .iter()
+            .all(|d| d.review && d.copies.is_empty() && !d.mark_read)
+    );
+}

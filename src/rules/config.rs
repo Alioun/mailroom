@@ -7,9 +7,17 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct Preset {
     pub id: String,
     pub major: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_senders: Option<CoreSenders>,
     #[serde(default)]
     pub renamed: BTreeMap<String, String>,
     pub rules: Vec<Rule>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoreSenders {
+    pub major: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -113,6 +121,24 @@ pub enum Category {
     Newsletters,
 }
 impl Category {
+    pub const ALL: [Self; 6] = [
+        Self::Money,
+        Self::Contracts,
+        Self::Orders,
+        Self::Travel,
+        Self::Social,
+        Self::Newsletters,
+    ];
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Money => "money",
+            Self::Contracts => "contracts",
+            Self::Orders => "orders",
+            Self::Travel => "travel",
+            Self::Social => "social",
+            Self::Newsletters => "newsletters",
+        }
+    }
     pub fn label(self, language: Language) -> &'static str {
         match (self, language) {
             (Self::Money, Language::En) => "Money",
@@ -140,13 +166,29 @@ pub enum Stage {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Condition {
-    FromAddress { value: String },
-    FromDomain { value: String },
-    ToAddress { value: String },
-    SubjectContains { value: String },
+    FromAddress {
+        value: String,
+    },
+    FromDomain {
+        value: String,
+    },
+    SenderSet {
+        #[serde(default)]
+        addresses: BTreeSet<String>,
+        #[serde(default)]
+        domains: BTreeSet<String>,
+    },
+    ToAddress {
+        value: String,
+    },
+    SubjectContains {
+        value: String,
+    },
     ListIdExists,
     ListIdAbsent,
-    ListIdExact { value: String },
+    ListIdExact {
+        value: String,
+    },
     OneClick,
     NonBulk,
     Attachment,
@@ -324,11 +366,30 @@ pub fn validate_rule(rule: &Rule) -> Result<(), String> {
     if rule.when.is_empty() || rule.when.len() > 16 {
         return Err("Each rule needs 1..16 AND conditions".into());
     }
+    if rule
+        .when
+        .iter()
+        .filter(|c| matches!(c, Condition::SenderSet { .. }))
+        .count()
+        > 1
+    {
+        return Err("Each rule supports at most one sender set".into());
+    }
     for account in &rule.accounts {
         identifier(account)?;
     }
     for condition in &rule.when {
         match condition {
+            Condition::SenderSet { addresses, domains }
+                if rule.stage != Stage::From
+                    || addresses.len() + domains.len() > 10_000
+                    || addresses.iter().any(|a| !mailbox(a))
+                    || domains.iter().any(|d| !domain(d)) =>
+            {
+                return Err(
+                    "Sender sets require a From rule and at most 10000 valid senders".into(),
+                );
+            }
             Condition::FromAddress { value } | Condition::ToAddress { value }
                 if !mailbox(value) =>
             {

@@ -8,7 +8,7 @@ import { render } from 'svelte/server'
 import ts from 'typescript'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
-const audit = resolve(root, '.audit/proposal-language')
+const audit = resolve(root, process.env.MAILROOM_VERIFY_AUDIT ?? '.audit/proposal-language')
 const output = resolve(audit, 'render')
 await mkdir(output, { recursive: true })
 const log = await readFile(process.argv[2] ?? resolve(audit, 'proposal-tests.log'), 'utf8')

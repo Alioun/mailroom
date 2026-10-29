@@ -12,4 +12,4 @@ Wikidata is the agreed CC0 candidate source. A future maintainer seed tool may p
 
 UT1 web-domain lists are outside this CC0 core. Their separate CC BY-SA package, per-account opt-in and attribution remain separate integration work. A row with `source: ut1` cannot enter this core. Data rows do not grant address ownership, delivery provenance, authentication, invoice approval or provider-write authority.
 
-The loader and wind-down projection are implemented. Curated rows, compiler category-list integration, preset release review, the accounting-tool table, contribution tooling and scheduled upkeep remain unfinished. No first-list or complete-catalog claim is made.
+The loader, wind-down projection and whole-category compiler integration are implemented. Curated rows, preset release review, the accounting-tool table, contribution tooling and scheduled upkeep remain unfinished. No first-list or complete-catalog claim is made.

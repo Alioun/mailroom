@@ -279,6 +279,7 @@ impl Accounts {
             stop_requested: false,
             batches,
             reverse: vec![],
+            compensation: vec![],
             undo_receipt: None,
             undo_conflicts: 0,
             completed_at: None,

@@ -189,3 +189,117 @@ fn invalid_copy_journals_never_replace_the_last_valid_ciphertext() {
         assert_eq!(store.load_state().unwrap().revision, state.revision);
     }
 }
+
+#[test]
+fn compensation_schema_twenty_seven_rejects_older_bases_frames_and_summaries() {
+    use protocol::{CompensationPhase as P, compensation_fixture};
+    let (_root, store, original) = fixture();
+    let mut current = original.clone();
+    current.protocol_backlog.runs =
+        vec![compensation_fixture(&current.census.account, P::Prepared)];
+    for version in 1..27 {
+        snapshot(&store, version, &current);
+        assert!(
+            matches!(store.load_state(), Err(CensusError::UnsupportedVersion)),
+            "base {version}"
+        );
+    }
+    snapshot(&store, 27, &current);
+    assert!(store.load_state().unwrap().protocol_backlog == current.protocol_backlog);
+    for version in 18..27 {
+        snapshot(&store, version, &original);
+        append(
+            &store,
+            &original,
+            patch::Patch::Replace {
+                value: serde_json::to_value(&current.protocol_backlog).unwrap(),
+            },
+        );
+        assert!(
+            matches!(store.load_state(), Err(CensusError::UnsupportedVersion)),
+            "frame {version}"
+        );
+    }
+    current.protocol_backlog.runs = vec![compensation_fixture(&current.census.account, P::Cleaned)];
+    assert!(current.protocol_backlog.compact(u64::MAX));
+    snapshot(&store, 26, &current);
+    assert!(matches!(
+        store.load_state(),
+        Err(CensusError::UnsupportedVersion)
+    ));
+    snapshot(&store, 27, &current);
+    assert_eq!(
+        store.load_state().unwrap().protocol_backlog.summaries[0].copies_removed,
+        2
+    );
+}
+
+#[test]
+fn encrypted_compensation_append_updates_and_omission_reopen_exactly() {
+    use protocol::{CompensationPhase as P, compensation_fixture};
+    let (_root, store, mut state) = fixture();
+    state.protocol_backlog.runs = vec![run(&state.census.account, Stage::Copied)];
+    store.save_state(&mut state).unwrap();
+    for phase in [
+        P::Prepared,
+        P::StoreUncertain,
+        P::Marked,
+        P::ExpungeUncertain,
+        P::Cleaned,
+    ] {
+        state.protocol_backlog.runs = vec![compensation_fixture(&state.census.account, phase)];
+        store.save_state(&mut state).unwrap();
+        decoded::forget(&store.path());
+        let loaded = store.load_state().unwrap();
+        assert!(
+            loaded.protocol_backlog == state.protocol_backlog,
+            "{phase:?}"
+        );
+        assert_eq!(loaded.revision, state.revision);
+    }
+    state.protocol_backlog.runs = vec![run(&state.census.account, Stage::Copied)];
+    store.save_state(&mut state).unwrap();
+    decoded::forget(&store.path());
+    let loaded = store.load_state().unwrap();
+    assert!(loaded.protocol_backlog == state.protocol_backlog);
+    assert!(
+        serde_json::to_value(&loaded.protocol_backlog).unwrap()["runs"][0]
+            .get("compensation")
+            .is_none()
+    );
+}
+
+#[test]
+fn substituted_compensation_never_replaces_valid_ciphertext() {
+    use protocol::{CompensationPhase as P, compensation_fixture};
+    let (_root, store, mut state) = fixture();
+    state.protocol_backlog.runs = vec![compensation_fixture(&state.census.account, P::Prepared)];
+    store.save_state(&mut state).unwrap();
+    let bytes = fs::read(store.path()).unwrap();
+    state.protocol_backlog.runs[0].compensation[0].forward = 99;
+    assert!(store.save_state(&mut state).is_err());
+    assert_eq!(fs::read(store.path()).unwrap(), bytes);
+    assert_eq!(
+        store.load_state().unwrap().protocol_backlog.runs[0].compensation[0].forward,
+        0
+    );
+}
+
+#[test]
+fn summary_frame_cannot_smuggle_nonzero_removed_copies_into_schema_twenty_six() {
+    use protocol::{CompensationPhase as P, compensation_fixture};
+    let (_root, store, mut state) = fixture();
+    state.protocol_backlog.runs = vec![compensation_fixture(&state.census.account, P::Cleaned)];
+    state.protocol_backlog.compact(u64::MAX);
+    state.protocol_backlog.summaries[0].copies_removed = 0;
+    let before = serde_json::to_value(&state.protocol_backlog).unwrap();
+    let mut after = before.clone();
+    after["summaries"][0]["copies_removed"] = 2.into();
+    snapshot(&store, 26, &state);
+    assert!(store.load_state().is_ok());
+    append(&store, &state, patch::diff(&before, &after).unwrap());
+    assert!(matches!(
+        store.load_state(),
+        Err(CensusError::UnsupportedVersion)
+    ));
+}

@@ -47,8 +47,15 @@ pub struct Summary {
     pub applied: usize,
     /// Messages whose undo was verified.
     pub restored: usize,
+    /// Extra copies removed while their original messages remained.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub copies_removed: usize,
     /// Planned messages per source folder and destination.
     pub folders: BTreeMap<String, BTreeMap<String, usize>>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 impl Summary {
@@ -66,7 +73,8 @@ impl Summary {
             && self.compacted_at >= deadline(self.completed_at)
             && self.applied <= self.messages
             && self.restored <= self.applied
-            && (self.status == Status::Undone || self.restored == 0)
+            && self.copies_removed <= self.messages.saturating_sub(self.applied)
+            && (self.status == Status::Undone || self.restored == 0 && self.copies_removed == 0)
             && pairs <= FOLDER_PAIRS
             && total == self.messages
             && self.folders.iter().all(|(source, targets)| {

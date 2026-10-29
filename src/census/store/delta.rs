@@ -114,6 +114,21 @@ impl Object {
         );
         Ok(())
     }
+    fn omitted_elements<T: Serialize + PartialEq>(
+        &mut self,
+        name: &str,
+        old: &[T],
+        new: &[T],
+    ) -> Result<(), CensusError> {
+        match (old.is_empty(), new.is_empty()) {
+            (false, true) => self.remove.push(name.into()),
+            (true, false) => {
+                self.set.insert(name.into(), replace(&new)?);
+            }
+            _ => self.elements(name, old, new)?,
+        }
+        Ok(())
+    }
     fn nested(&mut self, name: &str, delta: Delta) -> Option<()> {
         match delta {
             Delta::Same => Some(()),
@@ -139,7 +154,7 @@ impl Object {
 /// Runs are only appended or changed in place while their journal is live.
 /// Compaction removes runs and writes a new base.
 macro_rules! journal_delta {
-    ($name:ident, $module:ident) => {
+    ($name:ident, $module:ident, [$($extra:ident),*]) => {
         pub(super) fn $name(
             old: &$module::Journal,
             new: &$module::Journal,
@@ -172,6 +187,7 @@ macro_rules! journal_delta {
                     undo_conflicts,
                     completed_at,
                     closed,
+                    $($extra,)*
                 } = run;
                 let mut o = Object::default();
                 o.field("id", &before.id, id)?;
@@ -185,6 +201,7 @@ macro_rules! journal_delta {
                 o.field("undo_conflicts", &before.undo_conflicts, undo_conflicts)?;
                 o.optional("completed_at", &before.completed_at, completed_at)?;
                 o.optional("closed", &before.closed, closed)?;
+                $(o.omitted_elements(stringify!($extra), &before.$extra, $extra)?;)*
                 if let Delta::Patch(p) = o.finish() {
                     set.push((index, p));
                 }
@@ -210,8 +227,8 @@ macro_rules! journal_delta {
         }
     };
 }
-journal_delta!(protocol_journal, protocol);
-journal_delta!(gmail_journal, gmail_journal);
+journal_delta!(protocol_journal, protocol, [compensation]);
+journal_delta!(gmail_journal, gmail_journal, []);
 
 pub(super) fn census(old: &Census, new: &Census) -> Result<Delta, CensusError> {
     let Census {

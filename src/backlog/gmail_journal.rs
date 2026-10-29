@@ -107,6 +107,7 @@ impl Run {
             batches: self.batches.len(),
             applied: count(self.entries(false)),
             restored: count(self.entries(true)),
+            copies_removed: 0,
             folders: retention::folders(&self.plan.filing.changes),
         }
     }

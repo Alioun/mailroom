@@ -244,7 +244,7 @@ fn execute(
     let store = repo.store(&account)?;
     let mut saved = store.load_state()?;
     let journal = |saved: &crate::census::AccountState| match kind {
-        Kind::Move => json!(saved.protocol_backlog),
+        Kind::Move => saved.protocol_backlog.history_view(),
         Kind::Gmail => json!(saved.gmail_backlog),
     };
     let deadlines = |saved: &crate::census::AccountState| match kind {
@@ -367,6 +367,11 @@ fn execute(
                     .map(|e| e.command().messages().len())
                     .sum();
                 job.progress.folders = entries.len();
+                if !run.compensation.is_empty() {
+                    let counts = run.compensation_counts();
+                    job.progress.saved = counts.restored + counts.copies_removed;
+                    job.progress.folders = run.compensation.len();
+                }
             }
         }
         Ok(())
@@ -599,7 +604,7 @@ fn execute(
         | Action::LabelConfirm { .. }
         | Action::LabelReconcile { .. } => unreachable!(),
     }
-    Ok(json!({"journal":saved.protocol_backlog}))
+    Ok(json!({"journal":saved.protocol_backlog.history_view()}))
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import ArchiveOffer from './ArchiveOffer.svelte'
   import CopyPhaseEvidence from './CopyPhaseEvidence.svelte'
+  import CopyCompensation from './CopyCompensation.svelte'
   import { archiveCopy, archiveReason, archiveOfferAvailable } from './archive-copy'
   import { readAccountStatus, openProtocolBacklog, previewProtocolBacklog, previewProtocolUndo, protocolAction, type ProtocolView, type ProtocolPreview, type ProtocolUndo, type BacklogOptions } from './api'
   import UndoRetention from './UndoRetention.svelte'
@@ -97,6 +98,7 @@
       {#if !run.closed}<button disabled={busy || running || copyHeld(run) || !view?.installed || view?.recovery_hold} onclick={() => act(async () => { invalidate(); await protocolAction(account, { action: 'reconcile', run: run.id }); await load() })}>{t.reconcile}</button>{/if}
       {#if !run.closed && !run.undo_receipt && !['complete', 'undone'].includes(run.status)}<button disabled={busy || running || copyHeld(run) || !view?.installed || view?.recovery_hold} onclick={() => act(() => continuation('resume', run.id))}>{t.resume}</button>{/if}
       {#if run.closed}{:else if !run.undo_receipt}<button disabled={busy || running || copyHeld(run) || !view?.installed || view?.recovery_hold || view?.undo_deadlines.find(d => d.run === run.id)?.undo_open === false} onclick={() => act(() => inspectUndo(run.id))}>{t.undoPreview}</button>{:else if run.status !== 'undone'}<button disabled={busy || running || copyHeld(run) || !view?.installed || view?.recovery_hold} onclick={() => act(() => continuation('resume_undo', run.id))}>{t.resumeUndo}</button>{/if}
+      {#if run.compensation}<CopyCompensation counts={run.compensation} {lang} />{/if}
       <details><summary>{t.report}</summary><p>{run.id}</p><p>{run.plan.filing.artifact.identity}</p>{#each [...run.batches, ...run.reverse.map(r => r.evidence)] as e}<p>{e.intent.source.name.decoded} / {e.intent.source.uidvalidity} / {Object.keys(e.intent.messages).join(', ')} → {e.intent.destination.name.decoded}</p><p>{e.attempted ? t.attempted : t.pending} · {t.completion} · {e.completion?.kind === 'tagged' ? e.completion.status : e.completion?.kind ?? '?'}</p>{#if e.mapping.kind === 'validated'}<p>{t.mapping} · {JSON.stringify(e.mapping.mapping.pairs)}</p>{/if}{#if e.readback}<p>{t.readback}</p>{/if}{#if e.copy_journal}<CopyPhaseEvidence evidence={e.copy_journal} {lang} />{/if}{/each}</details>
     </article>
   {:else}<p>{t.empty}</p>{/each}

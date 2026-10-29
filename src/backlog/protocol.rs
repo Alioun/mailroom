@@ -8,6 +8,10 @@ use std::collections::BTreeSet;
 
 mod batch;
 pub use batch::{Batch, COPY_SEMANTICS};
+mod compensation;
+#[cfg(test)]
+pub(crate) use compensation::tests::{Phase as CompensationPhase, fixture as compensation_fixture};
+pub use compensation::{Compensation, CompensationCounts};
 
 /// Retained runs with a full per-message journal. Q27 compacts finished runs
 /// 90 days after completion, so this bounds runs started within 90 days.
@@ -70,6 +74,8 @@ pub struct Run {
     pub stop_requested: bool,
     pub batches: Vec<Batch>,
     pub reverse: Vec<Reverse>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compensation: Vec<Compensation>,
     pub undo_receipt: Option<String>,
     #[serde(default)]
     pub undo_conflicts: usize,
@@ -121,6 +127,9 @@ pub struct ClosePreview {
 }
 impl Run {
     pub fn finished(&self) -> bool {
+        if !self.compensation.is_empty() {
+            return self.status == Status::Undone && compensation::outcome(self) == Status::Undone;
+        }
         (self.status == Status::Undone
             || self.status == Status::Complete && self.undo_receipt.is_none())
             && self.batches.iter().all(|b| !b.attempted() || verified(b))
@@ -143,12 +152,12 @@ impl Run {
         self.batches
             .iter()
             .chain(self.reverse.iter().map(|r| &r.evidence))
-            .all(|e| {
-                !e.attempted()
-                    || e.observed()
-                        && e.resolutions()
-                            .values()
-                            .all(|r| *r != Resolution::Uncertain)
+            .all(|e| !e.attempted() || e.observed() && !e.uncertain())
+            && self.compensation.iter().all(|c| {
+                c.evidence
+                    .resolutions()
+                    .values()
+                    .all(|r| *r != super::imap_copy::CompensationResolution::Uncertain)
             })
     }
     /// Records the first completion. Called wherever a run's status is set.
@@ -177,7 +186,9 @@ impl Run {
             messages: self.plan.filing.changes.len(),
             batches: self.batches.len(),
             applied: count(&mut self.batches.iter()),
-            restored: count(&mut self.reverse.iter().map(|r| &r.evidence)),
+            restored: count(&mut self.reverse.iter().map(|r| &r.evidence))
+                + self.compensation_counts().restored,
+            copies_removed: self.compensation_counts().copies_removed,
             folders: retention::folders(&self.plan.filing.changes),
         }
     }
@@ -260,6 +271,9 @@ pub fn verified(e: &Batch) -> bool {
             .all(|r| matches!(r, Resolution::Verified { .. }))
 }
 pub fn outcome(run: &Run, reverse: bool) -> Status {
+    if reverse && !run.compensation.is_empty() {
+        return compensation::outcome(run);
+    }
     let entries: Vec<_> = if reverse {
         run.reverse.iter().map(|r| &r.evidence).collect()
     } else {
@@ -369,6 +383,8 @@ impl Journal {
                 || r.batches.is_empty()
                 || r.batches.len() > BATCHES
                 || r.reverse.len() > r.batches.len()
+                || r.compensation.len() > r.batches.len()
+                || !r.compensation.is_empty() && !r.reverse.is_empty()
                 || [
                     &r.plan.binding.source,
                     &r.plan.binding.authority,
@@ -379,8 +395,9 @@ impl Journal {
                 ]
                 .iter()
                 .any(|s| !digest(s))
-                || (r.undo_receipt.is_none() && !r.reverse.is_empty())
-                || (r.undo_receipt.is_some() && r.reverse.is_empty())
+                || (r.undo_receipt.is_none()
+                    && (!r.reverse.is_empty() || !r.compensation.is_empty()))
+                || (r.undo_receipt.is_some() && r.reverse.is_empty() && r.compensation.is_empty())
                 || (r.undo_receipt.is_none() && r.undo_conflicts != 0)
                 || r.undo_conflicts > r.plan.filing.changes.len()
                 || r.undo_receipt.as_ref().is_some_and(|s| !digest(s))
@@ -453,6 +470,7 @@ impl Journal {
             if count != r.plan.filing.changes.len() {
                 return Err(invalid());
             }
+            compensation::validate(r)?;
             let mut reversed = BTreeSet::new();
             for b in &r.reverse {
                 let f = r.batches.get(b.forward).ok_or_else(invalid)?;
@@ -494,10 +512,10 @@ impl Journal {
                 || r.undo_receipt.is_some()
                     && r.batches.iter().any(|b| b.attempted() && !b.observed())
                 || r.status == Status::Complete && !r.batches.iter().all(verified)
-                || r.status == Status::Undone
-                    && (r.reverse.is_empty() || !r.reverse.iter().all(|b| verified(&b.evidence)))
+                || r.status == Status::Undone && outcome(r, true) != Status::Undone
                 || r.status == Status::UndoRunning && r.undo_receipt.is_none()
                 || r.status == Status::Complete && r.reverse.iter().any(|b| b.evidence.attempted())
+                || r.status == Status::Complete && !r.compensation.is_empty()
                 || r.status == Status::Uncertain
                     && outcome(r, r.undo_receipt.is_some()) != Status::Uncertain
                 || r.status == Status::Stopped

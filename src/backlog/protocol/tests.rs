@@ -261,6 +261,7 @@ pub(crate) fn run(account: &AccountId, stage: Stage) -> Run {
         stop_requested: false,
         batches: vec![Batch::copy(e)],
         reverse: vec![],
+        compensation: vec![],
         undo_receipt: None,
         undo_conflicts: 0,
         completed_at: None,

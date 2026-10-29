@@ -9,7 +9,7 @@
       kept: (d: string) => `Undone. The journal is kept until ${d}, then replaced by a summary.`,
       compacted: 'Compacted runs',
       compactedNote: (n: number) => `Runs completed more than ${n} days ago keep only this summary. Undo is no longer offered for them.`,
-      line: (s: RunSummary, c: string, k: string) => `${s.messages} messages in ${s.batches} batches · ${s.applied} applied · ${s.restored} restored · completed ${c} · compacted ${k}`,
+      line: (s: RunSummary, c: string, k: string) => `${s.messages} messages in ${s.batches} batches · ${s.applied} applied · ${s.restored} restored · ${s.copies_removed} extra copies removed · completed ${c} · compacted ${k}`,
       status: { complete: 'complete', undone: 'undone' },
     },
     de: {
@@ -19,7 +19,7 @@
       kept: (d: string) => `Rückgängig gemacht. Das Journal bleibt bis ${d} erhalten und wird dann durch eine Zusammenfassung ersetzt.`,
       compacted: 'Zusammengefasste Abläufe',
       compactedNote: (n: number) => `Abläufe, die vor mehr als ${n} Tagen abgeschlossen wurden, behalten nur diese Zusammenfassung. Rückgängigmachen wird für sie nicht mehr angeboten.`,
-      line: (s: RunSummary, c: string, k: string) => `${s.messages} Nachrichten in ${s.batches} Stapeln · ${s.applied} angewendet · ${s.restored} zurückgesetzt · abgeschlossen ${c} · zusammengefasst ${k}`,
+      line: (s: RunSummary, c: string, k: string) => `${s.messages} Nachrichten in ${s.batches} Stapeln · ${s.applied} angewendet · ${s.restored} zurückgesetzt · ${s.copies_removed} zusätzliche Kopien entfernt · abgeschlossen ${c} · zusammengefasst ${k}`,
       status: { complete: 'abgeschlossen', undone: 'rückgängig gemacht' },
     },
   }

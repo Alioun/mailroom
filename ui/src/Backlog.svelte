@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import ArchiveOffer from './ArchiveOffer.svelte'
-  import { archiveCopy, archiveReason } from './archive-copy'
+  import { archiveCopy, archiveReason, archiveOfferAvailable } from './archive-copy'
   import ProtocolBacklog from './ProtocolBacklog.svelte'
   import GmailBacklog from './GmailBacklog.svelte'
   import { openBacklog, previewBacklog, startBacklog, advanceBacklog, resumeBacklog, stopBacklog, previewBacklogUndo, undoBacklog, resumeBacklogUndo, type BacklogOptions, type BacklogPreview, type BacklogView, type BacklogUndoPreview } from './api'
@@ -84,7 +84,7 @@
   <label>{t.scope}<select bind:value={scope} disabled={working} onchange={invalidate}><option value="inbox_unfiled">{t.unfiled}</option><option value="inbox">{t.inbox}</option><option value="every_folder">{t.every}</option></select></label>
   <label><input type="checkbox" bind:checked={protect} disabled={working} onchange={invalidate} />{t.protect}</label>
   <div class="actions"><button disabled={working} onclick={() => act(() => plan())}>{t.preview}</button><button disabled={working} onclick={() => act(load)}>{t.reload}</button></div>
-  {#if view?.runs.some(run => run.status === 'completed')}<ArchiveOffer {account} {lang} disabled={working} folders={false} onpreview={() => act(() => plan(null, 'archive_unmatched'))} />{/if}
+  {#if archiveOfferAvailable(!!view?.runs.some(run => run.status === 'completed'), preview?.plan)}<ArchiveOffer {account} {lang} disabled={working} folders={false} onpreview={() => act(() => plan(null, 'archive_unmatched'))} />{/if}
   {#if error}<p role="alert">{error}</p>{/if}
   {#if preview}
     {#if preview.plan.options.intent === 'archive_unmatched'}<h4>{archiveText.title}</h4>{/if}

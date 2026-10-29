@@ -156,7 +156,7 @@ async fn separate_archive_http_preview_confirmation_execution_and_undo() {
         assert_eq!(undone["runs"][0]["undo"][0]["state"], "restored");
         println!(
             "MAILROOM_ARCHIVE_FIXTURE {}",
-            json!({"provider":provider,"preview":p,"completed":done,"undone":undone})
+            json!({"provider":provider,"ordinary":ordinary,"preview":p,"completed":done,"undone":undone})
         );
     }
 }

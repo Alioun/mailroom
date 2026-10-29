@@ -7,7 +7,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte'
 import ts from 'typescript'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
-const audit = `${root}.audit/unmatched-archive/`
+const audit = `${root}${process.env.MAILROOM_VERIFY_AUDIT ?? '.audit/unmatched-archive'}/`
 await mkdir(`${audit}render`, { recursive: true })
 const log = await readFile(process.argv[2] ?? `${audit}verified-3.log`, 'utf8')
 const fixtures = [...log.matchAll(/MAILROOM_ARCHIVE_FIXTURE (.+)/g)].map(match => JSON.parse(match[1]))
@@ -26,7 +26,7 @@ globalThis.fetch = async (_path, options) => {
   assert.ok(response)
   const command = JSON.parse(options.body).command
   assert.equal(command.action, response.action)
-  if (command.options) assert.equal(command.options.intent, 'archive_unmatched')
+  if (command.options) assert.equal(command.options.intent ?? 'sort', response.value.plan.options.intent ?? 'sort')
   return new Response(JSON.stringify(response.value), { headers: { 'content-type': 'application/json' } })
 }
 let component = await readFile(`${root}ui/src/Backlog.svelte`, 'utf8')
@@ -63,7 +63,15 @@ for (const fixture of fixtures) {
   const view = await api.openBacklog(account)
   assert.equal(view.runs[0].plan.options.intent, 'archive_unmatched')
   if (fixture.provider === 'gmail') assert.deepEqual(preview.plan.changes[0].operation, { kind: 'gmail', add: [], remove: ['\\Inbox'] })
+  responses.push({ action: 'preview', value: fixture.ordinary })
+  const ordinary = await api.previewBacklog(account, fixture.ordinary.plan.options)
+  assert.equal(ordinary.plan.changes.length, 0)
   for (const lang of ['en', 'de']) {
+    const emptyView = { ...view, runs: [] }
+    const emptySort = await screen(`${fixture.provider}-empty-sort`, lang, rendered.Backlog, { account, lang, fixture: { preview: ordinary, view: emptyView } })
+    assert.ok(emptySort.includes('class="archive-offer"'), 'An empty successful sorting preview still offers separate archive review')
+    const blocked = await screen(`${fixture.provider}-blocked-sort`, lang, rendered.Backlog, { account, lang, fixture: { preview: { ...ordinary, plan: { ...ordinary.plan, proof_gate: 'blocked' } }, view: emptyView } })
+    assert.ok(!blocked.includes('class="archive-offer"'), 'A blocked preview cannot unlock the archive offer')
     const initial = await screen(`${fixture.provider}-initial`, lang, rendered.Backlog, { account, lang, fixture: { preview: null, view: { ...view, runs: [] } } })
     assert.ok(!initial.includes('class="archive-offer"'))
     const completed = await screen(`${fixture.provider}-completed`, lang, rendered.Backlog, { account, lang, fixture: { preview: null, view } })
@@ -84,5 +92,5 @@ for (const lang of ['en', 'de']) {
   assert.ok(folders.includes(lang === 'en' ? 'Archive folders for old unmatched mail' : 'Archivordner für alte unzugeordnete Nachrichten'))
 }
 assert.equal(responses.length, 0)
-await writeFile(`${audit}ui-results.json`, `${JSON.stringify({ apiChecks: 4, renderings: results, limitations: 'Server rendering with fixture initial-state injection. Mounted actions, layout and browser lifecycle remain unverified.' }, null, 2)}\n`)
+await writeFile(`${audit}ui-results.json`, `${JSON.stringify({ apiChecks: 6, renderings: results, limitations: 'Server rendering with fixture initial-state injection. Mounted actions, layout and browser lifecycle remain unverified.' }, null, 2)}\n`)
 console.log(`Archive API checks passed. ${results.length} bilingual server renderings passed.`)

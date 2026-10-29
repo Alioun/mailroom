@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import ArchiveOffer from './ArchiveOffer.svelte'
-  import { archiveCopy, archiveReason } from './archive-copy'
+  import { archiveCopy, archiveReason, archiveOfferAvailable } from './archive-copy'
   import { readAccountStatus, openProtocolBacklog, previewProtocolBacklog, previewProtocolUndo, protocolAction, type ProtocolView, type ProtocolPreview, type ProtocolUndo, type BacklogOptions } from './api'
   import UndoRetention from './UndoRetention.svelte'
   import CloseRun from './CloseRun.svelte'
@@ -72,7 +72,7 @@
   <label>{t.scope}<select bind:value={scope} disabled={busy || running} onchange={invalidate}><option value="inbox_unfiled">{t.unfiled}</option><option value="inbox">{t.inbox}</option><option value="every_folder">{t.every}</option></select></label>
   <label><input type="checkbox" bind:checked={protect} disabled={busy || running} onchange={invalidate} />{t.protect}</label>
   <div class="actions"><button disabled={busy || running || !view?.installed || view?.recovery_hold} onclick={() => act(() => plan())}>{t.preview}</button><button disabled={busy || running} onclick={() => act(load)}>{t.reload}</button><button disabled={cancelling || !view?.installed || view?.recovery_hold} onclick={cancel}>{t.cancel}</button></div>
-  {#if view?.journal.runs.some(run => run.status === 'complete')}<ArchiveOffer {account} {lang} disabled={busy || running || !view.installed || view.recovery_hold} folders={true} onpreview={() => act(() => plan(null, 'archive_unmatched'))} />{/if}
+  {#if archiveOfferAvailable(!!view?.journal.runs.some(run => run.status === 'complete'), preview?.operation.plan.filing)}<ArchiveOffer {account} {lang} disabled={busy || running || !view?.installed || !!view?.recovery_hold} folders={true} onpreview={() => act(() => plan(null, 'archive_unmatched'))} />{/if}
   {#if error}<p role="alert">{error}</p>{/if}
   {#if running || cancelling}<p role="status">{t.wait} · {savedCount}</p>{/if}
   {#if preview}

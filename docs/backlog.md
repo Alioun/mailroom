@@ -85,7 +85,7 @@ Gmail offers no conditional label store. Another client can change labels or fla
 
 ## Separate old unmatched-mail archive
 
-After a completed sorting run, the local interface offers a separate, initially unchecked archive choice. `Options.intent` is `archive_unmatched`; ordinary sorting omits the field and retains its historical receipt shape. Archive previews require Inbox-only scope and use separate confirmation purposes for synthetic filing, protocol MOVE, Gmail labels and archive-folder creation.
+After a completed sorting run or a successful ordinary preview with no filing changes, the local interface offers a separate, initially unchecked archive choice. `Options.intent` is `archive_unmatched`; ordinary sorting omits the field and retains its historical receipt shape. A blocked preview or an archive preview does not qualify as an ordinary sorting evaluation. Archive previews require Inbox-only scope and use separate confirmation purposes for synthetic filing, protocol MOVE, Gmail labels and archive-folder creation.
 
 Only an unmatched Inbox decision with no recipient review hold qualifies. Its IMAP `INTERNALDATE` must be strictly older than twelve calendar months at the saved workspace's as-of time. The year comes from that arrival date. Missing or invalid arrival dates do not fall back to header Date. Future and boundary-date messages remain excluded. Existing rule decisions, unknown or mixed recipient roles, protected Flagged messages and excluded or Deleted messages retain their normal protections.
 

@@ -19,6 +19,10 @@ pub(crate) use accounts::recovery;
 pub use accounts::{
     Account, AccountPaths, Accounts, CredentialBackend, OsCredentials, Provider, SecretValue,
 };
+pub use backlog::compensation_review::{
+    CopyCompensationActions, CopyCompensationObservation, CopyCompensationRequest,
+    CopyCompensationReview,
+};
 pub use scan::{Cancellation, ScanProgress};
 use serde::Serialize;
 

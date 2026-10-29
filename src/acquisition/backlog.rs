@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use subtle::ConstantTimeEq;
 
 mod batches;
+pub(super) mod compensation_review;
 pub(super) mod copy_checkpoints;
 pub(super) mod copy_worker;
 

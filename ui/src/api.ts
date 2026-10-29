@@ -244,7 +244,7 @@ export async function rotateAccount(account: string): Promise<void> { lifecycleS
 export async function recoverAccount(account: string): Promise<void> { lifecycleSaved.parse(await accountPost('lifecycle', { action: 'recover', account })) }
 
 const proposalChange = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('addition'), rule: z.record(z.string(), z.json()) }),
+  z.object({ kind: z.literal('extend_sender'), id: z.string(), address: z.string() }).strict(),
   z.object({ kind: z.literal('patch'), patch: z.record(z.string(), z.json()) }),
 ])
 const proposalSelection = z.object({ account: z.string(), generation: z.string(), candidates: z.array(z.object({ id: z.string(), change: proposalChange })) })

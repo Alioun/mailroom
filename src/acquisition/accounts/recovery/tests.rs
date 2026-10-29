@@ -507,6 +507,18 @@ fn organisational_decisions_survive_real_rotation_and_recovery_without_approval_
     let (root, repo, account) = fixture();
     let store = repo.store(&account).unwrap();
     let mut saved = store.load_state().unwrap();
+    saved
+        .census
+        .folders
+        .get_mut("INBOX")
+        .unwrap()
+        .messages
+        .get_mut(&3)
+        .unwrap()
+        .headers
+        .from[0]
+        .address = "robot@new-service.example".into();
+    store.save_state(&mut saved).unwrap();
     let g = proposals::generate(
         &saved,
         &crate::rules::workspace::WorkspaceContext::local(account.provider),
@@ -517,8 +529,20 @@ fn organisational_decisions_survive_real_rotation_and_recovery_without_approval_
         account: g.account,
         generation: g.generation,
         candidates: vec![Selected {
-            id: g.candidates[0].id.clone(),
-            change: g.candidates[0].change.clone(),
+            id: g
+                .candidates
+                .iter()
+                .find(|c| !c.rejected)
+                .unwrap()
+                .id
+                .clone(),
+            change: g
+                .candidates
+                .iter()
+                .find(|c| !c.rejected)
+                .unwrap()
+                .change
+                .clone(),
         }],
     };
     let old = proposals::review(

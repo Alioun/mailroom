@@ -78,7 +78,7 @@ pub struct CompiledArtifact {
     omissions: Vec<Omission>,
     folders: BTreeSet<String>,
 }
-pub const SEMANTICS: &str = "mailroom-sieve-subset-v7";
+pub const SEMANTICS: &str = "mailroom-sieve-subset-v8";
 /// Content types that count as invoice document evidence for keyword forwards.
 pub const SUPPORTED_INVOICE_TYPES: [&str; 3] = ["application/pdf", "application/xml", "text/xml"];
 
@@ -400,6 +400,23 @@ pub(super) fn compile_prepared(
         {
             return Err("An override patch must change a value".into());
         }
+        let membership_only = rule.stage == Stage::From
+            && rule
+                .when
+                .iter()
+                .any(|c| matches!(c, Condition::SenderSet { .. }))
+            && p.enabled.is_none()
+            && p.folder.is_none()
+            && p.when.is_none()
+            && p.accounts.is_none()
+            && p.mark_read.is_none()
+            && !p.extend.is_empty()
+            && p.extend.iter().all(|c| {
+                matches!(
+                    c,
+                    Condition::FromAddress { .. } | Condition::FromDomain { .. }
+                )
+            });
         if let Some(v) = p.enabled {
             rule.enabled = v;
         }
@@ -437,7 +454,9 @@ pub(super) fn compile_prepared(
             rule.mark_read = v;
         }
         validate_rule(rule)?;
-        *priority = if rule.stage == Stage::Guard { 0 } else { 1 };
+        if !membership_only {
+            *priority = if rule.stage == Stage::Guard { 0 } else { 1 };
+        }
         *origin = "preset patched by override".into();
         let e = effective.iter_mut().find(|r| r.id == id).unwrap();
         e.origin = origin.clone();
@@ -446,10 +465,12 @@ pub(super) fn compile_prepared(
         e.definition = EffectiveDefinition::Filing { rule: rule.clone() };
         trace.push(format!(
             "Override {id}: {}",
-            if rule.enabled {
-                "patched before bulk"
-            } else {
+            if !rule.enabled {
                 "disabled"
+            } else if membership_only {
+                "sender list extended at its existing priority"
+            } else {
+                "patched before bulk"
             }
         ));
     }

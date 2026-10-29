@@ -53,6 +53,79 @@ fn encoded(v: &impl Serialize) -> serde_json::Value {
 }
 
 #[test]
+fn unknown_senders_extend_one_category_in_a_batch_without_standalone_rules() {
+    let (_root, store, mut state) = fixture();
+    state
+        .census
+        .folders
+        .get_mut("INBOX")
+        .unwrap()
+        .messages
+        .get_mut(&3)
+        .unwrap()
+        .headers
+        .subject = "order confirmed".into();
+    let context = workspace::WorkspaceContext::local(Provider::MailboxOrg);
+    let g = generate(&state, &context, store.keys()).unwrap();
+    assert_eq!(g.candidates.len(), 2);
+    for candidate in &g.candidates {
+        assert_eq!(encoded(&candidate.change)["kind"], "extend_sender");
+        assert_eq!(candidate.change.target(), "sender.core.orders");
+    }
+    let w = state.workspace.as_ref().unwrap();
+    let (_, original) = config::documents(
+        &w.input.documents.preset_yaml,
+        &w.input.documents.override_yaml,
+    )
+    .unwrap();
+    let selected = selection(&g, &[0, 1]);
+    let r = review(
+        &state,
+        &context,
+        store.keys(),
+        &selected,
+        Disposition::Accept,
+    )
+    .unwrap();
+    confirm(
+        &mut state,
+        &context,
+        store.keys(),
+        &selected,
+        Disposition::Accept,
+        &r.receipt,
+    )
+    .unwrap();
+    store.save_state(&mut state).unwrap();
+    let state = store.load_state().unwrap();
+    let w = state.workspace.as_ref().unwrap();
+    let (_, overrides) = config::documents(
+        &w.input.documents.preset_yaml,
+        &w.input.documents.override_yaml,
+    )
+    .unwrap();
+    assert_eq!(encoded(&overrides.additions), encoded(&original.additions));
+    let patches: Vec<_> = overrides
+        .patches
+        .iter()
+        .filter(|p| p.id == "sender.core.orders")
+        .collect();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].extend.len(), 2);
+    assert!(
+        generate(&state, &context, store.keys())
+            .unwrap()
+            .candidates
+            .is_empty()
+    );
+    assert_eq!(state.proposals.history.len(), 2);
+    assert_ne!(
+        state.proposals.history[0].target,
+        state.proposals.history[1].target
+    );
+}
+
+#[test]
 fn generated_explanations_keep_counts_and_missing_sender_distinct() {
     let (_root, _store, mut state) = fixture();
     let keys = CensusKeys::derive(
@@ -185,7 +258,7 @@ fn deterministic_exact_rejection_survives_encrypted_reopen_and_material_changes(
     )
     .unwrap();
     assert_ne!(fresh.candidates[0].id, first.candidates[0].id);
-    assert!(!fresh.candidates[0].rejected);
+    assert!(fresh.candidates[0].rejected);
     assert_eq!(fresh.candidates[0].prior_rejections, 1);
     assert_eq!(changed.proposals.history.len(), 1);
 }
@@ -260,13 +333,13 @@ fn exact_selected_batch_preserves_all_other_state_and_requires_fresh_proof() {
     .unwrap();
     assert!(
         overrides
-            .additions
+            .patches
             .iter()
             .any(|r| r.id == selected.candidates[0].change.target())
     );
     assert!(
         !overrides
-            .additions
+            .patches
             .iter()
             .any(|r| r.id == g.candidates[0].change.target())
     );
@@ -361,8 +434,8 @@ fn stale_tamper_cross_purpose_cross_account_and_empty_selections_fail() {
             2 => s.candidates[0].id = "0".repeat(64),
             3 => s.account = "other-account".into(),
             _ => {
-                if let Change::Addition { rule } = &mut s.candidates[0].change {
-                    rule.mark_read = true;
+                if let Change::ExtendSender { address, .. } = &mut s.candidates[0].change {
+                    *address = "tampered@other.example".into();
                 }
             }
         }
@@ -465,11 +538,15 @@ fn gmail_dedup_sent_exclusion_unsupported_evidence_and_conflicts() {
         &w.input.documents.override_yaml,
     )
     .unwrap();
-    if let Change::Addition { rule } = &candidate.change {
-        let mut owner = rule.clone();
-        owner.enabled = false;
-        overrides.additions.push(owner);
-    }
+    overrides.patches.push(Patch {
+        id: candidate.change.target().into(),
+        enabled: Some(false),
+        folder: None,
+        when: None,
+        extend: vec![],
+        accounts: None,
+        mark_read: None,
+    });
     w.input.documents.override_yaml = serde_yaml_ng::to_string(&overrides).unwrap();
     let conflicted = generate(
         &conflict,
@@ -834,10 +911,7 @@ fn bilingual_majorities_and_known_folder_evidence_require_unique_existing_mappin
         store.keys(),
     )
     .unwrap();
-    let Change::Addition { rule } = &g.candidates[0].change else {
-        panic!("new rule expected")
-    };
-    assert_eq!(category_key(rule.category), category_key(Category::Money));
+    assert_eq!(g.candidates[0].change.target(), "sender.core.money");
     assert!(matches!(
         g.candidates[0].rationale,
         Rationale::SubjectMajority {
@@ -1025,4 +1099,319 @@ fn identical_acquisition_refresh_preserves_exact_rejection_but_invalidates_appro
         )
         .is_err()
     );
+}
+
+#[test]
+fn category_extension_preserves_owner_patch_fields_and_aliases() {
+    let (_root, store, mut state) = fixture();
+    let w = state.workspace.as_mut().unwrap();
+    let (mut preset, mut overrides) = config::documents(
+        &w.input.documents.preset_yaml,
+        &w.input.documents.override_yaml,
+    )
+    .unwrap();
+    preset
+        .renamed
+        .insert("sender.old-orders".into(), "sender.core.orders".into());
+    let patch = Patch {
+        id: "sender.old-orders".into(),
+        enabled: Some(true),
+        folder: Some("Owner Orders".into()),
+        when: Some(vec![
+            Condition::SenderSet {
+                addresses: BTreeSet::from(["known@other.example".into()]),
+                domains: BTreeSet::new(),
+            },
+            Condition::NonBulk,
+        ]),
+        extend: vec![Condition::FromAddress {
+            value: "earlier@other.example".into(),
+        }],
+        accounts: Some(BTreeSet::from([state.census.account.as_str().into()])),
+        mark_read: Some(false),
+    };
+    overrides.patches.push(patch.clone());
+    w.input.documents.preset_yaml = serde_yaml_ng::to_string(&preset).unwrap();
+    w.input.documents.override_yaml = serde_yaml_ng::to_string(&overrides).unwrap();
+    let context = workspace::WorkspaceContext::local(Provider::MailboxOrg);
+    let g = generate(&state, &context, store.keys()).unwrap();
+    let candidate = g
+        .candidates
+        .iter()
+        .position(|c| c.sender_claim == "robot@shop.example")
+        .unwrap();
+    let r = review(
+        &state,
+        &context,
+        store.keys(),
+        &selection(&g, &[candidate]),
+        Disposition::Accept,
+    )
+    .unwrap();
+    let (_, changed) = config::documents(
+        &r.resulting_documents.preset_yaml,
+        &r.resulting_documents.override_yaml,
+    )
+    .unwrap();
+    assert_eq!(changed.patches.len(), overrides.patches.len());
+    let mut expected = patch;
+    expected.extend.push(Condition::FromAddress {
+        value: "robot@shop.example".into(),
+    });
+    assert_eq!(
+        encoded(
+            changed
+                .patches
+                .iter()
+                .find(|p| p.id == "sender.old-orders")
+                .unwrap()
+        ),
+        encoded(&expected)
+    );
+    overrides.patches = changed.patches.clone();
+    assert_eq!(encoded(&overrides), encoded(&changed));
+}
+
+#[test]
+fn missing_disabled_replaced_or_incompatible_category_targets_stay_unresolved() {
+    for variant in 0..7 {
+        let (_root, store, mut state) = fixture();
+        let w = state.workspace.as_mut().unwrap();
+        let (mut preset, mut overrides) = config::documents(
+            &w.input.documents.preset_yaml,
+            &w.input.documents.override_yaml,
+        )
+        .unwrap();
+        let mut patch = Patch {
+            id: "sender.core.orders".into(),
+            enabled: None,
+            folder: None,
+            when: None,
+            extend: vec![],
+            accounts: None,
+            mark_read: None,
+        };
+        match variant {
+            0 => preset.core_senders = None,
+            1 => patch.enabled = Some(false),
+            2 => {
+                patch.when = Some(vec![Condition::FromAddress {
+                    value: "other@other.example".into(),
+                }])
+            }
+            3 => patch.mark_read = Some(true),
+            4 => patch.accounts = Some(BTreeSet::from(["other-account".into()])),
+            5 => patch.extend.push(Condition::SubjectContains {
+                value: "restricted".into(),
+            }),
+            _ => {
+                preset
+                    .rules
+                    .iter_mut()
+                    .find(|r| r.id == "topic.orders")
+                    .unwrap()
+                    .folder = Some("Custom Orders".into());
+            }
+        }
+        if (1..=5).contains(&variant) {
+            overrides.patches.push(patch);
+        }
+        w.input.documents.preset_yaml = serde_yaml_ng::to_string(&preset).unwrap();
+        w.input.documents.override_yaml = serde_yaml_ng::to_string(&overrides).unwrap();
+        let before = encoded(&state);
+        let g = generate(
+            &state,
+            &workspace::WorkspaceContext::local(Provider::MailboxOrg),
+            store.keys(),
+        )
+        .unwrap();
+        assert!(
+            !g.candidates
+                .iter()
+                .any(|c| c.sender_claim == "robot@shop.example"),
+            "variant {variant}"
+        );
+        assert!(
+            g.unresolved
+                .iter()
+                .any(|u| u.sender_claim.as_deref() == Some("robot@shop.example")
+                    && u.reason == UnresolvedReason::ConfigurationConflict)
+        );
+        assert_eq!(encoded(&state), before);
+    }
+}
+
+#[test]
+fn rejection_survives_new_evidence_and_old_standalone_identity_without_blocking_a_sibling() {
+    let (_root, store, mut state) = fixture();
+    state
+        .census
+        .folders
+        .get_mut("INBOX")
+        .unwrap()
+        .messages
+        .get_mut(&3)
+        .unwrap()
+        .headers
+        .subject = "order confirmation".into();
+    let context = workspace::WorkspaceContext::local(Provider::MailboxOrg);
+    let g = generate(&state, &context, store.keys()).unwrap();
+    let selected = selection(&g, &[0]);
+    let r = review(
+        &state,
+        &context,
+        store.keys(),
+        &selected,
+        Disposition::Reject,
+    )
+    .unwrap();
+    confirm(
+        &mut state,
+        &context,
+        store.keys(),
+        &selected,
+        Disposition::Reject,
+        &r.receipt,
+    )
+    .unwrap();
+    state.proposals.history[0].candidate = "a".repeat(64);
+    state.proposals.history[0].generation = "b".repeat(64);
+    state
+        .census
+        .folders
+        .get_mut("INBOX")
+        .unwrap()
+        .messages
+        .get_mut(&1)
+        .unwrap()
+        .headers
+        .subject
+        .push_str(" changed");
+    store.save_state(&mut state).unwrap();
+    let mut state = store.load_state().unwrap();
+    let fresh = generate(&state, &context, store.keys()).unwrap();
+    assert!(fresh.candidates[0].rejected);
+    assert!(!fresh.candidates[1].rejected);
+    assert!(
+        review(
+            &state,
+            &context,
+            store.keys(),
+            &selection(&fresh, &[0]),
+            Disposition::Accept
+        )
+        .is_err()
+    );
+    let sibling = selection(&fresh, &[1]);
+    let r = review(
+        &state,
+        &context,
+        store.keys(),
+        &sibling,
+        Disposition::Accept,
+    )
+    .unwrap();
+    confirm(
+        &mut state,
+        &context,
+        store.keys(),
+        &sibling,
+        Disposition::Accept,
+        &r.receipt,
+    )
+    .unwrap();
+    let final_generation = generate(&state, &context, store.keys()).unwrap();
+    assert_eq!(final_generation.candidates.len(), 1);
+    assert!(final_generation.candidates[0].rejected);
+}
+
+#[test]
+fn category_membership_keeps_owner_subject_and_mute_overrides_ahead_of_filing() {
+    let (_root, store, state) = fixture();
+    let context = workspace::WorkspaceContext::local(Provider::MailboxOrg);
+    let g = generate(&state, &context, store.keys()).unwrap();
+    let r = review(
+        &state,
+        &context,
+        store.keys(),
+        &selection(&g, &[0]),
+        Disposition::Accept,
+    )
+    .unwrap();
+    let mut input: engine::PreviewInput =
+        serde_json::from_str(include_str!("../../../examples/sample.json")).unwrap();
+    input.documents = r.resulting_documents;
+    input.context.account = g.account;
+    input.pins.clear();
+    let (_, mut overrides) =
+        config::documents(&input.documents.preset_yaml, &input.documents.override_yaml).unwrap();
+    overrides
+        .roles
+        .addresses
+        .insert("owner@example.test".into(), config::Role::Personal);
+    overrides.additions.push(Rule {
+        id: "user.owner-priority".into(),
+        category: Category::Contracts,
+        stage: Stage::Subject,
+        when: vec![Condition::SubjectContains {
+            value: "owner choice".into(),
+        }],
+        folder: Some("Owner Choice".into()),
+        enabled: true,
+        accounts: BTreeSet::new(),
+        retain: false,
+        mark_read: false,
+    });
+    overrides.additions.push(Rule {
+        id: "user.muted".into(),
+        category: Category::Newsletters,
+        stage: Stage::From,
+        when: vec![Condition::ListIdExact {
+            value: "<muted.shop.example>".into(),
+        }],
+        folder: Some("Muted".into()),
+        enabled: true,
+        accounts: BTreeSet::new(),
+        retain: false,
+        mark_read: true,
+    });
+    input.documents.override_yaml = serde_yaml_ng::to_string(&overrides).unwrap();
+    input.messages = [
+        ("ordinary", "Subject: ordinary"),
+        ("owner", "Subject: owner choice"),
+        ("bulk", "Subject: newsletter\r\nList-Id: <shop.example>"),
+        (
+            "muted",
+            "Subject: newsletter\r\nList-Id: <muted.shop.example>",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, extra)| engine::Fixture {
+        delivery: Default::default(),
+        observed_flags: Some(Default::default()),
+        id: id.into(),
+        current_folder: "INBOX".into(),
+        headers: format!(
+            "From: robot@shop.example\r\nDelivered-To: owner@example.test\r\n{extra}\r\n\r\n"
+        ),
+    })
+    .collect();
+    let proof = engine::preview(&input).unwrap();
+    let destinations: Vec<_> = proof
+        .decisions
+        .iter()
+        .map(|d| d.destination.label())
+        .collect();
+    assert_eq!(
+        destinations,
+        [
+            "Personal/Orders",
+            "Personal/Owner Choice",
+            "Personal/Newsletters",
+            "Personal/Muted"
+        ]
+    );
+    assert!(!proof.decisions[0].mark_read);
+    assert!(proof.decisions[3].mark_read);
+    assert!(proof.decisions.iter().all(|d| d.copies.is_empty()));
 }

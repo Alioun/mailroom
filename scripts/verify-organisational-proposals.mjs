@@ -110,7 +110,7 @@ try {
   await confirm(account, r, { receipt: wrong.receipt }, 422)
   await confirm(account, r, { disposition: 'reject' }, 422)
   for (const selected of [ { ...s, candidates: [] }, { ...s, candidates: [...s.candidates, ...s.candidates] }, { ...s, account: other }, { ...s, candidates: [{ ...s.candidates[0], id: '0'.repeat(64) }] } ]) await preview(account, selected, 'accept', 422)
-  const altered = structuredClone(s); altered.candidates[0].change.rule.mark_read = true
+  const altered = structuredClone(s); altered.candidates[0].change.address = 'altered@other.example'
   await preview(account, altered, 'accept', 422)
   await command(account, { action: 'open', capabilities: ['fileinto'] }, 422)
   checks.push('Empty, duplicate, unknown, altered, wrong-account, unconfirmed, tampered and cross-purpose rejections')
@@ -125,7 +125,7 @@ try {
   assert.equal((await fetch(`${base}/api/accounts/status`, { headers: { 'X-Mailroom-Token': oldToken } })).status, 403)
   g = await open(account)
   assert.equal(g.candidates[0].rejected, true)
-  assert.equal((await observe(account)).schema, 23)
+  assert.equal((await observe(account)).schema, 24)
   checks.push('Durable rejection survives actual process replacement and encrypted independent reopen; documents unchanged')
   let selected = selection(g, [1])
   let reviewed = await preview(account, selected)
@@ -138,8 +138,8 @@ try {
   assert.equal(g.current.proof.artifact.identity, r.current.proof.artifact.identity)
   assert.notEqual(g.candidates[0].id, s.candidates[0].id)
   assert.equal(g.candidates[0].prior_rejections, 1)
-  assert.equal(g.candidates[0].rejected, false)
-  checks.push('Equal-parsed raw-byte edit rejects old approval and keeps prior exact rejection history')
+  assert.equal(g.candidates[0].rejected, true)
+  checks.push('Equal-parsed raw-byte edit rejects old approval and keeps the sender rejection unavailable')
   selected = selection(g, [1]); reviewed = await preview(account, selected)
   await writeFile(join(directory, 'ledger/addresses.yaml'), (await readFile(join(directory, 'ledger/addresses.yaml'), 'utf8')) + '\n# external source-byte edit\n')
   await confirm(account, reviewed, {}, 422)

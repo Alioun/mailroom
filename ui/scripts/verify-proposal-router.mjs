@@ -100,7 +100,8 @@ try {
   const owner = await account()
   const other = await account()
   const generated = await api.openProposals(owner)
-  assert.ok(generated.candidates.length >= 2)
+  assert.ok(generated.candidates.length >= 3)
+  assert.ok(generated.candidates.every(candidate => candidate.change.kind === 'extend_sender' && candidate.change.id === 'sender.core.orders'))
   assert.ok(generated.candidates.every(candidate => candidate.rationale.kind === 'subject_majority'))
   assert.ok(generated.current.proof.decisions.every(decision => decision.destination.kind === 'inbox' && decision.copies.length === 0))
   function selection(candidate) {
@@ -110,19 +111,29 @@ try {
   const retained = await api.confirmProposals(owner, rejected)
   assert.ok(retained.candidates[0].rejected)
   assert.equal(retained.candidates[1].rejected, false)
-  const approved = await api.reviewProposals(owner, selection(retained.candidates[1]), 'accept')
+  const batch = { account: owner, generation: retained.generation, candidates: retained.candidates.filter(candidate => !candidate.rejected).map(candidate => ({ id: candidate.id, change: candidate.change })) }
+  assert.ok(batch.candidates.length >= 2)
+  const approved = await api.reviewProposals(owner, batch, 'accept')
   assert.ok(approved.acceptance_available)
   const altered = structuredClone(approved.selection)
-  altered.candidates[0].change.rule.mark_read = true
+  altered.candidates[0].change.address = 'altered@other.example'
   await assert.rejects(() => api.reviewProposals(owner, altered, 'accept'))
   await assert.rejects(() => api.confirmProposals(other, approved))
   const saved = await api.confirmProposals(owner, approved)
-  assert.equal(saved.decisions.history.length, 2)
+  assert.equal(saved.decisions.history.length, generated.candidates.length)
+  assert.equal(saved.candidates.length, 1)
+  assert.ok(saved.candidates[0].rejected)
+  assert.equal(new Set(saved.decisions.history.map(decision => decision.target)).size, generated.candidates.length)
+  const document = (await post('workspace/open', { account: owner })).workspace.input.documents.override_yaml
+  assert.equal(document.match(/id: sender\.core\.orders/g)?.length, 1)
+  for (const candidate of batch.candidates) assert.ok(document.includes(candidate.change.address))
+  assert.ok(!document.includes(generated.candidates[0].change.address))
+  await assert.rejects(() => api.reviewProposals(owner, { ...selection(saved.candidates[0]), generation: saved.generation }, 'accept'))
   assert.equal((await api.openProposals(other)).decisions.history.length, 0)
   await assert.rejects(() => api.confirmProposals(owner, approved))
   const proof = await api.previewWorkspace(owner)
   assert.ok(proof.proof.decisions.every(decision => decision.destination.kind === 'inbox' && decision.copies.length === 0))
-  const result = { syntheticOnly: true, bridgeSha256: artifact.sha256, requests: sequence, candidates: generated.candidates.length, decisions: saved.decisions.history.length, checks: ['session and Origin protections', 'actual HTTP router to frontend parser', 'generated counted rationale', 'separate exact rejection and acceptance', 'altered rule refused', 'cross-account confirmation refused', 'stale confirmation refused', 'other account preserved', 'fresh conservative proof'] }
+  const result = { syntheticOnly: true, bridgeSha256: artifact.sha256, requests: sequence, candidates: generated.candidates.length, decisions: saved.decisions.history.length, checks: ['session and Origin protections', 'actual HTTP router to frontend parser', 'generated counted rationale', 'separate rejection and multi-sender category approval', 'one merged category patch preserves sibling rejection', 'accepted senders do not reappear', 'altered rule refused', 'cross-account confirmation refused', 'stale confirmation refused', 'other account preserved', 'fresh conservative proof'] }
   await writeFile(`${audit}router-results.json`, JSON.stringify(result, null, 2) + '\n')
   console.log(`Passed ${result.checks.length} synthetic router workflow groups over private pipes.`)
 } finally {

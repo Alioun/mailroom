@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const SEMANTICS: &str = "organisational-filing-v1";
+pub const SEMANTICS: &str = "organisational-filing-v2";
 pub const DECISION_LIMIT: usize = 512;
 const CANDIDATE_LIMIT: usize = 64;
 
@@ -75,15 +75,25 @@ fn identity(value: &impl Serialize) -> Result<String, String> {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Change {
     Patch { patch: Patch },
-    Addition { rule: Rule },
+    ExtendSender { id: String, address: String },
 }
 impl Change {
     fn target(&self) -> &str {
         match self {
             Self::Patch { patch } => &patch.id,
-            Self::Addition { rule } => &rule.id,
+            Self::ExtendSender { id, .. } => id,
         }
     }
+    fn decision_target(&self, account: &str) -> Result<String, String> {
+        match self {
+            Self::Patch { patch } => Ok(patch.id.clone()),
+            Self::ExtendSender { address, .. } => sender_target(account, address),
+        }
+    }
+}
+fn sender_target(account: &str, sender: &str) -> Result<String, String> {
+    let digest = identity(&(account, sender))?;
+    Ok(format!("user.organisation.{}", &digest[..32]))
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -158,8 +168,6 @@ const UNCERTAINTY: &str = "Sender and header claims are unauthenticated. No role
 
 fn sender_matches(rule: &Rule, sender: &str) -> bool {
     rule.stage == Stage::From
-        && !rule.retain
-        && !rule.mark_read
         && rule.when.iter().any(|c| {
             matches!(
                 c,
@@ -198,15 +206,46 @@ fn applies(rule: &Rule, account: &str) -> bool {
 fn category_key(category: Category) -> String {
     serde_json::to_string(&category).expect("category serializes")
 }
-fn add_change(overrides: &mut Overrides, change: &Change) -> Result<(), String> {
-    if overrides.patches.iter().any(|p| p.id == change.target())
-        || overrides.additions.iter().any(|r| r.id == change.target())
-    {
-        return Err("Proposal conflicts with an existing owner patch or addition".into());
-    }
+fn add_change(
+    preset: &config::Preset,
+    overrides: &mut Overrides,
+    change: &Change,
+) -> Result<(), String> {
+    let id = resolved_id(preset, change.target());
     match change {
-        Change::Patch { patch } => overrides.patches.push(patch.clone()),
-        Change::Addition { rule } => overrides.additions.push(rule.clone()),
+        Change::Patch { patch } => {
+            if overrides
+                .patches
+                .iter()
+                .any(|p| resolved_id(preset, &p.id) == id)
+                || overrides.additions.iter().any(|r| r.id == id)
+            {
+                return Err("Proposal conflicts with an existing owner patch or addition".into());
+            }
+            overrides.patches.push(patch.clone());
+        }
+        Change::ExtendSender { address, .. } => {
+            let extension = Condition::FromAddress {
+                value: address.clone(),
+            };
+            if let Some(patch) = overrides
+                .patches
+                .iter_mut()
+                .find(|p| resolved_id(preset, &p.id) == id)
+            {
+                patch.extend.push(extension);
+            } else {
+                overrides.patches.push(Patch {
+                    id: id.into(),
+                    enabled: None,
+                    folder: None,
+                    when: None,
+                    extend: vec![extension],
+                    accounts: None,
+                    mark_read: None,
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -216,16 +255,26 @@ fn resulting(state: &AccountState, changes: &[Change]) -> Result<AccountState, S
         .workspace
         .as_mut()
         .ok_or("Save rules before generating proposals")?;
-    let (_, mut overrides) = config::documents(
+    let (preset, mut overrides) = config::documents(
         &workspace.input.documents.preset_yaml,
         &workspace.input.documents.override_yaml,
     )?;
-    let mut targets = BTreeSet::new();
+    let mut targets = BTreeMap::new();
+    let mut senders = BTreeSet::new();
     for change in changes {
-        if !targets.insert(change.target()) {
-            return Err("Conflicting proposal targets".into());
+        let id = resolved_id(&preset, change.target());
+        let extension = matches!(change, Change::ExtendSender { .. });
+        if let Some(previous_extension) = targets.insert(id, extension) {
+            if !extension || !previous_extension {
+                return Err("Conflicting proposal targets".into());
+            }
         }
-        add_change(&mut overrides, change)?;
+        if let Change::ExtendSender { address, .. } = change {
+            if !senders.insert((id, address)) {
+                return Err("Duplicate sender extension".into());
+            }
+        }
+        add_change(&preset, &mut overrides, change)?;
     }
     workspace.input.documents.override_yaml =
         serde_yaml_ng::to_string(&overrides).map_err(|_| "Cannot serialize resulting overrides")?;
@@ -345,6 +394,13 @@ pub fn generate(
             .any(|r| r.enabled && applies(r, account) && sender_matches(r, &sender))
         {
             unresolved.push(unresolved_reason(UnresolvedReason::OwnerMappingRetained));
+            continue;
+        }
+        if current.proof.artifact.effective().iter().any(|e| {
+            matches!(&e.definition, super::program::EffectiveDefinition::Filing { rule }
+                if rule.enabled && applies(rule, account) && sender_matches(rule, &sender))
+        }) {
+            unresolved.push(unresolved_reason(UnresolvedReason::PresetMappingRetained));
             continue;
         }
         let known: Vec<_> = preset
@@ -492,24 +548,50 @@ pub fn generate(
                 },
             }
         } else {
-            let sender_id = identity(&(account, &sender))?;
-            Change::Addition {
-                rule: Rule {
-                    id: format!("user.organisation.{}", &sender_id[..32]),
-                    category,
-                    stage: Stage::From,
-                    when: vec![
-                        Condition::FromAddress {
-                            value: sender.clone(),
-                        },
-                        Condition::NonBulk,
-                    ],
-                    folder,
-                    enabled: true,
-                    accounts: BTreeSet::from([account.into()]),
-                    retain: false,
-                    mark_read: false,
-                },
+            let id = format!("sender.core.{}", category.key());
+            let target =
+                current
+                    .proof
+                    .artifact
+                    .effective()
+                    .iter()
+                    .find_map(|e| match &e.definition {
+                        super::program::EffectiveDefinition::Filing { rule } if rule.id == id => {
+                            Some(rule)
+                        }
+                        _ => None,
+                    });
+            let Some(target) = target else {
+                unresolved.push(unresolved_reason(UnresolvedReason::ConfigurationConflict));
+                continue;
+            };
+            if !target.enabled
+                || !applies(target, account)
+                || target.retain
+                || target.mark_read
+                || target.stage != Stage::From
+                || !target
+                    .when
+                    .iter()
+                    .any(|c| matches!(c, Condition::SenderSet { .. }))
+                || !target.when.iter().any(|c| matches!(c, Condition::NonBulk))
+                || !target
+                    .when
+                    .iter()
+                    .all(|c| matches!(c, Condition::SenderSet { .. } | Condition::NonBulk))
+                || folder.as_ref().is_some_and(|name| {
+                    name != target
+                        .folder
+                        .as_deref()
+                        .unwrap_or_else(|| target.category.label(overrides.layout.language))
+                })
+            {
+                unresolved.push(unresolved_reason(UnresolvedReason::ConfigurationConflict));
+                continue;
+            }
+            Change::ExtendSender {
+                id,
+                address: sender.clone(),
             }
         };
         let result = match resulting(state, std::slice::from_ref(&change)) {
@@ -539,18 +621,18 @@ pub fn generate(
                 folders: m.folders.clone(),
             })
             .collect();
-        let rejected = state
-            .proposals
-            .history
-            .iter()
-            .any(|d| d.candidate == id && d.disposition == Disposition::Reject);
+        let decision_target = change.decision_target(account)?;
+        let rejected = state.proposals.history.iter().any(|d| {
+            d.disposition == Disposition::Reject
+                && (d.candidate == id || d.target == decision_target)
+        });
         let prior_rejections = state
             .proposals
             .history
             .iter()
             .filter(|d| {
                 d.disposition == Disposition::Reject
-                    && d.target == change.target()
+                    && d.target == decision_target
                     && d.candidate != id
             })
             .count();
@@ -654,11 +736,12 @@ pub fn review(
             .iter()
             .find(|c| c.id == selected.id)
             .ok_or("Unknown proposal candidate")?;
-        if state
-            .proposals
-            .history
-            .iter()
-            .any(|d| d.candidate == candidate.id)
+        if candidate.rejected
+            || state
+                .proposals
+                .history
+                .iter()
+                .any(|d| d.candidate == candidate.id)
             || serde_json::to_value(&candidate.change).map_err(|_| "Invalid change")?
                 != serde_json::to_value(&selected.change).map_err(|_| "Invalid change")?
         {
@@ -763,7 +846,9 @@ pub fn confirm(
             candidate: selected.id.clone(),
             generation: selection.generation.clone(),
             disposition,
-            target: selected.change.target().into(),
+            target: selected
+                .change
+                .decision_target(selection.account.as_str())?,
             as_of,
         });
     }

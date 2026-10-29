@@ -49,6 +49,12 @@ const rejected = await api.reviewProposals(supported.account, fixture.reject.sel
 assert.deepEqual(requests.at(-1).command.selection, fixture.reject.selection)
 assert.equal(accepted.receipt, fixture.accept.receipt)
 assert.equal(rejected.receipt, fixture.reject.receipt)
+const obsoleteChange = structuredClone(fixture.generation)
+obsoleteChange.candidates[0].change = { kind: 'addition', rule: {} }
+await assert.rejects(() => generation(obsoleteChange), 'Standalone proposal additions are no longer accepted by the UI contract')
+const alteredExtension = structuredClone(fixture.generation)
+alteredExtension.candidates[0].change.mark_read = true
+await assert.rejects(() => generation(alteredExtension), 'An additive sender change cannot request unrelated actions')
 const unknownReason = structuredClone(fixture.unresolved)
 unknownReason.unresolved[0].reason = 'future_unknown_reason'
 await assert.rejects(() => generation(unknownReason), 'Unknown diagnostic codes must not become untranslated interface text')
@@ -89,6 +95,7 @@ for (const lang of ['en', 'de']) {
   assert.ok(body.includes(diagnostics.proposalRationaleText(supported.candidates[0].rationale, lang)))
   assert.ok(body.includes(diagnostics.proposalStatusText[lang].gate[supported.candidates[0].impact.proof.gate]))
   assert.ok(!body.includes('[object Object]'))
+  assert.ok(body.includes(lang === 'de' ? 'Diesen Absender zur Absenderliste der Kategorie hinzufügen.' : 'Add this sender to the category sender list.'))
   const missing = await screen(`unresolved-${lang}`, lang, unresolved)
   assert.ok(missing.includes(diagnostics.proposalStatusText[lang].unknownSender))
   for (const observation of unresolved.unresolved) {

@@ -346,20 +346,6 @@ impl Connection {
         }
         .readbacks(requests)
     }
-
-    pub(in crate::acquisition) fn copy_store(
-        &mut self,
-        permit: &BacklogPermit<'_>,
-        evidence: &mut CopyEvidence,
-        prepared: PreparedDelete,
-        persist: impl FnMut(&CopyEvidence) -> Result<(), Error>,
-    ) -> Result<usize, Error> {
-        Conditional {
-            io: &mut self.io,
-            capabilities: &self.capabilities,
-        }
-        .store(permit, evidence, prepared, persist)
-    }
 }
 
 #[cfg(test)]

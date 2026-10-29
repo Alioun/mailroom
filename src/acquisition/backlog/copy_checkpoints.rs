@@ -98,37 +98,17 @@ impl Accounts {
 
 impl SavedCopyCheckpoints<'_> {
     fn validate_authority(&self) -> Result<(), AcquisitionError> {
-        if self.saved.census.account != self.account.id || self.store.recovery_pending() {
-            return Err(invalid());
-        }
-        let durable = self.store.load_state()?;
-        if durable.census.account != self.account.id || durable.revision != self.saved.revision {
-            return Err(invalid());
-        }
-        self.repo.require_ready(&self.account.id)?;
-        let current = self.repo.load(&self.account.id)?;
-        if serde_json::to_vec(&current).map_err(failure)?
-            != serde_json::to_vec(self.account).map_err(failure)?
-        {
-            return Err(invalid());
-        }
-        let source = self.repo.backlog_source(self.account)?;
-        if source.profile().map_err(failure)? != Profile::Copy
-            || !source.address.ip().is_loopback()
-            || source.epoch.is_empty()
-        {
-            return Err(invalid());
-        }
         let run = &self.saved.protocol_backlog.runs[self.run];
-        if approval(self.store, run)? != self.approval
-            || self
-                .repo
-                .backlog_binding(self.account, self.store, self.saved)?
-                != run.plan.binding
-        {
+        if approval(self.store, run)? != self.approval {
             return Err(invalid());
         }
-        (self.fresh)(self.saved).map_err(failure)
+        self.repo.validate_copy_authority(
+            self.account,
+            self.store,
+            self.saved,
+            &run.plan.binding,
+            self.fresh,
+        )
     }
 
     fn same_slot(&self, evidence: &CopyEvidence) -> Result<(), Failure> {
@@ -144,6 +124,40 @@ impl SavedCopyCheckpoints<'_> {
             .continues(&self.previous)
             .map_err(|_| Failure::Unstable)?;
         Ok(())
+    }
+}
+
+impl Accounts {
+    pub(super) fn validate_copy_authority(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &AccountState,
+        binding: &Binding,
+        fresh: &dyn Fn(&AccountState) -> Result<(), String>,
+    ) -> Result<(), AcquisitionError> {
+        if saved.census.account != account.id || store.recovery_pending() {
+            return Err(invalid());
+        }
+        let durable = store.load_state()?;
+        if durable.census.account != account.id || durable.revision != saved.revision {
+            return Err(invalid());
+        }
+        self.require_ready(&account.id)?;
+        if serde_json::to_vec(&self.load(&account.id)?).map_err(failure)?
+            != serde_json::to_vec(account).map_err(failure)?
+        {
+            return Err(invalid());
+        }
+        let source = self.backlog_source(account)?;
+        if source.profile().map_err(failure)? != Profile::Copy
+            || !source.address.ip().is_loopback()
+            || source.epoch.is_empty()
+            || self.backlog_binding(account, store, saved)? != *binding
+        {
+            return Err(invalid());
+        }
+        fresh(saved).map_err(failure)
     }
 }
 

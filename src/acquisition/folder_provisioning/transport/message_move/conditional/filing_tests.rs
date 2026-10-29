@@ -439,6 +439,368 @@ impl<C: CopyCheckpoints> CopyCheckpoints for StopAfterSave<C> {
     }
 }
 
+impl<C: CopyCheckpoints> CopyCheckpoints for &mut C {
+    fn validate_intent(&mut self, e: &CopyEvidence) -> Result<(), Error> {
+        (**self).validate_intent(e)
+    }
+    fn save(&mut self, e: &CopyEvidence) -> Result<(), Error> {
+        (**self).save(e)
+    }
+}
+
+struct WorkerTransport {
+    io: Script,
+    topology: crate::census::folder_provisioning::Inventory,
+    stop_at: Option<usize>,
+    inventories: usize,
+}
+impl crate::acquisition::backlog::copy_worker::CopyTransport for WorkerTransport {
+    fn inventory(&mut self) -> Result<crate::census::folder_provisioning::Inventory, Error> {
+        self.inventories += 1;
+        Ok(self.topology.clone())
+    }
+    fn file(
+        &mut self,
+        permit: &BacklogPermit<'_>,
+        e: &mut CopyEvidence,
+        cancel: &Cancellation,
+        checkpoints: &mut impl CopyCheckpoints,
+    ) -> Result<(), Error> {
+        if let Some(at) = self.stop_at.take() {
+            let mut checkpoints = StopAfterSave {
+                inner: checkpoints,
+                count: 0,
+                at,
+                cancel: cancel.clone(),
+            };
+            self.io
+                .conditional()
+                .file(permit, e, cancel, &mut checkpoints)
+        } else {
+            self.io.conditional().file(permit, e, cancel, checkpoints)
+        }
+    }
+    fn reconcile(
+        &mut self,
+        permit: &BacklogPermit<'_>,
+        e: &mut CopyEvidence,
+        cancel: &Cancellation,
+        checkpoints: &mut impl CopyCheckpoints,
+    ) -> Result<(), Error> {
+        self.io
+            .conditional()
+            .reconcile(permit, e, cancel, checkpoints)
+    }
+}
+
+#[test]
+fn saved_worker_starts_files_and_stamps_completion_through_the_actual_checkpoint_adapter() {
+    use crate::acquisition::backlog::{copy_checkpoints::tests::fixture, copy_worker::CopyWork};
+    use crate::backlog::protocol::Status;
+    let e = initial();
+    let (_root, repo, account, store, mut saved) = fixture(e.clone());
+    saved.protocol_backlog.runs[0].status = Status::Prepared;
+    store.save_state(&mut saved).unwrap();
+    let source = repo.backlog_source.as_deref().unwrap();
+    let permit = permitted(source);
+    let id = saved.protocol_backlog.runs[0].id.clone();
+    let mut transport = WorkerTransport {
+        io: complete_script(source, &e),
+        topology: saved.protocol_backlog.runs[0].plan.topology.clone(),
+        stop_at: None,
+        inventories: 0,
+    };
+    let revision = saved.revision;
+    repo.copy_worker(&account, &store, &mut saved, &id, CopyWork::File, &|_| {
+        Ok(())
+    })
+    .unwrap()
+    .drive(&mut transport, &permit, &Cancellation::default())
+    .unwrap();
+    assert_eq!(saved.revision, revision + 12);
+    assert_eq!(saved.protocol_backlog.runs[0].status, Status::Complete);
+    assert!(saved.protocol_backlog.runs[0].completed_at.is_some());
+    assert!(!saved.protocol_backlog.runs[0].stop_requested);
+    assert!(transport.io.flights.is_empty());
+    assert_eq!(transport.inventories, 1);
+    let before = std::fs::read(store.path()).unwrap();
+    assert!(
+        repo.copy_worker(&account, &store, &mut saved, &id, CopyWork::File, &|_| Ok(
+            ()
+        ))
+        .is_err()
+    );
+    assert_eq!(std::fs::read(store.path()).unwrap(), before);
+    assert!(store.load_state().unwrap().protocol_backlog == saved.protocol_backlog);
+}
+
+#[test]
+fn saved_worker_cancellation_reconcile_and_resume_never_repeat_an_effect() {
+    use crate::acquisition::backlog::{copy_checkpoints::tests::fixture, copy_worker::CopyWork};
+    use crate::backlog::protocol::Status;
+    for stop_at in [3, 4, 6, 7, 9] {
+        let e = initial();
+        let (_root, repo, account, store, mut saved) = fixture(e.clone());
+        let source = repo.backlog_source.as_deref().unwrap();
+        let permit = permitted(source);
+        let id = saved.protocol_backlog.runs[0].id.clone();
+        let mut transport = WorkerTransport {
+            io: complete_script(source, &e),
+            topology: saved.protocol_backlog.runs[0].plan.topology.clone(),
+            stop_at: Some(stop_at),
+            inventories: 0,
+        };
+        assert_eq!(
+            repo.copy_worker(&account, &store, &mut saved, &id, CopyWork::File, &|_| Ok(
+                ()
+            ))
+            .unwrap()
+            .drive(&mut transport, &permit, &Cancellation::default()),
+            Err(crate::acquisition::AcquisitionError::Cancelled)
+        );
+        assert!(saved.protocol_backlog.runs[0].stop_requested);
+        drop(store);
+        let store = repo.store(&account).unwrap();
+        let mut reopened = store.load_state().unwrap();
+        if reopened.protocol_backlog.runs[0].status == Status::Uncertain {
+            assert!(
+                repo.copy_worker(
+                    &account,
+                    &store,
+                    &mut reopened,
+                    &id,
+                    CopyWork::File,
+                    &|_| Ok(())
+                )
+                .is_err()
+            );
+            let effects = (
+                count(&transport.io, "copy"),
+                count(&transport.io, "store"),
+                count(&transport.io, "expunge"),
+            );
+            repo.copy_worker(
+                &account,
+                &store,
+                &mut reopened,
+                &id,
+                CopyWork::Reconcile,
+                &|_| Ok(()),
+            )
+            .unwrap()
+            .drive(&mut transport, &permit, &Cancellation::default())
+            .unwrap();
+            assert_eq!(
+                (
+                    count(&transport.io, "copy"),
+                    count(&transport.io, "store"),
+                    count(&transport.io, "expunge")
+                ),
+                effects
+            );
+        }
+        if reopened.protocol_backlog.runs[0].status != Status::Complete {
+            assert_eq!(reopened.protocol_backlog.runs[0].status, Status::Stopped);
+            repo.copy_worker(
+                &account,
+                &store,
+                &mut reopened,
+                &id,
+                CopyWork::File,
+                &|_| Ok(()),
+            )
+            .unwrap()
+            .drive(&mut transport, &permit, &Cancellation::default())
+            .unwrap();
+        }
+        assert_eq!(reopened.protocol_backlog.runs[0].status, Status::Complete);
+        assert_eq!(
+            (
+                count(&transport.io, "copy"),
+                count(&transport.io, "store"),
+                count(&transport.io, "expunge")
+            ),
+            (1, 1, 1)
+        );
+        assert!(transport.io.flights.is_empty());
+        assert!(store.load_state().unwrap().protocol_backlog == reopened.protocol_backlog);
+    }
+}
+
+#[test]
+fn saved_worker_conflict_blocks_resume_even_when_a_certified_member_could_finish() {
+    use crate::acquisition::backlog::{copy_checkpoints::tests::fixture, copy_worker::CopyWork};
+    use crate::backlog::protocol::Status;
+    for stop_at in [None, Some(7)] {
+        let e = initial();
+        let (_root, repo, account, store, mut saved) = fixture(e.clone());
+        let source = repo.backlog_source.as_deref().unwrap();
+        let permit = permitted(source);
+        let id = saved.protocol_backlog.runs[0].id.clone();
+        let mut io = complete_script(source, &e);
+        io.flights[7].response = Ok(acknowledged());
+        io.flights[9] = paired(&e, &[4], &[(4, BASE + 20, true)], BASE + 20);
+        io.flights[11].commands = vec!["UID EXPUNGE 4".into()];
+        io.flights[12] = paired(&e, &[4], &[], BASE + 30);
+        let mut transport = WorkerTransport {
+            io,
+            topology: saved.protocol_backlog.runs[0].plan.topology.clone(),
+            stop_at,
+            inventories: 0,
+        };
+        assert!(
+            repo.copy_worker(&account, &store, &mut saved, &id, CopyWork::File, &|_| Ok(
+                ()
+            ))
+            .unwrap()
+            .drive(&mut transport, &permit, &Cancellation::default())
+            .is_err()
+        );
+        let run = &saved.protocol_backlog.runs[0];
+        assert_eq!(run.status, Status::Conflict);
+        let evidence = run.batches[0].as_copy().unwrap();
+        assert_eq!(evidence.resolutions()[&uid(8)], Resolution::Conflict);
+        if stop_at.is_some() {
+            assert_eq!(evidence.next_action(), NextAction::Expunge(0));
+            assert!(run.batches[0].resumable());
+            assert_eq!(count(&transport.io, "expunge"), 0);
+        } else {
+            assert_eq!(evidence.next_action(), NextAction::Conflict);
+            assert_eq!(count(&transport.io, "expunge"), 1);
+            assert!(transport.io.flights.is_empty());
+        }
+        drop(store);
+        let store = repo.store(&account).unwrap();
+        let mut reopened = store.load_state().unwrap();
+        let before = std::fs::read(store.path()).unwrap();
+        assert!(
+            repo.copy_worker(
+                &account,
+                &store,
+                &mut reopened,
+                &id,
+                CopyWork::File,
+                &|_| Ok(())
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+        let events = transport.io.events.borrow().clone();
+        repo.copy_worker(
+            &account,
+            &store,
+            &mut reopened,
+            &id,
+            CopyWork::Reconcile,
+            &|_| Ok(()),
+        )
+        .unwrap()
+        .drive(&mut transport, &permit, &Cancellation::default())
+        .unwrap();
+        assert_eq!(*transport.io.events.borrow(), events);
+        assert_eq!(transport.inventories, 1);
+        assert_eq!(reopened.protocol_backlog.runs[0].status, Status::Conflict);
+    }
+}
+
+#[test]
+fn saved_worker_rechecks_freshness_before_starting_an_admitted_run() {
+    use crate::acquisition::backlog::{copy_checkpoints::tests::fixture, copy_worker::CopyWork};
+    let e = initial();
+    let (_root, repo, account, store, mut saved) = fixture(e.clone());
+    let source = repo.backlog_source.as_deref().unwrap();
+    let permit = permitted(source);
+    let id = saved.protocol_backlog.runs[0].id.clone();
+    let fresh = std::cell::Cell::new(true);
+    let freshness = |_: &crate::census::AccountState| {
+        if fresh.get() {
+            Ok(())
+        } else {
+            Err("stale synthetic ledger".into())
+        }
+    };
+    let before = std::fs::read(store.path()).unwrap();
+    let topology = saved.protocol_backlog.runs[0].plan.topology.clone();
+    let worker = repo
+        .copy_worker(
+            &account,
+            &store,
+            &mut saved,
+            &id,
+            CopyWork::File,
+            &freshness,
+        )
+        .unwrap();
+    fresh.set(false);
+    let mut transport = WorkerTransport {
+        io: complete_script(source, &e),
+        topology,
+        stop_at: None,
+        inventories: 0,
+    };
+    assert!(
+        worker
+            .drive(&mut transport, &permit, &Cancellation::default())
+            .is_err()
+    );
+    assert_eq!(std::fs::read(store.path()).unwrap(), before);
+    assert_eq!(transport.inventories, 0);
+    assert!(transport.io.events.borrow().is_empty());
+}
+
+#[test]
+fn changed_worker_topology_and_precancelled_work_never_transmit_effects() {
+    use crate::acquisition::backlog::{copy_checkpoints::tests::fixture, copy_worker::CopyWork};
+    use crate::{acquisition::AcquisitionError, backlog::protocol::Status};
+    for precancelled in [false, true] {
+        let e = initial();
+        let (_root, repo, account, store, mut saved) = fixture(e.clone());
+        let source = repo.backlog_source.as_deref().unwrap();
+        let permit = permitted(source);
+        let id = saved.protocol_backlog.runs[0].id.clone();
+        let mut transport = WorkerTransport {
+            io: complete_script(source, &e),
+            topology: saved.protocol_backlog.runs[0].plan.topology.clone(),
+            stop_at: None,
+            inventories: 0,
+        };
+        let cancel = Cancellation::default();
+        if precancelled {
+            cancel.cancel();
+        } else {
+            transport.topology.capabilities.insert("MOVE".into());
+        }
+        let before = std::fs::read(store.path()).unwrap();
+        let result = repo
+            .copy_worker(&account, &store, &mut saved, &id, CopyWork::File, &|_| {
+                Ok(())
+            })
+            .unwrap()
+            .drive(&mut transport, &permit, &cancel);
+        assert_eq!(
+            result,
+            Err(if precancelled {
+                AcquisitionError::Cancelled
+            } else {
+                AcquisitionError::InvalidInput
+            })
+        );
+        assert_eq!(
+            (
+                count(&transport.io, "copy"),
+                count(&transport.io, "store"),
+                count(&transport.io, "expunge")
+            ),
+            (0, 0, 0)
+        );
+        if precancelled {
+            assert_eq!(std::fs::read(store.path()).unwrap(), before);
+        } else {
+            assert_eq!(saved.protocol_backlog.runs[0].status, Status::Conflict);
+        }
+    }
+}
+
 #[test]
 fn reopened_uncertain_account_requires_read_only_reconcile_before_explicit_resume() {
     use crate::{

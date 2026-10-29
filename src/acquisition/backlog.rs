@@ -22,6 +22,7 @@ use subtle::ConstantTimeEq;
 
 mod batches;
 pub(super) mod copy_checkpoints;
+pub(super) mod copy_worker;
 
 fn invalid() -> AcquisitionError {
     AcquisitionError::InvalidInput
@@ -375,7 +376,19 @@ impl Accounts {
             .iter()
             .any(model::Batch::is_copy)
         {
-            return Err(invalid());
+            if reverse || !self.backlog_installed(Some(&account.id)) {
+                return Err(invalid());
+            }
+            return self
+                .copy_worker(
+                    account,
+                    store,
+                    saved,
+                    id,
+                    copy_worker::CopyWork::File,
+                    &fresh,
+                )?
+                .connected(session, cancel);
         }
         let mut binding = self.backlog_binding(account, store, saved)?;
         if !model::same_binding(
@@ -530,7 +543,19 @@ impl Accounts {
             .iter()
             .any(model::Batch::is_copy)
         {
-            return Err(invalid());
+            if !self.backlog_installed(Some(&account.id)) {
+                return Err(invalid());
+            }
+            return self
+                .copy_worker(
+                    account,
+                    store,
+                    saved,
+                    id,
+                    copy_worker::CopyWork::Reconcile,
+                    &|_| Ok(()),
+                )?
+                .connected(None, cancel);
         }
         let binding = self.backlog_binding(account, store, saved)?;
         if !model::same_binding(

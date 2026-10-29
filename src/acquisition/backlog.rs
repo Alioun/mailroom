@@ -18,6 +18,8 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 use subtle::ConstantTimeEq;
 
+pub(super) mod copy_checkpoints;
+
 fn invalid() -> AcquisitionError {
     AcquisitionError::InvalidInput
 }

@@ -154,7 +154,10 @@ impl Accounts {
         }
         Ok(())
     }
-    pub(super) fn require_ready(&self, id: &AccountId) -> Result<(), AcquisitionError> {
+    pub(in crate::acquisition) fn require_ready(
+        &self,
+        id: &AccountId,
+    ) -> Result<(), AcquisitionError> {
         self.require_no_restore(id)?;
         if self
             .intent_path(id)

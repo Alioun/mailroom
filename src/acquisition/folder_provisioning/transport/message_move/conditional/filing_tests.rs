@@ -366,3 +366,255 @@ fn partial_conditional_store_finishes_only_the_certified_member_and_reports_conf
     assert!(!Batch::copy(e).resumable());
     assert!(io.flights.is_empty());
 }
+
+#[test]
+fn full_byte_filing_persists_ten_account_checkpoints_and_reopens_exact_history() {
+    use crate::acquisition::backlog::copy_checkpoints::{CopySlot, tests::fixture};
+    let mut e = initial();
+    let (_root, repo, account, store, mut saved) = fixture(e.clone());
+    let source = repo.backlog_source.as_deref().unwrap();
+    let permit = permitted(source);
+    let mut io = complete_script(source, &e);
+    let id = saved.protocol_backlog.runs[0].id.clone();
+    let topology = saved.protocol_backlog.runs[0].plan.topology.clone();
+    let revision = saved.revision;
+    let validations = std::cell::Cell::new(0);
+    let fresh = |_: &crate::census::AccountState| {
+        validations.set(validations.get() + 1);
+        Ok(())
+    };
+    {
+        let mut checkpoints = repo
+            .copy_checkpoints(
+                &account,
+                &store,
+                &mut saved,
+                CopySlot::Filing { run: &id, batch: 0 },
+                &topology,
+                &fresh,
+            )
+            .unwrap();
+        io.conditional()
+            .file(&permit, &mut e, &Cancellation::default(), &mut checkpoints)
+            .unwrap();
+    }
+    assert_eq!(validations.get(), 4);
+    assert_eq!(saved.revision, revision + 10);
+    assert_eq!(e.next_action(), NextAction::Complete);
+    assert_eq!(
+        saved.protocol_backlog.runs[0].batches[0].as_copy(),
+        Some(&e)
+    );
+    assert!(io.flights.is_empty());
+    saved.protocol_backlog.interrupted();
+    store.save_state(&mut saved).unwrap();
+    assert_eq!(
+        saved.protocol_backlog.runs[0].status,
+        crate::backlog::protocol::Status::Complete
+    );
+    drop(store);
+    let reopened_store = repo.store(&account).unwrap();
+    let reopened = reopened_store.load_state().unwrap();
+    assert!(reopened.protocol_backlog == saved.protocol_backlog);
+    assert_eq!(reopened.revision, saved.revision);
+}
+
+struct StopAfterSave<C> {
+    inner: C,
+    count: usize,
+    at: usize,
+    cancel: Cancellation,
+}
+impl<C: CopyCheckpoints> CopyCheckpoints for StopAfterSave<C> {
+    fn validate_intent(&mut self, e: &CopyEvidence) -> Result<(), Error> {
+        self.inner.validate_intent(e)
+    }
+    fn save(&mut self, e: &CopyEvidence) -> Result<(), Error> {
+        self.inner.save(e)?;
+        self.count += 1;
+        if self.count == self.at {
+            self.cancel.cancel();
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn reopened_uncertain_account_requires_read_only_reconcile_before_explicit_resume() {
+    use crate::{
+        acquisition::backlog::copy_checkpoints::{CopySlot, tests::fixture},
+        backlog::protocol::Status,
+    };
+    for stop_at in [3, 6, 9] {
+        let mut e = initial();
+        let (_root, repo, account, store, mut saved) = fixture(e.clone());
+        let source = repo.backlog_source.as_deref().unwrap();
+        let permit = permitted(source);
+        let mut io = complete_script(source, &e);
+        let id = saved.protocol_backlog.runs[0].id.clone();
+        let topology = saved.protocol_backlog.runs[0].plan.topology.clone();
+        let cancel = Cancellation::default();
+        {
+            let checkpoints = repo
+                .copy_checkpoints(
+                    &account,
+                    &store,
+                    &mut saved,
+                    CopySlot::Filing { run: &id, batch: 0 },
+                    &topology,
+                    &|_| Ok(()),
+                )
+                .unwrap();
+            let mut checkpoints = StopAfterSave {
+                inner: checkpoints,
+                count: 0,
+                at: stop_at,
+                cancel: cancel.clone(),
+            };
+            assert_eq!(
+                io.conditional()
+                    .file(&permit, &mut e, &cancel, &mut checkpoints),
+                Err(Error::Cancelled)
+            );
+        }
+        drop(store);
+        let store = repo.store(&account).unwrap();
+        let mut reopened = store.load_state().unwrap();
+        assert_eq!(reopened.protocol_backlog.runs[0].status, Status::Uncertain);
+        let mut evidence = reopened.protocol_backlog.runs[0].batches[0]
+            .as_copy()
+            .unwrap()
+            .clone();
+        assert!(
+            repo.copy_checkpoints(
+                &account,
+                &store,
+                &mut reopened,
+                CopySlot::Filing { run: &id, batch: 0 },
+                &topology,
+                &|_| Ok(())
+            )
+            .is_err()
+        );
+        let effects = (
+            count(&io, "copy"),
+            count(&io, "store"),
+            count(&io, "expunge"),
+        );
+        {
+            let mut checkpoints = repo
+                .copy_checkpoints(
+                    &account,
+                    &store,
+                    &mut reopened,
+                    CopySlot::Reconcile { run: &id, batch: 0 },
+                    &topology,
+                    &|_| Ok(()),
+                )
+                .unwrap();
+            io.conditional()
+                .reconcile(
+                    &permit,
+                    &mut evidence,
+                    &Cancellation::default(),
+                    &mut checkpoints,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            (
+                count(&io, "copy"),
+                count(&io, "store"),
+                count(&io, "expunge")
+            ),
+            effects
+        );
+        assert!(!evidence.next_action().needs_observation());
+        if reopened.protocol_backlog.runs[0].status != Status::Complete {
+            assert_eq!(reopened.protocol_backlog.runs[0].status, Status::Stopped);
+            reopened.protocol_backlog.runs[0].status = Status::Running;
+            reopened.protocol_backlog.runs[0].stop_requested = false;
+            store.save_state(&mut reopened).unwrap();
+            let mut checkpoints = repo
+                .copy_checkpoints(
+                    &account,
+                    &store,
+                    &mut reopened,
+                    CopySlot::Filing { run: &id, batch: 0 },
+                    &topology,
+                    &|_| Ok(()),
+                )
+                .unwrap();
+            io.conditional()
+                .file(
+                    &permit,
+                    &mut evidence,
+                    &Cancellation::default(),
+                    &mut checkpoints,
+                )
+                .unwrap();
+        }
+        assert_eq!(evidence.next_action(), NextAction::Complete);
+        assert_eq!(
+            (
+                count(&io, "copy"),
+                count(&io, "store"),
+                count(&io, "expunge")
+            ),
+            (1, 1, 1)
+        );
+        assert!(io.flights.is_empty());
+    }
+}
+
+#[test]
+fn changed_ledger_freshness_stops_the_next_byte_effect_and_preserves_durable_copies() {
+    use crate::acquisition::backlog::copy_checkpoints::{CopySlot, tests::fixture};
+    let mut e = initial();
+    let (_root, repo, account, store, mut saved) = fixture(e.clone());
+    let source = repo.backlog_source.as_deref().unwrap();
+    let permit = permitted(source);
+    let mut io = complete_script(source, &e);
+    let id = saved.protocol_backlog.runs[0].id.clone();
+    let topology = saved.protocol_backlog.runs[0].plan.topology.clone();
+    let validations = std::cell::Cell::new(0);
+    let fresh = |_: &crate::census::AccountState| {
+        validations.set(validations.get() + 1);
+        if validations.get() >= 3 {
+            Err("authoritative ledger changed".into())
+        } else {
+            Ok(())
+        }
+    };
+    {
+        let mut checkpoints = repo
+            .copy_checkpoints(
+                &account,
+                &store,
+                &mut saved,
+                CopySlot::Filing { run: &id, batch: 0 },
+                &topology,
+                &fresh,
+            )
+            .unwrap();
+        assert_eq!(
+            io.conditional()
+                .file(&permit, &mut e, &Cancellation::default(), &mut checkpoints),
+            Err(Error::Unstable)
+        );
+    }
+    assert_eq!(count(&io, "copy"), 1);
+    assert_eq!(count(&io, "store"), 0);
+    assert_eq!(count(&io, "expunge"), 0);
+    let reopened = store.load_state().unwrap();
+    assert_eq!(
+        reopened.protocol_backlog.runs[0].batches[0]
+            .as_copy()
+            .unwrap()
+            .next_action(),
+        NextAction::PrepareDeletion
+    );
+    let mut expected = saved.protocol_backlog.clone();
+    expected.interrupted();
+    assert!(reopened.protocol_backlog == expected);
+}

@@ -161,3 +161,25 @@ fn partial_store_expunge_action_never_includes_a_modified_sibling() {
         [owned].into()
     );
 }
+
+#[test]
+fn durable_checkpoints_can_advance_but_cannot_discard_an_earlier_phase() {
+    let stages = [
+        Stage::Prepared,
+        Stage::CopyUncertain,
+        Stage::Copied,
+        Stage::StoreUncertain,
+        Stage::Marked,
+        Stage::ExpungeUncertain,
+        Stage::Filed,
+    ];
+    for (a, previous) in stages.iter().enumerate() {
+        for (b, current) in stages.iter().enumerate() {
+            assert_eq!(
+                evidence(*current).continues(&evidence(*previous)).is_ok(),
+                b >= a,
+                "{previous:?} to {current:?}"
+            );
+        }
+    }
+}

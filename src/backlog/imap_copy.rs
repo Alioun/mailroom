@@ -354,6 +354,82 @@ impl CopyEvidence {
     pub fn intent(&self) -> &MoveIntent {
         self.copy.command()
     }
+    pub fn before(&self) -> &Readback {
+        &self.before
+    }
+    pub(crate) fn continues(&self, previous: &Self) -> Result<(), InvalidEvidence> {
+        let mut next = previous.clone();
+        if self.copy.attempted() && !next.copy.attempted() {
+            next.begin_copy(&self.before)?;
+        }
+        if self.copy.mapping_rejected() {
+            next.reject_mapping();
+        } else if self.copy.mapping() != next.copy.mapping() {
+            next.record_mapping(self.copy.mapping().ok_or(InvalidEvidence::Phase)?.clone())?;
+        }
+        if self.copy.completion() != next.copy.completion() {
+            next.record_copy_completion(
+                self.copy
+                    .completion()
+                    .ok_or(InvalidEvidence::Phase)?
+                    .clone(),
+            )?;
+        }
+        if self.readback != next.readback {
+            let read = self.readback.as_ref().ok_or(InvalidEvidence::Phase)?;
+            next.observe_copy(read.source.clone(), read.destination.clone())?;
+        }
+        for (i, batch) in self.deletions.iter().enumerate() {
+            if i == next.deletions.len() {
+                next.begin_delete(PreparedDelete {
+                    intent: batch.evidence.intent().clone(),
+                    destination: batch.destination.clone(),
+                })?;
+            }
+            let flag = &batch.evidence.flag;
+            if flag.result != next.deletions[i].evidence.flag.result {
+                next.record_store_result(i, flag.result.clone().ok_or(InvalidEvidence::Phase)?)?;
+            }
+            if flag.readback != next.deletions[i].evidence.flag.readback {
+                next.observe_store(i, flag.readback.clone().ok_or(InvalidEvidence::Phase)?)?;
+            }
+            if let Some(expunge) = &batch.evidence.expunge {
+                if next.deletions[i].evidence.expunge.is_none() {
+                    next.begin_expunge(i, expunge.before.clone(), batch.destination.clone())?;
+                }
+                let prior = next.deletions[i].evidence.expunge.as_ref().unwrap();
+                if prior.completion != expunge.completion {
+                    next.record_expunge_completion(
+                        i,
+                        expunge.completion.clone().ok_or(InvalidEvidence::Phase)?,
+                    )?;
+                }
+                if next.deletions[i]
+                    .evidence
+                    .expunge
+                    .as_ref()
+                    .unwrap()
+                    .readback
+                    != expunge.readback
+                    || next.deletions[i].final_destination != batch.final_destination
+                {
+                    next.observe_final(
+                        i,
+                        expunge.readback.clone().ok_or(InvalidEvidence::Phase)?,
+                        batch
+                            .final_destination
+                            .clone()
+                            .ok_or(InvalidEvidence::Phase)?,
+                    )?;
+                }
+            }
+        }
+        if next == *self {
+            Ok(())
+        } else {
+            Err(InvalidEvidence::Phase)
+        }
+    }
     pub fn copy(&self) -> &MoveEvidence {
         &self.copy
     }

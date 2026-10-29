@@ -1,6 +1,9 @@
 use super::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+mod records;
+pub use records::{CleanupNext, ClearNext, CompensationEvidence, CompensationResolution};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompensationConflict {
     ForwardConflict,

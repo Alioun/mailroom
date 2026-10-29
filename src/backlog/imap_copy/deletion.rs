@@ -529,6 +529,12 @@ impl PendingClear {
     pub fn intent(&self) -> &FlagIntent {
         self.effect.intent()
     }
+    pub fn result(&self) -> Option<&StoreResult> {
+        self.effect.result()
+    }
+    pub fn readback(&self) -> Option<&Readback> {
+        self.effect.readback.as_ref()
+    }
     pub fn record_result(&mut self, result: StoreResult) -> Result<(), InvalidEvidence> {
         self.effect.record_result(result)
     }
@@ -537,5 +543,19 @@ impl PendingClear {
     }
     pub fn verified(&self) -> BTreeMap<Uid, VersionedMetadata> {
         self.effect.verified()
+    }
+    pub(crate) fn continues(&self, previous: &Self) -> Result<(), InvalidEvidence> {
+        let mut next = previous.clone();
+        if self.effect.result != next.effect.result {
+            next.record_result(self.effect.result.clone().ok_or(InvalidEvidence::Phase)?)?;
+        }
+        if self.effect.readback != next.effect.readback {
+            next.observe(self.effect.readback.clone().ok_or(InvalidEvidence::Phase)?)?;
+        }
+        if next == *self {
+            Ok(())
+        } else {
+            Err(InvalidEvidence::Phase)
+        }
     }
 }

@@ -970,4 +970,5 @@ fn copy_command_quotes_the_validated_exact_destination_name() {
 }
 
 mod compensation;
+mod compensation_records;
 mod effects;

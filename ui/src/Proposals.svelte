@@ -1,11 +1,18 @@
 <script lang="ts">
   import { openProposals, reviewProposals, confirmProposals, type ProposalGeneration, type ProposalReview, type ProposalSelection } from './api'
+  import { proposalRationaleText, proposalReasonText, proposalStatusText } from './proposal-diagnostics'
   let { account, lang, disabled, onChanged }: { account: string; lang: 'en' | 'de'; disabled: boolean; onChanged: () => Promise<void> } = $props()
   const copy = {
     en: { title: 'Advanced · Filing proposals', detail: 'Review deterministic suggestions from saved local observations. Sender claims are unauthenticated. Approval saves local rules only. It never acts on mail or deploys rules.', load: 'Generate or reload filing proposals', choose: 'Select proposal', rejected: 'Exact candidate rejected', changed: 'Earlier rejection exists. Evidence or behavior changed; review again.', unresolved: 'Unresolved observations', review: 'Review selected local changes', reject: 'Review exact rejections', confirm: 'I confirm this exact proposal batch', apply: 'Save reviewed local decision', original: 'Original rule documents', resulting: 'Resulting rule documents', selected: 'Selected changes', impact: 'Current and resulting proof', pins: 'Pin results', omissions: 'Omissions', warnings: 'Warnings', diff: 'Folder diff', sourceDiff: 'Rule document diff', empty: 'No supported filing changes. Unresolved observations need owner classification.', fresh: 'Local decision saved. Run fresh proof over the saved rules.', failure: 'Action rejected or saved state changed. Reload and review the exact candidates again.', dirty: 'Save or reload rule edits before using proposals.', uncertainty: 'Unauthenticated sender claim', history: 'Retained decision history', observations: 'Supporting local observations', counts: 'Messages / filed / Inbox / copies', gate: 'Proof gate', blocked: 'Acceptance blocked by proof. Rejection is still available.' },
     de: { title: 'Erweitert · Ablagevorschläge', detail: 'Prüfe deterministische Vorschläge aus lokal gespeicherten Belegen. Absenderangaben sind unbestätigt. Die Freigabe speichert nur lokale Regeln. Sie ändert keine Nachrichten und aktiviert keine Regeln.', load: 'Ablagevorschläge erzeugen oder neu laden', choose: 'Vorschlag auswählen', rejected: 'Genauer Vorschlag abgelehnt', changed: 'Frühere Ablehnung vorhanden. Belege oder Verhalten haben sich geändert. Erneut prüfen.', unresolved: 'Ungeklärte Beobachtungen', review: 'Ausgewählte lokale Änderungen prüfen', reject: 'Genaue Ablehnungen prüfen', confirm: 'Ich bestätige genau diese Vorschlagsauswahl', apply: 'Geprüfte lokale Entscheidung speichern', original: 'Ursprüngliche Regeldokumente', resulting: 'Resultierende Regeldokumente', selected: 'Ausgewählte Änderungen', impact: 'Aktuelle und resultierende Prüfung', pins: 'Fixierte Testergebnisse', omissions: 'Auslassungen', warnings: 'Hinweise', diff: 'Ordneränderungen', sourceDiff: 'Änderungen am Regeldokument', empty: 'Keine unterstützten Ablageänderungen. Ungeklärte Beobachtungen erfordern deine Zuordnung.', fresh: 'Lokale Entscheidung gespeichert. Gespeicherte Regeln neu prüfen.', failure: 'Aktion abgelehnt oder gespeicherter Stand geändert. Neu laden und genaue Vorschläge erneut prüfen.', dirty: 'Regeländerungen vor den Vorschlägen speichern oder neu laden.', uncertainty: 'Unbestätigte Absenderangabe', history: 'Aufbewahrte Entscheidungen', observations: 'Lokale Belege', counts: 'Nachrichten / abgelegt / Posteingang / Kopien', gate: 'Prüfstatus', blocked: 'Annahme durch Prüfung gesperrt. Ablehnung bleibt möglich.' },
   }
   let t = $derived(copy[lang])
+  let diagnostic = $derived(proposalStatusText[lang])
+  function counts(proof: ProposalGeneration['current']['proof']) {
+    const { messages, filed, inbox, copies } = proof.counts
+    const number = new Intl.NumberFormat(lang === 'de' ? 'de-DE' : 'en-US')
+    return [messages, filed, inbox, copies].map(value => number.format(value)).join(' / ')
+  }
   let generation = $state<ProposalGeneration | null>(null)
   let selected = $state<string[]>([])
   let review = $state<ProposalReview | null>(null)
@@ -47,31 +54,33 @@
     {#each generation.candidates as candidate (candidate.id)}
       <article class="filing-candidate" data-candidate={candidate.id}>
         <label><input type="checkbox" checked={selected.includes(candidate.id)} onchange={event => choose(candidate.id, event.currentTarget.checked)} disabled={busy || disabled || candidate.rejected} />{t.choose} · {candidate.sender_claim}</label>
-        <p>{t.uncertainty}</p><p>{candidate.rationale}</p>
+        <p>{t.uncertainty}</p><p>{proposalRationaleText(candidate.rationale, lang)}</p>
         {#if candidate.rejected}<p>{t.rejected}</p>{:else if candidate.prior_rejections}<p>{t.changed}</p>{/if}
         <pre>{JSON.stringify(candidate.change, null, 2)}</pre>
         <details><summary>{t.observations} · {candidate.observations.length}</summary>{#each candidate.observations as observation}<p>{observation.message} · {observation.subject} · {observation.folders.join(', ')}</p>{/each}</details>
-        <p>{t.counts} · {Object.values(generation.current.proof.counts).slice(0, 4).join(' / ')} → {Object.values(candidate.impact.proof.counts).slice(0, 4).join(' / ')}</p>
-        <p>{t.gate} · {candidate.impact.proof.gate}</p>
+        <p>{t.counts} · {counts(generation.current.proof)} → {counts(candidate.impact.proof)}</p>
+        <p>{t.gate} · {diagnostic.gate[candidate.impact.proof.gate]}</p>
         <details><summary>{t.impact}</summary><pre>{JSON.stringify({ current: generation.current.proof, resulting: candidate.impact.proof }, null, 2)}</pre></details>
       </article>
     {/each}
     <button onclick={() => preview('accept')} disabled={disabled || busy || !selected.length}>{t.review}</button>
     <button onclick={() => preview('reject')} disabled={disabled || busy || !selected.length}>{t.reject}</button>
-    <details><summary>{t.unresolved} · {generation.unresolved.length}</summary>{#each generation.unresolved as observation}<p>{observation.sender_claim} · {observation.messages} · {observation.reason}</p>{/each}</details>
-    <details><summary>{t.history} · {generation.decisions.history.length}</summary>{#each generation.decisions.history as decision}<p>{decision.target} · {decision.disposition} · {decision.candidate}</p>{/each}</details>
+    <details><summary>{t.unresolved} · {generation.unresolved.length}</summary>{#each generation.unresolved as observation}<p>{observation.sender_claim ?? diagnostic.unknownSender} · {observation.messages} · {proposalReasonText(observation.reason, lang)}</p>{/each}</details>
+    <details><summary>{t.history} · {generation.decisions.history.length}</summary>{#each generation.decisions.history as decision}<p>{decision.target} · {diagnostic.disposition[decision.disposition]} · {decision.candidate}</p>{/each}</details>
   {/if}
   {#if review}
     <section class="proposal-review" aria-label={t.selected}>
-      <h3>{t.selected} · {review.disposition}</h3><pre>{JSON.stringify(review.changes, null, 2)}</pre>
-      <p>{review.effects}</p>
+      <h3>{t.selected} · {diagnostic.disposition[review.disposition]}</h3><pre>{JSON.stringify(review.changes, null, 2)}</pre>
+      <p>{diagnostic.effects[review.disposition]}</p>
+      <details><summary>{diagnostic.exactEffects}</summary><p>{review.effects}</p></details>
       <details open><summary>{t.original}</summary><pre>{review.original_documents.preset_yaml}</pre><pre>{review.original_documents.override_yaml}</pre></details>
       <details open><summary>{t.resulting}</summary><pre>{review.resulting_documents.preset_yaml}</pre><pre>{review.resulting_documents.override_yaml}</pre></details>
       <details open><summary>{t.sourceDiff}</summary><pre>{review.document_diff}</pre></details>
       <h3>{t.impact}</h3>
-      <p>{t.counts} · {Object.values(review.current.proof.counts).slice(0, 4).join(' / ')} → {Object.values(review.resulting.proof.counts).slice(0, 4).join(' / ')}</p>
+      <p>{t.counts} · {counts(review.current.proof)} → {counts(review.resulting.proof)}</p>
       <details open><summary>{t.diff}</summary><pre>{JSON.stringify(review.resulting.proof.diff, null, 2)}</pre></details>
       <details open><summary>{t.pins}</summary><pre>{JSON.stringify(review.resulting.proof.pins, null, 2)}</pre></details>
+      <p>{diagnostic.originalDiagnostics}</p>
       <details open><summary>{t.omissions}</summary>{#each review.resulting.proof.artifact.omissions as omission}<p>{omission.rule} · {omission.reason}</p>{/each}</details>
       <details open><summary>{t.warnings}</summary>{#each review.resulting.proof.warnings as warning}<p>{warning}</p>{/each}</details>
       <details><summary>{t.impact}</summary><pre>{JSON.stringify({ current: review.current.proof, resulting: review.resulting.proof }, null, 2)}</pre></details>

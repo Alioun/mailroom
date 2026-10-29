@@ -105,12 +105,31 @@ pub struct Observation {
     pub folders: BTreeSet<String>,
 }
 #[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Rationale {
+    SubjectMajority { matching: usize, total: usize },
+    MappedFolder,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnresolvedReason {
+    NoUniqueSender,
+    MixedOrganisation,
+    OwnerMappingRetained,
+    PresetMappingRetained,
+    NoUniqueCategory,
+    CategoryConflict,
+    ConfigurationConflict,
+    CandidateLimit,
+    CompilationFailed,
+}
+#[derive(Serialize)]
 pub struct Candidate {
     pub id: String,
     pub sender_claim: String,
     pub change: Change,
     pub observations: Vec<Observation>,
-    pub rationale: String,
+    pub rationale: Rationale,
     pub uncertainty: &'static str,
     pub rejected: bool,
     pub prior_rejections: usize,
@@ -118,9 +137,9 @@ pub struct Candidate {
 }
 #[derive(Serialize)]
 pub struct Unresolved {
-    pub sender_claim: String,
+    pub sender_claim: Option<String>,
     pub messages: usize,
-    pub reason: String,
+    pub reason: UnresolvedReason,
 }
 #[derive(Serialize)]
 pub struct Generation {
@@ -279,9 +298,9 @@ pub fn generate(
         let from = &message.record.headers.from;
         if from.len() != 1 || !config::mailbox(&from[0].address) {
             unresolved.push(Unresolved {
-                sender_claim: "Ambiguous or missing raw From".into(),
+                sender_claim: None,
                 messages: 1,
-                reason: "No unique valid sender claim".into(),
+                reason: UnresolvedReason::NoUniqueSender,
             });
         } else {
             groups
@@ -292,10 +311,10 @@ pub fn generate(
     }
     let mut candidates = Vec::new();
     for (sender, messages) in groups {
-        let unresolved_reason = |reason: &str| Unresolved {
-            sender_claim: sender.clone(),
+        let unresolved_reason = |reason| Unresolved {
+            sender_claim: Some(sender.clone()),
             messages: messages.len(),
-            reason: reason.into(),
+            reason,
         };
         if !messages.iter().all(|m| {
             matches!(
@@ -304,7 +323,7 @@ pub fn generate(
                     | crate::census::report::SenderClass::Platform
             )
         }) {
-            unresolved.push(unresolved_reason("Insufficient or mixed organisational evidence. No sender identity is inferred from infrastructure."));
+            unresolved.push(unresolved_reason(UnresolvedReason::MixedOrganisation));
             continue;
         }
         if overrides
@@ -312,9 +331,7 @@ pub fn generate(
             .iter()
             .any(|r| r.enabled && applies(r, account) && sender_matches(r, &sender))
         {
-            unresolved.push(unresolved_reason(
-                "Existing owner sender mapping retained. No replacement proposed.",
-            ));
+            unresolved.push(unresolved_reason(UnresolvedReason::OwnerMappingRetained));
             continue;
         }
         let known: Vec<_> = preset
@@ -330,13 +347,11 @@ pub fn generate(
                     .iter()
                     .any(|p| resolved_id(&preset, &p.id) == known[0].id)
             {
-                unresolved.push(unresolved_reason(
-                    "Known preset sender or owner patch retained. No overwrite proposed.",
-                ));
+                unresolved.push(unresolved_reason(UnresolvedReason::PresetMappingRetained));
                 continue;
             }
         }
-        let mut support: BTreeMap<String, (Category, Option<String>, String)> = BTreeMap::new();
+        let mut support: BTreeMap<String, (Category, Option<String>, Rationale)> = BTreeMap::new();
         let mut keywords: BTreeMap<String, (Category, Vec<&Rule>)> = BTreeMap::new();
         for rule in &preset.rules {
             if rule.enabled
@@ -388,7 +403,17 @@ pub fn generate(
                 } else {
                     key
                 };
-                support.insert(key, (category, folder, format!("Strict subject majority {count}/{} supports the generic preset category", messages.len())));
+                support.insert(
+                    key,
+                    (
+                        category,
+                        folder,
+                        Rationale::SubjectMajority {
+                            matching: count,
+                            total: messages.len(),
+                        },
+                    ),
+                );
             }
         }
         let placements: BTreeSet<_> = messages
@@ -422,26 +447,24 @@ pub fn generate(
                 .contains(placement)
                 {
                     support.insert(
-                        if rule.folder.is_none() { category_key(rule.category) } else { format!("{}/{}", category_key(rule.category), name) },
-                        (
-                            rule.category,
-                            rule.folder.clone(),
-                            "All observations share a filing folder mapped by the preset or existing owner rules".into(),
-                        ),
+                        if rule.folder.is_none() {
+                            category_key(rule.category)
+                        } else {
+                            format!("{}/{}", category_key(rule.category), name)
+                        },
+                        (rule.category, rule.folder.clone(), Rationale::MappedFolder),
                     );
                 }
             }
         }
         if support.len() != 1 {
-            unresolved.push(unresolved_reason("No unique supported preset category or approved folder mapping. Owner classification is required."));
+            unresolved.push(unresolved_reason(UnresolvedReason::NoUniqueCategory));
             continue;
         }
         let (category, folder, rationale) = support.into_values().next().expect("one category");
         let change = if let Some(rule) = known.first() {
             if category_key(rule.category) != category_key(category) {
-                unresolved.push(unresolved_reason(
-                    "Preset sender category conflicts with observed category",
-                ));
+                unresolved.push(unresolved_reason(UnresolvedReason::CategoryConflict));
                 continue;
             }
             Change::Patch {
@@ -479,20 +502,18 @@ pub fn generate(
         let result = match resulting(state, std::slice::from_ref(&change)) {
             Ok(v) => v,
             Err(_) => {
-                unresolved.push(unresolved_reason("Candidate conflicts with existing owner rules or cannot compile. Existing configuration retained."));
+                unresolved.push(unresolved_reason(UnresolvedReason::ConfigurationConflict));
                 continue;
             }
         };
         if candidates.len() >= CANDIDATE_LIMIT {
-            unresolved.push(unresolved_reason(
-                "Candidate limit reached. No additional candidate generated.",
-            ));
+            unresolved.push(unresolved_reason(UnresolvedReason::CandidateLimit));
             continue;
         }
         let impact = match workspace::preview(&result, context, keys) {
             Ok(proof) => proof,
             Err(_) => {
-                unresolved.push(unresolved_reason("Candidate does not compile with current owner rules. Existing configuration retained."));
+                unresolved.push(unresolved_reason(UnresolvedReason::CompilationFailed));
                 continue;
             }
         };

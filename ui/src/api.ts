@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { evidenceView } from './acquisition-evidence'
+import { proposalRationale, proposalReason } from './proposal-diagnostics'
 
 z.config({ jitless: true })
 
@@ -248,8 +249,8 @@ const proposalChange = z.discriminatedUnion('kind', [
 const proposalSelection = z.object({ account: z.string(), generation: z.string(), candidates: z.array(z.object({ id: z.string(), change: proposalChange })) })
 const proposalGeneration = z.object({
   account: z.string(), generation: z.string(), semantics: z.string(), analysis: z.string(), revision: z.number(),
-  candidates: z.array(z.object({ id: z.string(), sender_claim: z.string(), change: proposalChange, observations: z.array(z.object({ message: z.string(), subject: z.string(), folders: z.array(z.string()) })), rationale: z.string(), uncertainty: z.string(), rejected: z.boolean(), prior_rejections: z.number(), impact: proofPreview })),
-  unresolved: z.array(z.object({ sender_claim: z.string(), messages: z.number(), reason: z.string() })),
+  candidates: z.array(z.object({ id: z.string(), sender_claim: z.string(), change: proposalChange, observations: z.array(z.object({ message: z.string(), subject: z.string(), folders: z.array(z.string()) })), rationale: proposalRationale, uncertainty: z.string(), rejected: z.boolean(), prior_rejections: z.number(), impact: proofPreview })),
+  unresolved: z.array(z.object({ sender_claim: z.string().nullable(), messages: z.number(), reason: proposalReason })),
   current: proofPreview, decisions: z.object({ history: z.array(z.object({ candidate: z.string(), generation: z.string(), disposition: z.enum(['accept', 'reject']), target: z.string(), as_of: z.number() })) }), limitations: z.string(),
 })
 const proposalReview = z.object({ selection: proposalSelection, disposition: z.enum(['accept', 'reject']), changes: z.array(proposalChange), original_documents: documents, resulting_documents: documents, document_diff: z.string(), current: proofPreview, resulting: proofPreview, receipt: z.string(), acceptance_available: z.boolean(), effects: z.string() })

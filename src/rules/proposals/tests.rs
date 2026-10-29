@@ -53,6 +53,71 @@ fn encoded(v: &impl Serialize) -> serde_json::Value {
 }
 
 #[test]
+fn generated_explanations_keep_counts_and_missing_sender_distinct() {
+    let (_root, _store, mut state) = fixture();
+    let keys = CensusKeys::derive(
+        &LocalSecret::from_bytes(vec![7; 32]).unwrap(),
+        &state.census.account,
+    );
+    let context = workspace::WorkspaceContext::local(Provider::MailboxOrg);
+    let generation = generate(&state, &context, &keys).unwrap();
+    assert_eq!(generation.candidates.len(), 2);
+    let accept = review(
+        &state,
+        &context,
+        &keys,
+        &selection(&generation, &[0]),
+        Disposition::Accept,
+    )
+    .unwrap();
+    let reject = review(
+        &state,
+        &context,
+        &keys,
+        &selection(&generation, &[0]),
+        Disposition::Reject,
+    )
+    .unwrap();
+    let messages = &mut state.census.folders.get_mut("INBOX").unwrap().messages;
+    messages.get_mut(&1).unwrap().headers.subject = "opaque topic".into();
+    messages.get_mut(&2).unwrap().headers.from.clear();
+    messages.get_mut(&3).unwrap().headers = crate::census::parse_headers(
+        b"From: person@social.example\r\nSubject: Hello\r\n\r\n",
+        crate::census::Direction::Received,
+    )
+    .unwrap();
+    let unresolved = generate(&state, &context, &keys).unwrap();
+    assert!(unresolved.candidates.is_empty());
+    assert_eq!(unresolved.unresolved.len(), 3);
+    assert!(
+        unresolved
+            .unresolved
+            .iter()
+            .any(|u| u.sender_claim.is_none() && u.reason == UnresolvedReason::NoUniqueSender)
+    );
+    assert!(
+        unresolved
+            .unresolved
+            .iter()
+            .any(|u| u.sender_claim.as_deref() == Some("robot@shop.example")
+                && u.reason == UnresolvedReason::NoUniqueCategory)
+    );
+    assert!(
+        unresolved
+            .unresolved
+            .iter()
+            .any(
+                |u| u.sender_claim.as_deref() == Some("person@social.example")
+                    && u.reason == UnresolvedReason::MixedOrganisation
+            )
+    );
+    println!(
+        "MAILROOM_PROPOSAL_DISPLAY_FIXTURE {}",
+        serde_json::json!({ "generation": generation, "accept": accept, "reject": reject, "unresolved": unresolved })
+    );
+}
+
+#[test]
 fn deterministic_exact_rejection_survives_encrypted_reopen_and_material_changes() {
     let (_root, store, mut state) = fixture();
     let first = generate(
@@ -438,7 +503,7 @@ fn gmail_dedup_sent_exclusion_unsupported_evidence_and_conflicts() {
         unsupported
             .unresolved
             .iter()
-            .any(|u| u.sender_claim == "robot@travel.example")
+            .any(|u| u.sender_claim.as_deref() == Some("robot@travel.example"))
     );
 }
 
@@ -773,7 +838,13 @@ fn bilingual_majorities_and_known_folder_evidence_require_unique_existing_mappin
         panic!("new rule expected")
     };
     assert_eq!(category_key(rule.category), category_key(Category::Money));
-    assert!(g.candidates[0].rationale.contains("2/2"));
+    assert!(matches!(
+        g.candidates[0].rationale,
+        Rationale::SubjectMajority {
+            matching: 2,
+            total: 2
+        }
+    ));
     let mut folder = state.census.folders.remove("INBOX").unwrap();
     for m in folder.messages.values_mut() {
         m.headers.subject = "opaque topic".into();
@@ -792,7 +863,7 @@ fn bilingual_majorities_and_known_folder_evidence_require_unique_existing_mappin
     assert!(
         g.candidates
             .iter()
-            .all(|c| c.rationale.contains("filing folder"))
+            .all(|c| matches!(c.rationale, Rationale::MappedFolder))
     );
     let folder = state.census.folders.remove("Personal/Orders").unwrap();
     state

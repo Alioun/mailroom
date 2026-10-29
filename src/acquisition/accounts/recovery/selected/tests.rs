@@ -845,3 +845,60 @@ fn selected_archive_history_preserves_exact_intent_and_restores_read_only() {
     assert!(restored.recovery_pending());
     assert!(restored.save_state(&mut reopened).is_err());
 }
+
+#[test]
+fn selected_copy_phase_histories_and_ciphertexts_restore_exactly_under_hold() {
+    use crate::backlog::protocol::tests::{Stage, run};
+    let (root, repo, ids, ledger) = fixture();
+    let mut expected = vec![];
+    for (id, stage) in ids
+        .iter()
+        .zip([Stage::Copied, Stage::StoreUncertain, Stage::Undone])
+    {
+        let store = repo.store(&repo.load(id).unwrap()).unwrap();
+        let mut saved = store.load_state().unwrap();
+        saved.protocol_backlog.runs = vec![run(id, stage)];
+        store.save_state(&mut saved).unwrap();
+        expected.push((
+            serde_json::to_vec(&saved.protocol_backlog).unwrap(),
+            fs::read(store.path()).unwrap(),
+        ));
+    }
+    let (manifest, bundle) = capture(&repo, &ids, &ledger, root.path());
+    assert!(manifest.accounts.iter().all(|a| a.state_schema == 26));
+    let destination = tempfile::tempdir().unwrap();
+    let fresh = persistent_accounts(destination.path());
+    let target = InstalledLedger::install(destination.path().join("ledger")).unwrap();
+    fs::remove_file(destination.path().join("ledger/addresses.yaml")).unwrap();
+    let preview = fresh
+        .selected_restore_preview(&bundle, &secret(), true, Some(&target))
+        .unwrap();
+    fresh
+        .selected_restore(&bundle, &secret(), &preview, Some(&target), |_| Ok(()))
+        .unwrap();
+    for (id, (journal, ciphertext)) in ids.iter().zip(expected) {
+        let restored = fresh.load(id).unwrap();
+        let store = fresh.store(&restored).unwrap();
+        let mut after = store.load_state().unwrap();
+        assert_eq!(
+            serde_json::to_vec(&after.protocol_backlog).unwrap(),
+            journal
+        );
+        assert_eq!(fs::read(store.path()).unwrap(), ciphertext);
+        assert!(store.recovery_pending());
+        assert!(!fresh.backlog_installed(Some(id)));
+        assert!(store.save_state(&mut after).is_err());
+        assert!(
+            fresh
+                .backlog_reconcile(
+                    &restored,
+                    &store,
+                    &mut after,
+                    &"a".repeat(64),
+                    crate::acquisition::Cancellation::default()
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read(store.path()).unwrap(), ciphertext);
+    }
+}

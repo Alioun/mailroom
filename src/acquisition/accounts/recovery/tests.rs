@@ -899,3 +899,57 @@ fn rotated_bundles_without_a_matching_identity_commitment_are_refused_before_imp
         "the committed bundle restores"
     );
 }
+
+#[test]
+fn copy_phase_history_survives_single_recovery_without_execution_authority() {
+    use crate::backlog::protocol::tests::{Stage, run};
+    for stage in [
+        Stage::Copied,
+        Stage::Marked,
+        Stage::StoreUncertain,
+        Stage::Undone,
+    ] {
+        let (root, repo, account) = fixture();
+        let store = repo.store(&account).unwrap();
+        let mut saved = store.load_state().unwrap();
+        saved.protocol_backlog.runs = vec![run(&account.id, stage)];
+        store.save_state(&mut saved).unwrap();
+        let expected = serde_json::to_vec(&saved.protocol_backlog).unwrap();
+        let ciphertext = fs::read(store.path()).unwrap();
+        drop(store);
+        let (manifest, bundle) = capture(&repo, &account, root.path());
+        assert_eq!(manifest.state_schema, 26);
+        let destination = tempfile::tempdir().unwrap();
+        let fresh = persistent_accounts(destination.path());
+        let preview = fresh.restore_preview(&bundle, &secret()).unwrap();
+        fresh
+            .restore(&bundle, &secret(), &preview, |_| Ok(()))
+            .unwrap();
+        let restored = fresh.load(&account.id).unwrap();
+        let store = fresh.store(&restored).unwrap();
+        let mut after = store.load_state().unwrap();
+        assert_eq!(
+            serde_json::to_vec(&after.protocol_backlog).unwrap(),
+            expected,
+            "{stage:?}"
+        );
+        assert_eq!(fs::read(store.path()).unwrap(), ciphertext);
+        assert!(store.recovery_pending());
+        assert!(!fresh.backlog_installed(Some(&account.id)));
+        assert!(store.save_state(&mut after).is_err());
+        assert!(
+            fresh
+                .backlog_run(
+                    &restored,
+                    &store,
+                    &mut after,
+                    &"a".repeat(64),
+                    false,
+                    crate::acquisition::Cancellation::default(),
+                    |_| Ok(())
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read(store.path()).unwrap(), ciphertext);
+    }
+}

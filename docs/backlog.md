@@ -14,7 +14,7 @@ A purpose-specific HMAC binds the exact approval to the saved proof, execution p
 
 ## Protocol journal and execution
 
-`AccountState::protocol_backlog` owns schema15 `Journal`, `Run` and `SavedPlan` records. Each batch reuses the validated `MoveEvidence` model. Approval consumption and exact membership persist before execution. The worker then saves attempted Intent before transmission, validated COPYUID mapping before later response processing, completion or loss, and identity readback as distinct evidence. Each command contains at most 500 distinct approved UIDs. Sparse sets never expand to include other messages.
+`AccountState::protocol_backlog` owns `Journal`, `Run` and `SavedPlan` records introduced in schema 15. Schema 26 batches distinguish historical MOVE evidence from tagged COPY evidence. Historical MOVE bytes retain their original form. Approval consumption and exact membership persist before execution. The worker then saves attempted Intent before transmission, validated COPYUID mapping before later response processing, completion or loss, and identity readback as distinct evidence. Each command contains at most 500 distinct approved UIDs. Sparse sets never expand to include other messages.
 
 The verified-TLS transport requires MOVE, usable UIDPLUS, stable mailbox identities and writable selected mailboxes. It emits UID MOVE with exact quoted wire names. It never uses COPY, STORE, EXPUNGE, CLOSE or CREATE. There is one execution connection per worker. Local account admission and store locks exclude competing application work.
 
@@ -95,13 +95,15 @@ The archive intent and populated history survive encrypted reopening and selecte
 
 ## COPY fallback evidence core
 
-`backlog::imap_copy` models COPY, conditional flag changes and exact UID EXPUNGE as separate effects. This module is not connected to account journals, transport workers, HTTP routes or UI. The existing protocol workflow still requires MOVE. Its account schema remains 25.
+`backlog::imap_copy` models COPY, conditional flag changes and exact UID EXPUNGE as separate effects. Schema 26 stores these phases in the shared account journal through a tagged COPY batch. Historical MOVE batch serialization stays unchanged. The status route and English/German UI preserve the complete COPY history, including incomplete phases. Execution, reconciliation and Undo for COPY remain denied before credentials or network access. The installed protocol worker still requires MOVE.
 
 The core reuses the validated transfer identities and COPYUID parser. Versioned observations require a nonzero per-message MODSEQ and a persistent mailbox HIGHESTMODSEQ. Source deletion requires a validated mapped copy whose flags, arrival date, size and Message-ID hash match. Fresh source observations determine STORE groups with one actual MODSEQ per group. The command adds only `\Deleted` with UNCHANGEDSINCE. MODIFIED members, missing acknowledgments, missing returned MODSEQs and later metadata changes cannot establish ownership.
 
 UID EXPUNGE requires another exact observation of the recorded owned flags and MODSEQs and an unchanged mapped copy. The core records the restricted UID set before returning the command. Final source absence and mapped destination metadata establish observed filing. Lost acknowledgments never make an attempted COPY or expunge repeatable. UID EXPUNGE has no MODSEQ condition, so the final-read/effect race remains.
 
-Copy-only Undo preparation targets the extra destination copy without copying it back. A pending Deleted clear has its own conditional intent and retains the exact acknowledged ownership record. It removes only that flag. Reopening serialized evidence performs no effect or compensation. The core tests use memory-backed independent effects and serialization at phase boundaries. They do not establish TLS behavior, process-crash durability or application recovery acceptance.
+MODSEQ values use canonical decimal strings across storage, recovery and UI. Values above JavaScript's safe integer range retain every digit. Schemas 1 through 25 reject COPY semantics and tags in base snapshots and appended patches. Historical synthetic copy method records remain readable.
+
+Copy-only Undo preparation targets the extra destination copy without copying it back. A pending Deleted clear has its own conditional intent and retains the exact acknowledged ownership record. It removes only that flag. Reopening serialized evidence performs no effect or compensation. The core tests use memory-backed independent effects and serialization at phase boundaries. They do not establish TLS behavior or process-crash durability. Separate account tests persist and reopen all journal phases. Single and selected recovery tests preserve exact COPY journals and ciphertext while retaining the restored-account read-only hold. They do not authorize provider reconciliation or operation resumption.
 
 ## Remaining limits
 

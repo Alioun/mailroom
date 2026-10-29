@@ -1261,3 +1261,6 @@ mod authority_matrix {
         }
     }
 }
+
+#[cfg(test)]
+mod copy_tests;

@@ -6,6 +6,9 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+mod batch;
+pub use batch::{Batch, COPY_SEMANTICS};
+
 /// Retained runs with a full per-message journal. Q27 compacts finished runs
 /// 90 days after completion, so this bounds runs started within 90 days.
 pub const HISTORY: usize = 512;
@@ -54,7 +57,7 @@ pub enum Status {
 #[serde(deny_unknown_fields)]
 pub struct Reverse {
     pub forward: usize,
-    pub evidence: MoveEvidence,
+    pub evidence: Batch,
 }
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,7 +67,7 @@ pub struct Run {
     pub plan: SavedPlan,
     pub status: Status,
     pub stop_requested: bool,
-    pub batches: Vec<MoveEvidence>,
+    pub batches: Vec<Batch>,
     pub reverse: Vec<Reverse>,
     pub undo_receipt: Option<String>,
     #[serde(default)]
@@ -154,7 +157,7 @@ impl Run {
         }
     }
     fn summary(&self, completed_at: u64, now: u64) -> retention::Summary {
-        let count = |entries: &mut dyn Iterator<Item = &MoveEvidence>| {
+        let count = |entries: &mut dyn Iterator<Item = &Batch>| {
             entries
                 .map(|e| {
                     e.resolutions()
@@ -249,7 +252,7 @@ pub fn same_binding(a: &Binding, b: &Binding, legacy: impl FnOnce() -> Vec<Strin
         && a.workspace == b.workspace
         && (a.material == b.material || legacy().contains(&b.material))
 }
-pub fn verified(e: &MoveEvidence) -> bool {
+pub fn verified(e: &Batch) -> bool {
     e.attempted()
         && e.resolutions()
             .values()
@@ -266,7 +269,7 @@ pub fn outcome(run: &Run, reverse: bool) -> Status {
         .any(|e| e.attempted() && e.resolutions().values().any(|r| *r == Resolution::Conflict))
     {
         Status::Conflict
-    } else if entries.iter().any(|e| e.attempted() && !verified(e)) {
+    } else if entries.iter().any(|e| e.attempted() && e.uncertain()) {
         Status::Uncertain
     } else if !entries.is_empty() && entries.iter().all(|e| verified(e)) {
         if reverse {
@@ -357,13 +360,10 @@ impl Journal {
                 || r.plan.binding.account != *account
                 || r.plan.filing.account != account.as_str()
                 || r.plan.filing.provider != crate::acquisition::Provider::MailboxOrg
-                || r.plan.filing.semantics != "imap-move-mapping-readback/v1"
-                || r.plan.filing.changes.iter().any(|c| {
-                    c.operation
-                        != super::Operation::Imap {
-                            method: super::MoveMethod::UidMove,
-                        }
-                })
+                || !matches!(
+                    r.plan.filing.semantics.as_str(),
+                    "imap-move-mapping-readback/v1" | COPY_SEMANTICS
+                )
                 || r.plan.filing.artifact.context().account != account.as_str()
                 || r.batches.is_empty()
                 || r.batches.len() > BATCHES
@@ -390,9 +390,31 @@ impl Journal {
                 return Err(invalid());
             }
             r.plan.topology.validate().map_err(|_| invalid())?;
+            if r.plan.filing.semantics == COPY_SEMANTICS
+                && (!r.plan.topology.capabilities.contains("UIDPLUS")
+                    || !r.plan.topology.capabilities.contains("CONDSTORE")
+                    || r.plan.topology.capabilities.contains("MOVE"))
+            {
+                return Err(invalid());
+            }
             let mut members = BTreeSet::new();
             let mut count = 0;
             for b in &r.batches {
+                if b.is_copy()
+                    && [b.command().source(), b.command().destination()]
+                        .iter()
+                        .any(|m| {
+                            r.plan
+                                .topology
+                                .get(&m.name.decoded)
+                                .is_none_or(|found| found.name != m.name || !found.selectable())
+                        })
+                {
+                    return Err(invalid());
+                }
+                if b.is_copy() != (r.plan.filing.semantics == COPY_SEMANTICS) {
+                    return Err(invalid());
+                }
                 if b.command().purpose()
                     != (Purpose::Filing {
                         protect_flagged: r.plan.filing.options.protect_flagged,
@@ -416,7 +438,8 @@ impl Journal {
                             uid.get(),
                         ))
                         .is_none_or(|c| {
-                            c.destination != b.command().destination().name.decoded
+                            c.operation != (super::Operation::Imap { method: b.method() })
+                                || c.destination != b.command().destination().name.decoded
                                 || c.source.message_id_hash
                                     != b.command().messages()[uid].message_id_hash
                                 || c.flags != b.command().messages()[uid].flags
@@ -434,6 +457,7 @@ impl Journal {
                 let f = r.batches.get(b.forward).ok_or_else(invalid)?;
                 let resolutions = f.resolutions();
                 if !reversed.insert(b.forward)
+                    || b.evidence.is_copy() != f.is_copy()
                     || b.evidence.command().purpose() != Purpose::ConditionalUndo
                     || b.evidence.command().source() != f.command().destination()
                     || b.evidence.command().destination() != f.command().source()
@@ -460,7 +484,7 @@ impl Journal {
                 }
             }
             if r.status == Status::Prepared
-                && (r.batches.iter().any(MoveEvidence::attempted) || r.undo_receipt.is_some())
+                && (r.batches.iter().any(Batch::attempted) || r.undo_receipt.is_some())
                 || matches!(
                     r.status,
                     Status::Prepared | Status::Running | Status::UndoRunning
@@ -524,3 +548,6 @@ pub(crate) fn project(
     )?;
     Ok(plan)
 }
+
+#[cfg(test)]
+pub(crate) mod tests;

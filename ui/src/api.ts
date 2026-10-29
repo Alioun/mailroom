@@ -268,14 +268,37 @@ const moveIntent = z.object({ purpose: z.union([z.literal('conditional_undo'), z
 const copyUid = z.object({ uidvalidity: z.number().int().positive(), pairs: z.record(z.string(), z.number().int().positive()) })
 const moveReadback = z.object({ identity: moveMailbox, messages: z.record(z.string(), moveMetadata) })
 const moveEvidence = z.object({ intent: moveIntent, attempted: z.boolean(), mapping: z.discriminatedUnion('kind', [z.object({ kind: z.literal('missing') }), z.object({ kind: z.literal('validated'), mapping: copyUid }), z.object({ kind: z.literal('rejected'), prior: copyUid.nullable() })]), completion: z.discriminatedUnion('kind', [z.object({ kind: z.literal('lost') }), z.object({ kind: z.literal('tagged'), status: z.enum(['ok', 'no', 'bad']), code: z.string().nullable() })]).nullable(), readback: z.tuple([moveReadback, moveReadback]).nullable() })
-const reverseMove = z.object({ forward: z.number().int().nonnegative(), evidence: moveEvidence })
+const modSeq = z.string().regex(/^[1-9][0-9]{0,19}$/).refine(value => value.length < 20 || value <= '18446744073709551615').brand<'ModSeq'>()
+const versionedMetadata = z.object({ metadata: moveMetadata, modseq: modSeq }).strict()
+const copyReadback = z.object({ identity: moveMailbox, highest_modseq: modSeq, messages: z.record(z.string(), versionedMetadata) }).strict()
+const flagIntent = z.object({ before: copyReadback, change: z.enum(['add_deleted', 'remove_owned_deleted']) }).strict()
+const storeResult = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('lost') }).strict(),
+  z.object({ kind: z.literal('rejected') }).strict(),
+  z.object({ kind: z.literal('tagged'), status: z.enum(['ok', 'no', 'bad']), modified: z.array(z.number().int().positive()).nullable(), updated: z.record(z.string(), modSeq) }).strict(),
+])
+const flagEvidence = z.object({ intent: flagIntent, result: storeResult.nullable(), readback: copyReadback.nullable() }).strict()
+const copyJournal = z.object({
+  before: copyReadback, copy: moveEvidence,
+  readback: z.object({ source: copyReadback, destination: copyReadback }).strict().nullable(),
+  deletions: z.array(z.object({
+    evidence: z.object({ flag: flagEvidence, expunge: z.object({ before: copyReadback, completion: moveEvidence.shape.completion, readback: copyReadback.nullable() }).strict().nullable() }).strict(),
+    destination: copyReadback, final_destination: copyReadback.nullable(),
+  }).strict()),
+}).strict()
+const protocolEvidence = z.union([
+  z.object({ kind: z.literal('copy_uid_expunge'), evidence: copyJournal }).strict().transform(batch => ({ ...batch.evidence.copy, copy_journal: batch.evidence })),
+  moveEvidence.strict().transform(batch => ({ ...batch, copy_journal: null })),
+])
+export type ProtocolEvidence = z.infer<typeof protocolEvidence>
+const reverseMove = z.object({ forward: z.number().int().nonnegative(), evidence: protocolEvidence })
 export const undoDeadline = z.object({ run: z.string(), completed_at: z.number().nullable(), undo_until: z.number().nullable(), undo_open: z.boolean() })
 export const runSummary = z.object({ id: z.string(), receipt: z.string(), status: z.enum(['complete', 'undone']), completed_at: z.number(), compacted_at: z.number(), messages: z.number(), batches: z.number(), applied: z.number(), restored: z.number(), folders: z.record(z.string(), z.record(z.string(), z.number())) })
 export type UndoDeadline = z.infer<typeof undoDeadline>
 export type RunSummary = z.infer<typeof runSummary>
 const retained = { undo_deadlines: z.array(undoDeadline).default([]), undo_window_days: z.number().default(90), closable: z.array(z.string()).default([]) }
 export const closure = z.object({ at: z.number(), receipt: z.string().length(64) })
-const protocolRun = z.object({ id: z.string(), receipt: z.string(), plan: z.object({ filing: backlogPlan, binding: z.object({ account: z.string(), source: z.string(), authority: z.string(), workspace: z.string(), material: z.string() }), saved_proof: z.string(), execution_proof: z.string() }), status: z.enum(['prepared', 'running', 'stopped', 'complete', 'uncertain', 'conflict', 'undo_running', 'undone']), stop_requested: z.boolean(), batches: z.array(moveEvidence), reverse: z.array(reverseMove), undo_receipt: z.string().nullable(), undo_conflicts: z.number().int().nonnegative().default(0), completed_at: z.number().optional(), closed: closure.optional() })
+const protocolRun = z.object({ id: z.string(), receipt: z.string(), plan: z.object({ filing: backlogPlan, binding: z.object({ account: z.string(), source: z.string(), authority: z.string(), workspace: z.string(), material: z.string() }), saved_proof: z.string(), execution_proof: z.string() }), status: z.enum(['prepared', 'running', 'stopped', 'complete', 'uncertain', 'conflict', 'undo_running', 'undone']), stop_requested: z.boolean(), batches: z.array(protocolEvidence), reverse: z.array(reverseMove), undo_receipt: z.string().nullable(), undo_conflicts: z.number().int().nonnegative().default(0), completed_at: z.number().optional(), closed: closure.optional() })
 const protocolView = z.object({ installed: z.boolean(), recovery_hold: z.boolean(), journal: z.object({ runs: z.array(protocolRun), summaries: z.array(runSummary).default([]) }), ...retained, limitations: z.string() })
 const protocolPreview = z.object({ operation: protocolRun, receipt: z.string(), saved: proofPreview, execution: preview, limitations: z.string() })
 const protocolUndo = z.object({ run: z.string(), reverse: z.array(reverseMove), conflicts: z.number(), receipt: z.string(), limitations: z.string() })

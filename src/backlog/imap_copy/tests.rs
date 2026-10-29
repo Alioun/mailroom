@@ -633,17 +633,17 @@ fn malformed_recorded_store_result_permanently_blocks_ownership() {
 
 #[test]
 fn zero_and_overflow_modseq_and_nonpersistent_readbacks_fail() {
-    for text in ["0", "-1", "18446744073709551616", "1.5", "\"900\""] {
+    for text in ["0", "-1", "18446744073709551616", "1.5", "\"0900\""] {
         assert!(serde_json::from_str::<ModSeq>(text).is_err());
     }
     assert_eq!(
-        serde_json::from_str::<ModSeq>("18446744073709551615")
+        serde_json::from_str::<ModSeq>("\"18446744073709551615\"")
             .unwrap()
             .get(),
         u64::MAX
     );
     let mut raw = serde_json::to_value(source()).unwrap();
-    raw["highest_modseq"] = 899.into();
+    raw["highest_modseq"] = "899".into();
     assert!(serde_json::from_value::<Readback>(raw).is_err());
     let mut raw = serde_json::to_value(source()).unwrap();
     raw.as_object_mut().unwrap().remove("highest_modseq");
@@ -685,7 +685,7 @@ fn deserialization_rejects_phase_smuggling_duplicate_members_and_changed_mapping
                 raw["readback"] = serde_json::Value::Null;
             }
             3 => {
-                raw["readback"]["destination"]["messages"]["60"]["modseq"] = 0.into();
+                raw["readback"]["destination"]["messages"]["60"]["modseq"] = "0".into();
             }
             4 => {
                 let duplicate = raw["deletions"][0].clone();
@@ -926,7 +926,7 @@ fn pending_clear_serialization_requires_the_exact_acknowledged_ownership_record(
                 raw["ownership"]["result"] = serde_json::json!({"kind":"lost"});
             }
             1 => {
-                raw["effect"]["intent"]["before"]["messages"]["4"]["modseq"] = 911.into();
+                raw["effect"]["intent"]["before"]["messages"]["4"]["modseq"] = "911".into();
             }
             2 => {
                 raw["ownership"]["readback"]["messages"]["4"]["metadata"]["flags"] =

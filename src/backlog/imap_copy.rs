@@ -5,9 +5,30 @@ use super::imap_move::{
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, collections::BTreeSet, num::NonZeroU64};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ModSeq(NonZeroU64);
+impl Serialize for ModSeq {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.get().to_string())
+    }
+}
+impl<'de> Deserialize<'de> for ModSeq {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        if text.is_empty()
+            || text.starts_with('0')
+            || text.len() > 20
+            || !text.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(serde::de::Error::custom("Invalid decimal MODSEQ"));
+        }
+        Self::new(
+            text.parse()
+                .map_err(|_| serde::de::Error::custom("MODSEQ overflow"))?,
+        )
+        .map_err(|_| serde::de::Error::custom("Zero MODSEQ"))
+    }
+}
 
 impl ModSeq {
     pub fn new(value: u64) -> Result<Self, InvalidEvidence> {
@@ -266,6 +287,9 @@ impl CopyEvidence {
     }
     pub fn copy(&self) -> &MoveEvidence {
         &self.copy
+    }
+    pub fn observed(&self) -> bool {
+        self.readback.is_some() && self.deletions.iter().all(|b| b.evidence.observed())
     }
     pub fn deletions(&self) -> impl Iterator<Item = &Deletion> {
         self.deletions.iter().map(|b| &b.evidence)

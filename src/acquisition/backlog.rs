@@ -263,17 +263,20 @@ impl Accounts {
             };
             let entries: Vec<_> = messages.into_iter().collect();
             for chunk in entries.chunks(crate::backlog::BATCH_LIMIT) {
-                batches.push(MoveEvidence::intent(
-                    MoveIntent::new(
-                        Purpose::Filing {
-                            protect_flagged: filing.options.protect_flagged,
-                        },
-                        identity(&src)?,
-                        identity(&dst)?,
-                        chunk.iter().cloned().collect(),
+                batches.push(
+                    MoveEvidence::intent(
+                        MoveIntent::new(
+                            Purpose::Filing {
+                                protect_flagged: filing.options.protect_flagged,
+                            },
+                            identity(&src)?,
+                            identity(&dst)?,
+                            chunk.iter().cloned().collect(),
+                        )
+                        .map_err(failure)?,
                     )
-                    .map_err(failure)?,
-                ));
+                    .into(),
+                );
             }
         }
         if batches.is_empty() || batches.len() > model::BATCHES {
@@ -393,6 +396,13 @@ impl Accounts {
             .iter()
             .position(|r| r.id == id)
             .ok_or_else(invalid)?;
+        if saved.protocol_backlog.runs[i]
+            .batches
+            .iter()
+            .any(model::Batch::is_copy)
+        {
+            return Err(invalid());
+        }
         let mut binding = self.backlog_binding(account, store, saved)?;
         if !model::same_binding(
             &binding,
@@ -476,26 +486,27 @@ impl Accounts {
                     return Err(invalid());
                 }
                 boundary("move_before_intent");
-                let result = connection.move_messages(&permit, &mut evidence, |e| {
-                    if e.mapping().is_some() && e.completion().is_none() {
-                        boundary("move_parsed_mapping");
-                    }
-                    if reverse {
-                        saved.protocol_backlog.runs[i].reverse[n].evidence = e.clone();
-                    } else {
-                        saved.protocol_backlog.runs[i].batches[n] = e.clone();
-                    }
-                    save(store, saved)
-                        .map_err(|_| crate::census::folder_provisioning::Failure::Limit)?;
-                    boundary(if e.mapping().is_some() && e.completion().is_none() {
-                        "move_saved_mapping"
-                    } else if e.completion().is_some() {
-                        "move_completion"
-                    } else {
-                        "move_attempted"
+                let result =
+                    connection.move_messages(&permit, evidence.move_mut().map_err(failure)?, |e| {
+                        if e.mapping().is_some() && e.completion().is_none() {
+                            boundary("move_parsed_mapping");
+                        }
+                        if reverse {
+                            saved.protocol_backlog.runs[i].reverse[n].evidence = e.clone().into();
+                        } else {
+                            saved.protocol_backlog.runs[i].batches[n] = e.clone().into();
+                        }
+                        save(store, saved)
+                            .map_err(|_| crate::census::folder_provisioning::Failure::Limit)?;
+                        boundary(if e.mapping().is_some() && e.completion().is_none() {
+                            "move_saved_mapping"
+                        } else if e.completion().is_some() {
+                            "move_completion"
+                        } else {
+                            "move_attempted"
+                        });
+                        Ok(())
                     });
-                    Ok(())
-                });
                 if result.is_ok() {
                     observe(&mut connection, &mut evidence).map_err(failure)?;
                     boundary("move_readback");
@@ -534,13 +545,20 @@ impl Accounts {
         id: &str,
         cancel: Cancellation,
     ) -> Result<(), AcquisitionError> {
-        let binding = self.backlog_binding(account, store, saved)?;
         let i = saved
             .protocol_backlog
             .runs
             .iter()
             .position(|r| r.id == id && r.closed.is_none())
             .ok_or_else(invalid)?;
+        if saved.protocol_backlog.runs[i]
+            .batches
+            .iter()
+            .any(model::Batch::is_copy)
+        {
+            return Err(invalid());
+        }
+        let binding = self.backlog_binding(account, store, saved)?;
         if !model::same_binding(
             &binding,
             &saved.protocol_backlog.runs[i].plan.binding,
@@ -605,13 +623,16 @@ impl Accounts {
         id: &str,
         cancel: Cancellation,
     ) -> Result<UndoPreview, AcquisitionError> {
-        let binding = self.backlog_binding(account, store, saved)?;
         let run = saved
             .protocol_backlog
             .runs
             .iter()
             .find(|r| r.id == id)
             .ok_or_else(invalid)?;
+        if run.batches.iter().any(model::Batch::is_copy) {
+            return Err(invalid());
+        }
+        let binding = self.backlog_binding(account, store, saved)?;
         if !model::same_binding(&binding, &run.plan.binding, || {
             model::material_legacy(saved, store.keys())
         }) || run.undo_receipt.is_some()
@@ -718,7 +739,8 @@ impl Accounts {
                         messages,
                     )
                     .map_err(failure)?,
-                ),
+                )
+                .into(),
             });
         }
         let receipt = store.keys().binding_for(
@@ -855,7 +877,7 @@ pub(super) fn close_preview(
 }
 fn observe(
     connection: &mut Connection,
-    e: &mut MoveEvidence,
+    e: &mut model::Batch,
 ) -> Result<(), crate::census::folder_provisioning::Failure> {
     use crate::census::folder_provisioning::Failure;
     let requested = e.command().messages().keys().copied().collect();

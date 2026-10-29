@@ -357,6 +357,9 @@ impl TryFrom<RawDeletion> for Deletion {
     }
 }
 impl Deletion {
+    pub(super) fn observed(&self) -> bool {
+        self.flag.readback.is_some() && self.expunge.as_ref().is_none_or(|e| e.readback.is_some())
+    }
     pub fn intent(&self) -> &FlagIntent {
         self.flag.intent()
     }

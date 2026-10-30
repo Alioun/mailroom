@@ -725,6 +725,26 @@ async fn combined_wired_handoffs_are_separate_durable_and_single_use() {
         );
     }
     let input = combined_input(&view, "mail_app_preparation");
+    let mute_input = combined_input(&view, "mute");
+    let before_mute = [&f.account, &other]
+        .map(|account| std::fs::read(f.repo.store(account).unwrap().path()).unwrap());
+    let (status, mute_preview) =
+        combined(&app, json!({"action":"preview","input":mute_input})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        mute_preview["previews"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|preview| preview["proof"].is_object())
+    );
+    for (account, before) in [&f.account, &other].into_iter().zip(before_mute) {
+        assert_eq!(
+            std::fs::read(f.repo.store(account).unwrap().path()).unwrap(),
+            before
+        );
+    }
+    assert!(recorded(&app).is_empty());
     let (status, preview) = combined(&app, json!({"action":"preview","input":input})).await;
     assert_eq!(status, StatusCode::OK);
     assert!(recorded(&app).is_empty());
@@ -765,7 +785,7 @@ async fn combined_wired_handoffs_are_separate_durable_and_single_use() {
     );
     assert_eq!(recorded(&app).len(), 2);
     files_secret_free(f.root.path());
-    let mut display_fixture = json!({"view":view,"preview":preview,"done":done});
+    let mut display_fixture = json!({"view":view,"preview":preview,"done":done,"mute_input":mute_input,"mute_preview":mute_preview});
     for preview in display_fixture["preview"]["previews"]
         .as_array_mut()
         .unwrap()

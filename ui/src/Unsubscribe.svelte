@@ -1,4 +1,6 @@
 <script lang="ts">
+  import ProofDiagnostics from './ProofDiagnostics.svelte'
+  import { proofGateText } from './proof-diagnostics'
   import { onMount } from 'svelte'
   import { openSubscriptionReview, previewSubscriptionReview, confirmSubscriptionReview, recoverUnsubscribe, resolveUnsubscribe, type Resolution, type SubscriptionReviewView, type SubscriptionReviewPreview, type SubscriptionReviewInput, type UnsubscribeMethod } from './api'
   let { lang }: { lang: 'en' | 'de' } = $props()
@@ -96,7 +98,7 @@
           <p>{action.effect}</p><p>{action.source} · {action.header_digest} · {action.payload_digest}</p>
           {#if action.copy_card}<div data-copy-card><p>{t.prepared}</p><pre>{action.copy_card.uri ?? ''}{'\n'}{action.copy_card.to ?? ''}{'\n'}{action.copy_card.from ?? ''}{'\n'}{action.copy_card.subject ?? ''}{'\n'}{action.copy_card.body ?? ''}</pre></div>{/if}
         {/each}
-        {#if accountPlan.proof}<details open><summary>{t.proof}</summary><p>{accountPlan.proof.gate} · {accountPlan.proof.counts.filed} filed · {accountPlan.proof.counts.copies} independent copies</p>{#each accountPlan.proof.warnings as warning}<p>{warning}</p>{/each}{#each accountPlan.proof.pins as pin}<p>{pin.status} · {pin.message_id_hash}</p>{/each}<pre>{accountPlan.proof.artifact.executable}</pre></details>{/if}
+        {#if accountPlan.proof}<details open><summary>{t.proof}</summary><p data-proof-summary>{proofGateText(accountPlan.proof.gate, lang)} · {accountPlan.proof.counts.filed} {lang === 'en' ? 'filed' : 'abgelegt'} · {accountPlan.proof.counts.copies} {lang === 'en' ? 'independent copies' : 'unabhängige Kopien'}</p><ProofDiagnostics diagnostics={accountPlan.proof.diagnostics} {lang} />{#each accountPlan.proof.pins as pin}<p>{pin.status} · {pin.message_id_hash}</p>{/each}<pre>{accountPlan.proof.artifact.executable}</pre></details>{/if}
         {/each}
         <label><input type="checkbox" bind:checked={confirmed} disabled={busy} />{t.confirm}</label>
         {#if plan.local_mail_confirmation}<p>{plan.local_mail_confirmation}</p><label><input type="checkbox" bind:checked={mailConfirmed} disabled={busy} />{t.mail}</label>{/if}

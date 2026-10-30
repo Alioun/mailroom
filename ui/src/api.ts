@@ -2,6 +2,7 @@ import { invoiceDiagnostic, invoiceHandoff, invoiceRole } from './invoice-diagno
 import { z } from 'zod'
 import { evidenceView } from './acquisition-evidence'
 import { proposalRationale, proposalReason } from './proposal-diagnostics'
+import { proofDiagnostics, proofGate } from './proof-diagnostics'
 
 z.config({ jitless: true })
 
@@ -24,7 +25,7 @@ const preview = z.object({
   baseline: sample.shape.baseline, diff: z.array(z.object({ id: z.string(), before: z.array(z.string()), after: z.string() })),
   rules: z.array(z.object({ id: z.string(), matched: z.number(), candidates: z.number(), monthly: z.record(z.string(), z.number()), zero_match: z.boolean(), fully_shadowed: z.boolean() })),
   months: z.array(z.string()), unmatched_senders: z.record(z.string(), z.number()), pins: z.array(pin.extend({ status: z.enum(['pass', 'fail', 'stale', 'unknown']), actual: z.array(destination) })),
-  gate: z.enum(['blocked', 'warnings']), warnings: z.array(z.string()), runtime_cross_check: z.string(),
+  gate: proofGate, diagnostics: proofDiagnostics, warnings: z.array(z.string()), runtime_cross_check: z.string(),
 })
 const operation = z.enum(['preview', 'synthetic_census', 'connect', 'census', 'upload_rules', 'activate_rules', 'create_folder', 'move_messages', 'change_flags', 'change_forwarding', 'send_message', 'unsubscribe'])
 const availability = z.array(z.object({ operation, effect: z.enum(['synthetic_read', 'account_read', 'account_write']), allowed: z.boolean(), reason: z.string() }))

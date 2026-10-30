@@ -21,11 +21,15 @@ function imports(code) {
   return code.replace(/(['"])(zod|svelte(?:\/[^'"]+)?)\1/g, (_match, _quote, name) => JSON.stringify(import.meta.resolve(name)))
     .replace(/from '(.\/[^']+)'/g, (_match, name) => `from '${name}.mjs'`)
 }
-for (const name of ['api', 'invoice-diagnostics', 'acquisition-evidence', 'proposal-diagnostics']) {
+for (const name of ['api', 'invoice-diagnostics', 'acquisition-evidence', 'proposal-diagnostics', 'proof-diagnostics']) {
   const source = await readFile(resolve(root, `ui/src/${name}.ts`), 'utf8')
   const emitted = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }, fileName: `${name}.ts` })
   await writeFile(resolve(output, `${name}.mjs`), imports(emitted.outputText))
 }
+const sharedSource = await readFile(resolve(root, 'ui/src/ProofDiagnostics.svelte'), 'utf8')
+const shared = compile(sharedSource, { filename: 'ProofDiagnostics.svelte', generate: 'server', css: 'external' })
+assert.equal(shared.warnings.length, 0)
+await writeFile(resolve(output, 'ProofDiagnostics.svelte.mjs'), imports(shared.js.code))
 const api = await import(pathToFileURL(resolve(output, 'api.mjs')))
 const diagnostics = await import(pathToFileURL(resolve(output, 'proposal-diagnostics.mjs')))
 const requests = []

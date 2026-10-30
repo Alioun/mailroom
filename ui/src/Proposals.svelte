@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ProofDiagnostics from './ProofDiagnostics.svelte'
   import { openProposals, reviewProposals, confirmProposals, type ProposalGeneration, type ProposalReview, type ProposalSelection } from './api'
   import { proposalRationaleText, proposalReasonText, proposalStatusText } from './proposal-diagnostics'
   let { account, lang, disabled, onChanged }: { account: string; lang: 'en' | 'de'; disabled: boolean; onChanged: () => Promise<void> } = $props()
@@ -81,9 +82,8 @@
       <p>{t.counts} · {counts(review.current.proof)} → {counts(review.resulting.proof)}</p>
       <details open><summary>{t.diff}</summary><pre>{JSON.stringify(review.resulting.proof.diff, null, 2)}</pre></details>
       <details open><summary>{t.pins}</summary><pre>{JSON.stringify(review.resulting.proof.pins, null, 2)}</pre></details>
-      <p>{diagnostic.originalDiagnostics}</p>
-      <details open><summary>{t.omissions}</summary>{#each review.resulting.proof.artifact.omissions as omission}<p>{omission.rule} · {omission.reason}</p>{/each}</details>
-      <details open><summary>{t.warnings}</summary>{#each review.resulting.proof.warnings as warning}<p>{warning}</p>{/each}</details>
+      <details open><summary>{t.omissions}</summary><p>{diagnostic.originalDiagnostics}</p>{#each review.resulting.proof.artifact.omissions as omission}<p>{omission.rule} · {omission.reason}</p>{/each}</details>
+      <details open><summary>{t.warnings}</summary><ProofDiagnostics diagnostics={review.resulting.proof.diagnostics} {lang} /></details>
       <details><summary>{t.impact}</summary><pre>{JSON.stringify({ current: review.current.proof, resulting: review.resulting.proof }, null, 2)}</pre></details>
       {#if !review.acceptance_available}<p role="alert">{t.blocked}</p>{/if}
       <label><input type="checkbox" bind:checked={confirmed} disabled={disabled || busy || !review.acceptance_available} />{t.confirm}</label>

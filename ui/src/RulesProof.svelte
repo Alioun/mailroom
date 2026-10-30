@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ProofDiagnostics from './ProofDiagnostics.svelte'
   import Proposals from './Proposals.svelte'
   import { onMount } from 'svelte'
   import { ToggleGroup } from '@ark-ui/svelte/toggle-group'
@@ -150,7 +151,7 @@
       <details><summary>{t.unmatched}</summary>{#each Object.entries(proofState.proof.unmatched_senders) as [sender, count]}<p>{sender} · {count}</p>{/each}</details>
       <details open><summary>{t.omissions}</summary>{#each proofState.proof.artifact.omissions as o}<p>{o.rule} · {o.reason}</p>{/each}</details>
       <details open><summary>{t.pinned}</summary>{#each proofState.proof.pins as p}<p>{p.message_id_hash.slice(0, 12)} · {t[p.status]}</p>{/each}</details>
-      <details open={account !== null}><summary>{t.warnings}</summary>{#each proofState.proof.warnings as w}<p>{w}</p>{/each}<p>{proofState.proof.runtime_cross_check}</p></details>
+      <details open={account !== null}><summary>{t.warnings}</summary><ProofDiagnostics diagnostics={proofState.proof.diagnostics} {lang} /></details>
       <details open={account !== null}><summary>{t.program}</summary><p class="artifact-id">{t.id} · {proofState.proof.artifact.identity}</p><p>{proofState.proof.semantics}</p><pre>{proofState.proof.artifact.executable}</pre><ul>{#each proofState.proof.artifact.trace as line}<li>{line}</li>{/each}</ul></details>
       {#if account && receipt?.download_available}
         <div class="local-download">

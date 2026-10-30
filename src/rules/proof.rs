@@ -9,6 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const SEMANTICS: &str = "parsed-emitted-sieve-subset-v6";
 
+pub mod diagnostics;
+use diagnostics::{Diagnostics, Notice, RuntimeCheck};
+
 /// Lowercase MIME part content types per proof message ID, from acquired originals.
 /// A message without an entry has unknown structure.
 pub type MimeEvidence = BTreeMap<String, BTreeSet<String>>;
@@ -54,6 +57,7 @@ pub struct Proof {
     pub unmatched_senders: BTreeMap<String, usize>,
     pub pins: Vec<PinResult>,
     pub gate: &'static str,
+    pub diagnostics: Diagnostics,
     pub warnings: Vec<String>,
     pub runtime_cross_check: &'static str,
 }
@@ -660,28 +664,31 @@ pub fn prove_with_evidence(
             }
         })
         .collect::<Vec<_>>();
-    let mut warnings = vec!["Delivery tags label a matched ingress address, not authenticated Gmail origin. Sieve starts with empty accumulated flags. Observed IMAP flags are separate; permanent keyword storage is unverified. A verified matching envelope route can add its keyword while a recipient-role hold keeps the message in Inbox without read changes or accounting copies.".into(),"Recipient safety accepts exactly one verified synthetic delivery recipient. Multiple recipients retain Inbox for review, including same-role recipients. Real provider provenance remains unknown.".into(), "Header census proves no attachment presence or accounting acceptance. Duplicate state starts empty for each proof and has no historical provider cache.".into(), "Folder paths use a logical slash separator. Actual provider separator, existing folders and rule coexistence remain unverified.".into()];
+    let mut notices = vec![
+        Notice::DeliveryTagLimits,
+        Notice::SyntheticRecipientLimits,
+        Notice::AttachmentAndDuplicateLimits,
+        Notice::FolderTopologyUnverified,
+    ];
     if census.acquisition_state != ScanState::Complete
         || census
             .folders
             .values()
             .any(|f| f.state != ScanState::Complete)
     {
-        warnings.push("Census is partial; counts cover saved records only".into());
+        notices.push(Notice::PartialCensus);
     }
     if input
         .iter()
         .any(|m| timestamp(m.record).is_none_or(|t| t > as_of))
     {
-        warnings.push(
-            "Missing, invalid or future Date values are excluded from 13-month counts".into(),
-        );
+        notices.push(Notice::InvalidDates);
     }
     if rules.iter().any(|r| r.zero_match) {
-        warnings.push("Some enabled rules match no selected messages in 13 months".into());
+        notices.push(Notice::RulesWithoutSelections);
     }
     if rules.iter().any(|r| r.fully_shadowed) {
-        warnings.push("Some rules are fully shadowed by earlier compiled rules".into());
+        notices.push(Notice::ShadowedRules);
     }
     let mut unmatched_senders = BTreeMap::new();
     for d in decisions
@@ -729,7 +736,7 @@ pub fn prove_with_evidence(
         })
         .collect();
     if pins.iter().any(|p| p.status == "stale") {
-        warnings.push("Some census pins are stale".into());
+        notices.push(Notice::StalePins);
     }
     let previous_decisions = match (baseline, previous) {
         (Baseline::Previous, Some(previous)) => Some(execute(previous, &input, None)?.decisions),
@@ -774,6 +781,10 @@ pub fn prove_with_evidence(
     } else {
         "warnings"
     };
+    let diagnostics = Diagnostics {
+        notices,
+        runtime_cross_check: RuntimeCheck::NotRun,
+    };
     Ok(Proof {
         source: "local_census",
         semantics: SEMANTICS,
@@ -787,8 +798,13 @@ pub fn prove_with_evidence(
         unmatched_senders,
         pins,
         gate,
-        warnings,
-        runtime_cross_check: "Not run by this proof. Run scripts/verify-sieve.sh on synthetic artifacts. This does not establish provider behavior.",
+        warnings: diagnostics
+            .notices
+            .iter()
+            .map(|notice| notice.message().into())
+            .collect(),
+        runtime_cross_check: diagnostics.runtime_cross_check.message(),
+        diagnostics,
     })
 }
 

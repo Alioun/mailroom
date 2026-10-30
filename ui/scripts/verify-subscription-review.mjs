@@ -21,12 +21,17 @@ function imports(code) {
   return code.replace(/(['"])(zod|svelte(?:\/[^'"]+)?)\1/g, (_match, _quote, name) => JSON.stringify(import.meta.resolve(name)))
     .replace(/from '(.\/[^']+)'/g, (_match, name) => `from '${name}.mjs'`)
 }
-for (const name of ['api', 'invoice-diagnostics', 'acquisition-evidence', 'proposal-diagnostics']) {
+for (const name of ['api', 'invoice-diagnostics', 'acquisition-evidence', 'proposal-diagnostics', 'proof-diagnostics']) {
   const source = await readFile(resolve(root, `ui/src/${name}.ts`), 'utf8')
   const emitted = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }, fileName: `${name}.ts` })
   await writeFile(resolve(output, `${name}.mjs`), imports(emitted.outputText))
 }
+const sharedSource = await readFile(resolve(root, 'ui/src/ProofDiagnostics.svelte'), 'utf8')
+const shared = compile(sharedSource, { filename: 'ProofDiagnostics.svelte', generate: 'server', css: 'external' })
+assert.equal(shared.warnings.length, 0)
+await writeFile(resolve(output, 'ProofDiagnostics.svelte.mjs'), imports(shared.js.code))
 const api = await import(pathToFileURL(resolve(output, 'api.mjs')))
+const proofText = await import(pathToFileURL(resolve(output, 'proof-diagnostics.mjs')))
 let reply = fixture.view
 let lastRequest
 let calls = 0
@@ -45,6 +50,9 @@ const input = { as_of: 1792886400, selections: fixture.preview.previews.flatMap(
 reply = fixture.preview
 const preview = await api.previewSubscriptionReview(input)
 assert.equal(preview.confirmation.synthetic, true)
+reply = fixture.mute_preview
+const mutePreview = await api.previewSubscriptionReview(fixture.mute_input)
+assert.ok(mutePreview.previews.every(preview => preview.proof !== null))
 reply = structuredClone(fixture.preview)
 reply.confirmation.synthetic = false
 const nativePreview = await api.previewSubscriptionReview(input)
@@ -86,6 +94,21 @@ for (const lang of ['en', 'de']) {
   assert.ok(active.includes(lang === 'en' ? 'Confirm this exact action list' : 'Genau diese Aktionsliste bestätigen'))
   assert.ok(active.includes(lang === 'en' ? 'Include exact subscription' : 'Genaues Abonnement einbeziehen'))
   for (const account of view.accounts) assert.ok(active.includes(`data-account="${account.account}"`))
+  const mute = await screen(`mute-proof-${lang}`, lang, view, mutePreview)
+  for (const preview of mutePreview.previews) {
+    for (const notice of preview.proof.diagnostics.notices) assert.ok(mute.includes(proofText.proofNoticeText(notice, lang)))
+    assert.ok(mute.includes(proofText.proofGateText(preview.proof.gate, lang)))
+  }
+  assert.ok(!/<input[^>]*\schecked(?:\s|=|>)/.test(mute), 'Mute confirmation starts unchecked')
+  if (lang === 'de') {
+    const summaries = [...mute.matchAll(/<p\b[^>]*\bdata-proof-summary(?:="[^"]*")?[^>]*>([\s\S]*?)<\/p>/g)]
+    assert.equal(summaries.length, mutePreview.previews.length)
+    for (const [, text] of summaries) {
+      assert.ok(text.includes('abgelegt'))
+      assert.ok(text.includes('unabhängige Kopien'))
+      assert.ok(!text.includes('filed') && !text.includes('independent copies'))
+    }
+  }
   const denied = { ...view, review_available: false }
   const blocked = await screen(`denied-${lang}`, lang, denied)
   assert.ok(!blocked.includes(lang === 'en' ? 'Include exact subscription' : 'Genaues Abonnement einbeziehen'))

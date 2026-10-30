@@ -129,7 +129,11 @@ The compensation transport consumes a non-cloneable saved-intent token before ea
 
 The core reuses the validated transfer identities and COPYUID parser. Versioned observations require a nonzero per-message MODSEQ and a persistent mailbox HIGHESTMODSEQ. Source deletion requires a validated mapped copy whose flags, arrival date, size and Message-ID hash match. Fresh source observations determine STORE groups with one actual MODSEQ per group. The command adds only `\Deleted` with UNCHANGEDSINCE. MODIFIED members, missing acknowledgments, missing returned MODSEQs and later metadata changes cannot establish ownership.
 
-UID EXPUNGE requires another exact observation of the recorded owned flags and MODSEQs and an unchanged mapped copy. The core records the restricted UID set before returning the command. Final source absence and mapped destination metadata establish observed filing. Lost acknowledgments never make an attempted COPY or expunge repeatable. UID EXPUNGE has no MODSEQ condition, so the final-read/effect race remains.
+UID EXPUNGE requires another exact observation of the recorded owned flags and MODSEQs and an unchanged mapped copy. The core records the restricted UID set before returning the command. Final source absence and mapped destination metadata establish observed filing. Lost acknowledgments never make an attempted COPY or expunge repeatable.
+
+Before an unattempted COPY, the mailbox-wide HIGHESTMODSEQ may advance while the approved message set, each message version, metadata and mailbox identity remain identical. A lower mailbox counter is rejected. This permits later batches after earlier batches changed the mailbox without accepting changed messages.
+
+UID EXPUNGE has no MODSEQ condition, so the final-read/effect race remains.
 
 MODSEQ values use canonical decimal strings across storage, recovery and UI. Values above JavaScript's safe integer range retain every digit. Schemas 1 through 25 reject COPY semantics and tags in base snapshots and appended patches. Historical synthetic copy method records remain readable.
 

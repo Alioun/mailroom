@@ -1,6 +1,9 @@
 use super::*;
 use crate::backlog::{imap_copy::NextAction, protocol::Batch};
 
+#[path = "batch_workflow_tests.rs"]
+mod batch_workflow;
+
 struct Checkpoints {
     saved: Vec<Vec<u8>>,
     intents: Vec<NextAction>,

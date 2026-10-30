@@ -8,7 +8,7 @@ import ts from 'typescript'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const auditName = process.argv[2] ?? 'imap-forward-preview'
-assert.ok(['imap-forward-preview', 'imap-copy-saved-workflow', 'imap-empty-preview'].includes(auditName))
+assert.ok(['imap-forward-preview', 'imap-copy-saved-workflow', 'imap-empty-preview', 'imap-copy-multi-batch'].includes(auditName))
 const audit = `${root}.audit/${auditName}/`
 await mkdir(`${audit}forward-render`, { recursive: true })
 const log = await readFile(`${audit}forward-preview.log`, 'utf8')
@@ -68,7 +68,7 @@ for (const fixture of fixtures) {
   previews.push({ ...fixture, preview })
 }
 const emptyPreviews = []
-if (auditName === 'imap-empty-preview') {
+if (['imap-empty-preview', 'imap-copy-multi-batch'].includes(auditName)) {
   const emptyFixtures = [...log.matchAll(/MAILROOM_EMPTY_FORWARD_PREVIEW_UI_FIXTURE (.+)/g)].map(match => JSON.parse(match[1]))
   assert.deepEqual(emptyFixtures.map(({ method, unselected }) => `${method}-${unselected}`).sort(), ['copy-false', 'copy-true', 'move-false', 'move-true'])
   for (const fixture of emptyFixtures) {

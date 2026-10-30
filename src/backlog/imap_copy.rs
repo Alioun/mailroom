@@ -446,7 +446,10 @@ impl CopyEvidence {
         self.deletions.iter().map(|b| &b.evidence)
     }
     pub fn begin_copy(&mut self, fresh: &Readback) -> Result<String, InvalidEvidence> {
-        if self.before != *fresh {
+        if self.before.identity != fresh.identity
+            || self.before.messages != fresh.messages
+            || fresh.highest_modseq < self.before.highest_modseq
+        {
             return Err(InvalidEvidence::Identity);
         }
         let name = self

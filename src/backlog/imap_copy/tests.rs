@@ -974,3 +974,81 @@ mod checkpoints;
 mod compensation;
 mod compensation_records;
 mod effects;
+
+#[test]
+fn copy_admission_allows_mailbox_clock_growth_only_with_identical_approved_messages() {
+    let mut before = source();
+    before.highest_modseq = seq(2000);
+    let initial = CopyEvidence::new(evidence().intent().clone(), before.clone()).unwrap();
+    let mut fresh = before.clone();
+    fresh.highest_modseq = seq(2001);
+    let mut accepted = initial.clone();
+    assert_eq!(
+        accepted.begin_copy(&fresh).unwrap(),
+        "UID COPY 4,8,19 \"Privat/News\""
+    );
+    assert_eq!(accepted.before(), &before);
+    assert!(accepted.copy().attempted());
+    for mutation in [
+        "clock",
+        "validity",
+        "mailbox",
+        "version",
+        "flags",
+        "size",
+        "date",
+        "message-id",
+        "missing",
+        "extra",
+    ] {
+        let mut fresh = fresh.clone();
+        match mutation {
+            "clock" => fresh.highest_modseq = seq(1999),
+            "validity" => fresh.identity.uidvalidity = UidValidity::new(102).unwrap(),
+            "mailbox" => fresh.identity.name = ExactName::from_wire("Other").unwrap(),
+            "version" => fresh.messages.get_mut(&uid(4)).unwrap().modseq = seq(901),
+            "flags" => {
+                fresh
+                    .messages
+                    .get_mut(&uid(4))
+                    .unwrap()
+                    .metadata
+                    .flags
+                    .insert("$later".into());
+            }
+            "size" => fresh.messages.get_mut(&uid(4)).unwrap().metadata.size += 1,
+            "date" => {
+                fresh
+                    .messages
+                    .get_mut(&uid(4))
+                    .unwrap()
+                    .metadata
+                    .internal_date = "25-Oct-2026 12:00:00 +0000".into()
+            }
+            "message-id" => {
+                fresh
+                    .messages
+                    .get_mut(&uid(4))
+                    .unwrap()
+                    .metadata
+                    .message_id_hash = "different".into()
+            }
+            "missing" => {
+                fresh.messages.remove(&uid(4));
+            }
+            "extra" => {
+                fresh
+                    .messages
+                    .insert(uid(23), fresh.messages[&uid(4)].clone());
+            }
+            _ => unreachable!(),
+        }
+        let mut denied = initial.clone();
+        assert!(
+            denied.begin_copy(&fresh).is_err(),
+            "changed {mutation} must deny COPY"
+        );
+        assert!(!denied.copy().attempted());
+        assert_eq!(denied, initial);
+    }
+}

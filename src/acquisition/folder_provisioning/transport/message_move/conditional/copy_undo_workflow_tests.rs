@@ -58,6 +58,15 @@ fn initial_preview_and_fresh_confirmation_schedule_the_exact_compensation_on_one
         };
         let evidence = &review.compensation()[0].evidence;
         let receipt = preview.receipt().to_owned();
+        let candidates = crate::acquisition::copy_undo_candidates(&saved, repo.now());
+        assert_eq!(
+            serde_json::to_value(&candidates).unwrap(),
+            serde_json::json!([target])
+        );
+        println!(
+            "MAILROOM_COPY_UNDO_UI_FIXTURE {}",
+            serde_json::json!({"account":account.id,"target":target,"preview":preview,"candidates":candidates})
+        );
         let mut flights = super::super::peer(&repo, &account, &saved, &request)
             .peer
             .io
@@ -133,6 +142,15 @@ fn dependent_preview_and_confirmation_keep_the_initial_undo_receipt_and_clear_hi
             .preview_with(&mut peer, &permit, &Cancellation::default())
             .unwrap();
         let eligible = if partial { 1 } else { 2 };
+        let candidates = crate::acquisition::copy_undo_candidates(&saved, repo.now());
+        assert_eq!(
+            serde_json::to_value(&candidates).unwrap(),
+            serde_json::json!([target])
+        );
+        println!(
+            "MAILROOM_COPY_UNDO_UI_FIXTURE {}",
+            serde_json::json!({"account":account.id,"target":target,"preview":preview,"candidates":candidates})
+        );
         assert_eq!(preview.actions().remove_copy, eligible);
         assert_eq!(std::fs::read(store.path()).unwrap(), before);
         let CopyUndoReview::AfterClear(review) = &preview else {

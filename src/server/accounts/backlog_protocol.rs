@@ -314,6 +314,13 @@ fn execute(
         value
     };
     let report = |saved: &crate::census::AccountState, mut value: serde_json::Value| {
+        if kind == Kind::Move {
+            value["copy_workflow"] = json!({
+                "installed":false,
+                "revision":saved.revision,
+                "targets":acquisition::copy_undo_candidates(saved, repo.now()),
+            });
+        }
         value["closable"] = json!(match kind {
             Kind::Move => saved
                 .protocol_backlog

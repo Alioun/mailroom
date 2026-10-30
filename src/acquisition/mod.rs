@@ -27,7 +27,7 @@ pub use backlog::compensation_review::{
     CopyCompensationActions, CopyCompensationObservation, CopyCompensationRequest,
     CopyCompensationReview,
 };
-pub(crate) use backlog::copy_undo::CopyUndoTarget;
+pub(crate) use backlog::copy_undo::{CopyUndoTarget, copy_undo_candidates};
 pub use backlog::dependent_cleanup::{DependentCleanupRequest, DependentCleanupReview};
 pub use scan::{Cancellation, ScanProgress};
 use serde::Serialize;

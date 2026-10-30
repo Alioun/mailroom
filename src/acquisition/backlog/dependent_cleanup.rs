@@ -27,6 +27,11 @@ pub(in crate::acquisition) struct DependentCleanupTarget<'a> {
 
 #[derive(Serialize)]
 pub struct DependentCleanupReview {
+    account: AccountId,
+    revision: u64,
+    run: String,
+    forward: usize,
+    clear: usize,
     receipt: String,
     actions: CopyCompensationActions,
     evidence: CompensationEvidence,
@@ -180,6 +185,11 @@ impl Accounts {
             .map_err(failure)?,
         );
         Ok(DependentCleanupReview {
+            account: account.id.clone(),
+            revision: saved.revision,
+            run: request.run.clone(),
+            forward: request.forward,
+            clear: request.clear,
             receipt,
             actions,
             evidence,

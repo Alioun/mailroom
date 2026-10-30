@@ -3,6 +3,7 @@
   import ArchiveOffer from './ArchiveOffer.svelte'
   import CopyPhaseEvidence from './CopyPhaseEvidence.svelte'
   import CopyCompensation from './CopyCompensation.svelte'
+  import CopyUndo from './CopyUndo.svelte'
   import { archiveCopy, archiveReason, archiveOfferAvailable } from './archive-copy'
   import { readAccountStatus, openProtocolBacklog, previewProtocolBacklog, previewProtocolUndo, protocolAction, type ProtocolView, type ProtocolPreview, type ProtocolUndo, type BacklogOptions } from './api'
   import UndoRetention from './UndoRetention.svelte'
@@ -28,7 +29,8 @@
   let cancelling = $state(false)
   let error = $state('')
   let active = true
-  function invalidate() { preview = null; undo = null; confirmed = false; undoConfirmed = false }
+  let copyReviewContext = $state({})
+  function invalidate() { preview = null; undo = null; confirmed = false; undoConfirmed = false; copyReviewContext = {} }
   $effect(() => { workspaceRevision; invalidate() })
   async function act(fn: () => Promise<void>) { busy = true; error = ''; try { await fn() } catch { error = t.error } finally { busy = false } }
   async function load() { invalidate(); view = await openProtocolBacklog(account) }
@@ -52,7 +54,7 @@
     } finally { running = false }
   }
   async function start() {
-    if (!preview || !confirmed) return
+    if (!preview || !confirmed || copyHeld(preview.operation)) return
     const command = { action: 'confirm', options: preview.operation.plan.filing.options, receipt: preview.receipt, confirmed: true } satisfies Parameters<typeof protocolAction>[1]
     invalidate(); await protocolAction(account, command); await watch()
   }
@@ -87,7 +89,7 @@
     {#each Object.entries(preview.operation.plan.filing.excluded) as [reason, count]}<p>{archiveReason(lang, reason)} · {count}</p>{/each}
     {#each preview.operation.plan.filing.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}
     <details><summary>{t.report}</summary><pre>{preview.operation.plan.filing.artifact.executable}</pre>{#each preview.operation.batches as b}<p>{b.intent.source.name.decoded} / {b.intent.source.uidvalidity} / {Object.keys(b.intent.messages).join(', ')} → {b.intent.destination.name.decoded} / {b.intent.destination.uidvalidity}</p>{/each}</details>
-    <label><input type="checkbox" bind:checked={confirmed} disabled={busy || running} />{preview.operation.plan.filing.options.intent === 'archive_unmatched' ? archiveText.confirm : t.confirm}</label><button disabled={busy || running || !confirmed} onclick={() => act(start)}>{preview.operation.plan.filing.options.intent === 'archive_unmatched' ? archiveText.start : t.start}</button>
+    {#if copyHeld(preview.operation)}<p role="status">{t.copyHold}</p>{:else}<label><input type="checkbox" bind:checked={confirmed} disabled={busy || running} />{preview.operation.plan.filing.options.intent === 'archive_unmatched' ? archiveText.confirm : t.confirm}</label><button disabled={busy || running || !confirmed} onclick={() => act(start)}>{preview.operation.plan.filing.options.intent === 'archive_unmatched' ? archiveText.start : t.start}</button>{/if}
   {/if}
   <h4>{t.journal}</h4>
   {#each view?.journal.runs ?? [] as run (run.id)}
@@ -99,6 +101,7 @@
       {#if !run.closed && !run.undo_receipt && !['complete', 'undone'].includes(run.status)}<button disabled={busy || running || copyHeld(run) || !view?.installed || view?.recovery_hold} onclick={() => act(() => continuation('resume', run.id))}>{t.resume}</button>{/if}
       {#if run.closed}{:else if !run.undo_receipt}<button disabled={busy || running || copyHeld(run) || !view?.installed || view?.recovery_hold || view?.undo_deadlines.find(d => d.run === run.id)?.undo_open === false} onclick={() => act(() => inspectUndo(run.id))}>{t.undoPreview}</button>{:else if run.status !== 'undone'}<button disabled={busy || running || copyHeld(run) || !view?.installed || view?.recovery_hold} onclick={() => act(() => continuation('resume_undo', run.id))}>{t.resumeUndo}</button>{/if}
       {#if run.compensation}<CopyCompensation counts={run.compensation} {lang} />{/if}
+      {#if copyHeld(run)}{#key copyReviewContext}{#key view?.copy_workflow.revision}<CopyUndo {account} {lang} targets={view?.copy_workflow.targets.filter(target => target.run === run.id) ?? []} installed={view?.copy_workflow.installed ?? false} disabled={busy || running || !!view?.recovery_hold} onstart={() => act(watch)} />{/key}{/key}{/if}
       <details><summary>{t.report}</summary><p>{run.id}</p><p>{run.plan.filing.artifact.identity}</p>{#each [...run.batches, ...run.reverse.map(r => r.evidence)] as e}<p>{e.intent.source.name.decoded} / {e.intent.source.uidvalidity} / {Object.keys(e.intent.messages).join(', ')} → {e.intent.destination.name.decoded}</p><p>{e.attempted ? t.attempted : t.pending} · {t.completion} · {e.completion?.kind === 'tagged' ? e.completion.status : e.completion?.kind ?? '?'}</p>{#if e.mapping.kind === 'validated'}<p>{t.mapping} · {JSON.stringify(e.mapping.mapping.pairs)}</p>{/if}{#if e.readback}<p>{t.readback}</p>{/if}{#if e.copy_journal}<CopyPhaseEvidence evidence={e.copy_journal} {lang} />{/if}{/each}</details>
     </article>
   {:else}<p>{t.empty}</p>{/each}

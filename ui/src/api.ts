@@ -300,8 +300,58 @@ const retained = { undo_deadlines: z.array(undoDeadline).default([]), undo_windo
 export const closure = z.object({ at: z.number(), receipt: z.string().length(64) })
 export const compensationCounts = z.object({ restored: z.number().int().nonnegative(), copies_removed: z.number().int().nonnegative(), deleted_cleared: z.number().int().nonnegative(), pending: z.number().int().nonnegative(), uncertain: z.number().int().nonnegative(), conflicts: z.number().int().nonnegative() }).strict()
 export type CompensationCounts = z.infer<typeof compensationCounts>
+const copyReceipt = z.string().regex(/^[a-f0-9]{64}$/)
+export const copyUndoTarget = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('initial'), run: copyReceipt }).strict(),
+  z.object({ kind: z.literal('after_clear'), run: copyReceipt, forward: z.number().int().nonnegative(), clear: z.number().int().nonnegative() }).strict(),
+])
+export type CopyUndoTarget = z.infer<typeof copyUndoTarget>
+const copyActions = z.object({ restore: z.number().int().nonnegative(), remove_copy: z.number().int().nonnegative(), clear_deleted: z.number().int().nonnegative(), conflicts: z.number().int().nonnegative() }).strict()
+const extraCopyPlan = z.object({ originals: z.record(z.string(), z.number().int().positive()), retained: copyReadback, deletion: flagIntent })
+const compensationPlan = z.object({ source: copyReadback, destination: copyReadback, restore: copyJournal.nullable(), cleanup: z.array(extraCopyPlan), clear: z.array(z.object({ deletion: z.number().int().nonnegative(), clear: flagIntent })), conflicts: z.record(z.string(), z.enum(['forward_conflict', 'uncertain_effect', 'source_present', 'changed_or_missing_message', 'protected_flags', 'unproven_flag_ownership'])) })
+const initialCopyReview = z.object({ account: z.string(), revision: z.number().int().nonnegative(), run: copyReceipt, receipt: copyReceipt, actions: copyActions, compensation: z.array(z.object({ forward: z.number().int().nonnegative(), evidence: z.object({ preview: compensationPlan }) })) })
+const afterClearPlan = z.object({ clear: z.number().int().nonnegative(), source: copyReadback, destination: copyReadback, plans: z.array(extraCopyPlan), conflicts: z.array(z.number().int().positive()) })
+const afterClearReview = z.object({ account: z.string(), revision: z.number().int().nonnegative(), run: copyReceipt, forward: z.number().int().nonnegative(), clear: z.number().int().nonnegative(), receipt: copyReceipt, actions: copyActions, evidence: z.object({ after_clear: z.array(afterClearPlan) }) })
+const copyReviewResponse = z.discriminatedUnion('kind', [z.object({ kind: z.literal('initial'), review: initialCopyReview }), z.object({ kind: z.literal('after_clear'), review: afterClearReview })])
+export type CopyUndoReview =
+  | { kind: 'initial'; account: string; target: Extract<CopyUndoTarget, { kind: 'initial' }>; review: z.infer<typeof initialCopyReview> }
+  | { kind: 'after_clear'; account: string; target: Extract<CopyUndoTarget, { kind: 'after_clear' }>; review: z.infer<typeof afterClearReview>; plan: z.infer<typeof afterClearPlan> }
+export function decodeCopyUndoReview(account: string, target: CopyUndoTarget, raw: unknown): CopyUndoReview {
+  const selection = copyUndoTarget.parse(target)
+  const response = copyReviewResponse.parse(raw)
+  if (selection.kind === 'initial' && response.kind === 'initial' && response.review.account === account && response.review.run === selection.run) return checkedCopyReview({ kind: 'initial', account, target: selection, review: response.review })
+  if (selection.kind === 'after_clear' && response.kind === 'after_clear' && response.review.account === account && response.review.run === selection.run && response.review.forward === selection.forward && response.review.clear === selection.clear) {
+    const plans = response.review.evidence.after_clear.filter(plan => plan.clear === selection.clear)
+    const [plan] = plans
+    if (plan && plans.length === 1) return checkedCopyReview({ kind: 'after_clear', account, target: selection, review: response.review, plan })
+  }
+  throw new Error('COPY review does not match its requested target')
+}
+export type CopyUndoRow =
+  | { kind: 'restore'; intent: z.infer<typeof moveIntent> }
+  | { kind: 'remove_copy'; plan: z.infer<typeof extraCopyPlan> }
+  | { kind: 'clear_deleted'; plan: z.infer<typeof flagIntent> }
+export function copyUndoRows(review: CopyUndoReview): CopyUndoRow[] {
+  if (review.kind === 'after_clear') return review.plan.plans.map(plan => ({ kind: 'remove_copy', plan }))
+  return review.review.compensation.flatMap(({ evidence: { preview } }) => {
+    const rows: CopyUndoRow[] = preview.restore ? [{ kind: 'restore', intent: preview.restore.copy.intent }] : []
+    rows.push(...preview.cleanup.map<CopyUndoRow>(plan => ({ kind: 'remove_copy', plan })))
+    rows.push(...preview.clear.map<CopyUndoRow>(({ clear: plan }) => ({ kind: 'clear_deleted', plan })))
+    return rows
+  })
+}
+function checkedCopyReview(review: CopyUndoReview): CopyUndoReview {
+  const counts = { restore: 0, remove_copy: 0, clear_deleted: 0 }
+  for (const row of copyUndoRows(review)) {
+    counts[row.kind] += row.kind === 'restore' ? Object.keys(row.intent.messages).length : row.kind === 'remove_copy' ? Object.keys(row.plan.deletion.before.messages).length : Object.keys(row.plan.before.messages).length
+  }
+  const conflicts = review.kind === 'initial' ? review.review.compensation.reduce((count, entry) => count + Object.keys(entry.evidence.preview.conflicts).length, 0) : review.plan.conflicts.length
+  if (counts.restore !== review.review.actions.restore || counts.remove_copy !== review.review.actions.remove_copy || counts.clear_deleted !== review.review.actions.clear_deleted || conflicts !== review.review.actions.conflicts) throw new Error('COPY review counts do not match its exact actions')
+  return review
+}
+const copyWorkflow = z.object({ installed: z.literal(false), revision: z.number().int().nonnegative(), targets: z.array(copyUndoTarget) }).strict()
 const protocolRun = z.object({ id: z.string(), receipt: z.string(), plan: z.object({ filing: backlogPlan, binding: z.object({ account: z.string(), source: z.string(), authority: z.string(), workspace: z.string(), material: z.string() }), saved_proof: z.string(), execution_proof: z.string() }), status: z.enum(['prepared', 'running', 'stopped', 'complete', 'uncertain', 'conflict', 'undo_running', 'undone']), stop_requested: z.boolean(), batches: z.array(protocolEvidence), reverse: z.array(reverseMove), compensation: compensationCounts.optional(), undo_receipt: z.string().nullable(), undo_conflicts: z.number().int().nonnegative().default(0), completed_at: z.number().optional(), closed: closure.optional() })
-const protocolView = z.object({ installed: z.boolean(), recovery_hold: z.boolean(), journal: z.object({ runs: z.array(protocolRun), summaries: z.array(runSummary).default([]) }), ...retained, limitations: z.string() })
+const protocolView = z.object({ installed: z.boolean(), recovery_hold: z.boolean(), copy_workflow: copyWorkflow.default({ installed: false, revision: 0, targets: [] }), journal: z.object({ runs: z.array(protocolRun), summaries: z.array(runSummary).default([]) }), ...retained, limitations: z.string() })
 const protocolPreview = z.object({ operation: protocolRun, receipt: z.string(), saved: proofPreview, execution: preview, limitations: z.string() })
 const protocolUndo = z.object({ run: z.string(), reverse: z.array(reverseMove), conflicts: z.number(), receipt: z.string(), limitations: z.string() })
 export type ProtocolView = z.infer<typeof protocolView>
@@ -317,6 +367,12 @@ export async function protocolAction(account: string, command: ProtocolAction): 
 export async function openProtocolBacklog(account: string): Promise<ProtocolView> { return protocolView.parse(await accountPost('backlog/protocol', { account, command: { action: 'status' } })) }
 export async function previewProtocolBacklog(account: string, options: BacklogOptions): Promise<ProtocolPreview> { return protocolPreview.parse(await accountPost('backlog/protocol', { account, command: { action: 'preview', options } })) }
 export async function previewProtocolUndo(account: string, run: string): Promise<ProtocolUndo> { return protocolUndo.parse(await accountPost('backlog/protocol', { account, command: { action: 'undo_preview', run } })) }
+export async function previewProtocolCopyUndo(account: string, target: CopyUndoTarget): Promise<CopyUndoReview> {
+  return decodeCopyUndoReview(account, target, await accountPost('backlog/protocol', { account, command: { action: 'copy_undo_preview', target: copyUndoTarget.parse(target) } }))
+}
+export async function confirmProtocolCopyUndo(review: CopyUndoReview): Promise<void> {
+  await accountPost('backlog/protocol', { account: review.account, command: { action: 'copy_undo_confirm', target: copyUndoTarget.parse(review.target), receipt: review.review.receipt, confirmed: true } })
+}
 
 const gmailLabel = z.object({ decoded: z.string(), wire: z.string() })
 const gmailSnapshot = z.object({ gmail_id: z.string(), message_id_hash: z.string(), size: z.number(), internal_date: z.string(), flags: z.array(z.string()), labels: z.array(z.string()) })

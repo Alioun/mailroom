@@ -10,7 +10,8 @@ use crate::acquisition::{
 };
 use serde::Serialize;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum CopyUndoTarget<'a> {
     Initial {
         run: &'a str,
@@ -20,6 +21,52 @@ pub(crate) enum CopyUndoTarget<'a> {
         forward: usize,
         clear: usize,
     },
+}
+
+pub(crate) fn copy_undo_candidates(saved: &AccountState, now: u64) -> Vec<CopyUndoTarget<'_>> {
+    let mut targets = vec![];
+    for run in &saved.protocol_backlog.runs {
+        if run.closed.is_some()
+            || run.plan.filing.semantics != model::COPY_SEMANTICS
+            || run.batches.iter().any(|batch| !batch.is_copy())
+            || !crate::backlog::retention::undo_open(run.completed_at, now)
+        {
+            continue;
+        }
+        if run.undo_receipt.is_none() {
+            if matches!(
+                run.status,
+                Status::Complete | Status::Stopped | Status::Conflict
+            ) && run.batches.iter().any(|batch| batch.attempted())
+                && run
+                    .batches
+                    .iter()
+                    .all(|batch| !batch.attempted() || batch.observed())
+            {
+                targets.push(CopyUndoTarget::Initial { run: &run.id });
+            }
+        } else if matches!(run.status, Status::Stopped | Status::Conflict)
+            && model::outcome(run, true) != Status::Uncertain
+        {
+            for entry in &run.compensation {
+                for clear in 0..entry.evidence.preview().clear().len() {
+                    if entry.evidence.clear(clear).is_some_and(|effect| {
+                        effect.result().is_some()
+                            && effect.readback().is_some()
+                            && !effect.verified().is_empty()
+                    }) && entry.evidence.dependent_plan(clear).is_none()
+                    {
+                        targets.push(CopyUndoTarget::AfterClear {
+                            run: &run.id,
+                            forward: entry.forward,
+                            clear,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    targets
 }
 
 impl<'a> CopyUndoTarget<'a> {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import AcquisitionEvidence from './AcquisitionEvidence.svelte'
+  import AgentProposalImport from './AgentProposalImport.svelte'
   import { readReport, reviewSummary, exportSummary, type CensusReport, type SummaryPreview } from './api'
   let { account, lang }: { account: string; lang: 'en' | 'de' } = $props()
   const strings = {
@@ -108,6 +109,7 @@
       <pre class="summary-preview">{preview.summary}</pre>
       <label><input type="checkbox" bind:checked={confirmed} disabled={busy} />{t.confirm}</label>
       <button class="primary" disabled={busy || !confirmed} onclick={download}>{t.download}</button>
+      {#key preview.summary}<AgentProposalImport summary={preview.summary} {lang} />{/key}
     {/if}
   {/if}
 </section>

@@ -48,7 +48,7 @@ Only the selected candidate domain strings may appear in clear text. Addresses, 
 
 `summary/export` requires that same selection, version, receipt and an explicit true confirmation. It reloads and re-derives the data under the account-operation lock. Changed census data, ownership, selection, receipt or version fails with a generic error. The fixed export name carries no account or private metadata. The UI clears its preview and confirmation when the selection or as-of time changes, and requires fresh review after refreshing. Approval is not persisted and must be reviewed again after reload.
 
-This is a local web confirmation and browser download. It does not implement the wider agent workflow, its native action-naming confirmation, agent folders, agent proof exports, proposal review or background access. No report or classification enables live writes.
+This is a local web confirmation and browser download. The [development agent exchange](agent-exchange.md) adds separate folders, instructions, a skill, a stdio MCP command and local text-recommendation review. Native action-naming disclosure consent, installed agent restrictions, rule-patch acceptance and agent proof exports remain unfinished. No report or classification enables live writes.
 
 ## Remaining census work
 

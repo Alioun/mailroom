@@ -1,4 +1,6 @@
 pub mod acquisition;
+#[cfg(unix)]
+pub mod agent;
 pub mod backlog;
 pub mod census;
 pub(crate) mod confirmation;

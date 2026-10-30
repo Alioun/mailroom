@@ -4,6 +4,10 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::from(70);
     }
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(unix)]
+    if arguments.first().map(String::as_str) == Some("agent") {
+        return std::process::ExitCode::from(mailroom::agent::run(&arguments[1..]));
+    }
     #[cfg(target_os = "macos")]
     if matches!(
         arguments.first().map(String::as_str),

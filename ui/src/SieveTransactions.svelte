@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte'
+  import { sieveFailureText } from './sieve-diagnostics'
   import { RadioGroup } from '@ark-ui/svelte/radio-group'
   import { transactionStatus, transactionPreview, transactionCommand, reconcileTransaction, recordPlacement, transactionHistoryLimit, type TransactionView, type TransactionPreview, type Placement, type Counts } from './sieve-transactions-api'
   import { sieveStatus, exactReview } from './managesieve-api'
@@ -113,8 +114,8 @@
     {#each historyRows as transaction (transaction.id)}
     <article><h4>{title(transaction)} · {t.statuses[transaction.status]}</h4><p>{transaction.id}</p>
       {#if transaction.composition}<p>{[...(transaction.composition.placement ? [label(transaction.composition.placement)] : []), ...transaction.composition.existing_rules].join(' · ')}</p>{#if transaction.composition.precedence}<p>{counted(transaction.composition.precedence)}</p>{/if}{/if}
-      <p>CHECKSCRIPT · {transaction.validation ? 'Ok' in transaction.validation ? t.outcomes.acknowledged : transaction.validation.Err : t.pending} · HAVESPACE · {transaction.space ? 'Ok' in transaction.space ? t.outcomes.acknowledged : transaction.space.Err : t.pending}</p>
-      <ul>{#each transaction.steps as step}<li>{t.effects[step.effect]} · {t.outcomes[step.outcome]} · {t.ack} {step.acknowledgment ? t.yes : t.no} {step.failure ?? ''}</li>{/each}</ul>
+      <p>CHECKSCRIPT · {transaction.validation ? 'Ok' in transaction.validation ? t.outcomes.acknowledged : sieveFailureText({ failure: transaction.validation.Err, lang }) : t.pending} · HAVESPACE · {transaction.space ? 'Ok' in transaction.space ? t.outcomes.acknowledged : sieveFailureText({ failure: transaction.space.Err, lang }) : t.pending}</p>
+      <ul>{#each transaction.steps as step}<li>{t.effects[step.effect]} · {t.outcomes[step.outcome]} · {t.ack} {step.acknowledgment ? t.yes : t.no} {step.failure ? sieveFailureText({ failure: step.failure, lang }) : ''}</li>{/each}</ul>
       <button disabled={busy || running} onclick={() => act('reconcile', transaction.id)}>{t.reconcile}</button>
       {#if !transaction.compensates && transaction.composition?.purpose !== 'removal'}<button disabled={busy || running || view.recovery_hold || history.length >= transactionHistoryLimit} onclick={() => act('compensation', transaction.id)}>{t.compensation}</button>{/if}
     </article>

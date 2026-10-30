@@ -1,9 +1,10 @@
 import { z } from 'zod'
 import { localFetch } from './api'
+import { sieveFailure } from './sieve-diagnostics'
 const body = z.object({ name: z.string(), bytes: z.array(z.number().int().min(0).max(255)).max(65536), sha256: z.string() })
 const image = z.object({ capabilities: z.record(z.string(), z.string()), names: z.array(z.object({ name: z.string(), active: z.boolean() })).max(8), bodies: z.array(body).max(8) })
 const effect = z.enum(['upload', 'activate', 'disable', 'upload_owned'])
-const step = z.object({ effect, before: image, after: image, outcome: z.enum(['intent', 'acknowledged', 'observed', 'refused', 'uncertain', 'conflict', 'preimage']), acknowledgment: z.boolean(), failure: z.string().nullable() })
+const step = z.object({ effect, before: image, after: image, outcome: z.enum(['intent', 'acknowledged', 'observed', 'refused', 'uncertain', 'conflict', 'preimage']), acknowledgment: z.boolean(), failure: sieveFailure.nullable() })
 const placement = z.discriminatedUnion('kind', [z.object({ kind: z.literal('block') }), z.object({ kind: z.literal('include'), script: z.string() })])
 const count = z.number().int().nonnegative()
 const filingCounts = z.object({ mailroom: count, existing_wins: count, conflicting: count, undetermined: count })
@@ -15,7 +16,7 @@ const composition = z.discriminatedUnion('semantics', [
   compositionBase.extend({ semantics: z.literal('mailroom-foreign-composition-v1'), precedence: legacyCounts.nullable() }),
   compositionBase.extend({ semantics: z.literal('mailroom-foreign-composition-v2'), precedence: currentCounts.nullable() }),
 ])
-const transaction = z.object({ id: z.string(), compensates: z.string().nullable(), target: z.string(), ownership_epoch: z.string(), artifact: z.string(), proof_binding: z.string(), receipt: z.string(), before: image, after: image, status: z.enum(['running', 'complete', 'refused', 'uncertain', 'stopped', 'conflict', 'fresh_review']), validation: z.union([z.object({ Ok: z.null() }), z.object({ Err: z.string() })]).nullable(), space: z.union([z.object({ Ok: z.null() }), z.object({ Err: z.string() })]).nullable(), steps: z.array(step).max(2), composition: composition.optional() })
+const transaction = z.object({ id: z.string(), compensates: z.string().nullable(), target: z.string(), ownership_epoch: z.string(), artifact: z.string(), proof_binding: z.string(), receipt: z.string(), before: image, after: image, status: z.enum(['running', 'complete', 'refused', 'uncertain', 'stopped', 'conflict', 'fresh_review']), validation: z.union([z.object({ Ok: z.null() }).strict(), z.object({ Err: sieveFailure }).strict()]).nullable(), space: z.union([z.object({ Ok: z.null() }).strict(), z.object({ Err: sieveFailure }).strict()]).nullable(), steps: z.array(step).max(2), composition: composition.optional() })
 export const transactionHistoryLimit = 64
 const journal = z.object({ history: z.array(transaction).max(transactionHistoryLimit) }).superRefine((journal, context) => {
   if (new Set(journal.history.map(transaction => transaction.id)).size !== journal.history.length) context.addIssue({ code: 'custom', message: 'Transaction history requires unique operation identities' })

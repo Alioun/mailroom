@@ -110,9 +110,14 @@ for (const [index, variant] of variants.entries()) {
   }
 }
 await writeFile(`${audit}results.json`, JSON.stringify({ requests, rejected, results, fixture: 'Constructed display histories. No protocol, persistence, mounted or provider acceptance.' }, null, 2) + '\n')
-assert.match(results[0].heading, /Deploy Mailroom rules after existing rules/)
-assert.match(results[1].heading, /Mailroom-Regeln nach vorhandenen Regeln/)
-if (!baseline) {
+if (baseline) {
+  assert.match(results[0].heading, /Deploy copies first, filing after existing rules/)
+  assert.match(results[1].heading, /Kopien zuerst, Ablage nach vorhandenen Regeln/)
+  assert.match(results[4].heading, /Preview composed deploy/)
+  assert.match(results[5].heading, /Zusammengesetzten Einsatz prüfen/)
+} else {
+  assert.match(results[0].heading, /Deploy Mailroom rules after existing rules/)
+  assert.match(results[1].heading, /Mailroom-Regeln nach vorhandenen Regeln/)
   assert.match(results[2].heading, /Deploy copies first, filing after existing rules/)
   assert.match(results[3].heading, /Kopien zuerst, Ablage nach vorhandenen Regeln/)
   assert.match(results[4].heading, /Recorded script transaction/)

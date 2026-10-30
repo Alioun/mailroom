@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte'
+  import { sieveFailureText, sieveDiscoveryOutcomeText } from './sieve-diagnostics'
   import { openSieve, startSieve, cancelSieve, sieveStatus, exactReview, type SieveView } from './managesieve-api'
   let { account, lang }: { account: string; lang: 'en' | 'de' } = $props()
   const strings = {
@@ -51,7 +52,7 @@
     {#if view.recovery_hold}<p>{t.restored}</p>{/if}
     {#if view.facts.latest && !running}
       {@const latest = view.facts.latest}
-      <h4>{t.partial}</h4><p>{latest.outcome} · {latest.id} · {time(latest.started_at)}{latest.failure ? ` · ${latest.failure}` : ''}</p>
+      <h4>{t.partial}</h4><p>{sieveDiscoveryOutcomeText({ outcome: latest.outcome, lang })} · {latest.id} · {time(latest.started_at)}{latest.failure ? ` · ${sieveFailureText({ failure: latest.failure, lang })}` : ''}</p>
       {#if latest.capabilities}<p>{t.caps}</p><ul>{#each Object.entries(latest.capabilities) as [name, value]}<li>{name} {value}</li>{/each}</ul>{/if}
       {#if latest.names}<p>{t.completeNames}</p>{#if !latest.names.length}<p>{t.empty}</p>{/if}<ul>{#each latest.names as name}<li>{name.name} {name.active ? t.active : ''}</li>{/each}</ul>{:else}<p>{t.unknownNames}</p>{/if}
       {#if latest.bodies.length}<button onclick={() => review = !review}>{review ? t.hide : t.private}</button>{#if review}{#each latest.bodies as body}<p>{body.name} · SHA-256 {body.sha256}</p><pre>{exactReview(body)}</pre>{/each}{/if}<p>{latest.bodies.length} / {latest.names?.filter(n => n.active || n.name === 'Open-Xchange').length ?? 0}</p>{/if}

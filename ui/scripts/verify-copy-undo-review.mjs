@@ -8,10 +8,11 @@ import ts from 'typescript'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const auditName = process.argv[2] ?? 'imap-copy-review-ui'
-assert.ok(['imap-copy-review-ui', 'imap-copy-continuation-dispatch'].includes(auditName))
+assert.ok(['imap-copy-review-ui', 'imap-copy-continuation-dispatch', 'imap-copy-continuation-controls'].includes(auditName))
 const audit = `${root}.audit/${auditName}/`
+const inputAudit = auditName === 'imap-copy-continuation-controls' ? `${root}.audit/imap-copy-continuation-dispatch/` : audit
 await mkdir(`${audit}render`, { recursive: true })
-const log = await readFile(`${audit}compensation-transport.log`, 'utf8')
+const log = await readFile(`${inputAudit}compensation-transport.log`, 'utf8')
 const fixtures = [...log.matchAll(/MAILROOM_COPY_UNDO_UI_FIXTURE (.+)/g)].map(match => JSON.parse(match[1]))
 assert.equal(fixtures.length, 5, 'Parser-backed workflows must emit all five exact reviews')
 for (const name of ['api', 'invoice-diagnostics', 'acquisition-evidence', 'proposal-diagnostics']) {
@@ -80,7 +81,7 @@ assert.deepEqual(reviews.map(review => review.kind).sort(), ['after_clear', 'aft
 assert.ok(reviews.some(review => review.review.actions.restore > 0))
 assert.ok(reviews.some(review => review.review.actions.remove_copy > 0))
 assert.ok(reviews.some(review => review.review.actions.clear_deleted > 0))
-const routerLog = await readFile(`${audit}compensation-router.log`, 'utf8')
+const routerLog = await readFile(`${inputAudit}compensation-router.log`, 'utf8')
 const routerMatch = routerLog.match(/MAILROOM_COMPENSATION_ROUTER_FIXTURE (.+)/)
 assert.ok(routerMatch)
 const router = JSON.parse(routerMatch[1])
@@ -96,6 +97,28 @@ for (const fixture of router.fixtures) {
   assert.equal(view.copy_workflow.installed, false)
   assert.ok(Number.isInteger(view.copy_workflow.revision))
   views.push({ stage: fixture.stage, view })
+}
+let continuationRequests = 0
+for (const { view } of views) {
+  for (const run of view.journal.runs) {
+    assert.equal(api.isCopyProtocolRun(run), true)
+    for (const work of ['resume', 'resume_undo', 'reconcile']) {
+      responses.push({})
+      await api.continueProtocolRun(router.account, run, work)
+      assert.deepEqual(requests.pop(), { account: router.account, command: { action: 'copy_continue', run: run.id, work } })
+      continuationRequests += 1
+    }
+    for (const work of ['undo', 'resume ', null, 4, {}, []]) {
+      await assert.rejects(api.continueProtocolRun(router.account, run, work))
+      assert.equal(requests.length, 0, 'Invalid work must not reach fetch')
+      rejections += 1
+    }
+    const wrongRun = structuredClone(run)
+    wrongRun.id = 'not-a-copy-run-identity'
+    await assert.rejects(api.continueProtocolRun(router.account, wrongRun, 'resume'))
+    assert.equal(requests.length, 0, 'Invalid COPY identity must not reach fetch')
+    rejections += 1
+  }
 }
 for (const invalid of [true, null, 'false']) {
   const raw = structuredClone(router.fixtures[0].view)
@@ -157,6 +180,11 @@ for (const lang of ['en', 'de']) {
   for (const { stage, view } of views) {
     const { body } = rendered.render(rendered.ProtocolBacklog, { props: { account: router.account, lang, fixture: view } })
     const enabled = [...body.matchAll(/<button([^>]*)>([\s\S]*?)<\/button>/g)].filter(button => !button[1].includes('disabled'))
+    assert.ok(!body.includes(lang === 'en' ? 'Preview conditional undo' : 'Bedingtes Rückgängigmachen prüfen'), 'COPY uses its separate review controls')
+    for (const run of view.journal.runs) {
+      if (!run.closed && !run.undo_receipt && !['complete', 'undone'].includes(run.status)) assert.ok(body.includes(lang === 'en' ? 'Resume confirmed COPY filing' : 'Bestätigte COPY-Ablage fortsetzen'))
+      if (!run.closed && run.undo_receipt && run.status !== 'undone') assert.ok(body.includes(lang === 'en' ? 'Resume confirmed COPY Undo actions' : 'Bestätigte COPY-Rückgängig-Aktionen fortsetzen'))
+    }
     assert.equal(enabled.length, 1)
     assert.ok(enabled[0][2].includes(lang === 'en' ? 'Reload saved protocol runs' : 'Gespeicherte Protokollabläufe laden'))
     if (view.copy_workflow.targets.length) assert.ok(body.includes('class="copy-undo"'))
@@ -165,5 +193,5 @@ for (const lang of ['en', 'de']) {
 }
 assert.equal(requests.length, 0)
 assert.equal(responses.length, 0)
-await writeFile(`${audit}ui-results.json`, `${JSON.stringify({ reviews: reviews.length, routerStates: views.length, rejections, renderings, limitations: 'API contracts and server rendering. No mounted interaction, layout, keyboard, connected TLS or process-crash acceptance.' }, null, 2)}\n`)
-console.log(`COPY Undo review passed ${reviews.length} workflow reviews, ${views.length} Router states, ${rejections} rejection cases and ${renderings.length} bilingual server renderings.`)
+await writeFile(`${audit}ui-results.json`, `${JSON.stringify({ reviews: reviews.length, routerStates: views.length, continuationRequests, rejections, renderings, limitations: 'API contracts and server rendering. No mounted interaction, layout, keyboard, connected TLS or process-crash acceptance.' }, null, 2)}\n`)
+console.log(`COPY Undo review passed ${reviews.length} workflow reviews, ${views.length} Router states, ${continuationRequests} continuation requests, ${rejections} rejection cases and ${renderings.length} bilingual server renderings.`)

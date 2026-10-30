@@ -357,6 +357,15 @@ const protocolUndo = z.object({ run: z.string(), reverse: z.array(reverseMove), 
 export type ProtocolView = z.infer<typeof protocolView>
 export type ProtocolPreview = z.infer<typeof protocolPreview>
 export type ProtocolUndo = z.infer<typeof protocolUndo>
+export type ProtocolRun = ProtocolView['journal']['runs'][number]
+const protocolContinuationWork = z.enum(['resume', 'resume_undo', 'reconcile'])
+export type ProtocolContinuationWork = z.infer<typeof protocolContinuationWork>
+export function isCopyProtocolRun(run: ProtocolRun): boolean { return run.batches.some(batch => batch.copy_journal !== null) }
+export async function continueProtocolRun(account: string, run: ProtocolRun, work: ProtocolContinuationWork): Promise<void> {
+  const action = protocolContinuationWork.parse(work)
+  if (isCopyProtocolRun(run)) await accountPost('backlog/protocol', { account, command: { action: 'copy_continue', run: copyReceipt.parse(run.id), work: action } })
+  else await protocolAction(account, { action, run: run.id })
+}
 type ProtocolAction = { action: 'status' | 'cancel' } | { action: 'preview' | 'label_preview'; options: BacklogOptions } | { action: 'confirm' | 'label_confirm'; options: BacklogOptions; receipt: string; confirmed: boolean } | { action: 'reconcile' | 'resume' | 'undo_preview' | 'resume_undo' | 'close_preview'; run: string } | { action: 'undo' | 'close'; run: string; receipt: string; confirmed: boolean } | { action: 'label_reconcile'; operation: string }
 export const closePreview = z.object({ run: z.string(), reason: z.enum(['nothing_to_undo', 'undo_ended', 'undo_unavailable']), receipt: z.string().length(64) })
 export type ClosePreview = z.infer<typeof closePreview>

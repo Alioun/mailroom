@@ -14,6 +14,9 @@ use crate::{
     census::Census,
 };
 
+#[path = "batch_undo_tests.rs"]
+mod undo;
+
 const MESSAGES: usize = BATCH_LIMIT + 3;
 const MAPPED_OFFSET: u32 = 10_000;
 const FETCH_FIELDS: &str =
@@ -56,7 +59,14 @@ fn observed(
 }
 
 fn complete_batch(e: &CopyEvidence, batch: usize) -> VecDeque<Flight> {
-    let highest = BASE + 30 * u64::try_from(batch).unwrap();
+    let highest = e.before().highest_modseq().get() + 30 * u64::try_from(batch).unwrap();
+    let version = e.before().messages().values().next().unwrap().modseq.get();
+    assert!(
+        e.before()
+            .messages()
+            .values()
+            .all(|message| message.modseq.get() == version)
+    );
     let source = e.intent().source();
     let destination = e.intent().destination();
     let members = e
@@ -86,7 +96,7 @@ fn complete_batch(e: &CopyEvidence, batch: usize) -> VecDeque<Flight> {
             } else {
                 highest
             },
-            if deleted { highest + 20 } else { BASE },
+            if deleted { highest + 20 } else { version },
             deleted,
             1,
         );
@@ -112,7 +122,7 @@ fn complete_batch(e: &CopyEvidence, batch: usize) -> VecDeque<Flight> {
     let mut initial = selection(destination, highest, 1);
     initial.extend(selection(source, highest, 2));
     for uid in &members {
-        initial.extend(fetch(*uid, Some(BASE)));
+        initial.extend(fetch(*uid, Some(version)));
     }
     initial.extend_from_slice(b"F3 OK fetched\r\n");
     let mut store_result = vec![];
@@ -159,7 +169,7 @@ fn complete_batch(e: &CopyEvidence, batch: usize) -> VecDeque<Flight> {
         Flight {
             event: "store",
             commands: vec![format!(
-                "UID STORE {members_text} (UNCHANGEDSINCE {BASE}) +FLAGS.SILENT (\\Deleted)"
+                "UID STORE {members_text} (UNCHANGEDSINCE {version}) +FLAGS.SILENT (\\Deleted)"
             )],
             response: Ok(store_result),
         },
@@ -191,8 +201,16 @@ fn complete_batch(e: &CopyEvidence, batch: usize) -> VecDeque<Flight> {
     .into()
 }
 
-fn saved_rule_batches(stop: bool) {
-    let (_root, mut repo, account, store, mut saved, topology, _) = fixture(Profile::Copy);
+fn saved_rule_batches(
+    stop: bool,
+) -> (
+    tempfile::TempDir,
+    crate::acquisition::Accounts,
+    crate::acquisition::Account,
+    crate::census::EncryptedStore,
+    crate::census::AccountState,
+) {
+    let (root, mut repo, account, mut store, mut saved, topology, _) = fixture(Profile::Copy);
     let passwords = repo.track_password_accesses(&account);
     let sample = saved.census.folders["INBOX"]
         .messages
@@ -315,7 +333,7 @@ fn saved_rule_batches(stop: bool) {
         );
         assert_eq!(transport.inventories, 1);
         drop(store);
-        let store = repo.store(&account).unwrap();
+        store = repo.store(&account).unwrap();
         let mut reopened = store.load_state().unwrap();
         assert!(reopened.protocol_backlog == saved.protocol_backlog);
         let continuation = repo
@@ -359,6 +377,7 @@ fn saved_rule_batches(stop: bool) {
     );
     assert_eq!(passwords.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert!(!repo.backlog_installed(Some(&account.id)));
+    (root, repo, account, store, saved)
 }
 
 #[test]

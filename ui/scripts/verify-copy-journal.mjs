@@ -7,9 +7,9 @@ import { svelte } from '@sveltejs/vite-plugin-svelte'
 import ts from 'typescript'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
-const audit = `${root}.audit/imap-copy-journal/`
+const audit = `${root}${process.env.MAILROOM_VERIFY_AUDIT ?? '.audit/imap-copy-journal'}/`
 await mkdir(`${audit}render`, { recursive: true })
-const log = await readFile(`${audit}copy-router.log`, 'utf8')
+const log = await readFile(process.argv[2] ?? `${audit}copy-router.log`, 'utf8')
 const match = log.match(/MAILROOM_COPY_ROUTER_FIXTURE (.+)/)
 assert.ok(match, 'The real protected Router must produce the fixture')
 const fixture = JSON.parse(match[1])

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import BacklogRunStatus from './BacklogRunStatus.svelte'
   import ArchiveOffer from './ArchiveOffer.svelte'
   import CopyPhaseEvidence from './CopyPhaseEvidence.svelte'
   import CopyCompensation from './CopyCompensation.svelte'
@@ -95,7 +96,7 @@
   {/if}
   <h4>{t.journal}</h4>
   {#each view?.journal.runs ?? [] as run (run.id)}
-    <article data-protocol-run={run.id}>{#if run.plan.filing.options.intent === 'archive_unmatched'}<p>{archiveText.title}</p>{/if}<p class="run-state">{run.status}</p><UndoRetention {lang} days={view?.undo_window_days ?? 90} deadline={view?.undo_deadlines.find(d => d.run === run.id)} undone={run.status === 'undone'} />{#if run.stop_requested}<p>{t.stopped}</p>{/if}
+    <article data-protocol-run={run.id}>{#if run.plan.filing.options.intent === 'archive_unmatched'}<p>{archiveText.title}</p>{/if}<BacklogRunStatus status={run.status} {lang} /><UndoRetention {lang} days={view?.undo_window_days ?? 90} deadline={view?.undo_deadlines.find(d => d.run === run.id)} undone={run.status === 'undone'} />{#if run.stop_requested}<p>{t.stopped}</p>{/if}
       {#if isCopyProtocolRun(run)}<p role="status">{t.copyHold}</p>{/if}
       {#if run.undo_receipt}<p>{run.undo_conflicts} {t.conflicts}</p>{/if}
       <CloseRun kind="protocol" {account} {run} {lang} closable={view?.closable.includes(run.id) ?? false} disabled={busy || running || isCopyProtocolRun(run) || !view?.installed || !!view?.recovery_hold} onchange={() => act(load)} />

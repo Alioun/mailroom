@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import BacklogRunStatus from './BacklogRunStatus.svelte'
   import ArchiveOffer from './ArchiveOffer.svelte'
   import { archiveCopy, archiveReason, archiveOfferAvailable } from './archive-copy'
   import { readAccountStatus, openGmailBacklog, previewGmailBacklog, previewGmailUndo, gmailAction, type GmailView, type GmailPreview, type GmailUndo, type GmailOutcome, type BacklogOptions } from './api'
@@ -99,7 +100,7 @@
   {#if preview?.missing_labels.some(m => !m.blocked) || labelHistory.length}<GmailLabels {account} {lang} offer={preview?.missing_labels.some(m => !m.blocked) ?? false} options={preview?.operation.plan.filing.options ?? { scope, protect_flagged: protect, selected: null }} history={labelHistory} limitations={view?.label_limitations ?? ''} disabled={busy || running || !view?.installed || !!view?.recovery_hold} onchange={() => act(async () => { const selected = preview?.operation.plan.filing.options.selected ?? null; await load(); await plan(selected) })} onreload={() => act(load)} />{/if}
   <h4>{t.journal}</h4>
   {#each view?.journal.runs ?? [] as run (run.id)}
-    <article data-gmail-run={run.id}>{#if run.plan.filing.options.intent === 'archive_unmatched'}<p>{archiveText.title}</p>{/if}<p class="run-state">{run.status}</p><UndoRetention {lang} days={view?.undo_window_days ?? 90} deadline={view?.undo_deadlines.find(d => d.run === run.id)} undone={run.status === 'undone'} />{#if run.stop_requested}<p>{t.stopped}</p>{/if}
+    <article data-gmail-run={run.id}>{#if run.plan.filing.options.intent === 'archive_unmatched'}<p>{archiveText.title}</p>{/if}<BacklogRunStatus status={run.status} {lang} /><UndoRetention {lang} days={view?.undo_window_days ?? 90} deadline={view?.undo_deadlines.find(d => d.run === run.id)} undone={run.status === 'undone'} />{#if run.stop_requested}<p>{t.stopped}</p>{/if}
       {#if run.undo_receipt}<p>{run.undo_conflicts} {t.conflicts}</p>{/if}
       <CloseRun kind="gmail" {account} {run} {lang} closable={view?.closable.includes(run.id) ?? false} disabled={busy || running || !view?.installed || !!view?.recovery_hold} onchange={() => act(load)} />
       {#if !run.closed}<button disabled={busy || running || !view?.installed || view?.recovery_hold} onclick={() => act(async () => { invalidate(); await gmailAction(account, { action: 'reconcile', run: run.id }); await load() })}>{t.reconcile}</button>{/if}

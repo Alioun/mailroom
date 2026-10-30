@@ -11,7 +11,7 @@ use crate::acquisition::{
 use serde::Serialize;
 
 #[derive(Clone, Copy)]
-pub(in crate::acquisition) enum CopyUndoTarget<'a> {
+pub(crate) enum CopyUndoTarget<'a> {
     Initial {
         run: &'a str,
     },
@@ -32,7 +32,7 @@ impl<'a> CopyUndoTarget<'a> {
 
 #[derive(Serialize)]
 #[serde(tag = "kind", content = "review", rename_all = "snake_case")]
-pub(in crate::acquisition) enum CopyUndoReview {
+pub(crate) enum CopyUndoReview {
     Initial(CopyCompensationReview),
     AfterClear(DependentCleanupReview),
 }
@@ -58,7 +58,7 @@ enum Observed {
     AfterClear(ObservedDependentCleanup),
 }
 
-pub(in crate::acquisition) struct CopyUndoWorkflow<'a> {
+pub(crate) struct CopyUndoWorkflow<'a> {
     repo: &'a Accounts,
     account: &'a Account,
     store: &'a EncryptedStore,
@@ -68,7 +68,7 @@ pub(in crate::acquisition) struct CopyUndoWorkflow<'a> {
 }
 
 impl Accounts {
-    pub(in crate::acquisition) fn copy_undo_workflow<'a>(
+    pub(crate) fn copy_undo_workflow<'a>(
         &'a self,
         account: &'a Account,
         store: &'a EncryptedStore,
@@ -238,7 +238,7 @@ impl<'a> CopyUndoWorkflow<'a> {
         Ok((connection, permit))
     }
 
-    pub(super) fn connected_preview(
+    pub(crate) fn connected_preview(
         self,
         cancel: Cancellation,
     ) -> Result<CopyUndoReview, AcquisitionError> {
@@ -246,7 +246,7 @@ impl<'a> CopyUndoWorkflow<'a> {
         self.preview_with(&mut connection, &permit, &cancel)
     }
 
-    pub(super) fn connected_confirm(
+    pub(crate) fn connected_confirm(
         self,
         receipt: &str,
         cancel: Cancellation,

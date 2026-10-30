@@ -16,6 +16,8 @@ Both placements carry the same copy segment in the host script. The include plac
 
 An existing rule that rejects refuses composition while Mailroom has copies, because Pigeonhole forbids reject beside an earlier redirect. That conflict is inferred from Pigeonhole's documented behavior and is unverified at mailbox.org. The proof evaluates the copy segment first, then the existing rules, then Mailroom filing, and reports each copy beside whichever rule files the message. State schema 17 stores the new semantics, `mailroom-foreign-composition-v2`. Records from before this order carry `mailroom-foreign-composition-v1` and stay readable and compensable.
 
+History headings follow each record's composition semantics. Version 1 deploys describe Mailroom rules after existing rules and retain their suppressed-copy counts. Version 2 deploys describe copies first and filing after existing rules. Older whole-script records use a generic recorded-transaction heading. The client rejects unknown semantics and counts that disagree with their recorded semantics. Current live precedence uses version 2 only. These display rules change no execution or compensation authority.
+
 ## Exact review and effects
 
 Preview derives the immutable candidate and fresh proof from the server-owned saved workspace. Saved-account recipient authority remains conservative. The preview displays complete before/after byte and digest review, active selection, proof gate, pin results, warnings, exact effect order and limitations. Replacing an active script affects future mail immediately. Uploading an inactive script does not activate it. Explicit activation is a separate command.

@@ -63,6 +63,7 @@ dd { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; marg
 small { font-size: inherit; }
 details { border-top: 1px solid var(--line); padding-top: 15px; margin-top: 24px; }
 summary { cursor: pointer; color: var(--accent); font-weight: 600; min-height: 30px; }
+.example-workspace > summary { min-height: 44px; padding-block: 8px; }
 details h3 { margin-top: 20px; }
 pre { font-family: ui-monospace, monospace; font-size: 12px; background: #eaf0f3; padding: 18px; overflow: auto; max-height: 440px; border-radius: 5px; }
 details ul { font-size: 14px; }

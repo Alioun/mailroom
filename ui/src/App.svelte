@@ -26,8 +26,12 @@
   <main id="main-content" tabindex="-1">
     <div class="intro"><h1>{t.title}</h1><p>{t.intro}</p><div class="status-line"><span class="source">{lang === 'en' ? 'Local interface' : 'Lokale Oberfläche'}</span><span>{t.locked}</span></div></div>
     <Accounts {lang} />
-    <Census {lang} />
-    <RulesProof {lang} />
+    <details class="example-workspace">
+      <summary>{t.examples}</summary>
+      <p>{t.examplesDetail}</p>
+      <Census {lang} />
+      <RulesProof {lang} />
+    </details>
     <section class="operations" aria-labelledby="operations-heading"><h2 id="operations-heading">{t.boundary}</h2><p>{t.boundaryDetail}</p><p>{t.unavailableDetail}</p>
       {#if availabilityError}<p role="alert">{lang === 'en' ? 'Could not load account availability. Reload the page.' : 'Kontoaktionen konnten nicht geladen werden. Lade die Seite neu.'}</p>{/if}
       <ul>{#each availability.filter(a => !a.allowed) as action}<li><span>{operationLabels[lang][action.operation]}</span><span class="availability">{action.effect === 'account_write' ? t.denied : t.unavailable}</span></li>{/each}</ul>

@@ -51,6 +51,8 @@ The page has a maximum width of 1200px with 40px side padding. Below 680px, use 
 
 The saved-account workspace opens the selected census automatically. Loading, errors and retry belong to the selected account; delayed results must not restore an earlier account. Task links point to the census, rules and address policy, existing mail, invoices, subscriptions, wind-down, then setup and recovery. Keep task contents mounted while using those links so navigation does not discard an exact review. Setup controls and raw saved headers follow the everyday tasks. Account activity names the account whose job it describes.
 
+Stand-alone census and rule examples follow saved accounts in one native disclosure, closed initially and labelled as invented mail. Keep both examples mounted so closing the disclosure preserves an in-progress review. Account write restrictions remain visible outside this disclosure.
+
 ## Elevation & Depth
 
 Use borders and surface colors. There are no shadows.

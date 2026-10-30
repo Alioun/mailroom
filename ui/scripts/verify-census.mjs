@@ -15,6 +15,7 @@ try {
     document.addEventListener('securitypolicyviolation', event => window.censusCspViolations.push(event.violatedDirective))
   })
   await page.goto('http://127.0.0.1:4173')
+  await page.getByText('Examples with invented mail', { exact: true }).click()
   const start = page.getByRole('button', { name: 'Start synthetic census', exact: true })
   await start.waitFor()
   await page.getByRole('heading', { name: 'Accounts', exact: true }).waitFor()
@@ -42,6 +43,7 @@ try {
   }
   await page.screenshot({ path: `${artifacts}/report.png`, fullPage: true })
   await page.reload()
+  await page.getByText('Examples with invented mail', { exact: true }).click()
   await page.getByText('Synthetic census complete', { exact: true }).waitFor()
   assert.equal(await page.getByRole('checkbox', { name: /Confirm own address owner@example.test/ }).isChecked(), true)
   await page.getByRole('button', { name: 'Simulate scan error', exact: true }).click()

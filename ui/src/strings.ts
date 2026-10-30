@@ -3,12 +3,14 @@ export const strings = {
   en: {
     title: 'Preview the filing decisions', intro: 'Review rules against synthetic or saved local headers before any account changes.',
     locked: 'Live writes locked', language: 'Language', footer: 'Local interface · Account writes locked',
+    examples: 'Examples with invented mail', examplesDetail: 'Explore header collection and rule previews with invented messages.',
     boundary: 'Account operations', boundaryDetail: 'Availability comes from the Rust authorization policy. Direct HTTP requests pass through the same policy.',
     denied: 'Denied', unavailable: 'Unavailable', unavailableDetail: 'Owner-run connection and header acquisition are read-only. Every account write is denied.',
   },
   de: {
     title: 'Ablageentscheidungen prüfen', intro: 'Prüfe Regeln mit synthetischen oder lokal gespeicherten Kopfzeilen, bevor ein Konto geändert wird.',
     locked: 'Kontoänderungen gesperrt', language: 'Sprache', footer: 'Lokale Oberfläche · Kontoänderungen gesperrt',
+    examples: 'Beispiele mit erfundenen Nachrichten', examplesDetail: 'Kopfzeilenerfassung und Regelvorschau mit erfundenen Nachrichten ausprobieren.',
     boundary: 'Kontoaktionen', boundaryDetail: 'Die Verfügbarkeit kommt aus der Rust-Autorisierung. Direkte HTTP-Anfragen durchlaufen dieselbe Prüfung.',
     denied: 'Gesperrt', unavailable: 'Nicht verfügbar', unavailableDetail: 'Kontoverbindung und Kopfzeilenerfassung durch den Inhaber sind schreibgeschützt. Alle Kontoänderungen sind gesperrt.',
   },

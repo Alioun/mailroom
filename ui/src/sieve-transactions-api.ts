@@ -16,7 +16,10 @@ const composition = z.discriminatedUnion('semantics', [
   compositionBase.extend({ semantics: z.literal('mailroom-foreign-composition-v2'), precedence: currentCounts.nullable() }),
 ])
 const transaction = z.object({ id: z.string(), compensates: z.string().nullable(), target: z.string(), ownership_epoch: z.string(), artifact: z.string(), proof_binding: z.string(), receipt: z.string(), before: image, after: image, status: z.enum(['running', 'complete', 'refused', 'uncertain', 'stopped', 'conflict', 'fresh_review']), validation: z.union([z.object({ Ok: z.null() }), z.object({ Err: z.string() })]).nullable(), space: z.union([z.object({ Ok: z.null() }), z.object({ Err: z.string() })]).nullable(), steps: z.array(step).max(2), composition: composition.optional() })
-const journal = z.object({ history: z.array(transaction).max(4) })
+export const transactionHistoryLimit = 64
+const journal = z.object({ history: z.array(transaction).max(transactionHistoryLimit) }).superRefine((journal, context) => {
+  if (new Set(journal.history.map(transaction => transaction.id)).size !== journal.history.length) context.addIssue({ code: 'custom', message: 'Transaction history requires unique operation identities' })
+})
 const view = z.object({ installed: z.literal(true), recovery_hold: z.boolean(), placement: placement.nullable(), journal, limitations: z.string() })
 const destination = z.discriminatedUnion('kind', [z.object({ kind: z.literal('inbox') }), z.object({ kind: z.literal('folder'), name: z.string() })])
 const existing = z.discriminatedUnion('kind', [z.object({ kind: z.literal('inbox') }), z.object({ kind: z.literal('folder'), name: z.string() }), z.object({ kind: z.literal('discard') }), z.object({ kind: z.literal('redirect') }), z.object({ kind: z.literal('reject') })])

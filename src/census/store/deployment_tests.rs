@@ -178,3 +178,78 @@ fn active_observation_requires_schema_thirty_one_in_snapshot_and_incremental_fra
         serde_json::to_vec(&saved.deployment_artifacts).unwrap()
     );
 }
+
+#[test]
+fn fifth_sieve_operation_requires_schema_thirty_two_in_snapshots_and_frames() {
+    let (_root, store, mut saved) = crate::rules::landing::tests::fixture_for(
+        "history-schema",
+        "",
+        crate::rules::composition::Placement::Block {},
+    );
+    crate::rules::landing::tests::seed_deployment(&mut saved);
+    crate::acquisition::sieve_transaction::capacity_tests::fill(&mut saved, 5);
+    for version in [30, 31] {
+        store
+            .stage_snapshot(version, &serde_json::to_string(&saved).unwrap())
+            .unwrap()
+            .persist(store.path())
+            .unwrap();
+        decoded::forget(&store.path());
+        assert!(matches!(
+            store.load_state(),
+            Err(CensusError::UnsupportedVersion)
+        ));
+    }
+    let current = saved.clone();
+    crate::acquisition::sieve_transaction::capacity_tests::fill(&mut saved, 4);
+    store
+        .stage_snapshot(31, &serde_json::to_string(&saved).unwrap())
+        .unwrap()
+        .persist(store.path())
+        .unwrap();
+    decoded::forget(&store.path());
+    let mut loaded = store.load_state().unwrap();
+    assert_eq!(loaded.sieve_transactions.history.len(), 4);
+    let mut bytes = fs::read(store.path()).unwrap();
+    let cipher = Aes256Gcm::new_from_slice(store.keys.encryption.as_ref()).unwrap();
+    let base = log::decode(&cipher, store.keys.account.as_str(), &bytes).unwrap();
+    let change = patch::diff(
+        &serde_json::to_value(&saved.sieve_transactions).unwrap(),
+        &serde_json::to_value(&current.sieve_transactions).unwrap(),
+    )
+    .unwrap();
+    let frame = serde_json::to_vec(
+        &serde_json::json!({"revision":saved.revision+1,"fields":{"sieve_transactions":change}}),
+    )
+    .unwrap();
+    bytes.extend(
+        log::encode_frame(
+            &cipher,
+            store.keys.account.as_str(),
+            &base.base_tag,
+            0,
+            &frame,
+        )
+        .unwrap(),
+    );
+    fs::write(store.path(), bytes).unwrap();
+    decoded::forget(&store.path());
+    assert!(matches!(
+        store.load_state(),
+        Err(CensusError::UnsupportedVersion)
+    ));
+    store
+        .stage_snapshot(31, &serde_json::to_string(&saved).unwrap())
+        .unwrap()
+        .persist(store.path())
+        .unwrap();
+    decoded::forget(&store.path());
+    loaded.sieve_transactions = current.sieve_transactions;
+    loaded.deployment_artifacts = current.deployment_artifacts;
+    store.save_state(&mut loaded).unwrap();
+    assert_eq!(store.schema_version().unwrap(), crate::census::SCHEMA);
+    assert_eq!(
+        store.load_state().unwrap().sieve_transactions.history.len(),
+        5
+    );
+}

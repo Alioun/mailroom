@@ -5,7 +5,8 @@ use super::{
 use crate::rules::composition::{self, Placement};
 use serde::{Deserialize, Serialize};
 
-pub const HISTORY: usize = 4;
+pub const HISTORY: usize = 64;
+pub const JOURNAL_BYTES: usize = 4 * 1024 * 1024;
 pub const IMAGE_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,7 +302,7 @@ impl Journal {
         if serde_json::to_vec(self)
             .map_err(|_| CensusError::Storage)?
             .len()
-            > 4 * 1024 * 1024
+            > JOURNAL_BYTES
         {
             return Err(CensusError::Storage);
         }

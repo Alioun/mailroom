@@ -105,7 +105,7 @@ for (const [index, variant] of variants.entries()) {
     const heading = article.match(/<h4>(.*?)<\/h4>/)?.[1].replace(/<[^>]*>/g, '')
     const name = `${variant.name}-${lang}`
     await writeFile(`${audit}${name}.html`, `<!doctype html><html lang="${lang}"><meta charset="utf-8"><body>${body}</body></html>`)
-    const controls = [...body.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)].map(([, attributes, html]) => ({ text: html.replace(/<[^>]*>/g, '').trim(), disabled: /\bdisabled(?:\s|=|$)/.test(attributes) }))
+    const controls = [...body.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)].filter(([, , html]) => !/Newer operations|Older operations|Neuere Vorgänge|Ältere Vorgänge/.test(html)).map(([, attributes, html]) => ({ text: html.replace(/<[^>]*>/g, '').trim(), disabled: /\bdisabled(?:\s|=|$)/.test(attributes) }))
     results.push({ name, heading, controls })
   }
 }

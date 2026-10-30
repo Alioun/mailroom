@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte'
   import { RadioGroup } from '@ark-ui/svelte/radio-group'
-  import { transactionStatus, transactionPreview, transactionCommand, reconcileTransaction, recordPlacement, type TransactionView, type TransactionPreview, type Placement, type Counts } from './sieve-transactions-api'
+  import { transactionStatus, transactionPreview, transactionCommand, reconcileTransaction, recordPlacement, transactionHistoryLimit, type TransactionView, type TransactionPreview, type Placement, type Counts } from './sieve-transactions-api'
   import { sieveStatus, exactReview } from './managesieve-api'
   let { account, lang }: { account: string; lang: 'en' | 'de' } = $props()
   const strings = {
@@ -17,6 +17,12 @@
     return t.purposes[composition.purpose]
   }
   let view = $state<TransactionView | null>(null)
+  let historyPage = $state(1)
+  let history = $derived([...(view?.journal.history ?? [])].reverse())
+  let historyPageCount = $derived(Math.max(1, Math.ceil(history.length / 10)))
+  let currentHistoryPage = $derived(Math.min(Math.max(1, historyPage), historyPageCount))
+  let historyRows = $derived(history.slice((currentHistoryPage - 1) * 10, currentHistoryPage * 10))
+  const historyText = $derived(lang === 'en' ? { title: 'Recorded operations', capacity: 'operations retained. The journal also has a 4 MiB byte limit and refuses new work before planned effect records exceed it. No history is deleted automatically. New deploys, removals and compensation stop at either limit. Read-only reconciliation remains available.', previous: 'Newer operations', next: 'Older operations', page: 'Page', of: 'of' } : { title: 'Gespeicherte Vorgänge', capacity: 'Vorgänge aufbewahrt. Das Journal hat zusätzlich eine Grenze von 4 MiB und lehnt neue Arbeit vor dem Überschreiten durch geplante Änderungsbelege ab. Kein Verlauf wird automatisch gelöscht. Neue Einsätze, Entfernungen und Kompensation stoppen an jeder Grenze. Abgleich ohne Schreiben bleibt verfügbar.', previous: 'Neuere Vorgänge', next: 'Ältere Vorgänge', page: 'Seite', of: 'von' })
   let preview = $state<TransactionPreview | null>(null)
   let choice = $state<string | null>(null)
   let script = $state('')
@@ -40,7 +46,7 @@
     } catch { if (alive) { error = t.error; running = false } }
   }
   async function act(action: 'open' | 'preview' | 'removal' | 'confirm' | 'cancel' | 'reconcile' | 'compensation' | 'record' | 'clear', operation?: string) {
-    busy = true; error = ''; show = false
+    busy = true; error = ''; show = false; historyPage = 1
     try {
       if (action === 'confirm' && preview?.outcome === 'ready' && approved) {
         const p = preview; preview = null; approved = false
@@ -58,7 +64,7 @@
 </script>
 <section class="sieve-transactions" aria-label={t.title}>
   <h3>{t.title}</h3><p>{t.unavailable}</p>
-  <div class="actions"><button disabled={!account || busy || running} onclick={() => act('open')}>{t.open}</button><button disabled={!view?.installed || view.recovery_hold || busy || running} onclick={() => act('preview')}>{t.preview}</button><button disabled={!view?.installed || view.recovery_hold || busy || running} onclick={() => act('removal')}>{t.removal}</button><button disabled={!running || busy} onclick={() => act('cancel')}>{t.cancel}</button></div>
+  <div class="actions"><button disabled={!account || busy || running} onclick={() => act('open')}>{t.open}</button><button disabled={!view?.installed || view.recovery_hold || history.length >= transactionHistoryLimit || busy || running} onclick={() => act('preview')}>{t.preview}</button><button disabled={!view?.installed || view.recovery_hold || history.length >= transactionHistoryLimit || busy || running} onclick={() => act('removal')}>{t.removal}</button><button disabled={!running || busy} onclick={() => act('cancel')}>{t.cancel}</button></div>
   {#if view}
     <fieldset class="placement"><legend>{t.placement}</legend><p>{label(view.placement)}</p>
       <RadioGroup.Root bind:value={choice} aria-label={t.placement}>
@@ -98,13 +104,19 @@
     <label><input type="checkbox" bind:checked={approved} />{t.approval}</label>
     <button disabled={!approved || busy || running} onclick={() => act('confirm')}>{t.confirm}</button>
   {/if}
-  {#if view}{#each view.journal.history as transaction}
+  {#if view}
+    <h4>{historyText.title}</h4><p>{history.length} / {transactionHistoryLimit} {historyText.capacity}</p>
+    {#if history.length}
+      <p aria-live="polite">{historyText.page} {currentHistoryPage} {historyText.of} {historyPageCount}</p>
+      <div class="actions"><button disabled={currentHistoryPage === 1} onclick={() => historyPage = currentHistoryPage - 1}>{historyText.previous}</button><button disabled={currentHistoryPage === historyPageCount} onclick={() => historyPage = currentHistoryPage + 1}>{historyText.next}</button></div>
+    {/if}
+    {#each historyRows as transaction (transaction.id)}
     <article><h4>{title(transaction)} · {t.statuses[transaction.status]}</h4><p>{transaction.id}</p>
       {#if transaction.composition}<p>{[...(transaction.composition.placement ? [label(transaction.composition.placement)] : []), ...transaction.composition.existing_rules].join(' · ')}</p>{#if transaction.composition.precedence}<p>{counted(transaction.composition.precedence)}</p>{/if}{/if}
       <p>CHECKSCRIPT · {transaction.validation ? 'Ok' in transaction.validation ? t.outcomes.acknowledged : transaction.validation.Err : t.pending} · HAVESPACE · {transaction.space ? 'Ok' in transaction.space ? t.outcomes.acknowledged : transaction.space.Err : t.pending}</p>
       <ul>{#each transaction.steps as step}<li>{t.effects[step.effect]} · {t.outcomes[step.outcome]} · {t.ack} {step.acknowledgment ? t.yes : t.no} {step.failure ?? ''}</li>{/each}</ul>
       <button disabled={busy || running} onclick={() => act('reconcile', transaction.id)}>{t.reconcile}</button>
-      {#if !transaction.compensates && transaction.composition?.purpose !== 'removal'}<button disabled={busy || running || view.recovery_hold} onclick={() => act('compensation', transaction.id)}>{t.compensation}</button>{/if}
+      {#if !transaction.compensates && transaction.composition?.purpose !== 'removal'}<button disabled={busy || running || view.recovery_hold || history.length >= transactionHistoryLimit} onclick={() => act('compensation', transaction.id)}>{t.compensation}</button>{/if}
     </article>
   {/each}{/if}
   <p>{t.fresh}</p><p>{t.limitation}</p>

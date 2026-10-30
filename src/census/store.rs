@@ -48,7 +48,8 @@ const MIN_FRAME_BUDGET: u64 = 64 * 1024;
 /// archive intent. 26 adds tagged COPY phase journals with exact decimal MODSEQ.
 /// 30 retains exact compiled deployment artifacts independently of downloads.
 /// 31 records the first observed active image for those artifacts.
-pub(crate) const SCHEMA: u32 = 31;
+/// 32 allows up to 64 Sieve operations within the existing journal byte bound.
+pub(crate) const SCHEMA: u32 = 32;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProtocolStateView {
@@ -1399,6 +1400,9 @@ impl EncryptedStore {
         {
             return Err(CensusError::UnsupportedVersion);
         }
+        if version < 32 && state.sieve_transactions.history.len() > 4 {
+            return Err(CensusError::UnsupportedVersion);
+        }
         if version < 11
             && (state.sieve_transactions != Default::default()
                 || state.synthetic_sieve.is_some()
@@ -1466,6 +1470,7 @@ impl EncryptedStore {
                     delta::apply_census(&mut state.census, change)?;
                     continue;
                 }
+                let sieve_history = name == "sieve_transactions";
                 let value = match patched.entry(name) {
                     std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
                     std::collections::btree_map::Entry::Vacant(e) => {
@@ -1474,6 +1479,15 @@ impl EncryptedStore {
                     }
                 };
                 patch::apply(value, change)?;
+                if version < 32
+                    && sieve_history
+                    && value
+                        .get("history")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|h| h.len() > 4)
+                {
+                    return Err(CensusError::UnsupportedVersion);
+                }
             }
         }
         for (name, value) in patched {

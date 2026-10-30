@@ -79,6 +79,7 @@ fn persist_confirmed_intent(
     saved: &mut AccountState,
     preview: Preview,
 ) -> Result<(), AcquisitionError> {
+    reserve_history(saved, &preview.transaction)?;
     let deploy = preview
         .transaction
         .composition
@@ -159,6 +160,62 @@ fn effects(before: &Image, after: &Image, t: &Transaction) -> Vec<Effect> {
         });
     }
     result
+}
+
+fn effect_image(
+    before: &Image,
+    transaction: &Transaction,
+    effect: Effect,
+) -> Result<Image, AcquisitionError> {
+    let desired = &transaction.after;
+    Ok(match effect {
+        Effect::Upload => with_body(before, desired, &transaction.target),
+        Effect::UploadOwned => with_body(
+            before,
+            desired,
+            transaction
+                .composition
+                .as_ref()
+                .and_then(|c| c.owned.as_deref())
+                .ok_or_else(invalid)?,
+        ),
+        Effect::Activate | Effect::Disable => Image {
+            names: desired.names.clone(),
+            ..before.clone()
+        },
+    })
+}
+
+fn reserve_history(
+    saved: &AccountState,
+    transaction: &Transaction,
+) -> Result<(), AcquisitionError> {
+    let mut completed = transaction.clone();
+    let mut image = completed.before.clone();
+    completed.steps.clear();
+    for effect in effects(&completed.before, &completed.after, &completed) {
+        let after = effect_image(&image, &completed, effect)?;
+        completed.steps.push(Step {
+            effect,
+            before: image,
+            after: after.clone(),
+            outcome: Outcome::Observed,
+            acknowledgment: true,
+            failure: None,
+        });
+        image = after;
+    }
+    completed.status = Status::Complete;
+    completed.validation = Some(Err(Error::CredentialUnavailable));
+    completed.space = Some(Err(Error::CredentialUnavailable));
+    let mut projected = saved.sieve_transactions.clone();
+    projected.history.push(completed);
+    projected.validate(&saved.census.account)?;
+    // Error/status forms can grow after admission; this reserve stays in the byte budget.
+    if serde_json::to_vec(&projected).map_err(|_| invalid())?.len() > model::JOURNAL_BYTES - 1024 {
+        return Err(invalid());
+    }
+    Ok(())
 }
 struct Planned {
     after: Image,
@@ -557,6 +614,7 @@ impl Accounts {
             .keys()
             .binding_for(b"mailroom/managesieve-operation/v1", receipt.as_bytes());
         transaction.receipt = receipt.clone();
+        reserve_history(saved, &transaction)?;
         session.logout().map_err(protocol("review_logout"))?;
         Ok(Previewed::Ready(Box::new(Preview {
             transaction,
@@ -696,16 +754,7 @@ impl Accounts {
                 save(store, saved)?;
                 return Err(invalid());
             }
-            let after = match effect {
-                Effect::Upload => with_body(&expected, &desired, &target),
-                Effect::UploadOwned => {
-                    with_body(&expected, &desired, owned.as_deref().ok_or_else(invalid)?)
-                }
-                Effect::Activate | Effect::Disable => Image {
-                    names: desired.names.clone(),
-                    ..expected.clone()
-                },
-            };
+            let after = effect_image(&expected, &saved.sieve_transactions.history[index], effect)?;
             if fresh(saved).is_err() {
                 saved.sieve_transactions.history[index].status = Status::Conflict;
                 save(store, saved)?;
@@ -928,6 +977,8 @@ pub(crate) fn boundary(name: &str) {
     let _ = name;
 }
 
+#[cfg(test)]
+pub(crate) mod capacity_tests;
 #[cfg(test)]
 mod retention_tests;
 #[cfg(test)]

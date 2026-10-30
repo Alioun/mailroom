@@ -26,7 +26,7 @@ pub(super) mod compensation_observer;
 pub(super) mod compensation_review;
 pub(super) mod compensation_worker;
 pub(super) mod copy_checkpoints;
-mod copy_start;
+pub(super) mod copy_start;
 pub(super) mod copy_undo;
 pub(super) mod copy_worker;
 pub(super) mod dependent_cleanup;
@@ -58,6 +58,21 @@ fn start_receipt(
     ))
 }
 impl Accounts {
+    #[cfg(test)]
+    pub(crate) fn install_backlog_admission_fixture(&mut self, account: &Account) {
+        self.backlog_source = Some(std::sync::Arc::new(InstalledSource {
+            account: account.id.clone(),
+            login: account.login.clone(),
+            address: "127.0.0.1:1".parse().unwrap(),
+            tls_name: "fixture.example.test".into(),
+            root: b"dummy-not-a-certificate".into(),
+            epoch: "admission-denial-fixture/v1".into(),
+            authority: "fixture-message-move/v1".into(),
+            command_timeout: std::time::Duration::from_secs(1),
+            operation_timeout: std::time::Duration::from_secs(1),
+        }));
+    }
+
     pub(crate) fn backlog_installed(&self, id: Option<&AccountId>) -> bool {
         self.backlog_source.as_ref().is_some_and(|s| {
             s.authority == "fixture-message-move/v1"

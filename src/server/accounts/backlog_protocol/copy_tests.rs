@@ -35,6 +35,53 @@ async fn call(
 }
 
 #[tokio::test]
+async fn installed_move_source_cannot_admit_held_copy_actions() {
+    let mut app = AppState::new(true);
+    let AccountSource::Synthetic { accounts, .. } = &mut app.accounts.source else {
+        unreachable!()
+    };
+    let repo = Arc::get_mut(accounts).unwrap();
+    let account = repo
+        .create(
+            Provider::MailboxOrg,
+            "copy-admission@example.test".into(),
+            &SecretValue::new(b"invented".to_vec()),
+        )
+        .unwrap();
+    repo.install_backlog_admission_fixture(&account);
+    assert!(repo.backlog_installed(Some(&account.id)));
+    let store = repo.store(&account).unwrap();
+    let path = store.path().to_path_buf();
+    let ciphertext = std::fs::read(&path).unwrap();
+    drop(store);
+    let credentials = repo.track_credential_accesses();
+    let state = Arc::new(app);
+    for command in [
+        json!({"action":"copy_confirm","options":Options::default(),"receipt":"a".repeat(64),"confirmed":true}),
+        json!({"action":"copy_undo_preview","target":{"kind":"initial","run":"a".repeat(64)}}),
+        json!({"action":"copy_undo_confirm","target":{"kind":"after_clear","run":"a".repeat(64),"forward":0,"clear":0},"receipt":"b".repeat(64),"confirmed":true}),
+    ] {
+        let result = call(&state, &account.id, command, true, StatusCode::FORBIDDEN).await;
+        assert_eq!(
+            result["error"],
+            "COPY workflow installation is held pending connected-runtime and interface acceptance."
+        );
+    }
+    assert_eq!(std::fs::read(path).unwrap(), ciphertext);
+    assert_eq!(
+        state
+            .accounts
+            .repository_accesses
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(credentials.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(state.accounts.confirmations.lock().unwrap().accesses, 0);
+    assert!(state.accounts.job.lock().unwrap().is_none());
+    assert!(state.accounts.worker.lock().unwrap().is_none());
+}
+
+#[tokio::test]
 async fn protected_copy_history_status_preserves_phases_and_denies_uninstalled_actions() {
     use crate::backlog::protocol::tests::{Stage, run};
     let state = Arc::new(AppState::new(true));

@@ -28,11 +28,34 @@ fn fixture() -> (
     (root, repo, account, store, saved, operation)
 }
 
-fn sign(store: &EncryptedStore, saved: &AccountState, operation: &mut Run) {
+pub(in crate::acquisition) fn sign(
+    store: &EncryptedStore,
+    saved: &AccountState,
+    operation: &mut Run,
+) {
     operation.receipt = start_receipt(store, saved, &operation.plan, &operation.batches).unwrap();
     operation.id = store
         .keys()
         .binding_for(b"mailroom/imap-backlog-id/v1", operation.receipt.as_bytes());
+}
+
+pub(in crate::acquisition) fn confirm_prepared(
+    repo: &Accounts,
+    account: &Account,
+    store: &EncryptedStore,
+    saved: &mut AccountState,
+    operation: Run,
+    receipt: &str,
+) -> Result<String, AcquisitionError> {
+    ObservedCopyStart { operation }.confirm(
+        repo,
+        account,
+        store,
+        saved,
+        receipt,
+        &Cancellation::default(),
+        &|_| Ok(()),
+    )
 }
 
 fn snapshot(store: &EncryptedStore, saved: &AccountState) -> (Vec<u8>, Vec<u8>) {
@@ -273,4 +296,17 @@ fn start_receipt_keeps_existing_serialization_and_separates_archive_intent() {
         .unwrap(),
     );
     assert_ne!(operation.receipt, archive_purpose);
+}
+
+#[test]
+fn rejected_staged_journal_preserves_ciphertext_and_caller_state() {
+    let (_root, mut repo, account, store, mut saved, mut operation) = fixture();
+    let accesses = repo.track_credential_accesses();
+    operation.plan.filing.changes[0].source.uid = 0;
+    sign(&store, &saved, &mut operation);
+    let receipt = operation.receipt.clone();
+    let before = snapshot(&store, &saved);
+    assert!(confirm_prepared(&repo, &account, &store, &mut saved, operation, &receipt).is_err());
+    assert_eq!(snapshot(&store, &saved), before);
+    assert_eq!(accesses.load(Ordering::SeqCst), 0);
 }

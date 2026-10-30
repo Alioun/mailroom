@@ -64,6 +64,11 @@ enum Action {
     ResumeUndo {
         run: String,
     },
+    CopyConfirm {
+        options: Options,
+        receipt: String,
+        confirmed: bool,
+    },
     CopyUndoPreview {
         target: CopyUndoSelection,
     },
@@ -141,11 +146,13 @@ async fn serve(
     if matches!(
         &body,
         Ok(Json(Request {
-            command: Action::CopyUndoPreview { .. } | Action::CopyUndoConfirm { .. },
+            command: Action::CopyConfirm { .. }
+                | Action::CopyUndoPreview { .. }
+                | Action::CopyUndoConfirm { .. },
             ..
         }))
     ) {
-        return (StatusCode::FORBIDDEN, Json(json!({"error":"COPY Undo workflow installation is held pending connected-runtime and interface acceptance."}))).into_response();
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"COPY workflow installation is held pending connected-runtime and interface acceptance."}))).into_response();
     }
     let status_only = matches!(
         &body,
@@ -205,6 +212,7 @@ async fn serve(
     if matches!(
         request.command,
         Action::Confirm { .. }
+            | Action::CopyConfirm { .. }
             | Action::Resume { .. }
             | Action::Undo { .. }
             | Action::CopyUndoConfirm { .. }
@@ -425,6 +433,35 @@ fn execute(
         Ok(())
     };
     match &request.command {
+        Action::CopyConfirm {
+            options,
+            receipt,
+            confirmed,
+        } => {
+            if kind != Kind::Move || !confirmed || other_effects_pending(&saved) {
+                return Err(AcquisitionError::InvalidInput);
+            }
+            mailbox_consent(
+                state,
+                &account.id,
+                if options.intent == crate::backlog::Intent::ArchiveUnmatched {
+                    "Archive the previewed old unmatched Inbox messages"
+                } else {
+                    "File the previewed backlog messages and remove their originals"
+                },
+                receipt,
+            )?;
+            repo.backlog_confirm_copy(
+                &account,
+                &store,
+                &mut saved,
+                options.clone(),
+                receipt,
+                cancel,
+                fresh,
+            )?;
+            return Ok(report(&saved, json!({"journal":journal(&saved)})));
+        }
         Action::CopyUndoPreview { target } => {
             if kind != Kind::Move {
                 return Err(AcquisitionError::InvalidInput);
@@ -604,6 +641,7 @@ fn execute(
             }
             Action::Status {}
             | Action::Cancel {}
+            | Action::CopyConfirm { .. }
             | Action::CopyUndoPreview { .. }
             | Action::CopyUndoConfirm { .. }
             | Action::ClosePreview { .. }
@@ -681,6 +719,7 @@ fn execute(
         }
         Action::Status {}
         | Action::Cancel {}
+        | Action::CopyConfirm { .. }
         | Action::CopyUndoPreview { .. }
         | Action::CopyUndoConfirm { .. }
         | Action::ClosePreview { .. }
@@ -705,8 +744,29 @@ async fn denied_sources_and_malformed_requests_never_open_repository_credentials
             _ => None,
         };
         let state = Arc::new(app);
-        for body in ["{".to_string(), json!({"account":"invented","command":{"action":"confirm","confirmed":true,"receipt":"a".repeat(64),"endpoint":"127.0.0.1"}}).to_string(), json!({"account":"invented","command":{"action":"cancel"}}).to_string(), json!({"account":"invented","command":{"action":"copy_undo_preview","target":{"kind":"initial","run":"a".repeat(64)}}}).to_string(), json!({"account":"invented","command":{"action":"copy_undo_confirm","target":{"kind":"after_clear","run":"a".repeat(64),"forward":0,"clear":0},"receipt":"b".repeat(64),"confirmed":true}}).to_string()] {
-            let response = super::super::router(state.clone()).oneshot(axum::http::Request::builder().method("POST").uri("/api/accounts/backlog/protocol").header("Host", super::super::ADDRESS).header("Origin", super::super::ORIGIN).header("Content-Type", "application/json").header("X-Mailroom-Token", state.token.as_str()).body(axum::body::Body::from(body)).unwrap()).await.unwrap();
+        let bodies = [
+            "{".to_string(),
+            json!({"account":"invented","command":{"action":"confirm","confirmed":true,"receipt":"a".repeat(64),"endpoint":"127.0.0.1"}}).to_string(),
+            json!({"account":"invented","command":{"action":"cancel"}}).to_string(),
+            json!({"account":"invented","command":{"action":"copy_confirm","options":Options::default(),"receipt":"b".repeat(64),"confirmed":true}}).to_string(),
+            json!({"account":"invented","command":{"action":"copy_undo_preview","target":{"kind":"initial","run":"a".repeat(64)}}}).to_string(),
+            json!({"account":"invented","command":{"action":"copy_undo_confirm","target":{"kind":"after_clear","run":"a".repeat(64),"forward":0,"clear":0},"receipt":"b".repeat(64),"confirmed":true}}).to_string(),
+        ];
+        for body in bodies {
+            let response = super::super::router(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/api/accounts/backlog/protocol")
+                        .header("Host", super::super::ADDRESS)
+                        .header("Origin", super::super::ORIGIN)
+                        .header("Content-Type", "application/json")
+                        .header("X-Mailroom-Token", state.token.as_str())
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
         }
         assert_eq!(
@@ -722,6 +782,33 @@ async fn denied_sources_and_malformed_requests_never_open_repository_credentials
             assert_eq!(accesses.load(std::sync::atomic::Ordering::SeqCst), 0);
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn copy_start_command_accepts_no_plan_observations_or_endpoint() {
+    let command = json!({"action":"copy_confirm","options":Options::default(),"receipt":"b".repeat(64),"confirmed":true});
+    let request = |command| json!({"account":"invented","command":command});
+    assert!(serde_json::from_value::<Request>(request(command.clone())).is_ok());
+    for field in ["plan", "observations", "endpoint"] {
+        let mut altered = command.clone();
+        altered[field] = json!({});
+        assert!(
+            serde_json::from_value::<Request>(request(altered)).is_err(),
+            "{field}"
+        );
+    }
+    for field in ["options", "receipt", "confirmed"] {
+        let mut altered = command.clone();
+        altered.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<Request>(request(altered)).is_err(),
+            "{field}"
+        );
+    }
+    let mut altered = command;
+    altered["options"]["source"] = json!({});
+    assert!(serde_json::from_value::<Request>(request(altered)).is_err());
 }
 
 #[cfg(test)]

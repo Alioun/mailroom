@@ -75,7 +75,7 @@ impl ObservedCopyStart {
 }
 
 impl Accounts {
-    pub(super) fn backlog_confirm_copy(
+    pub(crate) fn backlog_confirm_copy(
         &self,
         account: &Account,
         store: &EncryptedStore,
@@ -111,4 +111,4 @@ impl Accounts {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::acquisition) mod tests;

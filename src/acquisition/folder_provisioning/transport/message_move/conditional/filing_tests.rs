@@ -454,6 +454,31 @@ struct WorkerTransport {
     stop_at: Option<usize>,
     inventories: usize,
 }
+
+fn commit_start(
+    repo: &crate::acquisition::Accounts,
+    account: &crate::acquisition::Account,
+    store: &crate::census::EncryptedStore,
+    saved: &mut crate::census::AccountState,
+) -> String {
+    use crate::acquisition::backlog::copy_start::tests::{confirm_prepared, sign};
+    use crate::backlog::protocol::Status;
+    let mut operation = saved.protocol_backlog.runs.remove(0);
+    store.save_state(saved).unwrap();
+    operation.status = Status::Prepared;
+    sign(store, saved, &mut operation);
+    let receipt = operation.receipt.clone();
+    let id = confirm_prepared(repo, account, store, saved, operation, &receipt).unwrap();
+    assert_eq!(saved.protocol_backlog.runs[0].status, Status::Prepared);
+    assert_eq!(saved.protocol_backlog.runs[0].receipt, receipt);
+    assert!(!saved.protocol_backlog.runs[0].batches[0].attempted());
+    assert!(
+        store
+            .checkpoint_matches(saved, crate::census::ProtocolStateView::Persisted)
+            .unwrap()
+    );
+    id
+}
 impl crate::acquisition::backlog::copy_worker::CopyTransport for WorkerTransport {
     fn inventory(&mut self) -> Result<crate::census::folder_provisioning::Inventory, Error> {
         self.inventories += 1;
@@ -527,12 +552,11 @@ fn saved_worker_starts_files_and_stamps_completion_through_the_actual_checkpoint
     use crate::acquisition::backlog::{copy_checkpoints::tests::fixture, copy_worker::CopyWork};
     use crate::backlog::protocol::Status;
     let e = initial();
-    let (_root, repo, account, store, mut saved) = fixture(e.clone());
-    saved.protocol_backlog.runs[0].status = Status::Prepared;
-    store.save_state(&mut saved).unwrap();
+    let (_root, mut repo, account, store, mut saved) = fixture(e.clone());
+    let accesses = repo.track_credential_accesses();
+    let id = commit_start(&repo, &account, &store, &mut saved);
     let source = repo.backlog_source.as_deref().unwrap();
     let permit = permitted(source);
-    let id = saved.protocol_backlog.runs[0].id.clone();
     let mut transport = WorkerTransport {
         io: complete_script(source, &e),
         topology: saved.protocol_backlog.runs[0].plan.topology.clone(),
@@ -561,6 +585,8 @@ fn saved_worker_starts_files_and_stamps_completion_through_the_actual_checkpoint
     );
     assert_eq!(std::fs::read(store.path()).unwrap(), before);
     assert!(store.load_state().unwrap().protocol_backlog == saved.protocol_backlog);
+    assert_eq!(accesses.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(!repo.backlog_installed(Some(&account.id)));
 }
 
 #[test]
@@ -569,10 +595,13 @@ fn saved_worker_cancellation_reconcile_and_resume_never_repeat_an_effect() {
     use crate::backlog::protocol::Status;
     for stop_at in [3, 4, 6, 7, 9] {
         let e = initial();
-        let (_root, repo, account, store, mut saved) = fixture(e.clone());
+        let (_root, mut repo, account, store, mut saved) = fixture(e.clone());
+        let accesses = repo.track_credential_accesses();
+        let passwords = repo.track_password_accesses(&account);
+        let id = commit_start(&repo, &account, &store, &mut saved);
+        let receipt = saved.protocol_backlog.runs[0].receipt.clone();
         let source = repo.backlog_source.as_deref().unwrap();
         let permit = permitted(source);
-        let id = saved.protocol_backlog.runs[0].id.clone();
         let mut transport = WorkerTransport {
             io: complete_script(source, &e),
             topology: saved.protocol_backlog.runs[0].plan.topology.clone(),
@@ -588,6 +617,7 @@ fn saved_worker_cancellation_reconcile_and_resume_never_repeat_an_effect() {
             Err(crate::acquisition::AcquisitionError::Cancelled)
         );
         assert!(saved.protocol_backlog.runs[0].stop_requested);
+        assert_eq!(accesses.load(std::sync::atomic::Ordering::SeqCst), 0);
         drop(store);
         let store = repo.store(&account).unwrap();
         let mut reopened = store.load_state().unwrap();
@@ -643,6 +673,10 @@ fn saved_worker_cancellation_reconcile_and_resume_never_repeat_an_effect() {
             .unwrap();
         }
         assert_eq!(reopened.protocol_backlog.runs[0].status, Status::Complete);
+        assert_eq!(reopened.protocol_backlog.runs[0].receipt, receipt);
+        assert_eq!(accesses.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(passwords.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!repo.backlog_installed(Some(&account.id)));
         assert_eq!(
             (
                 count(&transport.io, "copy"),

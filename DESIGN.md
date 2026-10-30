@@ -53,6 +53,8 @@ The saved-account workspace opens the selected census automatically. Loading, er
 
 Stand-alone census and rule examples follow saved accounts in one native disclosure, closed initially and labelled as invented mail. Keep both examples mounted so closing the disclosure preserves an in-progress review. Account write restrictions remain visible outside this disclosure.
 
+Proof decisions use local subject, sender and destination search, with separate Inbox, copy and recipient-review filters. Show 50 messages per page with a matching result range and previous/next controls. The folder diff follows that page. Keep full-census totals and approval gates above the filters, with explicit text that browsing does not change their scope. Distinguish an empty census from filters with no matches. Search and page controls wrap with the existing layout and retain native focus styling.
+
 ## Elevation & Depth
 
 Use borders and surface colors. There are no shadows.

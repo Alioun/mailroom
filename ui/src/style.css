@@ -49,6 +49,13 @@ dt { font-size: 13px; color: var(--muted); }
 dd { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; margin: 2px 0 0; }
 .filters { display: flex; flex-wrap: wrap; gap: 7px; margin: 24px 0 18px; }
 .filters button { font-size: 14px; }
+.proof-search, .proof-pagination { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+.proof-search label { display: grid; gap: 6px; flex: 1 1 280px; max-width: 560px; min-width: 0; }
+.proof-search input { width: 100%; min-width: 0; min-height: 44px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: var(--ink); }
+.proof-pagination { align-items: center; margin-block: 16px; }
+.proof-result-range, .proof-pagination span { font-variant-numeric: tabular-nums; }
+.proof-empty { padding-block: 24px; }
+.proof-page-diff p { overflow-wrap: anywhere; }
 .table-heading, .decision { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, .75fr) minmax(0, 1fr); column-gap: 24px; }
 .table-heading { color: var(--muted); font-size: 12px; padding-bottom: 9px; }
 .decision { padding: 18px 0 12px; border-top: 1px solid var(--line); }

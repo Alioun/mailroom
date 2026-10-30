@@ -97,4 +97,4 @@ pub(super) fn prepare(
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::acquisition) mod tests;

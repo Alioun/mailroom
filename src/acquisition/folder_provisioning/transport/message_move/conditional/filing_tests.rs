@@ -549,12 +549,32 @@ fn saved_worker_rejects_unsaved_resume_over_a_durable_stop_before_admission() {
 
 #[test]
 fn saved_worker_starts_files_and_stamps_completion_through_the_actual_checkpoint_adapter() {
-    use crate::acquisition::backlog::{copy_checkpoints::tests::fixture, copy_worker::CopyWork};
+    use crate::acquisition::backlog::{
+        copy_start::tests::confirm_prepared,
+        copy_worker::CopyWork,
+        preview::tests::{fixture, review},
+    };
+    use crate::acquisition::folder_provisioning::transport::message_move::Profile;
     use crate::backlog::protocol::Status;
-    let e = initial();
-    let (_root, mut repo, account, store, mut saved) = fixture(e.clone());
+    let (_root, mut repo, account, store, mut saved, topology, before) = fixture(Profile::Copy);
     let accesses = repo.track_credential_accesses();
-    let id = commit_start(&repo, &account, &store, &mut saved);
+    let preview = review(&repo, &account, &store, &saved, topology, |_| {
+        Ok(before.clone())
+    })
+    .unwrap();
+    let plan = preview.operation.plan.clone();
+    let receipt = preview.receipt.clone();
+    let e = preview.operation.batches[0].as_copy().unwrap().clone();
+    assert_eq!(e, initial());
+    let id = confirm_prepared(
+        &repo,
+        &account,
+        &store,
+        &mut saved,
+        preview.operation,
+        &receipt,
+    )
+    .unwrap();
     let source = repo.backlog_source.as_deref().unwrap();
     let permit = permitted(source);
     let mut transport = WorkerTransport {
@@ -574,6 +594,8 @@ fn saved_worker_starts_files_and_stamps_completion_through_the_actual_checkpoint
     assert_eq!(saved.protocol_backlog.runs[0].status, Status::Complete);
     assert!(saved.protocol_backlog.runs[0].completed_at.is_some());
     assert!(!saved.protocol_backlog.runs[0].stop_requested);
+    assert!(saved.protocol_backlog.runs[0].plan == plan);
+    assert_eq!(saved.protocol_backlog.runs[0].receipt, receipt);
     assert!(transport.io.flights.is_empty());
     assert_eq!(transport.inventories, 1);
     let before = std::fs::read(store.path()).unwrap();
@@ -592,17 +614,33 @@ fn saved_worker_starts_files_and_stamps_completion_through_the_actual_checkpoint
 #[test]
 fn saved_worker_cancellation_reconcile_and_resume_never_repeat_an_effect() {
     use crate::acquisition::backlog::{
-        copy_checkpoints::tests::fixture,
         copy_continuation::{CopyContinuationWork, Worker},
+        copy_start::tests::confirm_prepared,
+        preview::tests::{fixture, review},
     };
+    use crate::acquisition::folder_provisioning::transport::message_move::Profile;
     use crate::backlog::protocol::Status;
     for stop_at in [3, 4, 6, 7, 9] {
-        let e = initial();
-        let (_root, mut repo, account, store, mut saved) = fixture(e.clone());
+        let (_root, mut repo, account, store, mut saved, topology, before) = fixture(Profile::Copy);
         let accesses = repo.track_credential_accesses();
         let passwords = repo.track_password_accesses(&account);
-        let id = commit_start(&repo, &account, &store, &mut saved);
-        let receipt = saved.protocol_backlog.runs[0].receipt.clone();
+        let preview = review(&repo, &account, &store, &saved, topology, |_| {
+            Ok(before.clone())
+        })
+        .unwrap();
+        let plan = preview.operation.plan.clone();
+        let receipt = preview.receipt.clone();
+        let e = preview.operation.batches[0].as_copy().unwrap().clone();
+        assert_eq!(e, initial());
+        let id = confirm_prepared(
+            &repo,
+            &account,
+            &store,
+            &mut saved,
+            preview.operation,
+            &receipt,
+        )
+        .unwrap();
         let source = repo.backlog_source.as_deref().unwrap();
         let permit = permitted(source);
         let mut transport = WorkerTransport {
@@ -698,6 +736,7 @@ fn saved_worker_cancellation_reconcile_and_resume_never_repeat_an_effect() {
         }
         assert_eq!(reopened.protocol_backlog.runs[0].status, Status::Complete);
         assert_eq!(reopened.protocol_backlog.runs[0].receipt, receipt);
+        assert!(reopened.protocol_backlog.runs[0].plan == plan);
         assert_eq!(accesses.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(passwords.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(!repo.backlog_installed(Some(&account.id)));

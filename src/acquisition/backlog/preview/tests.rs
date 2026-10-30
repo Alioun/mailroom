@@ -8,7 +8,7 @@ use crate::{
     census::{Direction, MessageRecord, parse_headers},
 };
 
-fn fixture(
+pub(in crate::acquisition) fn fixture(
     profile: Profile,
 ) -> (
     tempfile::TempDir,
@@ -43,15 +43,17 @@ fn fixture(
         .unwrap();
     for (uid, metadata) in evidence.intent().messages() {
         let headers = parse_headers(
-            format!("From: news@example.test\r\nTo: owner@home.example.test\r\nDelivered-To: owner@home.example.test\r\nSubject: Saved rules preview\r\nMessage-ID: <preview-{}@example.test>\r\nDate: Sat, 24 Oct 2026 12:00:00 +0000\r\n\r\n", uid.get()).as_bytes(),
+            b"From: news@example.test\r\nTo: owner@home.example.test\r\nDelivered-To: owner@home.example.test\r\nSubject: Saved rules preview\r\nMessage-ID: <conditional@example.test>\r\nDate: Sat, 24 Oct 2026 12:00:00 +0000\r\n\r\n",
             Direction::Received,
         ).unwrap();
-        observed.folders.get_mut("INBOX").unwrap().messages.insert(
-            uid.get(),
-            MessageRecord {
+        observed
+            .folders
+            .get_mut("INBOX")
+            .unwrap()
+            .insert(MessageRecord {
                 delivery: Default::default(),
                 uid: uid.get(),
-                size: metadata.size.into(),
+                size: 100,
                 internal_date: metadata.internal_date.clone(),
                 flags_observed: true,
                 flags: metadata.flags.clone(),
@@ -59,8 +61,8 @@ fn fixture(
                 gmail_thread_id: None,
                 gmail_labels: BTreeSet::new(),
                 headers,
-            },
-        );
+            })
+            .unwrap();
     }
     let versions = observed.folders["INBOX"]
         .messages
@@ -91,7 +93,7 @@ fn fixture(
     (root, repo, account, store, saved, topology, before)
 }
 
-fn review(
+pub(in crate::acquisition) fn review(
     repo: &Accounts,
     account: &Account,
     store: &EncryptedStore,

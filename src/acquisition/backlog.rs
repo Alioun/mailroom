@@ -31,7 +31,7 @@ pub(super) mod copy_start;
 pub(super) mod copy_undo;
 pub(super) mod copy_worker;
 pub(super) mod dependent_cleanup;
-mod preview;
+pub(super) mod preview;
 
 fn invalid() -> AcquisitionError {
     AcquisitionError::InvalidInput

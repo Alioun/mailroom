@@ -2,6 +2,9 @@ use super::*;
 use crate::acquisition::backlog::compensation_observer::CompensationReadTransport;
 use std::cell::Cell;
 
+#[path = "dependent_observation_tests.rs"]
+mod dependent;
+
 struct ReviewPeer {
     peer: Peer,
     inventories: usize,

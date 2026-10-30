@@ -19,6 +19,12 @@ pub struct DependentCleanupRequest {
     pub destination: Readback,
 }
 
+pub(in crate::acquisition) struct DependentCleanupTarget<'a> {
+    pub run: &'a str,
+    pub forward: usize,
+    pub clear: usize,
+}
+
 #[derive(Serialize)]
 pub struct DependentCleanupReview {
     receipt: String,
@@ -84,6 +90,51 @@ pub(super) fn approved_dependencies(
 }
 
 impl Accounts {
+    pub(super) fn dependent_cleanup_admit<'a>(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &'a AccountState,
+        target: &DependentCleanupTarget<'_>,
+        fresh: &dyn Fn(&AccountState) -> Result<(), String>,
+    ) -> Result<(&'a Run, &'a Compensation), AcquisitionError> {
+        saved.protocol_backlog.validate(&account.id)?;
+        let run = saved
+            .protocol_backlog
+            .runs
+            .iter()
+            .find(|run| run.id == target.run)
+            .ok_or_else(invalid)?;
+        if !matches!(run.status, Status::Stopped | Status::Conflict)
+            || run.plan.filing.semantics != model::COPY_SEMANTICS
+            || run.undo_receipt.is_none()
+            || run.closed.is_some()
+            || model::outcome(run, true) == Status::Uncertain
+            || !crate::backlog::retention::undo_open(run.completed_at, self.now())
+        {
+            return Err(invalid());
+        }
+        self.validate_copy_authority(account, store, saved, &run.plan.binding, fresh)?;
+        if !store.checkpoint_matches(saved, crate::census::ProtocolStateView::Persisted)? {
+            return Err(invalid());
+        }
+        approved_dependencies(store, run)?;
+        let entry = run
+            .compensation
+            .iter()
+            .find(|entry| entry.forward == target.forward)
+            .ok_or_else(invalid)?;
+        let clear = entry.evidence.clear(target.clear).ok_or_else(invalid)?;
+        if clear.result().is_none()
+            || clear.readback().is_none()
+            || clear.verified().is_empty()
+            || entry.evidence.dependent_plan(target.clear).is_some()
+        {
+            return Err(invalid());
+        }
+        Ok((run, entry))
+    }
+
     /// Reviews new local cleanup plans without executing them or loading credentials.
     pub fn review_dependent_cleanup(
         &self,
@@ -93,33 +144,20 @@ impl Accounts {
         request: &DependentCleanupRequest,
         fresh: impl Fn(&AccountState) -> Result<(), String>,
     ) -> Result<DependentCleanupReview, AcquisitionError> {
-        saved.protocol_backlog.validate(&account.id)?;
-        let run = saved
-            .protocol_backlog
-            .runs
-            .iter()
-            .find(|run| run.id == request.run)
-            .ok_or_else(invalid)?;
-        if !matches!(run.status, Status::Stopped | Status::Conflict)
-            || run.plan.filing.semantics != model::COPY_SEMANTICS
-            || run.plan.topology != request.topology
-            || run.undo_receipt.is_none()
-            || run.closed.is_some()
-            || model::outcome(run, true) == Status::Uncertain
-            || !crate::backlog::retention::undo_open(run.completed_at, self.now())
-        {
+        let (run, entry) = self.dependent_cleanup_admit(
+            account,
+            store,
+            saved,
+            &DependentCleanupTarget {
+                run: &request.run,
+                forward: request.forward,
+                clear: request.clear,
+            },
+            &fresh,
+        )?;
+        if run.plan.topology != request.topology {
             return Err(invalid());
         }
-        self.validate_copy_authority(account, store, saved, &run.plan.binding, &fresh)?;
-        if !store.checkpoint_matches(saved, crate::census::ProtocolStateView::Persisted)? {
-            return Err(invalid());
-        }
-        approved_dependencies(store, run)?;
-        let entry = run
-            .compensation
-            .iter()
-            .find(|entry| entry.forward == request.forward)
-            .ok_or_else(invalid)?;
         let mut evidence = entry.evidence.clone();
         evidence
             .prepare_after_clear(

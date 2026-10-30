@@ -18,7 +18,9 @@ Open <http://127.0.0.1:4173>. The launcher installs locked UI dependencies, buil
 
 Real account setup belongs to the approved frozen macOS installation described in [Native confirmation and protected Keychain credentials](docs/macos-confirmation.md). Its owner wizard offers hidden terminal entry and exact native consent for adding a local account or replacing its password. A checkout build cannot use that path without the protection requirements. Local creation leaves connectivity unverified. Actual terminal, Keychain, helper and provider acceptance remain owner-run work. The connection walkthrough captures no credentials and uses the saved-account interface. Provider writes remain held.
 
-For fake-only account verification, start the built binary with `./target/debug/mailroom --synthetic-accounts`. This mode uses temporary encrypted files, fake credentials and 100 invented headers. It cannot connect to a provider or the OS backend. The UI labels the mode explicitly.
+For fake-only account verification, run `./scripts/run-local.sh --synthetic-accounts`. This mode uses temporary encrypted files, fake credentials and 100 invented headers. It cannot connect to a provider or the OS backend. The UI labels the mode explicitly.
+
+Development and review runners in this workspace share one Cargo target and a stable isolated Cargo home, as recorded in the workspace `AGENTS.md`. Pass that same absolute `CARGO_TARGET_DIR` to child runners that construct their own environment. The launcher uses `cargo run` so it respects the selected target directory. Keep profiles and compiler flags stable when the check permits it. Frozen owner-acceptance stages retain their approved build environments.
 
 Expand **Examples with invented mail** below the saved accounts, then click **Run sample preview**. Fourteen invented messages produce ten filings, four Inbox retentions and three independent copies. Edit the YAML, compare current folders with the previous sample configuration, switch to Gmail backlog matching or change a census pin's expected folder. A failing pin blocks the proof. Example addresses and folder roots are generic synthetic settings.
 

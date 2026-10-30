@@ -26,6 +26,7 @@ pub(super) mod compensation_observer;
 pub(super) mod compensation_review;
 pub(super) mod compensation_worker;
 pub(super) mod copy_checkpoints;
+mod copy_start;
 pub(super) mod copy_undo;
 pub(super) mod copy_worker;
 pub(super) mod dependent_cleanup;
@@ -40,6 +41,21 @@ fn failure<T: std::fmt::Debug>(_error: T) -> AcquisitionError {
 }
 fn save(store: &EncryptedStore, state: &mut AccountState) -> Result<(), AcquisitionError> {
     store.save_state(state).map_err(Into::into)
+}
+fn start_receipt(
+    store: &EncryptedStore,
+    saved: &AccountState,
+    plan: &SavedPlan,
+    batches: &[model::Batch],
+) -> Result<String, AcquisitionError> {
+    Ok(store.keys().binding_for(
+        plan.filing.options.intent.purpose(
+            b"mailroom/imap-backlog-start/v2",
+            b"mailroom/imap-backlog-archive/v1",
+        ),
+        &crate::census::binding::bound(|| serde_json::to_vec(&(saved, plan, batches)))
+            .map_err(failure)?,
+    ))
 }
 impl Accounts {
     pub(crate) fn backlog_installed(&self, id: Option<&AccountId>) -> bool {
@@ -266,14 +282,7 @@ impl Accounts {
                 &serde_json::to_vec(&(&observed, &execution)).map_err(failure)?,
             ),
         };
-        let receipt = store.keys().binding_for(
-            plan.filing.options.intent.purpose(
-                b"mailroom/imap-backlog-start/v2",
-                b"mailroom/imap-backlog-archive/v1",
-            ),
-            &crate::census::binding::bound(|| serde_json::to_vec(&(saved, &plan, &batches)))
-                .map_err(failure)?,
-        );
+        let receipt = start_receipt(store, saved, &plan, &batches)?;
         let id = store
             .keys()
             .binding_for(b"mailroom/imap-backlog-id/v1", receipt.as_bytes());

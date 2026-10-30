@@ -1,6 +1,7 @@
 mod catalog;
 pub mod composition;
 pub mod config;
+pub mod landing;
 pub(crate) mod program;
 pub mod proof;
 mod sieve;

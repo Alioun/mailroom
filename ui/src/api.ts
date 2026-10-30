@@ -1,5 +1,6 @@
 import { invoiceDiagnostic, invoiceHandoff, invoiceRole } from './invoice-diagnostics'
 import { z } from 'zod'
+import { landingReport } from './landing'
 import { evidenceView } from './acquisition-evidence'
 import { proposalRationale, proposalReason } from './proposal-diagnostics'
 import { proofDiagnostics, proofGate } from './proof-diagnostics'
@@ -84,12 +85,15 @@ const accountStatus = z.object({
   job: z.object({ account: account.nullable(), progress: z.object({ state: z.enum(['idle', 'running', 'cancelled', 'complete', 'failed']), saved: z.number(), folders: z.number() }), error: z.string().nullable() }).nullable(),
 })
 const accountView = z.object({
+  landing: landingReport,
   evidence: evidenceView,
   addresses: censusStatus.shape.addresses,
   census: z.object({ account: z.string(), acquisition_state: censusStatus.shape.state, folders: z.record(z.string(), z.object({
     uidvalidity: z.number(), state: censusStatus.shape.state,
     messages: z.record(z.string(), z.object({ uid: z.number(), headers: z.object({ subject: z.string(), direction: z.enum(['received', 'sent']) }) })),
   })) }),
+}).superRefine((view, context) => {
+  if (view.landing.kind === 'compared' && view.landing.account !== view.census.account) context.addIssue({ code: 'custom', message: 'Placement comparison belongs to another account' })
 })
 export type Account = z.infer<typeof account>
 export type AccountStatus = z.infer<typeof accountStatus>

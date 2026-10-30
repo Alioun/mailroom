@@ -470,6 +470,7 @@ struct CensusView {
     census: Census,
     evidence: crate::census::acquisition::EvidenceView,
     addresses: Vec<crate::census::AddressCandidate>,
+    landing: crate::rules::landing::Report,
 }
 async fn census_action(
     state: Arc<AppState>,
@@ -497,17 +498,21 @@ async fn census_action(
                 store.save_state(&mut saved)?;
             }
         }
-        let mut census = store.load()?;
+        let mut saved = store.load_state()?;
         if let Some((address, confirmed)) = confirm {
-            census.confirm_address(&address, confirmed)?;
-            store.save(&census)?;
+            saved.census.confirm_address(&address, confirmed)?;
+            store.save_state(&mut saved)?;
         }
+        let historical = store.recovery_pending();
+        let landing = crate::rules::landing::compare(&saved, historical);
+        let census = saved.census.into_inner();
         let mut evidence = census.acquisition.view(crate::census::acquisition::now());
-        if store.recovery_pending() {
+        if historical {
             evidence.historical();
         }
         Ok::<_, AcquisitionError>(CensusView {
             evidence,
+            landing,
             addresses: census.own_address_candidates(),
             census,
         })

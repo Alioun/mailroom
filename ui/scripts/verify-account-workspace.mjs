@@ -103,6 +103,8 @@ try {
   const accounts = await api.listAccounts()
   const firstView = await api.openAccount(first.id)
   const secondView = await api.openAccount(second.id)
+  assert.deepEqual(firstView.landing, { kind: 'unavailable', reason: 'no_recorded_deployment' })
+  await writeFile(`${audit}first-view.json`, JSON.stringify(firstView) + '\n')
   const status = await api.readAccountStatus()
   const states = []
   const loader = accountWorkspace(state => states.push(state))

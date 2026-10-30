@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import ManageSieve from './ManageSieve.svelte'
   import SieveTransactions from './SieveTransactions.svelte'
+  import LandingComparison from './LandingComparison.svelte'
   import FolderProvisioning from './FolderProvisioning.svelte'
   import AcquisitionEvidence from './AcquisitionEvidence.svelte'
   import Reports from './Reports.svelte'
@@ -174,7 +175,7 @@
       <AcquisitionEvidence evidence={view.evidence} {lang} />
       <h3>{t.addresses}</h3><p class="help">{t.ownership}</p>
       <ul class="account-addresses">{#each view.addresses as address (address.address)}<li><label><input type="checkbox" checked={address.confirmed} disabled={busy || running} onchange={(event) => { const checked = event.currentTarget.checked; const account = selected; void act(async () => { await workspace.load(account, () => confirmAccount(account, address.address, checked)) }) }} />{t.confirm} {address.address}</label><p class="help">{address.evidence.join(', ')}</p></li>{/each}</ul>
-      {#key view}<Reports account={selected} {lang} />{/key}
+      {#key view}<Reports account={selected} {lang} /><LandingComparison report={view.landing} {lang} />{/key}
     </div>
     {#key view}
       <div id="account-rules" class="account-task" tabindex="-1"><Ledger account={selected} {lang} /><RulesProof account={selected} {lang} onWorkspaceChange={() => workspaceRevision += 1} /></div>

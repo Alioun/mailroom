@@ -55,6 +55,8 @@ Stand-alone census and rule examples follow saved accounts in one native disclos
 
 Proof decisions use local subject, sender and destination search, with separate Inbox, copy and recipient-review filters. Show 50 messages per page with a matching result range and previous/next controls. The folder diff follows that page. Keep full-census totals and approval gates above the filters, with explicit text that browsing does not change their scope. Distinguish an empty census from filters with no matches. Search and page controls wrap with the existing layout and retain native focus styling.
 
+The saved account view also compares observed folders with the last recorded deployment. Keep unavailable evidence explicit, show summary counts before private details and distinguish matches, other folders and uncheckable predictions. Put transaction and census identities inside the detail disclosure. Show 50 messages per page in a horizontally scrollable table. State that old mail and later moves are included and that matches do not prove initial delivery.
+
 ## Elevation & Depth
 
 Use borders and surface colors. There are no shadows.

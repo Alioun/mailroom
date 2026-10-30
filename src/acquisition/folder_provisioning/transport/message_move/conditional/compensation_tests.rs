@@ -500,8 +500,78 @@ fn drive(
             &source.authority,
         )
         .unwrap();
-    repo.compensation_worker(account, store, saved, &id, work, &|_| Ok(()))?
-        .drive(peer, &permit, &Cancellation::default())
+    use crate::acquisition::backlog::copy_continuation::{CopyContinuationWork, Worker};
+    let work = match work {
+        CopyCompensationWork::Execute => CopyContinuationWork::ResumeUndo,
+        CopyCompensationWork::Reconcile => CopyContinuationWork::Reconcile,
+    };
+    let continuation = repo.copy_continuation(account, store, saved, &id, work, &|_| Ok(()))?;
+    let Worker::Compensation(worker) = continuation.worker else {
+        panic!("An approved Undo must select its compensation worker")
+    };
+    worker.drive(peer, &permit, &Cancellation::default())
+}
+
+#[test]
+fn continuation_admission_rejects_wrong_phase_stale_state_and_cancellation_without_credentials() {
+    use crate::acquisition::backlog::copy_continuation::CopyContinuationWork;
+    let (_root, mut repo, account, store, mut saved) = fixture(Forward::Copied);
+    let credentials = repo.track_credential_accesses();
+    let id = saved.protocol_backlog.runs[0].id.clone();
+    let ciphertext = std::fs::read(store.path()).unwrap();
+    assert!(
+        repo.copy_continuation(
+            &account,
+            &store,
+            &mut saved,
+            &id,
+            CopyContinuationWork::Resume,
+            &|_| Ok(())
+        )
+        .is_err()
+    );
+    for work in [
+        CopyContinuationWork::ResumeUndo,
+        CopyContinuationWork::Reconcile,
+    ] {
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert_eq!(
+            repo.copy_continuation(&account, &store, &mut saved, &id, work, &|_| Ok(()))
+                .unwrap()
+                .connected(cancel),
+            Err(crate::acquisition::AcquisitionError::Cancelled)
+        );
+        assert!(
+            repo.copy_continuation(&account, &store, &mut saved, "missing-run", work, &|_| Ok(
+                ()
+            ))
+            .is_err()
+        );
+        assert!(
+            repo.copy_continuation(&account, &store, &mut saved, &id, work, &|_| Err(
+                "stale fixture".into()
+            ))
+            .is_err()
+        );
+        let mut stale = saved.clone();
+        stale.revision += 1;
+        assert!(
+            repo.copy_continuation(&account, &store, &mut stale, &id, work, &|_| Ok(()))
+                .is_err()
+        );
+        let mut missing_approval = saved.clone();
+        missing_approval.protocol_backlog.runs[0].undo_receipt = None;
+        assert!(
+            repo.copy_continuation(&account, &store, &mut missing_approval, &id, work, &|_| Ok(
+                ()
+            ))
+            .is_err()
+        );
+    }
+    assert_eq!(std::fs::read(store.path()).unwrap(), ciphertext);
+    assert_eq!(credentials.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(store.load_state().unwrap().protocol_backlog == saved.protocol_backlog);
 }
 
 #[test]

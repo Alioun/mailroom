@@ -352,17 +352,34 @@ fn loss_after_confirmation_retains_intent_and_requires_explicit_read_only_reconc
     );
     assert_eq!(std::fs::read(store.path()).unwrap(), before);
     saved = store.load_state().unwrap();
-    repo.compensation_worker(
-        &account,
-        &store,
-        &mut saved,
-        &request.run,
-        CopyCompensationWork::Reconcile,
-        &|_| Ok(()),
-    )
-    .unwrap()
-    .drive(&mut peer, &permit, &Cancellation::default())
-    .unwrap();
+    use crate::acquisition::backlog::copy_continuation::{CopyContinuationWork, Worker};
+    assert!(
+        repo.copy_continuation(
+            &account,
+            &store,
+            &mut saved,
+            &request.run,
+            CopyContinuationWork::Resume,
+            &|_| Ok(())
+        )
+        .is_err()
+    );
+    let continuation = repo
+        .copy_continuation(
+            &account,
+            &store,
+            &mut saved,
+            &request.run,
+            CopyContinuationWork::Reconcile,
+            &|_| Ok(()),
+        )
+        .unwrap();
+    let Worker::Compensation(worker) = continuation.worker else {
+        panic!("Undo reconciliation must not select forward filing")
+    };
+    worker
+        .drive(&mut peer, &permit, &Cancellation::default())
+        .unwrap();
     assert_eq!(saved.protocol_backlog.runs[0].status, Status::Conflict);
     assert_eq!(
         peer.peer

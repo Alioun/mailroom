@@ -69,6 +69,10 @@ enum Action {
         receipt: String,
         confirmed: bool,
     },
+    CopyContinue {
+        run: String,
+        work: acquisition::CopyContinuationWork,
+    },
     CopyUndoPreview {
         target: CopyUndoSelection,
     },
@@ -147,6 +151,7 @@ async fn serve(
         &body,
         Ok(Json(Request {
             command: Action::CopyConfirm { .. }
+                | Action::CopyContinue { .. }
                 | Action::CopyUndoPreview { .. }
                 | Action::CopyUndoConfirm { .. },
             ..
@@ -213,6 +218,11 @@ async fn serve(
         request.command,
         Action::Confirm { .. }
             | Action::CopyConfirm { .. }
+            | Action::CopyContinue {
+                work: acquisition::CopyContinuationWork::Resume
+                    | acquisition::CopyContinuationWork::ResumeUndo,
+                ..
+            }
             | Action::Resume { .. }
             | Action::Undo { .. }
             | Action::CopyUndoConfirm { .. }
@@ -469,6 +479,14 @@ fn execute(
             )?;
             return Ok(report(&saved, json!({"journal":journal(&saved)})));
         }
+        Action::CopyContinue { run, work } => {
+            if kind != Kind::Move {
+                return Err(AcquisitionError::InvalidInput);
+            }
+            repo.copy_continuation(&account, &store, &mut saved, run, *work, &fresh)?
+                .connected(cancel)?;
+            return Ok(report(&saved, json!({"journal":journal(&saved)})));
+        }
         Action::CopyUndoPreview { target } => {
             if kind != Kind::Move {
                 return Err(AcquisitionError::InvalidInput);
@@ -649,6 +667,7 @@ fn execute(
             Action::Status {}
             | Action::Cancel {}
             | Action::CopyConfirm { .. }
+            | Action::CopyContinue { .. }
             | Action::CopyUndoPreview { .. }
             | Action::CopyUndoConfirm { .. }
             | Action::ClosePreview { .. }
@@ -727,6 +746,7 @@ fn execute(
         Action::Status {}
         | Action::Cancel {}
         | Action::CopyConfirm { .. }
+        | Action::CopyContinue { .. }
         | Action::CopyUndoPreview { .. }
         | Action::CopyUndoConfirm { .. }
         | Action::ClosePreview { .. }
@@ -756,6 +776,9 @@ async fn denied_sources_and_malformed_requests_never_open_repository_credentials
             json!({"account":"invented","command":{"action":"confirm","confirmed":true,"receipt":"a".repeat(64),"endpoint":"127.0.0.1"}}).to_string(),
             json!({"account":"invented","command":{"action":"cancel"}}).to_string(),
             json!({"account":"invented","command":{"action":"copy_confirm","options":Options::default(),"receipt":"b".repeat(64),"confirmed":true}}).to_string(),
+            json!({"account":"invented","command":{"action":"copy_continue","run":"a".repeat(64),"work":"resume"}}).to_string(),
+            json!({"account":"invented","command":{"action":"copy_continue","run":"a".repeat(64),"work":"resume_undo"}}).to_string(),
+            json!({"account":"invented","command":{"action":"copy_continue","run":"a".repeat(64),"work":"reconcile"}}).to_string(),
             json!({"account":"invented","command":{"action":"copy_undo_preview","target":{"kind":"initial","run":"a".repeat(64)}}}).to_string(),
             json!({"account":"invented","command":{"action":"copy_undo_confirm","target":{"kind":"after_clear","run":"a".repeat(64),"forward":0,"clear":0},"receipt":"b".repeat(64),"confirmed":true}}).to_string(),
         ];
@@ -787,6 +810,31 @@ async fn denied_sources_and_malformed_requests_never_open_repository_credentials
         assert!(state.accounts.job.lock().unwrap().is_none());
         if let Some(accesses) = accesses {
             assert_eq!(accesses.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn copy_continuation_commands_accept_only_an_existing_run_and_closed_work_kind() {
+    for work in ["resume", "resume_undo", "reconcile"] {
+        let command = json!({"action":"copy_continue","run":"a".repeat(64),"work":work});
+        let request = |command| json!({"account":"invented","command":command});
+        assert!(serde_json::from_value::<Request>(request(command.clone())).is_ok());
+        for field in ["plan", "observations", "endpoint", "receipt", "confirmed"] {
+            let mut changed = command.clone();
+            changed[field] = json!({});
+            assert!(serde_json::from_value::<Request>(request(changed)).is_err());
+        }
+        for invalid in [json!("undo"), json!({"resume":true}), json!(null)] {
+            let mut changed = command.clone();
+            changed["work"] = invalid;
+            assert!(serde_json::from_value::<Request>(request(changed)).is_err());
+        }
+        for field in ["run", "work"] {
+            let mut changed = command.clone();
+            changed.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<Request>(request(changed)).is_err());
         }
     }
 }

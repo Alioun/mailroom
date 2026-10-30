@@ -26,6 +26,7 @@ pub(super) mod compensation_observer;
 pub(super) mod compensation_review;
 pub(super) mod compensation_worker;
 pub(super) mod copy_checkpoints;
+pub(super) mod copy_continuation;
 pub(super) mod copy_start;
 pub(super) mod copy_undo;
 pub(super) mod copy_worker;

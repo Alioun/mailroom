@@ -58,6 +58,9 @@ async fn installed_move_source_cannot_admit_held_copy_actions() {
     let state = Arc::new(app);
     for command in [
         json!({"action":"copy_confirm","options":Options::default(),"receipt":"a".repeat(64),"confirmed":true}),
+        json!({"action":"copy_continue","run":"a".repeat(64),"work":"resume"}),
+        json!({"action":"copy_continue","run":"a".repeat(64),"work":"resume_undo"}),
+        json!({"action":"copy_continue","run":"a".repeat(64),"work":"reconcile"}),
         json!({"action":"copy_undo_preview","target":{"kind":"initial","run":"a".repeat(64)}}),
         json!({"action":"copy_undo_confirm","target":{"kind":"after_clear","run":"a".repeat(64),"forward":0,"clear":0},"receipt":"b".repeat(64),"confirmed":true}),
     ] {

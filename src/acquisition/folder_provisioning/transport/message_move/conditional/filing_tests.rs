@@ -591,7 +591,10 @@ fn saved_worker_starts_files_and_stamps_completion_through_the_actual_checkpoint
 
 #[test]
 fn saved_worker_cancellation_reconcile_and_resume_never_repeat_an_effect() {
-    use crate::acquisition::backlog::{copy_checkpoints::tests::fixture, copy_worker::CopyWork};
+    use crate::acquisition::backlog::{
+        copy_checkpoints::tests::fixture,
+        copy_continuation::{CopyContinuationWork, Worker},
+    };
     use crate::backlog::protocol::Status;
     for stop_at in [3, 4, 6, 7, 9] {
         let e = initial();
@@ -609,11 +612,22 @@ fn saved_worker_cancellation_reconcile_and_resume_never_repeat_an_effect() {
             inventories: 0,
         };
         assert_eq!(
-            repo.copy_worker(&account, &store, &mut saved, &id, CopyWork::File, &|_| Ok(
-                ()
-            ))
-            .unwrap()
-            .drive(&mut transport, &permit, &Cancellation::default()),
+            {
+                let continuation = repo
+                    .copy_continuation(
+                        &account,
+                        &store,
+                        &mut saved,
+                        &id,
+                        CopyContinuationWork::Resume,
+                        &|_| Ok(()),
+                    )
+                    .unwrap();
+                let Worker::Forward(worker) = continuation.worker else {
+                    panic!("Forward Resume must retain the filing worker")
+                };
+                worker.drive(&mut transport, &permit, &Cancellation::default())
+            },
             Err(crate::acquisition::AcquisitionError::Cancelled)
         );
         assert!(saved.protocol_backlog.runs[0].stop_requested);
@@ -623,12 +637,12 @@ fn saved_worker_cancellation_reconcile_and_resume_never_repeat_an_effect() {
         let mut reopened = store.load_state().unwrap();
         if reopened.protocol_backlog.runs[0].status == Status::Uncertain {
             assert!(
-                repo.copy_worker(
+                repo.copy_continuation(
                     &account,
                     &store,
                     &mut reopened,
                     &id,
-                    CopyWork::File,
+                    CopyContinuationWork::Resume,
                     &|_| Ok(())
                 )
                 .is_err()
@@ -638,17 +652,22 @@ fn saved_worker_cancellation_reconcile_and_resume_never_repeat_an_effect() {
                 count(&transport.io, "store"),
                 count(&transport.io, "expunge"),
             );
-            repo.copy_worker(
-                &account,
-                &store,
-                &mut reopened,
-                &id,
-                CopyWork::Reconcile,
-                &|_| Ok(()),
-            )
-            .unwrap()
-            .drive(&mut transport, &permit, &Cancellation::default())
-            .unwrap();
+            let continuation = repo
+                .copy_continuation(
+                    &account,
+                    &store,
+                    &mut reopened,
+                    &id,
+                    CopyContinuationWork::Reconcile,
+                    &|_| Ok(()),
+                )
+                .unwrap();
+            let Worker::Forward(worker) = continuation.worker else {
+                panic!("Forward continuation must retain the filing worker")
+            };
+            worker
+                .drive(&mut transport, &permit, &Cancellation::default())
+                .unwrap();
             assert_eq!(
                 (
                     count(&transport.io, "copy"),
@@ -660,17 +679,22 @@ fn saved_worker_cancellation_reconcile_and_resume_never_repeat_an_effect() {
         }
         if reopened.protocol_backlog.runs[0].status != Status::Complete {
             assert_eq!(reopened.protocol_backlog.runs[0].status, Status::Stopped);
-            repo.copy_worker(
-                &account,
-                &store,
-                &mut reopened,
-                &id,
-                CopyWork::File,
-                &|_| Ok(()),
-            )
-            .unwrap()
-            .drive(&mut transport, &permit, &Cancellation::default())
-            .unwrap();
+            let continuation = repo
+                .copy_continuation(
+                    &account,
+                    &store,
+                    &mut reopened,
+                    &id,
+                    CopyContinuationWork::Resume,
+                    &|_| Ok(()),
+                )
+                .unwrap();
+            let Worker::Forward(worker) = continuation.worker else {
+                panic!("Forward continuation must retain the filing worker")
+            };
+            worker
+                .drive(&mut transport, &permit, &Cancellation::default())
+                .unwrap();
         }
         assert_eq!(reopened.protocol_backlog.runs[0].status, Status::Complete);
         assert_eq!(reopened.protocol_backlog.runs[0].receipt, receipt);

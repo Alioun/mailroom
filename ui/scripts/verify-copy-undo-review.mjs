@@ -7,7 +7,9 @@ import { svelte } from '@sveltejs/vite-plugin-svelte'
 import ts from 'typescript'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
-const audit = `${root}.audit/imap-copy-review-ui/`
+const auditName = process.argv[2] ?? 'imap-copy-review-ui'
+assert.ok(['imap-copy-review-ui', 'imap-copy-continuation-dispatch'].includes(auditName))
+const audit = `${root}.audit/${auditName}/`
 await mkdir(`${audit}render`, { recursive: true })
 const log = await readFile(`${audit}compensation-transport.log`, 'utf8')
 const fixtures = [...log.matchAll(/MAILROOM_COPY_UNDO_UI_FIXTURE (.+)/g)].map(match => JSON.parse(match[1]))

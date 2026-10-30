@@ -374,7 +374,17 @@ export async function sortingPost(kind: BacklogKind, account: string, command: P
 export async function previewClose(kind: BacklogKind, account: string, run: string): Promise<ClosePreview> { return closePreview.parse(await sortingPost(kind, account, { action: 'close_preview', run })) }
 export async function protocolAction(account: string, command: ProtocolAction): Promise<void> { await accountPost('backlog/protocol', { account, command }) }
 export async function openProtocolBacklog(account: string): Promise<ProtocolView> { return protocolView.parse(await accountPost('backlog/protocol', { account, command: { action: 'status' } })) }
-export async function previewProtocolBacklog(account: string, options: BacklogOptions): Promise<ProtocolPreview> { return protocolPreview.parse(await accountPost('backlog/protocol', { account, command: { action: 'preview', options } })) }
+function checkedProtocolPreview(account: string, result: ProtocolPreview): ProtocolPreview {
+  if (result.operation.plan.binding.account !== account || result.operation.plan.filing.account !== account || result.receipt !== result.operation.receipt || result.operation.plan.saved_proof !== result.saved.receipt) throw new Error('Filing preview does not match its account or receipts')
+  copyReceipt.parse(result.receipt)
+  return result
+}
+export async function previewProtocolBacklog(account: string, options: BacklogOptions): Promise<ProtocolPreview> { return checkedProtocolPreview(account, protocolPreview.parse(await accountPost('backlog/protocol', { account, command: { action: 'preview', options } }))) }
+export async function confirmProtocolBacklog(account: string, preview: ProtocolPreview): Promise<void> {
+  const review = checkedProtocolPreview(account, preview)
+  if (review.operation.status !== 'prepared' || review.operation.stop_requested || review.operation.closed || review.operation.undo_receipt || review.operation.batches.length === 0 || review.operation.plan.filing.changes.length === 0) throw new Error('Filing preview is not ready for confirmation')
+  await accountPost('backlog/protocol', { account, command: { action: isCopyProtocolRun(review.operation) ? 'copy_confirm' : 'confirm', options: review.operation.plan.filing.options, receipt: review.receipt, confirmed: true } })
+}
 export async function previewProtocolUndo(account: string, run: string): Promise<ProtocolUndo> { return protocolUndo.parse(await accountPost('backlog/protocol', { account, command: { action: 'undo_preview', run } })) }
 export async function previewProtocolCopyUndo(account: string, target: CopyUndoTarget): Promise<CopyUndoReview> {
   return decodeCopyUndoReview(account, target, await accountPost('backlog/protocol', { account, command: { action: 'copy_undo_preview', target: copyUndoTarget.parse(target) } }))

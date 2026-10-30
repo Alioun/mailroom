@@ -31,6 +31,7 @@ pub(super) mod copy_start;
 pub(super) mod copy_undo;
 pub(super) mod copy_worker;
 pub(super) mod dependent_cleanup;
+mod preview;
 
 fn invalid() -> AcquisitionError {
     AcquisitionError::InvalidInput
@@ -243,93 +244,32 @@ impl Accounts {
         }
         let (topology, observed, mut connection) =
             self.backlog_observe(account, store, saved, &binding, cancel)?;
-        let input = &saved.workspace.as_ref().ok_or_else(invalid)?.input;
-        let baseline = if input.baseline == proof::Baseline::Previous {
-            Some(&saved.exports.last().ok_or_else(invalid)?.artifact)
-        } else {
-            None
-        };
-        let execution = proof::prove(
-            saved_proof.proof.artifact.clone(),
-            &observed,
-            input.as_of,
-            &input.pins,
-            input.baseline,
-            baseline,
-        )
-        .map_err(failure)?;
-        if execution.gate == "blocked" {
-            return Err(invalid());
-        }
-        let profile = self.backlog_source(account)?.profile().map_err(failure)?;
-        let filing = model::project(saved, &observed, &execution, options, profile.method())
-            .map_err(failure)?;
-        #[cfg(test)]
-        if let Some(root) = std::env::var_os("MAILROOM_MOVE_FIXTURE") {
-            std::fs::write(
-                std::path::Path::new(&root).join("move-preview-debug.json"),
-                serde_json::to_vec(
-                    &serde_json::json!({"topology":topology,"execution":execution,"filing":filing}),
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        }
-        let batches = batches::prepare(&filing, &topology, &observed, profile, |intent| {
-            let empty = BTreeSet::new();
-            let requested = intent.messages().keys().copied().collect();
-            let mut readbacks = connection
-                .conditional_readbacks(&[
-                    (intent.destination(), &empty),
-                    (intent.source(), &requested),
-                ])
-                .map_err(failure)?
-                .into_iter();
-            readbacks.next().ok_or_else(invalid)?.map_err(failure)?;
-            readbacks.next().ok_or_else(invalid)?.map_err(failure)
-        })?;
-        let plan = SavedPlan {
-            filing,
-            binding,
-            topology,
-            saved_proof: saved_proof.receipt.clone(),
-            execution_proof: store.keys().binding_for(
-                b"mailroom/imap-execution-proof/v1",
-                &serde_json::to_vec(&(&observed, &execution)).map_err(failure)?,
-            ),
-        };
-        let receipt = start_receipt(store, saved, &plan, &batches)?;
-        let id = store
-            .keys()
-            .binding_for(b"mailroom/imap-backlog-id/v1", receipt.as_bytes());
-        let operation = Run {
-            id,
-            receipt: receipt.clone(),
-            plan,
-            status: Status::Prepared,
-            stop_requested: false,
-            batches,
-            reverse: vec![],
-            compensation: vec![],
-            undo_receipt: None,
-            undo_conflicts: 0,
-            completed_at: None,
-            closed: None,
-        };
-        Ok((
-            Preview {
-                operation,
-                receipt,
-                saved: saved_proof,
-                execution,
-                limitations: if profile == Profile::Copy {
-                    model::COPY_PREVIEW_LIMITATIONS
-                } else {
-                    model::LIMITATIONS
-                },
+        let preview = preview::prepare(
+            saved,
+            store,
+            options,
+            preview::Evidence {
+                saved_proof,
+                binding,
+                topology,
+                observed,
+                profile: self.backlog_source(account)?.profile().map_err(failure)?,
             },
-            connection,
-        ))
+            |intent| {
+                let empty = BTreeSet::new();
+                let requested = intent.messages().keys().copied().collect();
+                let mut readbacks = connection
+                    .conditional_readbacks(&[
+                        (intent.destination(), &empty),
+                        (intent.source(), &requested),
+                    ])
+                    .map_err(failure)?
+                    .into_iter();
+                readbacks.next().ok_or_else(invalid)?.map_err(failure)?;
+                readbacks.next().ok_or_else(invalid)?.map_err(failure)
+            },
+        )?;
+        Ok((preview, connection))
     }
     pub(crate) fn backlog_confirm(
         &self,

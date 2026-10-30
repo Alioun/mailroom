@@ -4,14 +4,15 @@
   import CopyPhaseEvidence from './CopyPhaseEvidence.svelte'
   import CopyCompensation from './CopyCompensation.svelte'
   import CopyUndo from './CopyUndo.svelte'
+  import ProtocolFilingReview from './ProtocolFilingReview.svelte'
   import { archiveCopy, archiveReason, archiveOfferAvailable } from './archive-copy'
-  import { readAccountStatus, openProtocolBacklog, previewProtocolBacklog, previewProtocolUndo, protocolAction, continueProtocolRun, isCopyProtocolRun, type ProtocolRun, type ProtocolContinuationWork, type ProtocolView, type ProtocolPreview, type ProtocolUndo, type BacklogOptions } from './api'
+  import { readAccountStatus, openProtocolBacklog, previewProtocolBacklog, confirmProtocolBacklog, previewProtocolUndo, protocolAction, continueProtocolRun, isCopyProtocolRun, type ProtocolRun, type ProtocolContinuationWork, type ProtocolView, type ProtocolPreview, type ProtocolUndo, type BacklogOptions } from './api'
   import UndoRetention from './UndoRetention.svelte'
   import CloseRun from './CloseRun.svelte'
   let { account, lang, workspaceRevision = 0 }: { account: string; lang: 'en' | 'de'; workspaceRevision?: number } = $props()
   const text = {
-    en: { copyResume: 'Resume confirmed COPY filing', copyResumeUndo: 'Resume confirmed COPY Undo actions', copyHold: 'COPY history is preserved. Execution, reconciliation and Undo are unavailable in this build.', title: 'Backlog sorting', source: 'Synthetic protocol mailbox. Real-account writes remain unavailable. Recipient evidence is installed separately.', preview: 'Preview exact protocol changes', confirm: 'I confirm these exact UID MOVE changes', start: 'Sort protocol backlog', reload: 'Reload saved protocol runs', cancel: 'Cancel sorting', reconcile: 'Reconcile observations only', resume: 'Resume never-attempted remainder', undoPreview: 'Preview conditional undo', undoConfirm: 'I confirm these exact reverse UID MOVE changes', undo: 'Undo eligible protocol changes', resumeUndo: 'Resume confirmed reverse remainder', scope: 'Scope', inbox: 'Inbox only', unfiled: 'Inbox plus unfiled', every: 'Advanced: every folder', protect: 'Protect flagged messages', changes: 'eligible changes', conflicts: 'conflicts', report: 'Exact local identities and protocol evidence', journal: 'Encrypted protocol journal', error: 'Action rejected. Reload the saved journal and request a fresh preview. Existing evidence is retained.', wait: 'Worker active. Cancel stops new batches and retains completed changes. A transmitted command may remain uncertain.', stopped: 'Stop is saved. Resume is explicit. Undo requires a separate preview and confirmation.', mapping: 'Validated COPYUID mapping', completion: 'Command completion', readback: 'Identity readback saved', attempted: 'Attempted', pending: 'Never attempted', hold: 'Restored account is held. No source or approval is restored.', approval: 'Saved proof', observation: 'Fresh observation proof', empty: 'No protocol runs.' },
-    de: { copyResume: 'Bestätigte COPY-Ablage fortsetzen', copyResumeUndo: 'Bestätigte COPY-Rückgängig-Aktionen fortsetzen', copyHold: 'COPY-Verlauf bleibt erhalten. Ausführung, Abgleich und Rückgängigmachen sind in dieser Version nicht verfügbar.', title: 'Bestand sortieren', source: 'Synthetisches Protokollpostfach. Schreibzugriff auf echte Konten bleibt gesperrt. Empfängernachweise werden separat installiert.', preview: 'Genaue Protokolländerungen anzeigen', confirm: 'Ich bestätige diese genauen UID-MOVE-Änderungen', start: 'Protokollbestand sortieren', reload: 'Gespeicherte Protokollabläufe laden', cancel: 'Sortierung abbrechen', reconcile: 'Nur Beobachtungen abgleichen', resume: 'Nie versuchten Rest fortsetzen', undoPreview: 'Bedingtes Rückgängigmachen prüfen', undoConfirm: 'Ich bestätige diese genauen umgekehrten UID-MOVE-Änderungen', undo: 'Geeignete Protokolländerungen rückgängig machen', resumeUndo: 'Bestätigten umgekehrten Rest fortsetzen', scope: 'Umfang', inbox: 'Nur Posteingang', unfiled: 'Posteingang und unsortierte Nachrichten', every: 'Erweitert: alle Ordner', protect: 'Markierte Nachrichten schützen', changes: 'geeignete Änderungen', conflicts: 'Konflikte', report: 'Genaue lokale Identitäten und Protokollnachweise', journal: 'Verschlüsseltes Protokolljournal', error: 'Aktion abgelehnt. Journal neu laden und frische Vorschau anfordern. Vorhandene Nachweise bleiben erhalten.', wait: 'Ablauf aktiv. Abbrechen stoppt neue Stapel und behält abgeschlossene Änderungen. Ein übertragener Befehl kann ungewiss bleiben.', stopped: 'Stopp gespeichert. Fortsetzen erfolgt ausdrücklich. Rückgängigmachen benötigt eine eigene Vorschau und Bestätigung.', mapping: 'Geprüfte COPYUID-Zuordnung', completion: 'Befehlsabschluss', readback: 'Identitätsprüfung gespeichert', attempted: 'Versucht', pending: 'Nie versucht', hold: 'Wiederhergestelltes Konto bleibt gesperrt. Quelle und Freigabe werden nicht wiederhergestellt.', approval: 'Gespeicherter Nachweis', observation: 'Nachweis aus frischer Beobachtung', empty: 'Keine Protokollabläufe.' },
+    en: { copyResume: 'Resume confirmed COPY filing', copyResumeUndo: 'Resume confirmed COPY Undo actions', copyHold: 'COPY history is preserved. Execution, reconciliation and Undo are unavailable in this build.', title: 'Backlog sorting', source: 'Synthetic protocol mailbox. Real-account writes remain unavailable. Recipient evidence is installed separately.', preview: 'Preview exact protocol changes', reload: 'Reload saved protocol runs', cancel: 'Cancel sorting', reconcile: 'Reconcile observations only', resume: 'Resume never-attempted remainder', undoPreview: 'Preview conditional undo', undoConfirm: 'I confirm these exact reverse UID MOVE changes', undo: 'Undo eligible protocol changes', resumeUndo: 'Resume confirmed reverse remainder', scope: 'Scope', inbox: 'Inbox only', unfiled: 'Inbox plus unfiled', every: 'Advanced: every folder', protect: 'Protect flagged messages', changes: 'eligible changes', conflicts: 'conflicts', report: 'Exact local identities and protocol evidence', journal: 'Encrypted protocol journal', error: 'Action rejected. Reload the saved journal and request a fresh preview. Existing evidence is retained.', wait: 'Worker active. Cancel stops new batches and retains completed changes. A transmitted command may remain uncertain.', stopped: 'Stop is saved. Resume is explicit. Undo requires a separate preview and confirmation.', mapping: 'Validated COPYUID mapping', completion: 'Command completion', readback: 'Identity readback saved', attempted: 'Attempted', pending: 'Never attempted', hold: 'Restored account is held. No source or approval is restored.', empty: 'No protocol runs.' },
+    de: { copyResume: 'Bestätigte COPY-Ablage fortsetzen', copyResumeUndo: 'Bestätigte COPY-Rückgängig-Aktionen fortsetzen', copyHold: 'COPY-Verlauf bleibt erhalten. Ausführung, Abgleich und Rückgängigmachen sind in dieser Version nicht verfügbar.', title: 'Bestand sortieren', source: 'Synthetisches Protokollpostfach. Schreibzugriff auf echte Konten bleibt gesperrt. Empfängernachweise werden separat installiert.', preview: 'Genaue Protokolländerungen anzeigen', reload: 'Gespeicherte Protokollabläufe laden', cancel: 'Sortierung abbrechen', reconcile: 'Nur Beobachtungen abgleichen', resume: 'Nie versuchten Rest fortsetzen', undoPreview: 'Bedingtes Rückgängigmachen prüfen', undoConfirm: 'Ich bestätige diese genauen umgekehrten UID-MOVE-Änderungen', undo: 'Geeignete Protokolländerungen rückgängig machen', resumeUndo: 'Bestätigten umgekehrten Rest fortsetzen', scope: 'Umfang', inbox: 'Nur Posteingang', unfiled: 'Posteingang und unsortierte Nachrichten', every: 'Erweitert: alle Ordner', protect: 'Markierte Nachrichten schützen', changes: 'geeignete Änderungen', conflicts: 'Konflikte', report: 'Genaue lokale Identitäten und Protokollnachweise', journal: 'Verschlüsseltes Protokolljournal', error: 'Aktion abgelehnt. Journal neu laden und frische Vorschau anfordern. Vorhandene Nachweise bleiben erhalten.', wait: 'Ablauf aktiv. Abbrechen stoppt neue Stapel und behält abgeschlossene Änderungen. Ein übertragener Befehl kann ungewiss bleiben.', stopped: 'Stopp gespeichert. Fortsetzen erfolgt ausdrücklich. Rückgängigmachen benötigt eine eigene Vorschau und Bestätigung.', mapping: 'Geprüfte COPYUID-Zuordnung', completion: 'Befehlsabschluss', readback: 'Identitätsprüfung gespeichert', attempted: 'Versucht', pending: 'Nie versucht', hold: 'Wiederhergestelltes Konto bleibt gesperrt. Quelle und Freigabe werden nicht wiederhergestellt.', empty: 'Keine Protokollabläufe.' },
   }
   let t = $derived(text[lang])
   function runAvailable(run: ProtocolRun) { return !!view && !view.recovery_hold && !run.closed && (isCopyProtocolRun(run) ? view.copy_workflow.installed : view.installed) }
@@ -21,7 +22,6 @@
   let view = $state<ProtocolView | null>(null)
   let preview = $state<ProtocolPreview | null>(null)
   let undo = $state<ProtocolUndo | null>(null)
-  let confirmed = $state(false)
   let undoConfirmed = $state(false)
   let busy = $state(false)
   let running = $state(false)
@@ -30,7 +30,7 @@
   let error = $state('')
   let active = true
   let copyReviewContext = $state({})
-  function invalidate() { preview = null; undo = null; confirmed = false; undoConfirmed = false; copyReviewContext = {} }
+  function invalidate() { preview = null; undo = null; undoConfirmed = false; copyReviewContext = {} }
   $effect(() => { workspaceRevision; invalidate() })
   async function act(fn: () => Promise<void>) { busy = true; error = ''; try { await fn() } catch { error = t.error } finally { busy = false } }
   async function load() { invalidate(); view = await openProtocolBacklog(account) }
@@ -54,9 +54,9 @@
     } finally { running = false }
   }
   async function start() {
-    if (!preview || !confirmed || isCopyProtocolRun(preview.operation)) return
-    const command = { action: 'confirm', options: preview.operation.plan.filing.options, receipt: preview.receipt, confirmed: true } satisfies Parameters<typeof protocolAction>[1]
-    invalidate(); await protocolAction(account, command); await watch()
+    if (!preview || !view || view.recovery_hold || !(isCopyProtocolRun(preview.operation) ? view.copy_workflow.installed : view.installed)) return
+    const review = preview
+    invalidate(); await confirmProtocolBacklog(account, review); await watch()
   }
   async function continuation(work: ProtocolContinuationWork, run: ProtocolRun) {
     if (!runAvailable(run) || running) return
@@ -86,15 +86,12 @@
   {#if error}<p role="alert">{error}</p>{/if}
   {#if running || cancelling}<p role="status">{t.wait} · {savedCount}</p>{/if}
   {#if preview}
-    {#if preview.operation.plan.filing.options.intent === 'archive_unmatched'}<h4>{archiveText.title}</h4>{/if}
     <p>{preview.operation.plan.filing.changes.length} {t.changes}</p>
     <p>{preview.operation.plan.filing.artifact.identity}</p>
-    <p>{t.approval} · {preview.operation.plan.saved_proof}</p><p>{t.observation} · {preview.operation.plan.execution_proof}</p>
     {#each Object.entries(preview.operation.plan.filing.groups) as [name, group]}<label><input type="checkbox" checked={group.selected} disabled={busy} onchange={event => { const checked = event.currentTarget.checked; void act(() => select(name, checked)) }} />{name} · {group.count}</label>{/each}
     {#each Object.entries(preview.operation.plan.filing.excluded) as [reason, count]}<p>{archiveReason(lang, reason)} · {count}</p>{/each}
     {#each preview.operation.plan.filing.diagnostics as diagnostic}<p>{diagnostic}</p>{/each}
-    <details><summary>{t.report}</summary><pre>{preview.operation.plan.filing.artifact.executable}</pre>{#each preview.operation.batches as b}<p>{b.intent.source.name.decoded} / {b.intent.source.uidvalidity} / {Object.keys(b.intent.messages).join(', ')} → {b.intent.destination.name.decoded} / {b.intent.destination.uidvalidity}</p>{/each}</details>
-    {#if isCopyProtocolRun(preview.operation)}<p role="status">{t.copyHold}</p>{:else}<label><input type="checkbox" bind:checked={confirmed} disabled={busy || running} />{preview.operation.plan.filing.options.intent === 'archive_unmatched' ? archiveText.confirm : t.confirm}</label><button disabled={busy || running || !confirmed} onclick={() => act(start)}>{preview.operation.plan.filing.options.intent === 'archive_unmatched' ? archiveText.start : t.start}</button>{/if}
+    {#key preview.receipt}<ProtocolFilingReview {preview} {lang} available={!!view && !view.recovery_hold && (isCopyProtocolRun(preview.operation) ? view.copy_workflow.installed : view.installed)} disabled={busy || running} onconfirm={() => act(start)} />{/key}
   {/if}
   <h4>{t.journal}</h4>
   {#each view?.journal.runs ?? [] as run (run.id)}
@@ -120,5 +117,4 @@
   article { border-bottom: 1px solid #7775; padding-block: .75rem; }
   p { overflow-wrap: anywhere; }
   label { display: block; margin-block: .5rem; }
-  pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>

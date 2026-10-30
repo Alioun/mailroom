@@ -286,7 +286,8 @@ impl Accounts {
         }
         let (p, connection) =
             self.backlog_prepare(account, store, saved, options, cancel.clone())?;
-        if !bool::from(p.receipt.as_bytes().ct_eq(receipt.as_bytes()))
+        if p.operation.batches.is_empty()
+            || !bool::from(p.receipt.as_bytes().ct_eq(receipt.as_bytes()))
             || saved
                 .protocol_backlog
                 .runs

@@ -252,3 +252,85 @@ fn changed_persistent_metadata_or_versions_cannot_reuse_the_saved_rule_copy_rece
     );
     assert_eq!(std::fs::read(store.path()).unwrap(), ciphertext);
 }
+
+#[test]
+fn empty_or_unselected_filing_is_a_read_only_preview_without_executable_history() {
+    for profile in [Profile::Copy, Profile::Move] {
+        for unselected in [false, true] {
+            let (_root, mut repo, account, store, mut saved, topology, _before) = fixture(profile);
+            if !unselected {
+                let documents = &mut saved.workspace.as_mut().unwrap().input.documents;
+                documents.override_yaml = documents
+                    .override_yaml
+                    .split("additions:")
+                    .next()
+                    .unwrap()
+                    .into();
+                store.save_state(&mut saved).unwrap();
+            }
+            let credentials = repo.track_credential_accesses();
+            let ciphertext = std::fs::read(store.path()).unwrap();
+            let context = repo.workspace_context(&account, &store).unwrap();
+            let saved_proof = workspace::preview(&saved, &context, store.keys()).unwrap();
+            let preview = prepare(
+                &saved,
+                &store,
+                Options {
+                    scope: Scope::Inbox,
+                    selected: unselected.then(BTreeSet::new),
+                    ..Options::default()
+                },
+                Evidence {
+                    saved_proof,
+                    binding: repo.backlog_binding(&account, &store, &saved).unwrap(),
+                    topology,
+                    observed: (*saved.census).clone(),
+                    profile,
+                },
+                |_| panic!("An empty preview cannot need persistent message versions"),
+            )
+            .unwrap();
+            assert!(preview.operation.plan.filing.changes.is_empty());
+            assert!(preview.operation.batches.is_empty());
+            if unselected {
+                assert_eq!(preview.operation.plan.filing.groups.len(), 1);
+                assert!(
+                    preview
+                        .operation
+                        .plan
+                        .filing
+                        .groups
+                        .values()
+                        .all(|group| !group.selected)
+                );
+            } else {
+                assert!(preview.operation.plan.filing.groups.is_empty());
+                assert_eq!(preview.operation.plan.filing.unmatched, 2);
+            }
+            println!(
+                "MAILROOM_EMPTY_FORWARD_PREVIEW_UI_FIXTURE {}",
+                serde_json::json!({"method":if profile == Profile::Copy {"copy"} else {"move"}, "unselected":unselected,"account":account.id,"preview":preview})
+            );
+            let receipt = preview.receipt.clone();
+            if profile == Profile::Copy {
+                assert!(
+                    super::super::copy_start::tests::confirm_prepared(
+                        &repo,
+                        &account,
+                        &store,
+                        &mut saved,
+                        preview.operation.clone(),
+                        &receipt
+                    )
+                    .is_err()
+                );
+            }
+            let mut rejected = saved.clone();
+            rejected.protocol_backlog.runs.push(preview.operation);
+            assert!(store.save_state(&mut rejected).is_err());
+            assert!(saved.protocol_backlog.runs.is_empty());
+            assert_eq!(std::fs::read(store.path()).unwrap(), ciphertext);
+            assert_eq!(credentials.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+    }
+}

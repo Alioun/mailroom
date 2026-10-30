@@ -8,7 +8,7 @@ import ts from 'typescript'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const auditName = process.argv[2] ?? 'imap-copy-review-ui'
-assert.ok(['imap-copy-review-ui', 'imap-copy-continuation-dispatch', 'imap-copy-continuation-controls', 'imap-forward-preview', 'imap-copy-saved-workflow'].includes(auditName))
+assert.ok(['imap-copy-review-ui', 'imap-copy-continuation-dispatch', 'imap-copy-continuation-controls', 'imap-forward-preview', 'imap-copy-saved-workflow', 'imap-empty-preview'].includes(auditName))
 const audit = `${root}.audit/${auditName}/`
 const inputAudit = auditName === 'imap-copy-continuation-controls' ? `${root}.audit/imap-copy-continuation-dispatch/` : audit
 await mkdir(`${audit}render`, { recursive: true })

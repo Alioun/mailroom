@@ -86,9 +86,6 @@ pub(super) fn prepare(
             }
         }
     }
-    if batches.is_empty() {
-        return Err(invalid());
-    }
     Ok(batches)
 }
 

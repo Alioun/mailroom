@@ -8,7 +8,7 @@ import ts from 'typescript'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const auditName = process.argv[2] ?? 'imap-forward-preview'
-assert.ok(['imap-forward-preview', 'imap-copy-saved-workflow'].includes(auditName))
+assert.ok(['imap-forward-preview', 'imap-copy-saved-workflow', 'imap-empty-preview'].includes(auditName))
 const audit = `${root}.audit/${auditName}/`
 await mkdir(`${audit}forward-render`, { recursive: true })
 const log = await readFile(`${audit}forward-preview.log`, 'utf8')
@@ -67,6 +67,27 @@ for (const fixture of fixtures) {
   rejections += 1
   previews.push({ ...fixture, preview })
 }
+const emptyPreviews = []
+if (auditName === 'imap-empty-preview') {
+  const emptyFixtures = [...log.matchAll(/MAILROOM_EMPTY_FORWARD_PREVIEW_UI_FIXTURE (.+)/g)].map(match => JSON.parse(match[1]))
+  assert.deepEqual(emptyFixtures.map(({ method, unselected }) => `${method}-${unselected}`).sort(), ['copy-false', 'copy-true', 'move-false', 'move-true'])
+  for (const fixture of emptyFixtures) {
+    const options = fixture.preview.operation.plan.filing.options
+    responses.push(fixture.preview)
+    const preview = await api.previewProtocolBacklog(fixture.account, options)
+    assert.deepEqual(requests.pop(), { account: fixture.account, command: { action: 'preview', options } })
+    assert.deepEqual(preview.operation.batches, [])
+    assert.deepEqual(preview.operation.plan.filing.changes, [])
+    const groups = Object.values(preview.operation.plan.filing.groups)
+    assert.equal(groups.length, fixture.unselected ? 1 : 0)
+    assert.ok(groups.every(group => group.selected === false))
+    if (!fixture.unselected) assert.equal(preview.operation.plan.filing.unmatched, 2)
+    await assert.rejects(api.confirmProtocolBacklog(fixture.account, preview))
+    assert.equal(requests.length, 0, 'Empty confirmation must fail before fetch')
+    rejections += 1
+    emptyPreviews.push({ ...fixture, preview })
+  }
+}
 await writeFile(`${audit}forward-render/entry.mjs`, `import '${root}ui/src/style.css'; export { default as Review } from '${root}ui/src/ProtocolFilingReview.svelte'; export { render } from 'svelte/server'`)
 const bundled = await build({ root: `${root}ui`, configFile: false, logLevel: 'error', plugins: [svelte({ configFile: false })], ssr: { noExternal: true }, build: { ssr: `${audit}forward-render/entry.mjs`, outDir: `${audit}forward-ssr`, emptyOutDir: false, ssrEmitAssets: true, cssCodeSplit: false, minify: false, rollupOptions: { output: { entryFileNames: 'review.mjs' } } } })
 const styles = (Array.isArray(bundled) ? bundled : [bundled]).flatMap(item => item.output).filter(item => item.type === 'asset' && item.fileName.endsWith('.css')).map(item => item.source.toString()).join('\n')
@@ -109,7 +130,24 @@ for (const { method, preview } of previews) {
     }
   }
 }
+const emptyRenderings = []
+for (const { method, unselected, preview } of emptyPreviews) {
+  for (const lang of ['en', 'de']) {
+    for (const available of [false, true]) {
+      for (const disabled of [false, true]) {
+        const { body } = rendered.render(rendered.Review, { props: { preview, lang, available, disabled, onconfirm: async () => assert.fail('An empty preview must not confirm') } })
+        assert.ok(body.includes(lang === 'en' ? 'No eligible filing changes remain.' : 'Keine geeigneten Ablageänderungen bleiben übrig.'))
+        assert.ok(!/<(?:input|button|fieldset)\b/.test(body), 'An empty preview must omit execution controls')
+        assert.ok(body.includes(preview.receipt))
+        assert.ok(body.includes(preview.operation.plan.binding.account))
+        const name = `empty-${method}-${unselected ? 'unselected' : 'unmatched'}-${available ? 'available' : 'held'}-${disabled ? 'busy' : 'idle'}-${lang}`
+        await writeFile(`${audit}${name}.html`, `<!doctype html><html lang="${lang}"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${styles}</style><body>${body}</body></html>`)
+        emptyRenderings.push({ name, sha256: createHash('sha256').update(body).digest('hex') })
+      }
+    }
+  }
+}
 assert.equal(requests.length, 0)
 assert.equal(responses.length, 0)
-await writeFile(`${audit}forward-ui-results.json`, `${JSON.stringify({ previews: previews.length, rejections, renderings, limitations: 'Credential-free saved-rule previews, intercepted request contracts and server renderings. Available COPY component props are fixture-only. No mounted interaction, visual, connected TLS or process-crash acceptance.' }, null, 2)}\n`)
-console.log(`Forward filing review passed ${previews.length} saved-rule previews, ${rejections} rejected confirmations and ${renderings.length} bilingual server renderings.`)
+await writeFile(`${audit}forward-ui-results.json`, `${JSON.stringify({ previews: previews.length, emptyPreviews: emptyPreviews.length, rejections, renderings, emptyRenderings, limitations: 'Credential-free saved-rule previews, intercepted request contracts and server renderings. Available COPY component props are fixture-only. No mounted interaction, visual, connected TLS or process-crash acceptance.' }, null, 2)}\n`)
+console.log(`Forward filing review passed ${previews.length} saved-rule previews, ${rejections} rejected confirmations and ${renderings.length} nonempty and ${emptyRenderings.length} empty bilingual server renderings.`)

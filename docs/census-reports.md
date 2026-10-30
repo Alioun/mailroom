@@ -53,14 +53,14 @@ This is a local web confirmation and browser download. It does not implement the
 ## Remaining census work
 
 - Owner-run runtime evidence for the OS credential adapters, mailbox.org and Gmail, provider restrictions, throttling, filesystem behavior and recovery. Synthetic tests do not establish those facts.
-- Windows private ACL enforcement and Windows/Linux runtime validation, including directory synchronization. Current Unix permissions remain enforced.
-- Credential update, explicit confirmed account forgetting, key rotation, lost-key recovery, interrupted-creation orphan cleanup and lifecycle UI. A missing key must continue to stop without replacement or deletion.
-- Full Gmail label topology and excluded-folder counts, including Spam counts needed by the later wind-down workflow.
+- Installed macOS runtime validation, including directory synchronization. Other platforms are deferred beyond the personal release.
+- Owner-run acceptance of the implemented [lifecycle controls](account-lifecycle.md) and [encrypted recovery](recovery-format.md). A missing key continues to stop ordinary account access without replacement or deletion; explicit authenticated bundle restoration is a separate operation.
+- Actual Gmail topology and historical coverage. [Versioned provider evidence](provider-evidence.md) records observed selected/excluded counts, including available Spam counts. A current count does not establish continuous historical coverage.
 - Trusted authentication provenance and correlated passing DKIM signatures, including coverage of both unsubscribe headers. All such coverage stays unknown.
 - Scale verification and possible persistence changes beyond whole-snapshot census rewrites, the 512 MiB snapshot cap and existing acquisition bounds. Report derivation currently holds the snapshot and derived data in memory.
 - Takeout import, further provider and credential adapters, and broader platform work remain separate units.
-- Wider agent integration and its native confirmation boundary. Clear exports currently support organisational domains only. Other values intentionally remain placeholders.
-- Unsubscribe logs remain absent. The [synthetic backlog workflow](backlog.md) now persists its own journal. Rules, invoice forwarding, address ledger, unsubscribe execution and full wind-down statuses remain later personal features.
+- Wider agent integration and installed acceptance of the implemented [native confirmation boundary](macos-confirmation.md). Clear exports currently support organisational domains only. Other values intentionally remain placeholders.
+- Connected, mounted and owner/provider acceptance of the implemented rules, invoice, ledger, subscription and wind-down slices. Their local journals and reports exist. [Personal-use readiness](personal-readiness.md) separates those implementations from outstanding daily-use gates.
 
 Provider OX coexistence, exact recipient semantics, forwarding behavior and accounting intake acceptance remain owner-run evidence. Business roles, the signup domain/mechanism, invoice sender approvals and accounting targets remain owner decisions. Own-address confirmation and classifier observations do not settle any of them.
 

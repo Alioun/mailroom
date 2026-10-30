@@ -84,13 +84,13 @@ Starting the binary with `--synthetic-accounts` installs a fake credential backe
 
 ## Required follow-up units
 
-- Validate the OS adapters and real provider behavior through an owner-run process. Current evidence establishes synthetic behavior only. Windows ACL enforcement and cross-platform runtime behavior remain unverified.
-- Add credential update, account forgetting, key rotation, interrupted-creation cleanup and a recovery interface. The current UI retries scans with existing stored credentials; it does not replace them.
+- Validate the protected OS adapters and real provider behavior through the approved owner-run process. Current evidence establishes synthetic behavior only. The personal release targets this Mac; other platforms remain later product work.
+- Complete installed acceptance of [local lifecycle controls](account-lifecycle.md) and [encrypted recovery](recovery-format.md). Replacement, forgetting, rotation, interrupted-creation cleanup and recovery are implemented with dummy backends. Real credential operations require the approved frozen owner CLI and wizard; ordinary scan retry does not replace credentials.
 - Census saves (scan checkpoints) still rewrite the whole snapshot, and loading still decrypts and parses all of it. Journal saves no longer do. The 512 MiB snapshot limit applies.
 - Add Takeout MBOX import without body or attachment persistence.
 - Validate actual provider topology and optional counts through owner-run checks. Saved current mailbox totals never establish continuous historical Spam coverage.
 - Implement trusted authentication provenance and signature correlation. Preserve unknown coverage when evidence is insufficient.
-- Complete the wider agent workflow separately, including native action-naming confirmation, agent enablement, agent proof exports, restricted agent directories and proposal resolution. The report export currently uses explicit local web confirmation and a browser download. It does not enable agent access or live operations.
-- Unsubscribe logs remain absent. Version 3 includes the concrete synthetic backlog journal. Production backlog operations remain unavailable.
+- Complete the wider agent workflow separately, including agent enablement, agent proof exports, restricted agent directories and proposal resolution. [Exact native confirmation](macos-confirmation.md) is implemented but still needs installed owner-run acceptance. Report export uses explicit local web confirmation and a browser download. It does not enable agent access or live operations.
+- Complete connected and installed acceptance of [backlog sorting](backlog.md), [subscription actions](unsubscribe.md) and the other [personal workflows](personal-readiness.md). Their encrypted journals exist; synthetic histories do not establish provider effects. Production mutations remain denied.
 
 The person-run `scripts/connect-account.sh` walkthrough starts no credentialed step automatically and reads no secret. It guides an existing local launch and private UI entry without requesting provider setting changes. Its shared wizard library retains unused helpers; shellcheck excludes SC2329 for those template functions only.

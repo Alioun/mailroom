@@ -4,6 +4,8 @@ Inspect a synthetic header census and preview deterministic mail rules locally. 
 
 ## Run locally
 
+Read [Personal-use readiness](docs/personal-readiness.md) for implemented workflows, remaining acceptance gates and the scope of the Mac prototype.
+
 Install Rust with Cargo and Node.js 22.12 or newer with npm. From this checkout, run:
 
 ```sh

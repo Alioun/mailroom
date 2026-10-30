@@ -22,6 +22,9 @@ use std::{
     thread,
 };
 
+#[path = "copy_fixture_tests.rs"]
+mod copy_fixture;
+
 const HEADER: &[u8] = b"From: updates@studio.example.com\r\nTo: owner@home.example.test\r\nDelivered-To: owner@home.example.test\r\nSubject: Release notes\r\nMessage-ID: <identical@example.test>\r\nDate: Sat, 24 Oct 2026 00:00:00 +0000\r\n\r\n";
 
 /// How long the `slow_greeting` fake takes to trickle out its greeting, one
@@ -125,6 +128,7 @@ impl Fake {
         let p = state.synthetic_folders.as_mut().unwrap();
         let listener = TcpListener::bind(p.address).unwrap();
         listener.set_nonblocking(true).unwrap();
+        p.address = listener.local_addr().unwrap();
         let config = Arc::new(
             ServerConfig::builder()
                 .with_no_client_auth()
@@ -203,6 +207,16 @@ impl Fake {
                     })
                     .collect();
             }
+        }
+        if root.join("copy-workflow").exists() {
+            let capabilities = &mut state
+                .synthetic_folders
+                .as_mut()
+                .unwrap()
+                .inventory
+                .capabilities;
+            capabilities.remove("MOVE");
+            capabilities.insert("CONDSTORE".into());
         }
         if root.join("move-condstore").exists() {
             state
@@ -549,8 +563,13 @@ fn serve(
                         }
                     }
                     for uid in requested.into_iter().filter(|_| !refused) {
-                        let modseq =
-                            since.map(|_| modseqs::of(root, selected.as_ref().unwrap(), uid));
+                        let requested_modseq = root.join("copy-workflow").exists()
+                            && condstore
+                            && command
+                                .split_ascii_whitespace()
+                                .any(|field| field.trim_matches(['(', ')']) == "MODSEQ");
+                        let modseq = (since.is_some() || requested_modseq)
+                            .then(|| modseqs::of(root, selected.as_ref().unwrap(), uid));
                         if since
                             .zip(modseq)
                             .is_some_and(|(since, modseq)| modseq <= since)
@@ -573,6 +592,16 @@ fn serve(
                             reply.push_str(&format!("* 1 FETCH (UID {uid} FLAGS ({}) INTERNALDATE \"{}\" RFC822.SIZE {}{body}{modseq})\r\n", m.flags.iter().cloned().collect::<Vec<_>>().join(" "), m.internal_date, m.size));
                         }
                     }
+                }
+                _ if copy_fixture::admitted(root, command) => {
+                    reply = copy_fixture::handle(
+                        root,
+                        &store,
+                        &mut state,
+                        selected.as_deref(),
+                        tag,
+                        command,
+                    )?;
                 }
                 _ if command.starts_with("UID MOVE ") => {
                     let (set, target) = command[9..].split_once(' ').unwrap();
@@ -749,6 +778,9 @@ fn serve(
         } else if command.starts_with("LOGIN ") || modseq_changed {
             cache.save(&store, &mut state);
             modseqs::saved(root, &store);
+        }
+        if root.join("copy-workflow").exists() {
+            modseqs::persist(root);
         }
         drop(store);
         drop(guard);

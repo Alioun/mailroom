@@ -2,7 +2,7 @@
 
 Inspect a synthetic header census and preview deterministic mail rules locally. The Rust core serves a Svelte interface with Ark UI controls. The census supports owner-run read-only mailbox.org and Gmail acquisition, encrypted persistence, cancellation and resume. Independent synthetic modes demonstrate it without a provider or credential store. Local census reports, reviewed summary downloads, encrypted rule workspaces and confirmed local Sieve downloads are available. The complete census and personal workflow remain unfinished. All account writes remain denied.
 
-The [development agent exchange](docs/agent-exchange.md) includes separate folders, a skill, a stdio MCP command and local review of text recommendations. Native disclosure approval and installed agent acceptance remain unfinished.
+The [development agent exchange](docs/agent-exchange.md) includes separate folders, a skill, a stdio MCP command and local review of text recommendations. Summary download requires exact native confirmation. Installed native and agent acceptance remain unfinished.
 
 ## Run locally
 

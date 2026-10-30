@@ -1,5 +1,6 @@
 pub(super) mod backlog;
 pub(super) mod backlog_protocol;
+mod disclosure;
 pub(super) mod folder_provisioning;
 pub(super) mod invoices;
 pub(super) mod ledger;
@@ -645,6 +646,14 @@ async fn report_action(
                 if !bool::from(preview.receipt.as_bytes().ct_eq(receipt.as_bytes())) {
                     return Err(AcquisitionError::InvalidInput);
                 }
+                disclosure::confirm(
+                    &state,
+                    &account,
+                    &store,
+                    &report,
+                    &preview,
+                    &review.approved,
+                )?;
                 return Ok(json!({"summary": preview.summary, "filename": "census-summary.md"}));
             }
             return Ok(json!(preview));

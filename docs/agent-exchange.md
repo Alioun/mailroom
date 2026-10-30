@@ -2,7 +2,7 @@
 
 The development exchange lets an agent read a supplied census-summary export and return text recommendations for local review. It includes separate input and proposal directories, `AGENTS.md`, an agent skill and a stdio MCP command. This unit uses no account repository, census key, credential backend, native helper or provider connection.
 
-Publication with native action-naming consent, installed agent restrictions, rule-patch acceptance and agent proof exports remain unfinished. The existing summary download uses browser confirmation. It does not provide native consent. Only invented exports have acceptance coverage for this unit. This is not personal daily-use acceptance.
+The existing summary download now requires browser review and [native action-naming confirmation](census-reports.md#reviewed-summary-boundary), followed by census revalidation. Automatic publication into the exchange, installed agent restrictions, rule-patch acceptance and agent proof exports remain unfinished. Only invented exports and injected confirmation backends have acceptance coverage. Installed native and owner acceptance of this disclosure action remain unverified. This is not personal daily-use acceptance.
 
 ## Files
 
@@ -19,7 +19,7 @@ Initialization copies static agent instructions. It exports no account data and 
 
 The supplied input is `reviewed/census-summary.md`, a UTF-8 export no larger than 256 KiB with the census summary heading. The file must have mode `0600`, belong to the current user and have a single hard link. The fixed child directories and files reject symbolic links. Directory handles anchor child access after the exchange opens.
 
-File placement and Unix permissions do not establish approval provenance or isolate another process running as the same user. These checks are not a substitute for an enforced agent sandbox. The owner must approve the exact disclosure through the eventual native publication path before real account data enters an installed exchange. This command does not implement that publication path.
+File placement and Unix permissions do not establish approval provenance or isolate another process running as the same user. These checks are not a substitute for an enforced agent sandbox. The owner must approve the exact disclosure before real account data enters an installed exchange. This command does not implement an automatic publication path or authenticate the provenance of a supplied file.
 
 The exchange contains user-managed exported copies. Account forgetting, encrypted rotation and recovery do not manage these copies. Account removal cannot erase exports, backups or copies already read by an agent. The exchange must stay separate from private account storage and the shared address ledger.
 
@@ -51,3 +51,5 @@ The digest detects mismatched summary bytes. It is not a signature, account bind
 Rust tests cover folder reopen, exact retries, interrupted files, changed summaries, malformed proposals, link and permission refusals, protocol initialization and bounded errors. The SDK interoperability runner is `scripts/verify-agent-mcp.mjs`. It uses the actual MCP client vendored by the installed Playwright distribution, with invented data and isolated process directories. No MCP dependency is added to the executable.
 
 The UI verifier is `ui/scripts/verify-agent-exchange.mjs`. It parses the document written by that actual command, rejects changed and malformed documents, and renders escaped English and German reviews. Server rendering and a successful build do not establish mounted-browser acceptance. Public specification refresh and installed agent-client acceptance remain separate checks.
+
+The summary-download Router tests use invented accounts and an injected confirmation backend. `ui/scripts/verify-summary-disclosure.mjs` consumes their exact export fixture. `scripts/verify-native-model.py` compiles and runs the existing Swift XCTest model cases directly with this Mac's installed Xcode libraries. These checks launch no native helper and establish no installed confirmation or Keychain acceptance.

@@ -58,7 +58,7 @@ func request(_ fixture: Fixture, _ edit: (inout [String: Any]) -> Void = { _ in 
 final class ExactTests: XCTestCase {
     func testDisplayMatchesTheRustCoreForEveryPurpose() throws {
         let fixture = try Fixture.load()
-        XCTAssertEqual(fixture.actions.count, 10)
+        XCTAssertEqual(fixture.actions.count, 11)
         for item in fixture.actions {
             let action = try JSONDecoder().decode(ExactAction.self, from: item.action.data())
             XCTAssertEqual(try action.display(), item.display)
@@ -77,6 +77,25 @@ final class ExactTests: XCTestCase {
         let cancelled = try JSONSerialization.jsonObject(with: outcome(request: raw, id: parsed.request_id, outcome: .cancelled, challenge: challenge)) as? [String: String]
         XCTAssertNotEqual(cancelled?["authentication"], fixture.outcome.approved_tag)
         XCTAssertThrowsError(try outcome(request: raw, id: parsed.request_id, outcome: .approved, challenge: Data(count: 16)))
+    }
+
+    func testSummaryActionRequiresExactDigestAndClearDomainCount() throws {
+        let fixture = try Fixture.load()
+        let summary = try XCTUnwrap(fixture.actions.last)
+        let original = try XCTUnwrap(JSONSerialization.jsonObject(with: summary.action.data()) as? [String: Any])
+        let edits: [(inout [String: Any]) -> Void] = [
+            { $0.removeValue(forKey: "content_digest") },
+            { $0["content_digest"] = "short" },
+            { $0.removeValue(forKey: "report_version") },
+            { $0["report_version"] = "unbound" },
+            { $0.removeValue(forKey: "clear_domain_count") },
+            { $0["clear_domain_count"] = -1 },
+        ]
+        for edit in edits {
+            var changed = original
+            edit(&changed)
+            XCTAssertThrowsError(try JSONDecoder().decode(ExactAction.self, from: JSONSerialization.data(withJSONObject: changed)).display())
+        }
     }
 
     func testAlteredSyntheticOversizedAndUnknownRequestsDeny() throws {

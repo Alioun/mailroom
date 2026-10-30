@@ -117,6 +117,85 @@ fn exact_display_and_single_use_consumption() {
 }
 
 #[test]
+fn summary_consent_binds_every_field_and_never_accepts_another_purpose() {
+    let summary = Plan {
+        exact_receipt: "c".repeat(64),
+        actions: vec![ExactAction::AgentSummary {
+            account: "invented-account".into(),
+            report_version: "a".repeat(64),
+            content_digest: "b".repeat(64),
+            clear_domain_count: 2,
+        }],
+    };
+    for field in 0..6 {
+        let mut changed = summary.clone();
+        let ExactAction::AgentSummary {
+            account,
+            report_version,
+            content_digest,
+            clear_domain_count,
+        } = &mut changed.actions[0]
+        else {
+            unreachable!()
+        };
+        match field {
+            0 => *account = "other-account".into(),
+            1 => *report_version = "d".repeat(64),
+            2 => *content_digest = "e".repeat(64),
+            3 => *clear_domain_count = 0,
+            4 => changed.exact_receipt = "f".repeat(64),
+            _ => changed.actions = plan().actions,
+        }
+        for after in [false, true] {
+            let (mut boundary, _) = boundary(Fault::None);
+            let (handle, _) = boundary.offer(summary.clone()).unwrap();
+            assert!(
+                boundary
+                    .confirm(&handle, if after { &summary } else { &changed }, || Ok(
+                        changed.clone()
+                    ))
+                    .is_err()
+            );
+            assert!(
+                boundary
+                    .confirm(&handle, &summary, || Ok(summary.clone()))
+                    .is_err()
+            );
+        }
+    }
+    for fault in [
+        Fault::Cancelled,
+        Fault::Unverified,
+        Fault::Forged,
+        Fault::OtherResponder,
+        Fault::WrongRequest,
+        Fault::Malformed,
+        Fault::Failure,
+    ] {
+        let (mut boundary, _) = boundary(fault);
+        let (handle, _) = boundary.offer(summary.clone()).unwrap();
+        assert!(
+            boundary
+                .confirm(&handle, &summary, || Ok(summary.clone()))
+                .is_err()
+        );
+    }
+    let (mut boundary, seen) = boundary(Fault::None);
+    let (handle, _) = boundary.offer(summary.clone()).unwrap();
+    assert!(
+        boundary
+            .confirm(&handle, &summary, || Ok(summary.clone()))
+            .is_ok()
+    );
+    assert!(
+        boundary
+            .confirm(&handle, &summary, || Ok(summary.clone()))
+            .is_err()
+    );
+    assert_eq!(seen.lock().unwrap().prompts, 1);
+}
+
+#[test]
 fn unverified_cancelled_malformed_forged_unauthenticated_and_failed_helpers_deny_and_consume() {
     for fault in [
         Fault::Unverified,
@@ -322,6 +401,12 @@ fn display_and_authentication_match_the_swift_helper_fixture() {
             provider: crate::acquisition::Provider::MailboxOrg,
             login: "owner@example.test".into(),
             plan_receipt: "f".repeat(64),
+        },
+        ExactAction::AgentSummary {
+            account: "invented-account".into(),
+            report_version: "a".repeat(64),
+            content_digest: "b".repeat(64),
+            clear_domain_count: 2,
         },
     ];
     let cases = fixture["actions"].as_array().unwrap();

@@ -120,6 +120,16 @@
     "plan_receipt": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
    },
    "display": "Replace the stored password for owner@example.test at mailbox.org, account invented-account. Store the credential privately. No provider connection or setting change. Exact local plan receipt ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff."
+  },
+  {
+   "action": {
+    "purpose": "agent_summary",
+    "account": "invented-account",
+    "report_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "content_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "clear_domain_count": 2
+   },
+   "display": "Export this census summary for account invented-account as census-summary.md for agent review. 2 approved organisational domains may appear in clear text. Exact summary SHA-256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb. Exported copies are outside local account forgetting."
   }
  ],
  "outcome": {

@@ -25,6 +25,8 @@ public struct ExactAction: Decodable, Sendable {
     let host: String?
     let effect: String?
     let plan_receipt: String?
+    let report_version: String?
+    let clear_domain_count: UInt64?
 
     func required(_ value: String?) throws -> String {
         guard let value else { throw Denied() }
@@ -34,6 +36,11 @@ public struct ExactAction: Decodable, Sendable {
     /// The exact sentence the Rust core derives for the same action.
     public func display() throws -> String {
         switch purpose {
+        case "agent_summary":
+            guard let clear_domain_count,
+                  let report_version, isDigest(report_version),
+                  let content_digest, isDigest(content_digest) else { throw Denied() }
+            return "Export this census summary for account \(account) as census-summary.md for agent review. \(clear_domain_count) approved organisational domains may appear in clear text. Exact summary SHA-256 \(content_digest). Exported copies are outside local account forgetting."
         case "local_account":
             let label: String
             switch try required(operation) {

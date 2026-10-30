@@ -16,6 +16,12 @@ const LIFETIME: Duration = Duration::from_secs(300);
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "purpose", rename_all = "snake_case")]
 pub(crate) enum ExactAction {
+    AgentSummary {
+        account: String,
+        report_version: String,
+        content_digest: String,
+        clear_domain_count: usize,
+    },
     LocalAccount {
         account: String,
         operation: LocalAccountOperation,
@@ -138,6 +144,7 @@ fn random() -> [u8; 32] {
 }
 fn display(actions: &[ExactAction]) -> String {
     actions.iter().map(|a| match a {
+        ExactAction::AgentSummary { account, content_digest, clear_domain_count, .. } => format!("Export this census summary for account {account} as census-summary.md for agent review. {clear_domain_count} approved organisational domains may appear in clear text. Exact summary SHA-256 {content_digest}. Exported copies are outside local account forgetting."),
         ExactAction::LocalAccount {account, operation, provider, login, plan_receipt} => format!("{} for {login} at {}, account {account}. Store the credential privately. No provider connection or setting change. Exact local plan receipt {plan_receipt}.", operation.label(), match provider { crate::acquisition::Provider::Gmail => "Gmail", crate::acquisition::Provider::MailboxOrg => "mailbox.org" }),
         ExactAction::Recovery {account, operation, manifest_digest, consequences} => format!("{operation} for account {account}. Exact recovery plan SHA-256 {manifest_digest}. {consequences}"),
         ExactAction::InvoiceSend {account, target_name, target, sending_identity, content_digest, ..} => format!("Send this invoice for account {account} to {target_name} <{target}> from {sending_identity}. Exact content SHA-256 {content_digest}. No Undo."),

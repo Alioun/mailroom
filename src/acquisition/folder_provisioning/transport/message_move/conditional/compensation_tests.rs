@@ -20,6 +20,9 @@ enum Forward {
     Filed,
 }
 
+#[path = "compensation_observation_tests.rs"]
+mod observation;
+
 fn changed(before: &Readback, deleted: bool) -> Readback {
     let highest = ModSeq::new(before.highest_modseq().get() + 10).unwrap();
     let messages = before
@@ -62,7 +65,7 @@ fn store_result(before: &Readback) -> StoreResult {
             .collect(),
     }
 }
-fn fixture(
+fn review_fixture(
     stage: Forward,
 ) -> (
     tempfile::TempDir,
@@ -70,6 +73,7 @@ fn fixture(
     Account,
     EncryptedStore,
     AccountState,
+    CopyCompensationRequest,
 ) {
     let (mut forward, delete) = prepared();
     let mut source = forward.before().clone();
@@ -115,6 +119,19 @@ fn fixture(
             destination,
         }],
     };
+    (root, repo, account, store, saved, request)
+}
+
+fn fixture(
+    stage: Forward,
+) -> (
+    tempfile::TempDir,
+    Accounts,
+    Account,
+    EncryptedStore,
+    AccountState,
+) {
+    let (root, repo, account, store, mut saved, request) = review_fixture(stage);
     let review = repo
         .review_copy_compensation(&account, &store, &saved, &request, |_| Ok(()))
         .unwrap();

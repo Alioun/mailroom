@@ -34,6 +34,24 @@ fn persist<C: CompensationCheckpoints>(
 }
 
 impl<I: Commands> Conditional<'_, I> {
+    pub(super) fn observe_for_compensation(
+        &mut self,
+        permit: &BacklogPermit<'_>,
+        forward: &CopyEvidence,
+    ) -> Result<(Readback, Readback), Error> {
+        self.authorize(permit)?;
+        if forward.next_action().needs_observation() || !forward.observed() {
+            return Err(Error::Unsupported);
+        }
+        let mapping = forward.copy().mapping().ok_or(Error::Unsupported)?;
+        self.pair(
+            forward.intent().source(),
+            &forward.intent().messages().keys().copied().collect(),
+            forward.intent().destination(),
+            &mapping.pairs().values().copied().collect(),
+        )
+    }
+
     pub(super) fn compensate(
         &mut self,
         permit: &BacklogPermit<'_>,
@@ -111,6 +129,18 @@ impl<I: Commands> Conditional<'_, I> {
 }
 
 impl Connection {
+    pub(in crate::acquisition) fn observe_for_compensation(
+        &mut self,
+        permit: &BacklogPermit<'_>,
+        forward: &CopyEvidence,
+    ) -> Result<(Readback, Readback), Error> {
+        Conditional {
+            io: &mut self.io,
+            capabilities: &self.capabilities,
+        }
+        .observe_for_compensation(permit, forward)
+    }
+
     pub(in crate::acquisition) fn execute_compensation(
         &mut self,
         permit: &BacklogPermit<'_>,

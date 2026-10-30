@@ -53,6 +53,43 @@ impl CopyCompensationReview {
 }
 
 impl Accounts {
+    pub(super) fn copy_compensation_admit<'a>(
+        &self,
+        account: &Account,
+        store: &EncryptedStore,
+        saved: &'a AccountState,
+        id: &str,
+        fresh: &dyn Fn(&AccountState) -> Result<(), String>,
+    ) -> Result<&'a Run, AcquisitionError> {
+        saved.protocol_backlog.validate(&account.id)?;
+        let run = saved
+            .protocol_backlog
+            .runs
+            .iter()
+            .find(|run| run.id == id)
+            .ok_or_else(invalid)?;
+        if !matches!(
+            run.status,
+            Status::Complete | Status::Stopped | Status::Conflict
+        ) || run.plan.filing.semantics != model::COPY_SEMANTICS
+            || run.batches.iter().any(|batch| !batch.is_copy())
+            || run.undo_receipt.is_some()
+            || run.closed.is_some()
+            || run
+                .batches
+                .iter()
+                .any(|batch| batch.attempted() && !batch.observed())
+            || !crate::backlog::retention::undo_open(run.completed_at, self.now())
+        {
+            return Err(invalid());
+        }
+        self.validate_copy_authority(account, store, saved, &run.plan.binding, fresh)?;
+        if !store.checkpoint_matches(saved, crate::census::ProtocolStateView::Persisted)? {
+            return Err(invalid());
+        }
+        Ok(run)
+    }
+
     /// Derives a local exact review. It neither connects nor loads a password.
     pub fn review_copy_compensation(
         &self,
@@ -62,29 +99,11 @@ impl Accounts {
         request: &CopyCompensationRequest,
         fresh: impl Fn(&AccountState) -> Result<(), String>,
     ) -> Result<CopyCompensationReview, AcquisitionError> {
-        saved.protocol_backlog.validate(&account.id)?;
-        let run = saved
-            .protocol_backlog
-            .runs
-            .iter()
-            .find(|run| run.id == request.run)
-            .ok_or_else(invalid)?;
-        if !matches!(
-            run.status,
-            Status::Complete | Status::Stopped | Status::Conflict
-        ) || run.plan.filing.semantics != model::COPY_SEMANTICS
-            || run.batches.iter().any(|batch| !batch.is_copy())
-            || run.undo_receipt.is_some()
-            || run.closed.is_some()
-            || request.topology != run.plan.topology
+        let run = self.copy_compensation_admit(account, store, saved, &request.run, &fresh)?;
+        if request.topology != run.plan.topology
             || request.observations.is_empty()
             || request.observations.len() > model::BATCHES
-            || !crate::backlog::retention::undo_open(run.completed_at, self.now())
         {
-            return Err(invalid());
-        }
-        self.validate_copy_authority(account, store, saved, &run.plan.binding, &fresh)?;
-        if !store.checkpoint_matches(saved, crate::census::ProtocolStateView::Persisted)? {
             return Err(invalid());
         }
         let attempted: Vec<_> = run

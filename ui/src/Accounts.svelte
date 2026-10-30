@@ -8,6 +8,7 @@
   import Reports from './Reports.svelte'
   import Lifecycle from './Lifecycle.svelte'
   import Recovery from './Recovery.svelte'
+  import GmailRoute from './GmailRoute.svelte'
   import Ledger from './Ledger.svelte'
   import Winddown from './Winddown.svelte'
   import Backlog from './Backlog.svelte'
@@ -189,6 +190,7 @@
   {/if}
   <div id="account-setup" class="account-task account-setup" tabindex="-1">
     <h3>{t.setup}</h3>
+    <GmailRoute {lang} />
     {#key status?.synthetic}<Recovery {accounts} account={selected} synthetic={status?.synthetic ?? false} {lang} onChanged={lifecycleChanged} />{/key}
     {#key `${selected}:${status?.synthetic}`}<Lifecycle account={selected} synthetic={status?.synthetic ?? false} {lang} onChanged={lifecycleChanged} />{/key}
     {#key `${selected}:${cacheEpoch}`}<ManageSieve account={selected} {lang} /><SieveTransactions account={selected} {lang} /><FolderProvisioning account={selected} {lang} />{/key}

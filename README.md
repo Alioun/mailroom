@@ -8,6 +8,8 @@ The [development agent exchange](docs/agent-exchange.md) includes separate folde
 
 Read [Personal-use readiness](docs/personal-readiness.md) for implemented workflows, remaining acceptance gates and the scope of the Mac prototype.
 
+The [Gmail forwarding preparation guide](docs/gmail-forwarding.md) provides the settled route and a terminal plan beside the account workspace's Setup and recovery tools. Live setup remains owner-run after separate approval.
+
 Install Rust with Cargo and Node.js 22.12 or newer with npm. From this checkout, run:
 
 ```sh

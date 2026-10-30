@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "kind": "preparation_only",
+  "en": {
+    "title": "Gmail forwarding plan",
+    "summary": "Gmail → dedicated mailbox.org address; existing filing choices keep priority",
+    "boundary": "Preparation only. Forwarding setup and delivery checks require the complete personal build and separate owner approval. This guide changes no settings and records no provider evidence.",
+    "private": "Keep the receiving address, verification links and account details private. This plan asks for none of them.",
+    "download": "Save the preparation plan",
+    "wizard": "The checkout preparation wizard shows the same stages in the terminal:",
+    "next": "After preparation, the owner still needs approved live setup and delivery checks. Reading or saving this plan does not mark the route ready.",
+    "sources": "Provider instructions"
+  },
+  "de": {
+    "title": "Gmail-Weiterleitung planen",
+    "summary": "Gmail → eigene mailbox.org-Empfangsadresse; bestehende Ablageziele haben Vorrang",
+    "boundary": "Nur Vorbereitung. Die Weiterleitung und Zustellprüfungen erfordern den vollständigen persönlichen Build und eine gesonderte Freigabe. Dieser Leitfaden ändert keine Einstellungen und speichert keine Anbieterbelege.",
+    "private": "Empfangsadresse, Bestätigungslinks und Kontodaten bleiben vertraulich. Dieser Plan fragt nichts davon ab.",
+    "download": "Vorbereitungsplan speichern",
+    "wizard": "Der Vorbereitungsassistent im Checkout zeigt dieselben Schritte im Terminal:",
+    "next": "Nach der Vorbereitung stehen die freigegebene Einrichtung und Zustellprüfungen durch den Nutzer noch aus. Lesen oder Speichern dieses Plans meldet die Route nicht als bereit.",
+    "sources": "Anleitungen der Anbieter"
+  },
+  "stages": [
+    {
+      "id": "destination",
+      "en": {
+        "title": "Dedicated receiving address",
+        "body": "During approved setup, the owner selects a dedicated receiving address in the mailbox.org account. Confirm ownership and the account association privately. Do not infer a personal or business role from forwarding or ownership."
+      },
+      "de": {
+        "title": "Eigene Empfangsadresse",
+        "body": "Bei der freigegebenen Einrichtung wählt der Nutzer eine eigene Empfangsadresse im mailbox.org-Konto. Zugehörigkeit und Kontozuordnung werden vertraulich bestätigt. Weiterleitung oder Zugehörigkeit weisen keine private oder geschäftliche Rolle zu."
+      }
+    },
+    {
+      "id": "verification",
+      "en": {
+        "title": "Verify the address in Gmail",
+        "body": "The owner opens Gmail Settings, See all settings, then the Forwarding section and adds the dedicated address. The owner alone opens the verification message at mailbox.org and follows its link. Never paste that link into Mailroom or an agent conversation."
+      },
+      "de": {
+        "title": "Adresse in Gmail bestätigen",
+        "body": "Der Nutzer öffnet die Gmail-Einstellungen, Alle Einstellungen aufrufen und den Bereich Weiterleitung und fügt die eigene Adresse hinzu. Nur der Nutzer öffnet die Bestätigungsnachricht bei mailbox.org und folgt dem Link. Der Link gehört weder in Mailroom noch in einen Agentenchat."
+      }
+    },
+    {
+      "id": "forwarding",
+      "en": {
+        "title": "Forward new mail and archive the Gmail copy",
+        "body": "After verification, the owner returns to Gmail forwarding settings, enables account-wide forwarding to that address, selects Archive Gmail's copy and saves. Gmail forwards new messages except Spam. Existing mail stays in Gmail for its separate backlog workflow. Do not deploy Gmail filters."
+      },
+      "de": {
+        "title": "Neue Nachrichten weiterleiten und Gmail-Kopie archivieren",
+        "body": "Nach der Bestätigung kehrt der Nutzer zu den Gmail-Weiterleitungseinstellungen zurück, aktiviert die kontoweite Weiterleitung an diese Adresse, wählt Gmail-Kopie archivieren und speichert. Gmail leitet neue Nachrichten außer Spam weiter. Vorhandene Nachrichten bleiben für die gesonderte Stapelverarbeitung in Gmail. Keine Gmail-Filter einrichten."
+      }
+    },
+    {
+      "id": "filing",
+      "en": {
+        "title": "Preserve mailbox.org filing choices",
+        "body": "Existing mailbox.org rules take priority when filing destinations conflict. Approved business accounting copies run separately before existing filing rules. Mailroom adds $via-gmail only from verified delivery-envelope evidence for the dedicated address. Unknown or mixed roles keep Inbox and read status unchanged, with no accounting copy; verified ingress tagging can still apply. A setup checkbox, To, Cc or Delivered-To header does not establish envelope authority."
+      },
+      "de": {
+        "title": "Bestehende mailbox.org-Ablage erhalten",
+        "body": "Bestehende mailbox.org-Regeln haben bei widersprüchlichen Ablagezielen Vorrang. Freigegebene geschäftliche Buchhaltungskopien werden getrennt vor den bestehenden Ablageregeln ausgeführt. Mailroom ergänzt $via-gmail nur bei verifiziertem Zustellumschlag für die eigene Adresse. Unbekannte oder gemischte Rollen behalten Inbox und Lesestatus ohne Buchhaltungskopie; eine verifizierte Eingangsmarkierung kann trotzdem gelten. Ein Einrichtungshäkchen, An, Cc oder Delivered-To belegt keinen Zustellumschlag."
+      }
+    },
+    {
+      "id": "observation",
+      "en": {
+        "title": "Check delivery after separate approval",
+        "body": "The later owner-run check must establish new-mail arrival at mailbox.org, the archived retained copy in Gmail, existing-rule coexistence, the actual envelope recipient, and persistent $via-gmail readback separately. Any test send needs that approval. The keyword labels the configured ingress route; it does not authenticate Gmail origin. Spam coverage remains a separate uncertainty."
+      },
+      "de": {
+        "title": "Zustellung nach gesonderter Freigabe prüfen",
+        "body": "Die spätere Prüfung durch den Nutzer muss den Eingang neuer Nachrichten bei mailbox.org, die archivierte Gmail-Kopie, das Zusammenspiel bestehender Regeln, den tatsächlichen Umschlagempfänger und die dauerhaft gespeicherte Markierung $via-gmail getrennt belegen. Auch ein Testversand braucht diese Freigabe. Die Markierung bezeichnet den eingerichteten Eingangsweg; sie authentifiziert keinen Gmail-Ursprung. Die Spam-Abdeckung bleibt gesondert zu klären."
+      }
+    },
+    {
+      "id": "stop",
+      "en": {
+        "title": "Keep stopping and Undo separate",
+        "body": "To stop future forwarding during an approved owner procedure, the owner disables forwarding in Gmail settings and saves. That does not move earlier mail back. In Mailroom, Cancel stops new sorting batches and keeps completed changes; Undo remains a separate confirmed action. Keep the Gmail account and backlog until wind-down evidence supports retirement."
+      },
+      "de": {
+        "title": "Stoppen und Rückgängig getrennt halten",
+        "body": "Um künftige Weiterleitungen während eines freigegebenen Nutzerablaufs zu stoppen, deaktiviert der Nutzer die Weiterleitung in Gmail und speichert. Frühere Nachrichten werden dadurch nicht zurückverschoben. In Mailroom stoppt Abbrechen neue Sortierstapel und erhält abgeschlossene Änderungen; Rückgängig bleibt eine getrennte bestätigte Aktion. Gmail-Konto und Altbestand bleiben erhalten, bis die Stilllegungsbelege eine Aufgabe stützen."
+      }
+    }
+  ],
+  "sources": [
+    {
+      "label": "Gmail: automatic forwarding",
+      "url": "https://support.google.com/mail/answer/10957?hl=en"
+    },
+    {
+      "label": "mailbox.org: Sieve filtering",
+      "url": "https://kb.mailbox.org/en/private/e-mail/can-i-use-sieve-mail-filtering/"
+    }
+  ]
+}

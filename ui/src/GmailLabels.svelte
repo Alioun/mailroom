@@ -1,6 +1,7 @@
 <script lang="ts">
   import { readAccountStatus, sortingPost, type BacklogOptions } from './api'
   import { labelPreviewFor, type LabelOperation, type LabelPreview } from './folder-provisioning-api'
+  import { folderFailureText } from './folder-diagnostics'
   let { account, lang, offer, options, history, limitations, disabled, onchange, onreload }: { account: string; lang: 'en' | 'de'; offer: boolean; options: BacklogOptions; history: LabelOperation[]; limitations: string; disabled: boolean; onchange: () => Promise<void>; onreload: () => Promise<void> } = $props()
   const text = {
     en: {
@@ -8,14 +9,14 @@
       create: 'Create labels', reconcile: 'Reconcile label observations only', journal: 'Label creation journal', existing: 'exists', missing: 'create', ancestor: 'parent', leaf: 'destination',
       error: 'Label action rejected. Reload and request a fresh preview. Existing evidence is retained.', wait: 'Creating labels. Each label is read back through LIST before the next.',
       status: { running: 'running', complete: 'complete', refused: 'refused', uncertain: 'uncertain', stopped: 'stopped', conflict: 'conflict', fresh_review: 'needs a fresh preview' },
-      outcome: { intent: 'sent, no answer yet', acknowledged: 'acknowledged', observed: 'read back', refused: 'refused', uncertain: 'uncertain', conflict: 'conflict', absent: 'absent' },
+      outcome: { intent: 'Intent persisted', acknowledged: 'acknowledged', observed: 'read back', refused: 'refused', uncertain: 'uncertain', conflict: 'conflict', absent: 'absent' },
     },
     de: {
       title: 'Fehlende Ziellabels', preview: 'Genaue Labelerstellung anzeigen', confirm: 'Ich bestätige, genau diese Labels zu erstellen, übergeordnete zuerst, jedes vor dem nächsten geprüft',
       create: 'Labels erstellen', reconcile: 'Nur Labelbeobachtungen abgleichen', journal: 'Journal der Labelerstellung', existing: 'vorhanden', missing: 'erstellen', ancestor: 'übergeordnet', leaf: 'Ziel',
       error: 'Labelaktion abgelehnt. Neu laden und frische Vorschau anfordern. Vorhandene Nachweise bleiben erhalten.', wait: 'Labels werden erstellt. Jedes Label wird vor dem nächsten über LIST geprüft.',
       status: { running: 'läuft', complete: 'abgeschlossen', refused: 'abgelehnt', uncertain: 'ungewiss', stopped: 'gestoppt', conflict: 'Konflikt', fresh_review: 'braucht eine frische Vorschau' },
-      outcome: { intent: 'gesendet, noch keine Antwort', acknowledged: 'bestätigt', observed: 'geprüft', refused: 'abgelehnt', uncertain: 'ungewiss', conflict: 'Konflikt', absent: 'nicht vorhanden' },
+      outcome: { intent: 'Absicht gespeichert', acknowledged: 'bestätigt', observed: 'geprüft', refused: 'abgelehnt', uncertain: 'ungewiss', conflict: 'Konflikt', absent: 'nicht vorhanden' },
     },
   }
   let t = $derived(text[lang])
@@ -56,7 +57,7 @@
     <h5>{t.journal}</h5>
     {#each history as op (op.id)}
       <article data-label-operation={op.id}><p class="label-state">{t.status[op.status]}</p>
-        {#each op.steps as s}<p>{s.name.decoded} · {t.outcome[s.outcome]}</p>{/each}
+        {#each op.steps as s}<p>{s.name.decoded} · {t.outcome[s.outcome]}{s.failure ? ` · ${folderFailureText({ failure: s.failure, lang })}` : ''}</p>{/each}
         <button disabled={disabled || busy || running} onclick={() => act(async () => { await sortingPost('gmail', account, { action: 'label_reconcile', operation: op.id }); await onreload() })}>{t.reconcile}</button>
       </article>
     {/each}

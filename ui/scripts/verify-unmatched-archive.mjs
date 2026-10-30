@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { build } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
@@ -12,7 +12,9 @@ await mkdir(`${audit}render`, { recursive: true })
 const log = await readFile(process.argv[2] ?? `${audit}verified-3.log`, 'utf8')
 const fixtures = [...log.matchAll(/MAILROOM_ARCHIVE_FIXTURE (.+)/g)].map(match => JSON.parse(match[1]))
 assert.deepEqual(fixtures.map(f => f.provider), ['mailbox_org', 'gmail'])
-for (const name of ['api', 'invoice-diagnostics', 'acquisition-evidence', 'proposal-diagnostics', 'proof-diagnostics']) {
+for (const file of await readdir(`${root}ui/src`)) {
+  if (!file.endsWith('.ts') || file === 'main.ts') continue
+  const name = file.slice(0, -3)
   const source = await readFile(`${root}ui/src/${name}.ts`, 'utf8')
   const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText
   const imports = compiled.replace(/from (['"])zod\1/g, `from '${import.meta.resolve('zod')}'`).replace(/from (['"])(\.\/[^'"]+)\1/g, (_match, _quote, local) => `from '${local}.mjs'`)

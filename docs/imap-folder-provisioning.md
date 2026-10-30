@@ -18,6 +18,8 @@ The transport pipelines read-only checks (RFC 3501 section 5.5). Topology observ
 
 CREATE has no compare-and-swap. A server may recreate a parent removed after the last LIST, or subscribe a new mailbox itself. Complete observations reduce stale plans without excluding that race. The application sends no SUBSCRIBE, DELETE, RENAME, compensation, message mutation or Sieve deployment.
 
+Folder and Gmail label histories explain every recorded creation failure in English and German. Their shared client parser accepts only the recorded failure variants. Saved intent does not establish that CREATE was sent. An explanation does not establish whether an interrupted CREATE reached the server; the step outcome, acknowledgment and observed inventory remain separate evidence. Unknown diagnostic codes fail parsing rather than appearing as unexplained text.
+
 Actual provider namespaces, permissions, quotas, name equivalence, implicit parent and subscription behavior, Sieve mapping and delivery remain unverified. Native confirmation and personal readiness remain outside this unit.
 
 Run `CARGO_PROFILE_TEST_OPT_LEVEL=1 node scripts/verify-imap-provisioning.mjs`, then `node ui/scripts/verify-imap-provisioning.mjs` against its retained fixture. The synthetic checks cover protected saved-workspace proof and exact download, English and German CREATE, deterministic cancellation, HTTP-confirmed process interruption, observe-only reconciliation and unrelated-state preservation. The transport write test saturates an actual TLS path before checking cancellation and absolute deadlines.

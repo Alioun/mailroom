@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte'
+  import { folderFailureText } from './folder-diagnostics'
   import { folderCommand, folderStatus, folderPreview, folderReconcile, type FolderView, type FolderPreview } from './folder-provisioning-api'
   import { localFetch } from './api'
   import { z } from 'zod'
@@ -55,7 +56,7 @@
     <ol>{#each preview.operation.plan.entries as entry}<li><p>{entry.role === 'leaf' ? t.leaf : t.ancestor} · {entry.existing ? t.existing : t.missing}</p>{#if show}<p>{t.decoded} <code>{entry.name.decoded}</code></p><p>{t.wire} <code>{entry.name.wire}</code></p>{#if entry.existing}<p>{entry.existing.attributes.join(' ')}</p>{/if}{/if}</li>{/each}</ol>
     <label><input type="checkbox" bind:checked={approved} />{t.approval}</label><button disabled={!show || !approved || busy || running} onclick={() => act('confirm')}>{preview.operation.plan.entries.length ? t.confirm : t.record}</button>
   {/if}
-  {#if view}{#each view.journal.history as operation}<article><h4>{t.statuses[operation.status]}</h4><p>{operation.id}</p><ol>{#each operation.steps as step}<li>{#if show}<code>{step.name.decoded}</code> · <code>{step.name.wire}</code> · {/if}{t.outcomes[step.outcome]} · {t.ack} {step.acknowledgment ? t.yes : t.no} · {t.readback} {step.observed ? t.yes : t.none} {step.failure ?? ''}</li>{/each}</ol><button disabled={busy || running || view.recovery_hold} onclick={() => act('reconcile', operation.id)}>{t.reconcile}</button></article>{/each}{/if}
+  {#if view}{#each view.journal.history as operation}<article><h4>{t.statuses[operation.status]}</h4><p>{operation.id}</p><ol>{#each operation.steps as step}<li>{#if show}<code>{step.name.decoded}</code> · <code>{step.name.wire}</code> · {/if}{t.outcomes[step.outcome]} · {t.ack} {step.acknowledgment ? t.yes : t.no} · {t.readback} {step.observed ? t.yes : t.none} {step.failure ? folderFailureText({ failure: step.failure, lang }) : ''}</li>{/each}</ol><button disabled={busy || running || view.recovery_hold} onclick={() => act('reconcile', operation.id)}>{t.reconcile}</button></article>{/each}{/if}
   <p>{t.fresh}</p><p>{t.limitations}</p>
 </section>
 <style>

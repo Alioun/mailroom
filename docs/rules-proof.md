@@ -84,12 +84,18 @@ Primary tool references:
 4. The source schema is a coherent subset of the complete authoring specification. It has no preset forward patches, category-wide enable controls, major-upgrade approval workflow or ledger service, first-seen and leak-report fields. General TOML, Jsonnet, alternative layouts and weak-provider engines remain deferred product scope.
 5. [Deterministic organisational proposals](organisational-proposals.md) now support exact rejection and selected local approval over saved observations. Agent export, CLI review and native confirmation remain outside this bounded slice. Proposals infer no roles or invoice-sender approval and never edit external private files.
 6. Durable local documents, pins, confirmed Sieve downloads and recorded export comparisons are implemented. Provider deployment history, after-deploy landing comparison and strict/warnings-only advanced gates remain unimplemented. Download history records prepared bytes only. It does not prove successful delivery or provider application.
-7. Generated system filing rules lack individual 13-month diagnostic rows. Omitted rules are reported but engine-gap attribution to individual Inbox messages remains incomplete. Backend diagnostic prose and copy-eligibility states are not fully localized, though controls and proof headings support English and German.
+7. Generated ledger, new-address, bulk and unmatched filing rules now have separate diagnostic rows. Omitted rules are reported but engine-gap attribution to individual Inbox messages remains incomplete. Backend diagnostic prose and copy-eligibility states are not fully localized, though controls and proof headings support English and German.
 8. T3 preview opened but both snapshot attempts timed out. The actual built UI was verified through the repository's Playwright fallback. T3 preview verification remains unverified.
 9. Provider folder separators, existing folder inventory, rule coexistence, accounting acceptance and full-scale census behavior remain unknown. Full Gmail topology and earlier census lifecycle limitations remain as documented in the census receipts. No synthetic check settles these facts.
 
 The [synthetic backlog slice](backlog.md) adds journaled local effects and conditional undo. Production backlog moves, deployment, Gmail forwarding setup, unsubscribe, complete address lifecycle, wind-down reporting and owner-authorized live validation remain later dependencies. Every live-write denial remains enforced.
 
+
+## Generated filing diagnostics
+
+The proof's `generated_rules` rows come from the parsed emitted executable. Personal and business branches share one row per rule ID. Candidate counts include only messages that clear recipient safety and match that rule before precedence. Selected and monthly counts follow the final filing decisions. A guard or ledger rule can therefore select a message that also counts as a bulk candidate.
+
+The window includes the current calendar month and twelve preceding month buckets, with future, invalid and missing Date values excluded. It is the proof's existing window, not a rolling interval of thirteen months. Each row contains all thirteen buckets, including zeros. The role-safety hold stays in the proof's review count and has no generated filing row. A generated rule omitted from the executable has no row; omission does not mean zero matches. Generated zero or shadowed rows do not add authored-rule warnings or change the proof gate.
 
 ## Current-delivery envelope tags
 

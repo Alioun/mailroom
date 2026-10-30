@@ -17,13 +17,14 @@ const sample = z.object({
   messages: z.array(z.object({ id: z.string(), headers: z.string(), current_folder: z.string() })),
   as_of: z.number(), pins: z.array(pin), baseline: z.enum(['current', 'previous']), previous: documents.nullable(),
 })
+const ruleCount = z.object({ id: z.string(), matched: z.number(), candidates: z.number(), monthly: z.record(z.string(), z.number()), zero_match: z.boolean(), fully_shadowed: z.boolean() })
 const preview = z.object({
   source: z.literal('local_census'), semantics: z.string(),
   artifact: z.object({ identity: z.string(), context: sample.shape.context, executable: z.string(), trace: z.array(z.string()), omissions: z.array(z.object({ rule: z.string(), reason: z.string() })), folders: z.array(z.string()), effective: z.array(z.object({ id: z.string(), origin: z.string(), enabled: z.boolean(), accounts: z.array(z.string()) })) }),
   counts: z.object({ messages: z.number(), filed: z.number(), inbox: z.number(), copies: z.number(), copied_messages: z.number(), review: z.number() }),
   decisions: z.array(z.object({ id: z.string(), message_id_hash: z.string().nullable(), subject: z.string(), from: z.string(), destination, matched_rule: z.string().nullable(), review: z.boolean(), mark_read: z.boolean(), delivery_status: z.enum(['known', 'unavailable', 'unsupported', 'ambiguous', 'incompatible']), keyword_additions: z.array(z.string()), observed_flags: z.array(z.string()).nullable(), delivery_tags: z.array(z.object({ rule: z.string(), status: z.enum(['match', 'no_match', 'unknown', 'omitted', 'held_tagged']), reason: z.string() })), copies: z.array(z.object({ rule: z.string(), recipient: z.string() })), current_folders: z.array(z.string()), copy_eligibility: z.array(z.object({ rule: z.string(), status: z.string(), reason: z.string() })) })),
   baseline: sample.shape.baseline, diff: z.array(z.object({ id: z.string(), before: z.array(z.string()), after: z.string() })),
-  rules: z.array(z.object({ id: z.string(), matched: z.number(), candidates: z.number(), monthly: z.record(z.string(), z.number()), zero_match: z.boolean(), fully_shadowed: z.boolean() })),
+  rules: z.array(ruleCount), generated_rules: z.array(ruleCount),
   months: z.array(z.string()), unmatched_senders: z.record(z.string(), z.number()), pins: z.array(pin.extend({ status: z.enum(['pass', 'fail', 'stale', 'unknown']), actual: z.array(destination) })),
   gate: proofGate, diagnostics: proofDiagnostics, warnings: z.array(z.string()), runtime_cross_check: z.string(),
 })

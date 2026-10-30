@@ -12,6 +12,10 @@ pub const SEMANTICS: &str = "parsed-emitted-sieve-subset-v6";
 pub mod diagnostics;
 use diagnostics::{Diagnostics, Notice, RuntimeCheck};
 
+#[cfg(test)]
+#[path = "proof/generated_tests.rs"]
+mod generated_tests;
+
 /// Lowercase MIME part content types per proof message ID, from acquired originals.
 /// A message without an entry has unknown structure.
 pub type MimeEvidence = BTreeMap<String, BTreeSet<String>>;
@@ -53,6 +57,7 @@ pub struct Proof {
     pub baseline: Baseline,
     pub diff: Vec<FolderDiff>,
     pub rules: Vec<RuleCount>,
+    pub generated_rules: Vec<RuleCount>,
     pub months: Vec<String>,
     pub unmatched_senders: BTreeMap<String, usize>,
     pub pins: Vec<PinResult>,
@@ -311,7 +316,7 @@ fn execute(
         if !review {
             let mut matched_ids = BTreeSet::new();
             for s in &statements {
-                if s.id.starts_with("system.")
+                if s.id == "system.role_safety"
                     || !s.test.evaluate(&view, &duplicates).matched()
                     || !matched_ids.insert(&s.id)
                 {
@@ -629,22 +634,30 @@ pub fn prove_with_evidence(
                 .map(|d| (&m.id, d.format("%Y-%m").to_string()))
         })
         .collect();
-    let rules = artifact
+    let mut generated = BTreeSet::new();
+    let generated_ids = artifact
+        .statements()?
+        .into_iter()
+        .filter(|s| s.id.starts_with("system.") && s.id != "system.role_safety")
+        .filter_map(|s| generated.insert(s.id.clone()).then_some(s.id));
+    let (rules, generated_rules): (Vec<_>, Vec<_>) = artifact
         .effective()
         .iter()
         .filter(|r| {
             r.enabled && (r.accounts.is_empty() || r.accounts.contains(&artifact.context().account))
         })
-        .map(|r| {
+        .map(|r| r.id.clone())
+        .chain(generated_ids)
+        .map(|id| {
             let selected: Vec<_> = decisions
                 .iter()
                 .filter(|d| {
                     window_ids.contains(&d.id)
-                        && (d.matched_rule.as_ref() == Some(&r.id)
-                            || d.copies.iter().any(|c| c.rule == r.id)
+                        && (d.matched_rule.as_ref() == Some(&id)
+                            || d.copies.iter().any(|c| c.rule == id)
                             || d.delivery_tags
                                 .iter()
-                                .any(|t| t.rule == r.id && t.status == "match"))
+                                .any(|t| t.rule == id && t.status == "match"))
                 })
                 .collect();
             let mut monthly: BTreeMap<_, _> = months.iter().map(|m| (m.clone(), 0)).collect();
@@ -653,9 +666,9 @@ pub fn prove_with_evidence(
                     *monthly.get_mut(month).unwrap() += 1;
                 }
             }
-            let count = candidates.get(&r.id).map(|r| r.0).unwrap_or(0);
+            let count = candidates.get(&id).map(|r| r.0).unwrap_or(0);
             RuleCount {
-                id: r.id.clone(),
+                id,
                 matched: selected.len(),
                 candidates: count,
                 monthly,
@@ -663,7 +676,7 @@ pub fn prove_with_evidence(
                 fully_shadowed: count > 0 && selected.is_empty(),
             }
         })
-        .collect::<Vec<_>>();
+        .partition(|r| !r.id.starts_with("system."));
     let mut notices = vec![
         Notice::DeliveryTagLimits,
         Notice::SyntheticRecipientLimits,
@@ -794,6 +807,7 @@ pub fn prove_with_evidence(
         baseline,
         diff,
         rules,
+        generated_rules,
         months,
         unmatched_senders,
         pins,

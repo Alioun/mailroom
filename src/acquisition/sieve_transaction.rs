@@ -43,6 +43,8 @@ pub(crate) struct Preview {
     pub precedence: Option<Precedence>,
     pub effects: Vec<Effect>,
     pub limitations: &'static str,
+    #[serde(skip)]
+    deployment_artifact: Option<crate::rules::CompiledArtifact>,
 }
 #[derive(Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
@@ -70,6 +72,27 @@ fn sha256(bytes: &[u8]) -> String {
 }
 fn save(store: &EncryptedStore, state: &mut AccountState) -> Result<(), AcquisitionError> {
     store.save_state(state).map_err(Into::into)
+}
+
+fn persist_confirmed_intent(
+    store: &EncryptedStore,
+    saved: &mut AccountState,
+    preview: Preview,
+) -> Result<(), AcquisitionError> {
+    let deploy = preview
+        .transaction
+        .composition
+        .as_ref()
+        .is_some_and(|c| c.purpose == Purpose::Deploy);
+    match (deploy, preview.deployment_artifact) {
+        (true, Some(artifact)) => saved
+            .deployment_artifacts
+            .insert(&preview.transaction, artifact)?,
+        (false, None) => (),
+        _ => return Err(invalid()),
+    }
+    saved.sieve_transactions.history.push(preview.transaction);
+    save(store, saved)
 }
 fn observe(session: &mut Session) -> Result<Image, Error> {
     let capabilities = session.capabilities()?;
@@ -144,6 +167,7 @@ struct Planned {
     proof: serde_json::Value,
     precedence: Option<Precedence>,
     composition: Option<Composition>,
+    deployment_artifact: Option<crate::rules::CompiledArtifact>,
 }
 enum Plan {
     Ready(Box<Planned>),
@@ -282,6 +306,7 @@ impl Accounts {
             proof: serde_json::json!({"compensates": id, "fresh_provider_match":true}),
             precedence: None,
             composition,
+            deployment_artifact: None,
         })
     }
     fn composed_plan(
@@ -342,6 +367,7 @@ impl Accounts {
                 proof_binding: sha256(foreign.as_bytes()),
                 proof: serde_json::json!({"removal": composition::SEMANTICS, "found": {"require": found.require, "copy": found.copy, "block": found.block, "include": found.include}}),
                 precedence: None,
+                deployment_artifact: None,
                 composition: Some(Composition {
                     purpose: Purpose::Removal,
                     semantics: composition::SEMANTICS.into(),
@@ -412,6 +438,7 @@ impl Accounts {
         Ok(Plan::Ready(Box::new(Planned {
             after,
             artifact: p.proof.artifact.identity().to_owned(),
+            deployment_artifact: Some(p.proof.artifact.clone()),
             proof_binding: store
                 .keys()
                 .binding_for(b"mailroom/managesieve-composed-proof/v1", &binding),
@@ -538,6 +565,7 @@ impl Accounts {
             precedence: planned.precedence,
             effects: proposed,
             limitations: LIMITATIONS,
+            deployment_artifact: planned.deployment_artifact,
         })))
     }
     pub(crate) fn transaction_preview(
@@ -568,8 +596,7 @@ impl Accounts {
             return Err(invalid());
         }
         fresh(saved).map_err(|_| invalid())?;
-        saved.sieve_transactions.history.push(preview.transaction);
-        save(store, saved)?;
+        persist_confirmed_intent(store, saved, preview)?;
         boundary("transaction_consumed");
         let index = saved.sieve_transactions.history.len() - 1;
         let execution = self.transaction_run(account, store, saved, index, cancel.clone(), &fresh);
@@ -860,5 +887,7 @@ pub(crate) fn boundary(name: &str) {
     let _ = name;
 }
 
+#[cfg(test)]
+mod retention_tests;
 #[cfg(test)]
 pub(crate) mod tests;

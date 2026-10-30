@@ -7,6 +7,45 @@ fn secret() -> SecretValue {
 }
 
 #[test]
+fn retained_deployment_artifacts_survive_rotation_and_single_account_recovery_without_exports() {
+    let (root, repo, account) = fixture();
+    let store = repo.store(&account).unwrap();
+    let mut saved = store.load_state().unwrap();
+    crate::rules::landing::tests::seed_deployment(&mut saved);
+    store.save_state(&mut saved).unwrap();
+    let before = serde_json::to_vec(&saved.deployment_artifacts).unwrap();
+    drop(store);
+    let effects = root.path().join("effects");
+    fs::create_dir_all(&effects).unwrap();
+    repo.rotate(&account.id, &effects).unwrap();
+    let current = repo.load(&account.id).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&state(&repo, &current).deployment_artifacts).unwrap(),
+        before
+    );
+    let (manifest, bundle) = capture(&repo, &current, root.path());
+    assert_eq!(manifest.state_schema, crate::census::SCHEMA);
+    let target = tempfile::tempdir().unwrap();
+    let fresh = persistent_accounts(target.path());
+    let preview = fresh.restore_preview(&bundle, &secret()).unwrap();
+    fresh
+        .restore(&bundle, &secret(), &preview, |_| Ok(()))
+        .unwrap();
+    let restored = fresh.load(&account.id).unwrap();
+    let store = fresh.store(&restored).unwrap();
+    let saved = store.load_state().unwrap();
+    assert!(saved.exports.is_empty());
+    assert!(store.recovery_pending());
+    assert_eq!(
+        serde_json::to_vec(&saved.deployment_artifacts).unwrap(),
+        before
+    );
+    let comparison = serde_json::to_value(crate::rules::landing::compare(&saved, true)).unwrap();
+    assert_eq!(comparison["baseline_source"], "retained_deployment");
+    assert_eq!(comparison["historical"], true);
+}
+
+#[test]
 fn transactions_round_trip_without_resumption_authority_under_single_recovery_hold() {
     let root = tempfile::tempdir().unwrap();
     let (repo, account, fake) = crate::acquisition::sieve_transaction::tests::install(root.path());

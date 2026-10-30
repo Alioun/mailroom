@@ -105,6 +105,11 @@ try {
   const secondView = await api.openAccount(second.id)
   assert.deepEqual(firstView.landing, { kind: 'unavailable', reason: 'no_recorded_deployment' })
   await writeFile(`${audit}first-view.json`, JSON.stringify(firstView) + '\n')
+  if (process.argv.includes('--recovery-preview')) {
+    const recovery = await import(pathToFileURL(`${audit}render/recovery-api.mjs`))
+    const offer = await recovery.previewCapture([first.id], false)
+    await writeFile(`${audit}recovery-offer.json`, JSON.stringify(offer) + '\n')
+  }
   const status = await api.readAccountStatus()
   const states = []
   const loader = accountWorkspace(state => states.push(state))

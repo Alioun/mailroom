@@ -12,6 +12,11 @@ const marker = 'MAILROOM_LANDING_FIXTURE '
 const line = (await readFile(`${audit}rules.log`, 'utf8')).split('\n').find(line => line.startsWith(marker))
 assert.ok(line, 'The compiled Rust comparison supplies the received-message fixture')
 const report = JSON.parse(line.slice(marker.length)).compared
+assert.equal(report.baseline_source, 'legacy_export')
+const retainedLine = (await readFile(`${audit}rules.log`, 'utf8')).split('\n').find(line => line.startsWith('MAILROOM_RETAINED_DEPLOYMENT_FIXTURE '))
+assert.ok(retainedLine)
+const retained = JSON.parse(retainedLine.slice('MAILROOM_RETAINED_DEPLOYMENT_FIXTURE '.length)).compared
+assert.equal(retained.baseline_source, 'retained_deployment')
 const source = await readFile(`${root}ui/src/LandingComparison.svelte`, 'utf8')
 for (const page of [2, 3]) await writeFile(`${audit}render/source/Page${page}.svelte`, source.replace("from './landing'", `from '${root}ui/src/landing'`).replace('let page = $state(1)', `let page = $state(${page})`))
 await writeFile(`${audit}render/source/entry.mjs`, `export { default as Comparison } from '${root}ui/src/LandingComparison.svelte'; export { default as Page2 } from './Page2.svelte'; export { default as Page3 } from './Page3.svelte'; export { landingReport } from '${root}ui/src/landing'; export { openAccount } from '${root}ui/src/api'; export { render } from 'svelte/server'`)
@@ -21,6 +26,7 @@ assert.deepEqual(ui.landingReport.parse(report), report)
 const rejections = []
 for (const [name, alter] of [
   ['unknown semantics', r => { r.semantics = 'future' }],
+  ['unknown baseline source', r => { r.baseline_source = 'current_editable_rules' }],
   ['unknown comparison', r => { r.rows[0].prediction.comparison = 'delivered' }],
   ['unknown origin', r => { r.rows[0].prediction.origin = 'provider_verified' }],
   ['negative counts', r => { r.counts.matches = -1 }],
@@ -62,6 +68,8 @@ assert.ok(first)
 const long = { ...report, counts: { matches: 103, elsewhere: 0, additional_folders: 0, uncheckable: 0 }, rows: Array.from({ length: 103 }, (_, i) => ({ ...first, id: `row-${i}`, subject: i === 0 ? '<img src=x onerror=alert(1)>' : `message-${i}` })) }
 ui.landingReport.parse(long)
 for (const lang of ['en', 'de']) {
+  const kept = await screen(`retained-${lang}`, ui.Comparison, retained, lang)
+  assert.ok(kept.includes(lang === 'en' ? 'independent of downloads' : 'unabhängig von Downloads'))
   const body = await screen(`compared-${lang}`, ui.Comparison, report, lang)
   assert.equal((body.match(/<tbody>.*?<\/tbody>/s)?.[0].match(/<tr>/g) ?? []).length, 4)
   assert.ok(body.includes(lang === 'en' ? 'Existing rule' : 'Vorhandene Regel'))

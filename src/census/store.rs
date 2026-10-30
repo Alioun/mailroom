@@ -18,6 +18,8 @@ use std::{
 use zeroize::Zeroizing;
 
 mod delta;
+#[cfg(test)]
+mod deployment_tests;
 mod log;
 mod patch;
 
@@ -44,7 +46,8 @@ const MIN_FRAME_BUDGET: u64 = 64 * 1024;
 /// local unsubscribe mail. 24 adds explicit OR sender sets to persisted
 /// rule artifacts used by exports and backlog plans. 25 adds separate unmatched
 /// archive intent. 26 adds tagged COPY phase journals with exact decimal MODSEQ.
-pub(crate) const SCHEMA: u32 = 29;
+/// 30 retains exact compiled deployment artifacts independently of downloads.
+pub(crate) const SCHEMA: u32 = 30;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProtocolStateView {
@@ -265,6 +268,11 @@ pub struct AccountState {
     pub synthetic_folders: Option<super::folder_provisioning::FakeProvider>,
     #[serde(default)]
     pub sieve_transactions: super::sieve_transaction::Journal,
+    #[serde(
+        default,
+        skip_serializing_if = "super::deployment::Artifacts::is_empty"
+    )]
+    pub deployment_artifacts: super::deployment::Artifacts,
     #[serde(default)]
     pub synthetic_sieve: Option<super::sieve_transaction::FakeProvider>,
     #[serde(default)]
@@ -301,6 +309,7 @@ impl AccountState {
             synthetic_folders: None,
             sieve: Default::default(),
             sieve_transactions: Default::default(),
+            deployment_artifacts: Default::default(),
             synthetic_sieve: None,
             proposals: Default::default(),
             revision: 0,
@@ -381,6 +390,7 @@ frame_fields!(
     label_provisioning,
     synthetic_folders,
     sieve_transactions,
+    deployment_artifacts,
     synthetic_sieve,
     sieve,
     proposals,
@@ -918,6 +928,9 @@ impl EncryptedStore {
             .map_err(|_| CensusError::Storage)?;
         state.sieve.validate(&state.census.account)?;
         state.sieve_transactions.validate(&state.census.account)?;
+        state
+            .deployment_artifacts
+            .validate(&state.census.account, &state.sieve_transactions)?;
         if state
             .sieve_placement
             .as_ref()
@@ -1225,6 +1238,13 @@ impl EncryptedStore {
         if account != self.keys.account.as_str() {
             return Err(CensusError::AccountMismatch);
         }
+        if version < 30 {
+            let raw: serde_json::Value =
+                serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?;
+            if raw.get("deployment_artifacts").is_some() {
+                return Err(CensusError::UnsupportedVersion);
+            }
+        }
         if version < 29 {
             let raw: serde_json::Value =
                 serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?;
@@ -1388,6 +1408,9 @@ impl EncryptedStore {
         let mut patched = std::collections::BTreeMap::new();
         for frame in frames {
             let frame: Frame = serde_json::from_slice(frame).map_err(|_| CensusError::Storage)?;
+            if version < 30 && frame.fields.contains_key("deployment_artifacts") {
+                return Err(CensusError::UnsupportedVersion);
+            }
             if Some(frame.revision) != state.revision.checked_add(1) {
                 return Err(CensusError::Storage);
             }

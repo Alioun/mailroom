@@ -5,6 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const SEMANTICS: &str = "mailroom/recorded-placement-comparison/v1";
 
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BaselineSource {
+    RetainedDeployment,
+    LegacyExport,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Unavailable {
@@ -34,6 +41,7 @@ pub enum Report {
         historical: bool,
         transaction: String,
         artifact: String,
+        baseline_source: BaselineSource,
         target: String,
         counts: Counts,
         rows: Vec<Row>,
@@ -122,14 +130,24 @@ pub fn compare(saved: &AccountState, historical: bool) -> Report {
     if recorded.semantics != composition::SEMANTICS {
         return unavailable(Unavailable::HistoricalSemantics);
     }
-    let Some(export) = saved.exports.iter().rev().find(|e| {
+    let (artifact, baseline_source) = if let Some(retained) =
+        saved.deployment_artifacts.get(&transaction.id)
+    {
+        if retained.semantics != program::SEMANTICS || retained.proof_semantics != proof::SEMANTICS
+        {
+            return unavailable(Unavailable::HistoricalSemantics);
+        }
+        (&retained.artifact, BaselineSource::RetainedDeployment)
+    } else if let Some(export) = saved.exports.iter().rev().find(|e| {
         e.artifact.identity() == transaction.artifact
             && e.artifact.context().account == saved.census.account.as_str()
             && e.artifact.context().engine == super::Engine::MailboxSieve
             && e.context_binding.is_some()
             && e.semantics == program::SEMANTICS
             && e.proof_semantics == proof::SEMANTICS
-    }) else {
+    }) {
+        (&export.artifact, BaselineSource::LegacyExport)
+    } else {
         return unavailable(Unavailable::ArtifactNotRetained);
     };
     let Some(host) = transaction.after.body(&transaction.target) else {
@@ -148,7 +166,7 @@ pub fn compare(saved: &AccountState, historical: bool) -> Report {
         &foreign,
         &script,
         placement,
-        export.artifact.executable(),
+        artifact.executable(),
         &transaction.target,
     ) else {
         return unavailable(Unavailable::RecordedBytesDiffer);
@@ -167,7 +185,7 @@ pub fn compare(saved: &AccountState, historical: bool) -> Report {
         return unavailable(Unavailable::NoCompletedRefresh);
     };
     let Ok(proof) = proof::prove_shared(
-        export.artifact.clone(),
+        artifact.clone(),
         &saved.census,
         refreshed_at,
         &[],
@@ -270,6 +288,7 @@ pub fn compare(saved: &AccountState, historical: bool) -> Report {
         historical,
         transaction: transaction.id.clone(),
         artifact: transaction.artifact.clone(),
+        baseline_source,
         target: transaction.target.clone(),
         counts,
         rows,
@@ -277,4 +296,4 @@ pub fn compare(saved: &AccountState, historical: bool) -> Report {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

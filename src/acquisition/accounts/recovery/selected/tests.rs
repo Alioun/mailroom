@@ -38,6 +38,52 @@ fn secret() -> SecretValue {
 }
 
 #[test]
+fn selected_recovery_preserves_account_owned_deployment_artifacts_without_export_history() {
+    let (root, repo, ids, ledger) = fixture();
+    let mut expected = vec![];
+    for id in &ids[..2] {
+        let account = repo.load(id).unwrap();
+        let store = repo.store(&account).unwrap();
+        let mut saved = store.load_state().unwrap();
+        crate::rules::landing::tests::seed_deployment(&mut saved);
+        store.save_state(&mut saved).unwrap();
+        expected.push(serde_json::to_vec(&saved.deployment_artifacts).unwrap());
+    }
+    let (manifest, bundle) = capture(&repo, &ids[..2], &ledger, root.path());
+    assert!(
+        manifest
+            .accounts
+            .iter()
+            .all(|m| m.state_schema == crate::census::SCHEMA)
+    );
+    let target = tempfile::tempdir().unwrap();
+    let fresh = persistent_accounts(target.path());
+    let installed = InstalledLedger::install(target.path().join("ledger")).unwrap();
+    let preview = fresh
+        .selected_restore_preview(&bundle, &secret(), false, Some(&installed))
+        .unwrap();
+    fresh
+        .selected_restore(&bundle, &secret(), &preview, Some(&installed), |_| Ok(()))
+        .unwrap();
+    for (id, expected) in ids.iter().zip(expected) {
+        let account = fresh.load(id).unwrap();
+        let store = fresh.store(&account).unwrap();
+        let saved = store.load_state().unwrap();
+        assert!(store.recovery_pending());
+        assert!(saved.exports.is_empty());
+        assert_eq!(
+            serde_json::to_vec(&saved.deployment_artifacts).unwrap(),
+            expected
+        );
+        assert_eq!(
+            serde_json::to_value(crate::rules::landing::compare(&saved, true)).unwrap()["baseline_source"],
+            "retained_deployment"
+        );
+    }
+    assert!(fresh.load(&ids[2]).is_err());
+}
+
+#[test]
 fn selected_recovery_preserves_transaction_journal_and_cannot_resume_effects() {
     let root = tempfile::tempdir().unwrap();
     let (repo, account, fake) = crate::acquisition::sieve_transaction::tests::install(root.path());

@@ -6,7 +6,7 @@ The baseline requires all of the following evidence:
 
 - The newest recorded transaction is a complete version-2 composed deploy with an active target.
 - Its final effect was observed and matches its exact recorded after-image.
-- A retained export contains the identical immutable compiled artifact for that account and engine, with current compiler and proof semantics.
+- The deployment record retains the identical immutable compiled artifact for that account and engine, with current compiler and proof semantics. Older deployments can use an exact matching export as a legacy fallback.
 - Recomposing that artifact with the recorded existing rules reproduces the exact recorded host and included script bytes.
 - A completed census refresh supplies the comparison date.
 
@@ -18,6 +18,8 @@ The report binds its account, census SHA-256, last completed refresh, recorded t
 
 This is a comparison of recorded snapshots. It includes old messages and later moves. It does not establish the initial delivery destination, causation, continued script activation, accounting-copy receipt, keyword persistence or complete provider coverage. Excluded folders remain outside the saved message set. Partial scans can mix observations from different times.
 
-The transaction journal and export history have independent retention bounds. If either needed record is missing, the comparison becomes unavailable. A dedicated deployment-artifact record that survives export eviction and a time-bounded new-arrival comparison remain unimplemented. No schema or persistence format changes in this slice.
+State schema 30 retains the exact approved artifact with each new composed deployment intent in one encrypted account save before effects. Preview keeps the compiled artifact internal, and confirmation rechecks the existing receipt and freshness conditions before saving. Removing a deployment or compensating it creates no replacement artifact. Encrypted reopen, key rotation and both recovery formats preserve these records. Restored accounts keep their execution hold.
+
+The dedicated records survive export eviction, and deployment requires no prior download. The report identifies whether a dedicated record or a legacy export supplies its baseline. Missing material makes comparison unavailable and never triggers recompilation. The transaction journal admits at most four operations and refuses when full. Artifact retention follows the same bound and never silently prunes history. A deployment timestamp and a time-bounded new-arrival comparison remain unimplemented.
 
 Credential-free verification uses constructed recorded deployments, real compiled artifacts and encrypted reopen, followed by actual account Router/client checks and bilingual server rendering. These checks do not establish mounted interaction, visual, connected, provider or whole-workflow acceptance.

@@ -24,6 +24,8 @@ Preview derives the immutable candidate and fresh proof from the server-owned sa
 
 Dedicated purpose-separated receipts bind the entire saved state, workspace/census revisions, ledger authority, proof binding and semantics, exact executable, complete observed script inventory and bytes, capabilities, active selection, installed source, ownership epoch, credential/key/recovery context and operation identity. Compensation has a distinct purpose and original journal binding. Confirmation recomputes proof and actual provider observations, rechecks external ledger freshness and consumes approval through an encrypted revision before effects. Download, altered, stale, replayed and cross-purpose approvals cannot grant these writes.
 
+Schema 30 saves the exact compiled artifact and confirmed composed deployment intent together before effects. The artifact remains internal to the server preview, survives export eviction and supplies the [saved placement comparison](landing-comparison.md). Compensation and removal preserve earlier artifacts without creating new ones. The four-operation journal limit remains unchanged.
+
 CHECKSCRIPT validates syntax without storing. Its success is not delivery, coexistence, provider acceptance of a subsequent upload, or independent Sieve-engine verification. Unsupported protocol semantics and command refusal have no upload fallback. HAVESPACE reserves nothing and cannot mask a later PUTSCRIPT quota refusal. Client literals count exact octets, including CRLF and UTF-8, without newline conversion. The adapter never sends credentials before verified TLS and never follows referrals.
 
 ## Journal and recovery

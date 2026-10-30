@@ -14,8 +14,17 @@ fn fixture(
     foreign: &str,
     placement: composition::Placement,
 ) -> (tempfile::TempDir, EncryptedStore, AccountState) {
+    fixture_for("synthetic-rules", foreign, placement)
+}
+
+pub(crate) fn fixture_for(
+    account: &str,
+    foreign: &str,
+    placement: composition::Placement,
+) -> (tempfile::TempDir, EncryptedStore, AccountState) {
     let mut input: PreviewInput =
         serde_json::from_str(include_str!("../../../examples/sample.json")).unwrap();
+    input.context.account = account.into();
     input.documents.preset_yaml = "id: placement\nmajor: 1\nrules:\n  - id: sender.vendor\n    category: orders\n    stage: from\n    folder: Vendor\n    when: [{kind: from_domain, value: vendor.example.test}]\n".into();
     input.documents.override_yaml =
         "preset: placement\nmajor: 1\nlayout:\n  language: de\n  personal_root: Privat\n  business_root: Geschäftlich\n  new_addresses: Neue Adressen\n  retired_addresses: Stillgelegte Adressen\nroles:\n  domains: {home.example.test: personal}\n".into();
@@ -127,6 +136,25 @@ fn fixture(
 }
 
 const FOREIGN: &str = "require [\"fileinto\"];\nif header :contains \"subject\" \"existing\" { fileinto \"Prior\"; stop; }\n";
+
+pub(crate) fn seed_deployment(saved: &mut AccountState) {
+    let (_directory, _store, mut fixture) = fixture_for(
+        saved.census.account.as_str(),
+        FOREIGN,
+        composition::Placement::Block {},
+    );
+    fixture
+        .deployment_artifacts
+        .insert(
+            &fixture.sieve_transactions.history[0],
+            fixture.exports[0].artifact.clone(),
+        )
+        .unwrap();
+    saved.census = fixture.census;
+    saved.sieve_transactions = fixture.sieve_transactions;
+    saved.deployment_artifacts = fixture.deployment_artifacts;
+    saved.exports.clear();
+}
 
 fn value(state: &AccountState) -> serde_json::Value {
     serde_json::to_value(compare(state, false)).unwrap()
@@ -267,4 +295,51 @@ fn artifact_from_a_different_account_cannot_explain_this_accounts_observations()
     state.sieve_transactions.history[0].artifact = artifact.identity().into();
     state.exports[0].artifact = artifact;
     assert_eq!(value(&state)["reason"], "artifact_not_retained");
+}
+
+#[test]
+fn retained_deployment_survives_export_eviction_and_encrypted_reopen_without_a_download() {
+    let (_directory, store, mut state) = fixture(FOREIGN, composition::Placement::Block {});
+    seed_deployment(&mut state);
+    assert!(state.exports.is_empty());
+    store.save_state(&mut state).unwrap();
+    let report = value(&state);
+    assert_eq!(report["baseline_source"], "retained_deployment");
+    assert_eq!(report["counts"]["matches"], 2);
+    assert_eq!(value(&store.load_state().unwrap()), report);
+    println!(
+        "MAILROOM_RETAINED_DEPLOYMENT_FIXTURE {}",
+        serde_json::json!({"compared":report})
+    );
+}
+
+#[test]
+fn retained_artifact_is_immutable_and_orphaned_or_mismatched_records_are_rejected() {
+    let (_directory, store, mut state) = fixture(FOREIGN, composition::Placement::Block {});
+    let transaction = state.sieve_transactions.history[0].clone();
+    let artifact = state.exports[0].artifact.clone();
+    state
+        .deployment_artifacts
+        .insert(&transaction, artifact.clone())
+        .unwrap();
+    let before = serde_json::to_vec(&state.deployment_artifacts).unwrap();
+    assert!(
+        state
+            .deployment_artifacts
+            .insert(&transaction, artifact)
+            .is_err()
+    );
+    assert_eq!(
+        serde_json::to_vec(&state.deployment_artifacts).unwrap(),
+        before
+    );
+    store.save_state(&mut state).unwrap();
+    let encrypted = std::fs::read(store.path()).unwrap();
+    state.sieve_transactions.history.clear();
+    assert!(store.save_state(&mut state).is_err());
+    assert_eq!(std::fs::read(store.path()).unwrap(), encrypted);
+    state.sieve_transactions.history.push(transaction);
+    state.sieve_transactions.history[0].artifact = "0".repeat(64);
+    assert!(store.save_state(&mut state).is_err());
+    assert_eq!(std::fs::read(store.path()).unwrap(), encrypted);
 }

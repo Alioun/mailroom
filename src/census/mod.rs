@@ -1,6 +1,7 @@
 pub mod acquisition;
 pub mod delivery;
 pub mod demo;
+pub mod deployment;
 pub mod folder_provisioning;
 mod headers;
 pub mod report;

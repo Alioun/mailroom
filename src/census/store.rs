@@ -47,7 +47,8 @@ const MIN_FRAME_BUDGET: u64 = 64 * 1024;
 /// rule artifacts used by exports and backlog plans. 25 adds separate unmatched
 /// archive intent. 26 adds tagged COPY phase journals with exact decimal MODSEQ.
 /// 30 retains exact compiled deployment artifacts independently of downloads.
-pub(crate) const SCHEMA: u32 = 30;
+/// 31 records the first observed active image for those artifacts.
+pub(crate) const SCHEMA: u32 = 31;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProtocolStateView {
@@ -1238,6 +1239,16 @@ impl EncryptedStore {
         if account != self.keys.account.as_str() {
             return Err(CensusError::AccountMismatch);
         }
+        if version < 31 {
+            let raw: serde_json::Value =
+                serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?;
+            if raw
+                .get("deployment_artifacts")
+                .is_some_and(super::deployment::has_observation)
+            {
+                return Err(CensusError::UnsupportedVersion);
+            }
+        }
         if version < 30 {
             let raw: serde_json::Value =
                 serde_json::from_str(&snapshot).map_err(|_| CensusError::Storage)?;
@@ -1408,6 +1419,13 @@ impl EncryptedStore {
         let mut patched = std::collections::BTreeMap::new();
         for frame in frames {
             let frame: Frame = serde_json::from_slice(frame).map_err(|_| CensusError::Storage)?;
+            if version < 31
+                && frame.fields.get("deployment_artifacts").is_some_and(|p| {
+                    serde_json::to_value(p).map_or(true, |v| super::deployment::has_observation(&v))
+                })
+            {
+                return Err(CensusError::UnsupportedVersion);
+            }
             if version < 30 && frame.fields.contains_key("deployment_artifacts") {
                 return Err(CensusError::UnsupportedVersion);
             }

@@ -17,9 +17,14 @@ const retainedLine = (await readFile(`${audit}rules.log`, 'utf8')).split('\n').f
 assert.ok(retainedLine)
 const retained = JSON.parse(retainedLine.slice('MAILROOM_RETAINED_DEPLOYMENT_FIXTURE '.length)).compared
 assert.equal(retained.baseline_source, 'retained_deployment')
+const windowLine = (await readFile(`${audit}rules.log`, 'utf8')).split('\n').find(line => line.startsWith('MAILROOM_ARRIVAL_WINDOW_FIXTURE '))
+assert.ok(windowLine)
+const timed = JSON.parse(windowLine.slice('MAILROOM_ARRIVAL_WINDOW_FIXTURE '.length))
+assert.equal(timed.arrival_window.kind, 'timed')
 const source = await readFile(`${root}ui/src/LandingComparison.svelte`, 'utf8')
 for (const page of [2, 3]) await writeFile(`${audit}render/source/Page${page}.svelte`, source.replace("from './landing'", `from '${root}ui/src/landing'`).replace('let page = $state(1)', `let page = $state(${page})`))
-await writeFile(`${audit}render/source/entry.mjs`, `export { default as Comparison } from '${root}ui/src/LandingComparison.svelte'; export { default as Page2 } from './Page2.svelte'; export { default as Page3 } from './Page3.svelte'; export { landingReport } from '${root}ui/src/landing'; export { openAccount } from '${root}ui/src/api'; export { render } from 'svelte/server'`)
+await writeFile(`${audit}render/source/WindowOnly.svelte`, source.replace("from './landing'", `from '${root}ui/src/landing'`).replace('let windowOnly = $state(false)', 'let windowOnly = $state(true)'))
+await writeFile(`${audit}render/source/entry.mjs`, `export { default as Comparison } from '${root}ui/src/LandingComparison.svelte'; export { default as Page2 } from './Page2.svelte'; export { default as Page3 } from './Page3.svelte'; export { default as WindowOnly } from './WindowOnly.svelte'; export { landingReport } from '${root}ui/src/landing'; export { openAccount } from '${root}ui/src/api'; export { render } from 'svelte/server'`)
 await build({ root: `${root}ui`, configFile: false, logLevel: 'error', plugins: [svelte({ configFile: false })], ssr: { noExternal: true }, build: { ssr: `${audit}render/source/entry.mjs`, outDir: `${audit}render/built`, emptyOutDir: false, minify: false, rollupOptions: { output: { entryFileNames: 'comparison.mjs' } } } })
 const ui = await import(pathToFileURL(`${audit}render/built/comparison.mjs`))
 assert.deepEqual(ui.landingReport.parse(report), report)
@@ -28,6 +33,8 @@ for (const [name, alter] of [
   ['unknown semantics', r => { r.semantics = 'future' }],
   ['unknown baseline source', r => { r.baseline_source = 'current_editable_rules' }],
   ['unknown comparison', r => { r.rows[0].prediction.comparison = 'delivered' }],
+  ['unknown arrival period', r => { r.rows[0].arrival_period = 'delivered' }],
+  ['invented timing without observation', r => { r.rows[0].arrival_period = 'after_observation' }],
   ['unknown origin', r => { r.rows[0].prediction.origin = 'provider_verified' }],
   ['negative counts', r => { r.counts.matches = -1 }],
   ['mismatched counts', r => { r.counts.matches++ }],
@@ -63,11 +70,37 @@ async function screen(name, component, report, lang) {
   renderings.push({ name, sha256: createHash('sha256').update(body).digest('hex') })
   return body
 }
+const timedRejections = []
+for (const [name, alter] of [
+  ['reversed window', r => { r.arrival_window.after = r.arrival_window.through + 1 }],
+  ['changed refresh', r => { r.arrival_window.through-- }],
+  ['bad interval counts', r => { r.arrival_window.counts.matches++ }],
+  ['unknown observation provenance', r => { r.arrival_window.via = 'inferred' }],
+  ['unavailable row in timed comparison', r => { r.rows[0].arrival_period = 'unavailable' }],
+  ['duplicate message identity', r => { r.rows[1].id = r.rows[0].id }],
+]) { const changed = structuredClone(timed); alter(changed); assert.equal(ui.landingReport.safeParse(changed).success, false, name); timedRejections.push(name) }
 const first = report.rows.find(row => row.prediction.kind === 'folder' && row.prediction.comparison === 'matches')
 assert.ok(first)
 const long = { ...report, counts: { matches: 103, elsewhere: 0, additional_folders: 0, uncheckable: 0 }, rows: Array.from({ length: 103 }, (_, i) => ({ ...first, id: `row-${i}`, subject: i === 0 ? '<img src=x onerror=alert(1)>' : `message-${i}` })) }
 ui.landingReport.parse(long)
 for (const lang of ['en', 'de']) {
+  ui.landingReport.parse(timed)
+  const interval = await screen(`timed-${lang}`, ui.Comparison, timed, lang)
+  assert.ok(interval.includes(lang === 'en' ? 'IMAP INTERNALDATE' : 'IMAP INTERNALDATE'))
+  assert.ok(interval.includes(lang === 'en' ? 'Show only mailbox dates' : 'Nur Mailbox-Daten'))
+  const only = await screen(`interval-only-${lang}`, ui.WindowOnly, timed, lang)
+  assert.equal((only.match(/<tbody>.*?<\/tbody>/s)?.[0].match(/<tr>/g) ?? []).length, 2)
+  const emptyWindow = structuredClone(timed)
+  for (const row of emptyWindow.rows) row.arrival_period = 'before_or_at_observation'
+  emptyWindow.arrival_window.counts = { matches: 0, elsewhere: 0, additional_folders: 0, uncheckable: 0 }
+  const emptyInterval = await screen(`interval-empty-${lang}`, ui.WindowOnly, emptyWindow, lang)
+  assert.ok(emptyInterval.includes(lang === 'en' ? 'No mailbox dates fall inside' : 'Keine Mailbox-Daten liegen'))
+  const reversed = structuredClone(report)
+  reversed.arrival_window = { kind: 'unavailable', reason: 'refresh_predates_observation' }
+  await screen(`interval-predates-${lang}`, ui.Comparison, reversed, lang)
+  const reconciliation = structuredClone(timed)
+  reconciliation.arrival_window.via = 'reconciliation'
+  await screen(`reconciled-${lang}`, ui.Comparison, reconciliation, lang)
   const kept = await screen(`retained-${lang}`, ui.Comparison, retained, lang)
   assert.ok(kept.includes(lang === 'en' ? 'independent of downloads' : 'unabhängig von Downloads'))
   const body = await screen(`compared-${lang}`, ui.Comparison, report, lang)
@@ -95,5 +128,5 @@ for (const lang of ['en', 'de']) {
   const empty = await screen(`empty-${lang}`, ui.Comparison, { ...report, rows: [], counts: { matches: 0, elsewhere: 0, additional_folders: 0, uncheckable: 0 } }, lang)
   assert.ok(empty.includes(lang === 'en' ? 'No received messages' : 'Keine empfangenen Nachrichten'))
 }
-await writeFile(`${audit}ui-results.json`, JSON.stringify({ source: 'Actual compiled comparison over constructed credential-free persisted deployment, plus explicit display variants.', requests, rejections, renderings, limits: ['Server rendering and client boundary checks only. No mounted events, layout, connected TLS, initial delivery, continued activation or provider acceptance.'] }, null, 2) + '\n')
+await writeFile(`${audit}ui-results.json`, JSON.stringify({ source: 'Actual compiled comparison over constructed credential-free persisted deployment, plus explicit display variants.', requests, rejections, timedRejections, renderings, limits: ['Server rendering and client boundary checks only. No mounted events, layout, connected TLS, initial delivery, continued activation or provider acceptance.'] }, null, 2) + '\n')
 console.log(`Passed ${rejections.length} malformed-input refusals and ${renderings.length} bilingual renderings.`)

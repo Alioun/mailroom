@@ -62,3 +62,47 @@ fn missing_material_refuses_before_journal_or_ciphertext_change() {
     assert!(state.deployment_artifacts.is_empty());
     assert_eq!(std::fs::read(store.path()).unwrap(), before);
 }
+
+#[test]
+fn active_observation_records_actual_local_time_and_readback_or_reconciliation_provenance() {
+    for via in [
+        crate::census::deployment::ObservationVia::Readback,
+        crate::census::deployment::ObservationVia::Reconciliation,
+    ] {
+        let (_root, store, mut saved) =
+            crate::rules::landing::tests::fixture_for("clock-account", "", Placement::Block {});
+        crate::rules::landing::tests::seed_deployment(&mut saved);
+        let before = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        record_active_observation(&mut saved, 0, via).unwrap();
+        save(&store, &mut saved).unwrap();
+        let reopened = store.load_state().unwrap();
+        let observation = reopened
+            .deployment_artifacts
+            .get(&reopened.sieve_transactions.history[0].id)
+            .unwrap()
+            .active_observation
+            .unwrap();
+        assert_eq!(observation.via, via);
+        assert!(
+            (before
+                ..=i64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()
+                )
+                .unwrap())
+                .contains(&observation.at)
+        );
+        assert_eq!(
+            reopened.sieve_transactions.history[0].status,
+            Status::Complete
+        );
+    }
+}

@@ -343,3 +343,174 @@ fn retained_artifact_is_immutable_and_orphaned_or_mismatched_records_are_rejecte
     assert!(store.save_state(&mut state).is_err());
     assert_eq!(std::fs::read(store.path()).unwrap(), encrypted);
 }
+
+pub(crate) fn observe_active(state: &mut AccountState, at: i64) {
+    state
+        .deployment_artifacts
+        .observe_active(
+            &state.sieve_transactions.history[0],
+            crate::census::deployment::ActiveObservation {
+                at,
+                via: crate::census::deployment::ObservationVia::Readback,
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn mailbox_date_window_uses_internaldate_not_header_date_and_keeps_full_comparison() {
+    let (_root, store, mut state) = fixture(FOREIGN, composition::Placement::Block {});
+    seed_deployment(&mut state);
+    let through = state.census.last_completed_at.unwrap();
+    let after = through - 3600;
+    observe_active(&mut state, after);
+    let stamp = |at| {
+        chrono::DateTime::from_timestamp(at, 0)
+            .unwrap()
+            .format("%d-%b-%Y %H:%M:%S %z")
+            .to_string()
+    };
+    for record in state
+        .census
+        .folders
+        .values_mut()
+        .flat_map(|f| f.messages.values_mut())
+    {
+        record.internal_date = match record.headers.subject.as_str() {
+            "match" => stamp(after + 1),
+            "elsewhere" => stamp(after),
+            "existing" => stamp(through),
+            _ => "invalid".into(),
+        };
+        record.headers.date = Some("Wed, 01 Jan 1997 00:00:00 +0000".into());
+    }
+    let report = value(&state);
+    assert_eq!(report["arrival_window"]["kind"], "timed");
+    assert_eq!(report["arrival_window"]["after"], after);
+    assert_eq!(report["arrival_window"]["through"], through);
+    assert_eq!(report["arrival_window"]["counts"]["matches"], 2);
+    assert_eq!(report["counts"]["elsewhere"], 1);
+    let rows = report["rows"].as_array().unwrap();
+    let period = |subject| {
+        rows.iter().find(|r| r["subject"] == subject).unwrap()["arrival_period"]
+            .as_str()
+            .unwrap()
+    };
+    assert_eq!(period("elsewhere"), "before_or_at_observation");
+    assert_eq!(period("existing"), "after_observation");
+    assert_eq!(period("hold"), "invalid_date");
+    store.save_state(&mut state).unwrap();
+    assert_eq!(value(&store.load_state().unwrap()), report);
+    println!("MAILROOM_ARRIVAL_WINDOW_FIXTURE {}", report);
+    for record in state
+        .census
+        .folders
+        .values_mut()
+        .flat_map(|f| f.messages.values_mut())
+    {
+        record.internal_date = stamp(through + 1);
+    }
+    let future = value(&state);
+    assert!(
+        future["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["arrival_period"] == "after_refresh")
+    );
+    assert_eq!(future["arrival_window"]["counts"]["matches"], 0);
+}
+
+#[test]
+fn legacy_and_reversed_chronology_never_invent_a_window() {
+    let (_root, _store, mut state) = fixture(FOREIGN, composition::Placement::Block {});
+    assert_eq!(
+        value(&state)["arrival_window"]["reason"],
+        "no_active_observation"
+    );
+    seed_deployment(&mut state);
+    assert_eq!(
+        value(&state)["arrival_window"]["reason"],
+        "no_active_observation"
+    );
+    let observed = state.census.last_completed_at.unwrap() + 1;
+    observe_active(&mut state, observed);
+    let report = value(&state);
+    assert_eq!(
+        report["arrival_window"]["reason"],
+        "refresh_predates_observation"
+    );
+    assert!(
+        report["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["arrival_period"] == "unavailable")
+    );
+}
+
+#[test]
+fn active_observation_is_first_only_and_survives_later_context_conflict() {
+    let (_root, store, mut state) = fixture(FOREIGN, composition::Placement::Block {});
+    seed_deployment(&mut state);
+    observe_active(&mut state, 123);
+    let before = serde_json::to_vec(&state.deployment_artifacts).unwrap();
+    state
+        .deployment_artifacts
+        .observe_active(
+            &state.sieve_transactions.history[0],
+            crate::census::deployment::ActiveObservation {
+                at: 456,
+                via: crate::census::deployment::ObservationVia::Reconciliation,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&state.deployment_artifacts).unwrap(),
+        before
+    );
+    state.sieve_transactions.history[0].status = sieve_transaction::Status::Conflict;
+    store.save_state(&mut state).unwrap();
+    let loaded = store.load_state().unwrap();
+    assert_eq!(
+        serde_json::to_vec(&loaded.deployment_artifacts).unwrap(),
+        before
+    );
+    assert_eq!(value(&loaded)["reason"], "transaction_unsettled");
+}
+
+#[test]
+fn incomplete_unobserved_or_inactive_transactions_cannot_acquire_timing() {
+    let (_root, _store, mut state) = fixture(FOREIGN, composition::Placement::Block {});
+    seed_deployment(&mut state);
+    let original = state.sieve_transactions.history[0].clone();
+    for failure in 0..4 {
+        let mut t = original.clone();
+        match failure {
+            0 => t.status = sieve_transaction::Status::Uncertain,
+            1 => t.steps[0].outcome = sieve_transaction::Outcome::Acknowledged,
+            2 => t.after.names[0].active = false,
+            _ => t.steps.clear(),
+        }
+        assert!(
+            state
+                .deployment_artifacts
+                .observe_active(
+                    &t,
+                    crate::census::deployment::ActiveObservation {
+                        at: 123,
+                        via: crate::census::deployment::ObservationVia::Readback
+                    }
+                )
+                .is_err()
+        );
+        assert!(
+            state
+                .deployment_artifacts
+                .get(&original.id)
+                .unwrap()
+                .active_observation
+                .is_none()
+        );
+    }
+}

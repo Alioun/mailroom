@@ -46,6 +46,7 @@ fn selected_recovery_preserves_account_owned_deployment_artifacts_without_export
         let store = repo.store(&account).unwrap();
         let mut saved = store.load_state().unwrap();
         crate::rules::landing::tests::seed_deployment(&mut saved);
+        crate::rules::landing::tests::observe_active(&mut saved, 123);
         store.save_state(&mut saved).unwrap();
         expected.push(serde_json::to_vec(&saved.deployment_artifacts).unwrap());
     }

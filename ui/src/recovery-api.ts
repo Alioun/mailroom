@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { localFetch } from './api'
 const inventory = z.object({ resource: z.string(), bytes: z.number(), sha256: z.string() })
 const keyMaterial = z.object({ resource: z.string(), bytes: z.number() })
-const accountManifest = z.object({ version: z.literal(1), state_schema: z.number().int().min(1).max(30), captured_at: z.number(), account: z.string(), provider: z.enum(['mailbox_org', 'gmail']), login: z.string(), generation: z.number(), revision: z.number(), resources: z.array(inventory), key_material: z.array(keyMaterial), dependencies: z.array(z.string()), shared_state: z.literal('excluded_preserve_current'), excluded: z.array(z.string()), limitations: z.string() })
+const accountManifest = z.object({ version: z.literal(1), state_schema: z.number().int().min(1).max(31), captured_at: z.number(), account: z.string(), provider: z.enum(['mailbox_org', 'gmail']), login: z.string(), generation: z.number(), revision: z.number(), resources: z.array(inventory), key_material: z.array(keyMaterial), dependencies: z.array(z.string()), shared_state: z.literal('excluded_preserve_current'), excluded: z.array(z.string()), limitations: z.string() })
 const ledger = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('excluded'), source_version: z.string().nullable() }),
   z.object({ kind: z.literal('included'), inventory, schema: z.literal(1), entries: z.number(), semantics: z.string() }),

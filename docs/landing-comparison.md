@@ -20,6 +20,17 @@ This is a comparison of recorded snapshots. It includes old messages and later m
 
 State schema 30 retains the exact approved artifact with each new composed deployment intent in one encrypted account save before effects. Preview keeps the compiled artifact internal, and confirmation rechecks the existing receipt and freshness conditions before saving. Removing a deployment or compensating it creates no replacement artifact. Encrypted reopen, key rotation and both recovery formats preserve these records. Restored accounts keep their execution hold.
 
-The dedicated records survive export eviction, and deployment requires no prior download. The report identifies whether a dedicated record or a legacy export supplies its baseline. Missing material makes comparison unavailable and never triggers recompilation. The transaction journal admits at most four operations and refuses when full. Artifact retention follows the same bound and never silently prunes history. A deployment timestamp and a time-bounded new-arrival comparison remain unimplemented.
+The dedicated records survive export eviction, and deployment requires no prior download. The report identifies whether a dedicated record or a legacy export supplies its baseline. Missing material makes comparison unavailable and never triggers recompilation. The transaction journal admits at most four operations and refuses when full. Artifact retention follows the same bound and never silently prunes history. Exact activation time remains unknown. The separate mailbox-date interval below uses an observed active image.
 
 Credential-free verification uses constructed recorded deployments, real compiled artifacts and encrypted reopen, followed by actual account Router/client checks and bilingual server rendering. These checks do not establish mounted interaction, visual, connected, provider or whole-workflow acceptance.
+
+
+## Mailbox dates after an active observation
+
+Schema 31 adds the first recorded observation time of the exact active image to the retained artifact. A successful final readback saves it with transaction completion. Read-only reconciliation can record it when the final image is first confirmed later. The record identifies which path supplied the time. Later observations preserve the first timestamp. Missing historical timing stays unavailable and is never inferred from download time.
+
+The complete comparison remains unchanged. A separate interval includes received rows whose IMAP INTERNALDATE is strictly after the observation and no later than the last completed census refresh. It uses the existing full-census proof and precedence results. Header Date never determines membership. Equal or older mailbox dates, invalid or missing INTERNALDATE and dates after the refresh remain outside the interval with explicit row labels. A refresh predating the observation leaves the interval unavailable.
+
+The local panel shows the exact interval, separate counts and a filter for its rows. It distinguishes an empty interval from an empty saved census. Both recovery forms and key rotation preserve timing with the artifact. Restored results remain historical and cannot resume effects.
+
+These times compare the local observation clock with provider-supplied mailbox dates. Copying and importing can preserve or assign INTERNALDATE. Clock disagreement can exclude messages or put them outside the interval. This is neither proof of SMTP arrival nor the initial destination. Reconciliation records its later observation time, never the original activation time. Continuous activation, copy receipt, keyword persistence and complete provider coverage remain unverified.

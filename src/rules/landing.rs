@@ -2,6 +2,8 @@ use super::{composition, program, proof};
 use crate::census::{AccountState, ScanState, sieve_transaction};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+mod window;
+pub use window::{ArrivalPeriod, ArrivalWindow};
 
 pub const SEMANTICS: &str = "mailroom/recorded-placement-comparison/v1";
 
@@ -44,6 +46,7 @@ pub enum Report {
         baseline_source: BaselineSource,
         target: String,
         counts: Counts,
+        arrival_window: ArrivalWindow,
         rows: Vec<Row>,
     },
 }
@@ -63,6 +66,7 @@ pub struct Row {
     pub from: String,
     pub observed: BTreeSet<String>,
     pub prediction: Prediction,
+    pub arrival_period: ArrivalPeriod,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -209,6 +213,11 @@ pub fn compare(saved: &AccountState, historical: bool) -> Report {
         .map(|d| (d.id.as_str(), d))
         .collect();
     let mut counts = Counts::default();
+    let observation = saved
+        .deployment_artifacts
+        .get(&transaction.id)
+        .and_then(|r| r.active_observation);
+    let periods = window::periods(&saved.census, observation, refreshed_at);
     let rows = proof
         .decisions
         .into_iter()
@@ -265,6 +274,10 @@ pub fn compare(saved: &AccountState, historical: bool) -> Report {
                 }
             };
             Row {
+                arrival_period: periods
+                    .get(&decision.id)
+                    .copied()
+                    .unwrap_or(ArrivalPeriod::Unavailable),
                 id: decision.id,
                 subject: decision.subject,
                 from: decision.from,
@@ -272,7 +285,8 @@ pub fn compare(saved: &AccountState, historical: bool) -> Report {
                 prediction,
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let arrival_window = window::summarize(observation, refreshed_at, &rows);
     Report::Compared {
         semantics: SEMANTICS,
         account: saved.census.account.as_str().to_owned(),
@@ -291,6 +305,7 @@ pub fn compare(saved: &AccountState, historical: bool) -> Report {
         baseline_source,
         target: transaction.target.clone(),
         counts,
+        arrival_window,
         rows,
     }
 }

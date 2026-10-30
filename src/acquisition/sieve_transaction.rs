@@ -799,6 +799,11 @@ impl Accounts {
             });
         }
         saved.sieve_transactions.history[index].status = Status::Complete;
+        record_active_observation(
+            saved,
+            index,
+            crate::census::deployment::ObservationVia::Readback,
+        )?;
         save(store, saved)?;
         let _ = session.logout();
         Ok(())
@@ -864,11 +869,47 @@ impl Accounts {
             };
         }
         if *t != previous {
+            let index = saved
+                .sieve_transactions
+                .history
+                .iter()
+                .position(|t| t.id == id)
+                .ok_or_else(invalid)?;
+            if saved.sieve_transactions.history[index].status == Status::Complete {
+                record_active_observation(
+                    saved,
+                    index,
+                    crate::census::deployment::ObservationVia::Reconciliation,
+                )?;
+            }
             save(store, saved)?;
         }
         let _ = session.logout();
         Ok(())
     }
+}
+
+fn record_active_observation(
+    saved: &mut AccountState,
+    index: usize,
+    via: crate::census::deployment::ObservationVia,
+) -> Result<(), AcquisitionError> {
+    saved
+        .deployment_artifacts
+        .observe_active(
+            &saved.sieve_transactions.history[index],
+            crate::census::deployment::ActiveObservation {
+                at: i64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_err(|_| invalid())?
+                        .as_secs(),
+                )
+                .map_err(|_| invalid())?,
+                via,
+            },
+        )
+        .map_err(Into::into)
 }
 pub(crate) fn boundary(name: &str) {
     #[cfg(test)]

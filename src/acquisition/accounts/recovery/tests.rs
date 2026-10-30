@@ -12,6 +12,7 @@ fn retained_deployment_artifacts_survive_rotation_and_single_account_recovery_wi
     let store = repo.store(&account).unwrap();
     let mut saved = store.load_state().unwrap();
     crate::rules::landing::tests::seed_deployment(&mut saved);
+    crate::rules::landing::tests::observe_active(&mut saved, 123);
     store.save_state(&mut saved).unwrap();
     let before = serde_json::to_vec(&saved.deployment_artifacts).unwrap();
     drop(store);

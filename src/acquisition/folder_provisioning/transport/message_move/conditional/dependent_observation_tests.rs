@@ -1,6 +1,9 @@
 use super::*;
 use crate::acquisition::backlog::dependent_cleanup::DependentCleanupTarget;
 
+#[path = "copy_undo_workflow_tests.rs"]
+mod workflow;
+
 fn target(request: &DependentCleanupRequest) -> DependentCleanupTarget<'_> {
     DependentCleanupTarget {
         run: &request.run,

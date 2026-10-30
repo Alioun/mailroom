@@ -45,6 +45,10 @@ pub(in crate::acquisition) struct ObservedDependentCleanup {
 }
 
 impl ObservedDependentCleanup {
+    pub(super) fn into_review(self) -> DependentCleanupReview {
+        self.review
+    }
+
     pub(in crate::acquisition) fn review(&self) -> &DependentCleanupReview {
         &self.review
     }
@@ -66,6 +70,10 @@ impl ObservedDependentCleanup {
 }
 
 impl ObservedCopyCompensation {
+    pub(super) fn into_review(self) -> CopyCompensationReview {
+        self.review
+    }
+
     pub(in crate::acquisition) fn review(&self) -> &CopyCompensationReview {
         &self.review
     }

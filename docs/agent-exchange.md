@@ -15,7 +15,7 @@ reviewed/
 proposals/
 ```
 
-Initialization copies static agent instructions. It exports no account data and refuses to replace edited instructions. It can finish creating missing static files after an interruption. The server never creates missing directories when it starts.
+Initialization copies static agent instructions. It exports no account data. A file equal to the current packaged version stays. A file equal to an earlier packaged version, kept byte for byte in `agent/superseded/`, was never edited, so initialization replaces it through a staged file and a rename. Any other content is the user's, and initialization refuses to replace it. It can finish creating missing static files, or replacing earlier ones, after an interruption. The server never creates missing directories when it starts.
 
 The supplied input is `reviewed/census-summary.md`, a UTF-8 export no larger than 256 KiB with the census summary heading. The file must have mode `0600`, belong to the current user and have a single hard link. The fixed child directories and files reject symbolic links. Directory handles anchor child access after the exchange opens.
 

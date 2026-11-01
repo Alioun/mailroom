@@ -99,27 +99,99 @@ fn read(parent: &File, name: &str, limit: usize) -> Result<Vec<u8>, &'static str
     Ok(bytes)
 }
 
-fn write_once(parent: &File, name: &str, bytes: &[u8]) -> Result<(), &'static str> {
-    let name_c = CString::new(name).map_err(|_| ERROR)?;
+/// Creates `name` with `bytes`. Returns false, writing nothing, when it exists.
+fn create(parent: &File, name: &str, bytes: &[u8]) -> Result<bool, &'static str> {
+    let name = CString::new(name).map_err(|_| ERROR)?;
     let fd = unsafe {
         libc::openat(
             parent.as_raw_fd(),
-            name_c.as_ptr(),
+            name.as_ptr(),
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             0o600,
         )
     };
     if fd < 0 {
-        if std::io::Error::last_os_error().kind() == std::io::ErrorKind::AlreadyExists
-            && read(parent, name, bytes.len())? == bytes
-        {
-            return Ok(());
-        }
-        return Err(ERROR);
+        return match std::io::Error::last_os_error().kind() {
+            std::io::ErrorKind::AlreadyExists => Ok(false),
+            _ => Err(ERROR),
+        };
     }
     let mut file = unsafe { File::from_raw_fd(fd) };
     file.write_all(bytes).map_err(|_| ERROR)?;
     file.sync_all().map_err(|_| ERROR)?;
+    parent.sync_all().map_err(|_| ERROR)?;
+    Ok(true)
+}
+
+fn write_once(parent: &File, name: &str, bytes: &[u8]) -> Result<(), &'static str> {
+    if create(parent, name, bytes)? || read(parent, name, bytes.len())? == bytes {
+        return Ok(());
+    }
+    Err(ERROR)
+}
+
+/// A file `init` installs. `superseded` holds every earlier packaged version.
+/// A file still equal to one of them was never changed by the user, so `init`
+/// replaces it. Any other content belongs to the user and is refused.
+struct Packaged {
+    name: &'static str,
+    current: &'static [u8],
+    superseded: &'static [&'static [u8]],
+}
+
+const AGENTS: Packaged = Packaged {
+    name: "AGENTS.md",
+    current: include_bytes!("../../agent/AGENTS.md"),
+    superseded: &[include_bytes!("../../agent/superseded/021643c/AGENTS.md")],
+};
+const SKILL: Packaged = Packaged {
+    name: "SKILL.md",
+    current: include_bytes!("../../agent/skills/mailroom-assistant/SKILL.md"),
+    superseded: &[include_bytes!(
+        "../../agent/superseded/021643c/skills/mailroom-assistant/SKILL.md"
+    )],
+};
+
+fn install(parent: &File, packaged: &Packaged) -> Result<(), &'static str> {
+    if create(parent, packaged.name, packaged.current)? {
+        return Ok(());
+    }
+    let limit = packaged
+        .superseded
+        .iter()
+        .map(|b| b.len())
+        .chain([packaged.current.len()])
+        .max()
+        .unwrap_or(0);
+    let existing = read(parent, packaged.name, limit)?;
+    if existing == packaged.current {
+        return Ok(());
+    }
+    if !packaged.superseded.contains(&existing.as_slice()) {
+        return Err(ERROR);
+    }
+    let staging = format!(".{}.update", packaged.name);
+    let staging_c = CString::new(staging.as_str()).map_err(|_| ERROR)?;
+    let name_c = CString::new(packaged.name).map_err(|_| ERROR)?;
+    if unsafe { libc::unlinkat(parent.as_raw_fd(), staging_c.as_ptr(), 0) } < 0
+        && std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(ERROR);
+    }
+    if !create(parent, &staging, packaged.current)? {
+        return Err(ERROR);
+    }
+    if unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            staging_c.as_ptr(),
+            parent.as_raw_fd(),
+            name_c.as_ptr(),
+        )
+    } < 0
+    {
+        return Err(ERROR);
+    }
     parent.sync_all().map_err(|_| ERROR)
 }
 
@@ -138,12 +210,8 @@ impl Exchange {
         let proposals = directory(&root, "proposals", true)?;
         let skills = directory(&root, "skills", true)?;
         let skill = directory(&skills, "mailroom-assistant", true)?;
-        write_once(&root, "AGENTS.md", include_bytes!("../../agent/AGENTS.md"))?;
-        write_once(
-            &skill,
-            "SKILL.md",
-            include_bytes!("../../agent/skills/mailroom-assistant/SKILL.md"),
-        )?;
+        install(&root, &AGENTS)?;
+        install(&skill, &SKILL)?;
         Ok(Self {
             reviewed,
             proposals,

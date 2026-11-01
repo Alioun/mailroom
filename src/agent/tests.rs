@@ -74,6 +74,48 @@ fn agent_proposals_survive_reopen_and_exact_retries_without_overwriting() {
 }
 
 #[test]
+fn init_updates_unchanged_earlier_packaged_files_and_refuses_user_changes() {
+    const AGENTS: &[u8] = include_bytes!("../../agent/AGENTS.md");
+    const SKILL: &[u8] = include_bytes!("../../agent/skills/mailroom-assistant/SKILL.md");
+    const OLD_AGENTS: &[u8] = include_bytes!("../../agent/superseded/021643c/AGENTS.md");
+    const OLD_SKILL: &[u8] =
+        include_bytes!("../../agent/superseded/021643c/skills/mailroom-assistant/SKILL.md");
+    let (parent, _) = fixture();
+    let path = parent.path().join("exchange");
+    let agents = path.join("AGENTS.md");
+    let skill = path.join("skills/mailroom-assistant/SKILL.md");
+    fs::write(&agents, OLD_AGENTS).unwrap();
+    fs::write(&skill, OLD_SKILL).unwrap();
+    fs::write(path.join(".AGENTS.md.update"), b"interrupted update").unwrap();
+    assert!(files::Exchange::initialize(&path).is_ok());
+    assert_eq!(fs::read(&agents).unwrap(), AGENTS);
+    assert_eq!(fs::read(&skill).unwrap(), SKILL);
+    assert_eq!(
+        fs::metadata(&agents).unwrap().permissions().mode() & 0o7777,
+        0o600
+    );
+    assert!(!path.join(".AGENTS.md.update").exists());
+    assert!(
+        files::Exchange::initialize(&path).is_ok(),
+        "repeat is a no-op"
+    );
+    assert_eq!(fs::read(&agents).unwrap(), AGENTS);
+
+    let mut edited = OLD_SKILL.to_vec();
+    edited.extend(b"\nMy own note.\n");
+    fs::write(&agents, OLD_AGENTS).unwrap();
+    fs::write(&skill, &edited).unwrap();
+    assert!(files::Exchange::initialize(&path).is_err());
+    assert_eq!(fs::read(&skill).unwrap(), edited, "user change kept");
+    assert_eq!(fs::read(&agents).unwrap(), AGENTS, "unchanged file updated");
+    let mut trimmed = OLD_AGENTS.to_vec();
+    trimmed.pop();
+    fs::write(&agents, &trimmed).unwrap();
+    assert!(files::Exchange::initialize(&path).is_err());
+    assert_eq!(fs::read(&agents).unwrap(), trimmed);
+}
+
+#[test]
 fn agent_changed_summaries_and_invalid_proposals_never_stage_files() {
     let (parent, exchange) = fixture();
     for alter in [

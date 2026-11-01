@@ -43,7 +43,7 @@ try {
   await page.locator('.summary-preview').waitFor()
   const privatePreview = await page.locator('.summary-preview').innerText()
   for (const value of ['shop.example', 'platform.example', 'Synthetic account header', 'owner@example.test', 'alex@people.example', 'synthetic-private-token', 'Synthetic label']) assert.equal(privatePreview.includes(value), false, value)
-  assert.equal(await page.getByRole('button', { name: 'Export reviewed summary', exact: true }).isEnabled(), false)
+  assert.equal(await page.getByRole('button', { name: 'Export after native confirmation', exact: true }).isEnabled(), false)
   await page.getByRole('checkbox', { name: 'Allow clear domain shop.example', exact: true }).check()
   assert.equal(await page.locator('.summary-preview').count(), 0)
   await page.getByRole('button', { name: 'Preview exact shared text', exact: true }).click()
@@ -53,7 +53,7 @@ try {
   assert.equal(exactPreview.includes('platform.example'), false)
   await page.getByRole('checkbox', { name: 'I reviewed this exact summary and want to export it', exact: true }).check()
   const downloadEvent = page.waitForEvent('download')
-  await page.getByRole('button', { name: 'Export reviewed summary', exact: true }).click()
+  await page.getByRole('button', { name: 'Export after native confirmation', exact: true }).click()
   const download = await downloadEvent
   assert.equal(download.suggestedFilename(), 'census-summary.md')
   let exported = ''

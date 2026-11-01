@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { build } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import ts from 'typescript'
+import { localModules } from './local-modules.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const audit = `${root}${process.env.MAILROOM_VERIFY_AUDIT ?? '.audit/backlog-status'}/`
@@ -21,7 +22,7 @@ const labels = {
   en: { prepared: 'Prepared', running: 'Running', stopped: 'Stopped', completed: 'Processing complete', failed: 'Failed', uncertain: 'Effects uncertain', complete: 'Processing complete', conflict: 'Conflicts found', undo_running: 'Undo in progress', undone: 'Undo finished' },
   de: { prepared: 'Vorbereitet', running: 'Läuft', stopped: 'Angehalten', completed: 'Verarbeitung abgeschlossen', failed: 'Fehlgeschlagen', uncertain: 'Änderungen ungewiss', complete: 'Verarbeitung abgeschlossen', conflict: 'Konflikte festgestellt', undo_running: 'Rückgängigmachen läuft', undone: 'Rückgängigmachen beendet' },
 }
-for (const name of ['api', 'invoice-diagnostics', 'acquisition-evidence', 'proposal-diagnostics', 'proof-diagnostics']) {
+for (const name of localModules(['api', 'invoice-diagnostics', 'acquisition-evidence', 'proposal-diagnostics', 'proof-diagnostics'])) {
   const source = await readFile(`${root}ui/src/${name}.ts`, 'utf8')
   const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText
   const imports = compiled.replace(/from (['"])zod\1/g, `from '${import.meta.resolve('zod')}'`).replace(/from (['"])(\.\/[^'"]+)\1/g, (_match, _quote, local) => `from '${local}.mjs'`)

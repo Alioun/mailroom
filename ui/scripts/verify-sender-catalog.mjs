@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto'
 import { compile } from 'svelte/compiler'
 import { render } from 'svelte/server'
 import ts from 'typescript'
+import { localModules } from './local-modules.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const audit = resolve(root, process.env.MAILROOM_VERIFY_AUDIT ?? '.audit/sender-catalog')
@@ -22,7 +23,7 @@ function imports(code) {
   return code.replace(/(['"])(zod|svelte(?:\/[^'"]+)?)\1/g, (_match, _quote, name) => JSON.stringify(import.meta.resolve(name)))
     .replace(/from '(.\/[^']+)'/g, (_match, name) => `from '${name}.mjs'`)
 }
-for (const name of ['api', 'invoice-diagnostics', 'acquisition-evidence', 'proposal-diagnostics', 'winddown-api']) {
+for (const name of localModules(['api', 'invoice-diagnostics', 'acquisition-evidence', 'proposal-diagnostics', 'winddown-api'])) {
   const source = await readFile(resolve(root, `ui/src/${name}.ts`), 'utf8')
   const emitted = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }, fileName: `${name}.ts` })
   await writeFile(resolve(output, `${name}.mjs`), imports(emitted.outputText))

@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { build } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import ts from 'typescript'
+import { localModules } from './local-modules.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const audit = `${root}${process.env.MAILROOM_VERIFY_AUDIT ?? '.audit/imap-copy-journal'}/`
@@ -14,7 +15,7 @@ const match = log.match(/MAILROOM_COPY_ROUTER_FIXTURE (.+)/)
 assert.ok(match, 'The real protected Router must produce the fixture')
 const fixture = JSON.parse(match[1])
 assert.equal(fixture.fixtures.length, 8)
-for (const name of ['api', 'invoice-diagnostics', 'acquisition-evidence', 'proposal-diagnostics', 'proof-diagnostics']) {
+for (const name of localModules(['api', 'invoice-diagnostics', 'acquisition-evidence', 'proposal-diagnostics', 'proof-diagnostics'])) {
   const source = await readFile(`${root}ui/src/${name}.ts`, 'utf8')
   const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText
   const imports = compiled.replace(/from (['"])zod\1/g, `from '${import.meta.resolve('zod')}'`).replace(/from (['"])(\.\/[^'"]+)\1/g, (_match, _quote, local) => `from '${local}.mjs'`)

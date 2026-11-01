@@ -762,12 +762,9 @@ for file in "$CONFIG/lifecycle"/*.json; do
     *) expect lifecycle_state known unknown || { stop_incomplete; return 1; } ;;
   esac
   say "Account $id has an interrupted local $kind operation."
-  if confirm_no "Review native confirmation to reconcile $id now?"; then
-    mailroom account recover-local "$id"
-    expect "recover $id" status=recovered "$RESULT" || { stop_incomplete; return 1; }
-  else
-    INCOMPLETE+=("local recovery $id")
-  fi
+  confirm_no "Review native confirmation to reconcile $id now?" || { expect "recover $id" status=recovered declined || stop_incomplete; return 1; }
+  mailroom account recover-local "$id"
+  expect "recover $id" status=recovered "$RESULT" || { stop_incomplete; return 1; }
 done
 expected_references || { expect account_metadata readable unreadable || stop_incomplete; return 1; }
 
@@ -849,7 +846,7 @@ stage "Keep the recovery key separately"
 say "Use the separately held random 256-bit key, encoded as 64 lowercase hex characters. A memorable password is not a recovery key."
 say "Generate and store a new capture key privately in the owner's secret manager. Keep it apart from the encrypted bundle."
 say "The wizard never receives or records the key. The installed binary reads it from the controlling terminal with echo disabled."
-if ! confirm_no "Is the separate recovery key available for this action?"; then INCOMPLETE+=("separate recovery key"); finish; return 1; fi
+confirm_no "Is the separate recovery key available for this action?" || { expect recovery_key available unavailable || stop_incomplete; return 1; }
 
 stage "Confirm the exact local recovery action"
 say "Read the native dialog's accounts, captured versions, ledger action and exclusions. Cancellation leaves the restore intent unpublished."
@@ -864,7 +861,8 @@ stage "Check bundle custody and restored-account holds"
 if [[ $kind == capture ]]; then
   say "In Finder, open $transfer/outgoing. Move the completed encrypted bundle outside this Mac using the owner's chosen storage."
   say "Keep the recovery key separately. Preserve a usable bundle while testing restoration in an isolated protected installation."
-  if confirm_no "Has the encrypted bundle been stored separately from its key?"; then note_result bundle_custody owner_confirmed; else INCOMPLETE+=("off-Mac bundle custody"); fi
+  confirm_no "Has the encrypted bundle been stored separately from its key?" || { expect bundle_custody owner_confirmed unconfirmed || stop_incomplete; return 1; }
+  note_result bundle_custody owner_confirmed
 else
   say "Restored accounts remain read-only. Provider passwords and uncaptured changes are excluded."
   say "Later external mail effects remain. Reconnection and authoritative reconciliation are still required before any provider operation resumes."

@@ -307,7 +307,7 @@ maint_prepare maint_decline; maint_go; completed "declined maintenance"; no_acco
 maint_prepare maint_forgotten; lifecycle acct forgotten; maint_go; completed "a finished forget"
 ! grep -qa "reconcile acct now" "$out/transcript" || fail "a finished forget is not offered for recovery"; ok; no_account_command "a finished forget"
 maint_prepare maint_recover_declined n; lifecycle acct replacing; maint_go
-! grep -q "^recover " <(records) || fail "a declined recovery records no result"; ok; no_account_command "a declined recovery"
+grep -qx "recover acct declined" <(records) || fail "a declined recovery is recorded"; ok; no_account_command "a declined recovery"; stopped maint_recover_declined
 maint_prepare maint_state; lifecycle acct exploded; maint_go
 grep -qx "lifecycle_state unknown" <(records) || fail "an unknown lifecycle state is refused"; ok; no_account_command "an unknown state"; stopped maint_state
 maint_prepare maint_lifecycle_json; mkdir "$out/config/lifecycle"; echo '{' >"$out/config/lifecycle/acct.json"; maint_go
@@ -358,8 +358,9 @@ rec_prepare rec_capture y; rec_go; completed "capture"
 grep -qx "recovery_directories status=recovery_prepared" <(records) && grep -qx "recovery status=captured" <(records) \
   && grep -qx "bundle_custody owner_confirmed" <(records) || fail "capture records"; ok
 rec_argv capture "account recovery-capture acct"; key_entered capture; no_secret rec_capture
-rec_prepare rec_capture_ledger y "" acct y y n; rec_go; completed "capture with the ledger"
-rec_argv "capture with the ledger" "account recovery-capture-with-ledger acct"; ! grep -q "^bundle_custody" <(records) || fail "declined custody records no confirmation"; ok
+rec_prepare rec_capture_ledger y "" acct y y n; rec_go
+rec_argv "capture with the ledger" "account recovery-capture-with-ledger acct"; grep -qx "recovery status=captured" <(records) || fail "capture with the ledger"; ok
+grep -qx "bundle_custody unconfirmed" <(records) || fail "unconfirmed custody is recorded"; ok; stopped "unconfirmed custody"
 no_secret rec_capture_ledger
 rec_prepare rec_restore y restore; rec_go; completed "restore"
 grep -qx "recovery status=restored_read_only" <(records) || fail "restore record"; ok; rec_argv restore "account recovery-restore $bundle"; key_entered restore; no_secret rec_restore
@@ -382,7 +383,7 @@ done
 rec_prepare rec_metadata y; printf '%s' '{"id":"other"}' >"$out/config/acct.json"; rec_go
 grep -qx "account_metadata unreadable" <(records) && ! grep -q "recovery-capture" <(calls) || fail "capture refuses mismatched metadata"; ok; stopped rec_metadata
 rec_prepare rec_no_key y "" acct "" n; rec_go
-[[ $(cat "$out/exit") != 0 ]] && ! grep -q "^recovery " <(records) && [[ "$(grep "^account " <(calls))" == "account recovery-prepare" ]] || fail "a missing recovery key stops before the action"; ok
+grep -qx "recovery_key unavailable" <(records) && ! grep -q "^recovery " <(records) && [[ "$(grep "^account " <(calls))" == "account recovery-prepare" ]] || fail "a missing recovery key stops before the action"; ok; stopped rec_no_key
 rec_prepare rec_mismatch y "" acct "" y y "" "$dummy_key" "$(printf '0%.0s' {1..64})"; rec_go
 grep -qx "recovery status=mismatch" <(records) || fail "a mismatched key stops"; ok; no_secret rec_mismatch; stopped rec_mismatch
 rec_prepare rec_invalid y resume "" "" y y "" "$dummy"; rec_go

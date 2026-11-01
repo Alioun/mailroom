@@ -17,6 +17,8 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+#[cfg(test)]
+mod agent_rejection_tests;
 mod delta;
 #[cfg(test)]
 mod deployment_tests;
@@ -49,7 +51,8 @@ const MIN_FRAME_BUDGET: u64 = 64 * 1024;
 /// 30 retains exact compiled deployment artifacts independently of downloads.
 /// 31 records the first observed active image for those artifacts.
 /// 32 allows up to 64 Sieve operations within the existing journal byte bound.
-pub(crate) const SCHEMA: u32 = 32;
+/// 33 adds the agent rule-edit rejection history `proposals.agent_rejections`.
+pub(crate) const SCHEMA: u32 = 33;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProtocolStateView {
@@ -1515,6 +1518,9 @@ impl EncryptedStore {
             return Err(CensusError::UnsupportedVersion);
         }
         if version < 25 && uses_archive(&state) {
+            return Err(CensusError::UnsupportedVersion);
+        }
+        if version < 33 && !state.proposals.agent_rejections.is_empty() {
             return Err(CensusError::UnsupportedVersion);
         }
         if version < 21

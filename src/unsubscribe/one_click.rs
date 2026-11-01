@@ -238,6 +238,11 @@ pub(crate) mod tests {
                         break;
                     }
                 }
+                // A refused handshake reads nothing, so only bytes received
+                // over an accepted session count as a request.
+                if length == 0 {
+                    continue;
+                }
                 request.truncate(length);
                 seen.lock().unwrap().push(request);
                 thread::sleep(delay);

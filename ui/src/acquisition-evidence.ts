@@ -1,7 +1,5 @@
 import { z } from 'zod'
 
-z.config({ jitless: true })
-
 export const countObservation = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('observed'), messages: z.number().int().nonnegative(), observed_at: z.number(), source: z.enum(['status_messages', 'examine_search']) }),
   z.object({ kind: z.literal('unknown'), reason: z.enum(['not_requested', 'not_selectable', 'budget', 'denied', 'unavailable', 'malformed', 'missing', 'ambiguous', 'no_junk_role', 'older_snapshot']) }),

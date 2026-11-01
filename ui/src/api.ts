@@ -5,8 +5,6 @@ import { evidenceView } from './acquisition-evidence'
 import { proposalRationale, proposalReason } from './proposal-diagnostics'
 import { proofDiagnostics, proofGate } from './proof-diagnostics'
 
-z.config({ jitless: true })
-
 const destination = z.discriminatedUnion('kind', [z.object({ kind: z.literal('inbox') }), z.object({ kind: z.literal('folder'), name: z.string() })])
 const documents = z.object({ preset_yaml: z.string(), override_yaml: z.string() })
 const pin = z.object({ account: z.string(), message_id_hash: z.string(), expected: destination })

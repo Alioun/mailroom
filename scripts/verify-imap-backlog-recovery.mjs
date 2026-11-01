@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fixture, root } from './imap-backlog-fixture.mjs'
+import { stateSchema } from './state-schema.mjs'
 
 const f = await fixture()
 const options = { scope: 'inbox', protect_flagged: true, selected: null }
@@ -40,7 +41,7 @@ try {
     const accounts = selected ? [f.account, peer].sort() : [f.account]
     const offer = await recovery(selected ? { action: 'selected_capture_preview', accounts, include_ledger: true } : { action: 'capture_preview', account: f.account })
     const manifests = selected ? offer.preview.accounts : [offer.preview]
-    assert.ok(manifests.every(m => m.state_schema === 23))
+    assert.ok(manifests.every(m => m.state_schema === stateSchema))
     assert.equal(manifests.find(m => m.account === f.account).resources.find(r => r.resource === 'local_encrypted_state').sha256, before.ciphertext)
     if (selected) assert.ok(offer.preview.excluded_accounts.includes(excluded))
     const captured = await recovery({ action: selected ? 'selected_capture' : 'capture', preview: offer.preview, receipt: offer.receipt })

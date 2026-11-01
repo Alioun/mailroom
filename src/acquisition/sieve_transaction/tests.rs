@@ -604,7 +604,12 @@ fn transaction_fixture_worker() {
     let store = repo.store(&account).unwrap();
     let saved = store.load_state().unwrap();
     let mut unrelated = serde_json::to_value(&saved).unwrap();
-    for field in ["revision", "sieve_transactions", "sieve"] {
+    for field in [
+        "revision",
+        "sieve_transactions",
+        "deployment_artifacts",
+        "sieve",
+    ] {
         unrelated.as_object_mut().unwrap().remove(field);
     }
     let value = serde_json::json!({"account":account.id,"schema":store.schema_version().unwrap(),"revision":saved.revision,"unrelated":image_digest(&unrelated),"external_unrelated":independent_effects(root, &store),"provider_image":image_digest(&p.image),"provider_target":p.image.body("Open-Xchange").map(|b|&b.sha256),"provider_foreign":crate::census::sieve_transaction::foreign(&p.image, "Open-Xchange").map(|f| image_digest(&f)),"provider_owned":p.image.body("mailroom").map(|b|&b.sha256),"names":p.image.names.iter().map(|n|&n.name).collect::<Vec<_>>(),"active":p.image.active(),"commands":p.commands,"placement":saved.sieve_placement,"transactions":saved.sieve_transactions.history.iter().map(|t|serde_json::json!({"id":t.id,"status":t.status,"purpose":t.composition.as_ref().map(|c|c.purpose),"steps":t.steps.iter().map(|s|serde_json::json!({"effect":s.effect,"outcome":s.outcome,"acknowledgment":s.acknowledgment})).collect::<Vec<_>>()})).collect::<Vec<_>>()});

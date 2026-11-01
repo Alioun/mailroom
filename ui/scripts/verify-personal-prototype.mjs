@@ -252,7 +252,7 @@ try {
     await page.getByRole('button', { name: 'Retry loading accounts', exact: true }).click()
     await page.getByText('No saved accounts yet.', { exact: true }).waitFor()
     await page.getByRole('button', { name: 'Add synthetic account', exact: true }).click()
-    await page.getByText('Account action complete', { exact: true }).waitFor()
+    await page.locator('.accounts [aria-live=polite]').getByText('Account action complete', { exact: true }).waitFor()
     const account = await page.locator('.accounts > .census-actions select').inputValue()
     assert.ok(account)
     await page.reload({ waitUntil: 'domcontentloaded' })

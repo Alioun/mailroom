@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { request } from 'node:http'
+import { stateSchema } from './state-schema.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url)).replace(/\/$/, '')
 const base = 'http://127.0.0.1:4173'
@@ -92,7 +93,7 @@ try {
   assert.equal(baseline.bodies.length, 1)
   assert.equal(sha(Buffer.from(baseline.bodies[0].bytes)), baseline.bodies[0].sha256)
   assert.equal((await observe(account)).unrelated_sha256, before.unrelated_sha256)
-  assert.equal((await observe(account)).schema, 23)
+  assert.equal((await observe(account)).schema, stateSchema)
   checks.push('Actual STARTTLS/PLAIN/authenticated CAPABILITY/list/get and independent encrypted reopen preserve populated aggregates')
   for (const mode of ['auth_denied', 'missing', 'partial_list', 'unstable', 'unstable_names']) {
     const failed = await discover(account, mode, 'failed')

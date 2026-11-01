@@ -6,6 +6,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
+import { stateSchema } from './state-schema.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url)).replace(/\/$/, '')
 const base = 'http://127.0.0.1:4173'
@@ -86,11 +87,11 @@ try {
   assert.equal(view.census.winddown_evidence.complete_since, null)
   assert.deepEqual(view.census.winddown_evidence.deliveries, {})
   const independent = await reopen(account)
-  assert.equal(independent.schema, 23)
+  assert.equal(independent.schema, stateSchema)
   assert.deepEqual(independent.evidence.last_successful, good)
   assert.equal(independent.history_unknown && independent.delivery_unknown, true)
   const bytes = await readFile(join(directory, 'data', `${account}.census.enc`))
-  assert.equal(bytes.subarray(0, 16).toString(), 'MAILROOM-CENSUS\x01')
+  assert.equal(bytes.subarray(0, 16).toString(), 'MAILROOM-CENSUS\x02')
   assert.equal(bytes.includes(Buffer.from('Alle Nachrichten')), false)
   const oldToken = token
   await stop(); await start()

@@ -21,7 +21,7 @@ try {
   await page.goto(metadata.base)
   await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()
   await page.locator('.accounts > .census-actions select').selectOption(metadata.account)
-  const sieve = page.locator('.accounts > .sieve')
+  const sieve = page.locator('.accounts .account-setup > .sieve')
   await sieve.getByRole('button', { name: 'Open local Sieve evidence', exact: true }).click()
   await sieve.locator('h4').first().waitFor()
   assert.match(await sieve.innerText(), /Production ManageSieve installation is missing/)

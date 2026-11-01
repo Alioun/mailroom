@@ -3,6 +3,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { chromium } from 'playwright'
 import { fixture, root, base } from '../../scripts/imap-backlog-fixture.mjs'
+import { stateSchema } from '../../scripts/state-schema.mjs'
 
 const f = await fixture()
 const browser = await chromium.launch({ headless: true })
@@ -51,7 +52,7 @@ try {
     assert.equal(await region.locator('.ledger-inclusion').isChecked(), false)
     if (multiple) await region.locator('.ledger-inclusion').check()
     const offer = await response('selected_capture_preview', region.getByRole('button', { name: 'Preview exact capture', exact: true }))
-    assert.ok(offer.preview.accounts.every(a => a.state_schema === 23))
+    assert.ok(offer.preview.accounts.every(a => a.state_schema === stateSchema))
     assert.equal(await region.locator('.recovery-preview').getByRole('checkbox').isChecked(), false)
     assert.equal(await region.getByRole('button', { name: 'Create this synthetic encrypted bundle', exact: true }).isEnabled(), false)
     await region.locator('.recovery-preview').getByRole('checkbox').check()

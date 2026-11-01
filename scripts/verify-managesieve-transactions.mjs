@@ -6,6 +6,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
+import { stateSchema } from './state-schema.mjs'
 const root = fileURLToPath(new URL('../', import.meta.url)).replace(/\/$/, '')
 const base = 'http://127.0.0.1:4173'
 assert.equal(await fetch(`${base}/api/session`).then(() => true, () => false), false, 'Stop the verified retained fake before building')
@@ -138,7 +139,7 @@ try {
   assert.equal(effects(await observe()), '')
   await confirm(p)
   const deployed = await observe()
-  assert.equal(deployed.schema, 23); assert.equal(deployed.provider_target, p.transaction.after.bodies.find(b => b.name === p.transaction.target).sha256)
+  assert.equal(deployed.schema, stateSchema); assert.equal(deployed.provider_target, p.transaction.after.bodies.find(b => b.name === p.transaction.target).sha256)
   assert.equal(deployed.provider_foreign, initial.provider_foreign); assert.equal(deployed.active, 'Open-Xchange')
   assert.deepEqual(deployed.placement, BLOCK)
   assert.deepEqual(deployed.external_unrelated, initial.external_unrelated)

@@ -5,6 +5,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
+import { stateSchema } from './state-schema.mjs'
 const root = fileURLToPath(new URL('../', import.meta.url)).replace(/\/$/, '')
 const base = 'http://127.0.0.1:4173'
 assert.equal(await fetch(`${base}/api/session`).then(() => true, () => false), false, 'Stop the identity-verified retained fake before builds')
@@ -169,7 +170,7 @@ try {
   await command('confirm', { receipt: p.receipt, confirmed: true }); await terminal()
   await command('confirm', { receipt: p.receipt, confirmed: true }); await terminal('failed')
   const after = await observe()
-  assert.equal(after.schema, 23); assert.equal(creates(after), 0); assert.equal(after.topology, initial.topology)
+  assert.equal(after.schema, stateSchema); assert.equal(creates(after), 0); assert.equal(after.topology, initial.topology)
   assert.equal(after.unrelated, initial.unrelated); assert.equal(after.external_unrelated, initial.external_unrelated)
   checks.push('Protected HTTP, hostile extra fields, wrong account, receipt purpose/alteration/replay and exact empty saved-artifact plan pass with zero CREATE')
   await stop()

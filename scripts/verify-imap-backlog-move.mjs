@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fixture, root } from './imap-backlog-fixture.mjs'
+import { stateSchema } from './state-schema.mjs'
 const f = await fixture()
 const options = { scope: 'inbox', protect_flagged: true, selected: null }
 const checks = []
@@ -27,7 +28,7 @@ try {
   assert.equal(run.batches[0].attempted, true)
   assert.equal(run.batches[0].mapping.kind, 'validated')
   const after = await f.observe()
-  assert.equal(after.schema, 23)
+  assert.equal(after.schema, stateSchema)
   assert.deepEqual(after.folders.INBOX.uids, [99])
   assert.deepEqual(after.folders['Personal/Studio'].uids, [40,60,64,68])
   assert.ok(after.folders.INBOX.messages['99'].flags.includes('\\Deleted'))

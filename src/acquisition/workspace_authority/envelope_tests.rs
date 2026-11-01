@@ -96,6 +96,7 @@ fn preserved(saved: &AccountState) -> String {
         "revision",
         "sieve",
         "sieve_transactions",
+        "deployment_artifacts",
         "sieve_placement",
         "folder_provisioning",
     ] {

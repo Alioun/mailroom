@@ -273,6 +273,7 @@ const agentEditReview = z.object({
   edits: z.array(z.object({ kind: z.enum(['patch', 'addition']), requested: z.string(), target: z.string(), digest: z.string().length(64) })).min(1).max(20),
   changes: z.record(z.string(), z.json()), original_documents: documents, resulting_documents: documents, document_diff: z.string(),
   current: proofPreview, resulting: proofPreview, accept_receipt: z.string().length(64).nullable(), reject_receipt: z.string().length(64).nullable(),
+  rejection_history: z.object({ recorded: z.number().int().nonnegative(), limit: z.number().int().positive() }),
   effects: z.object({ accept: z.string(), reject: z.string() }),
 })
 const agentEditSaved = z.object({ status: z.enum(['local_rules_saved', 'edits_rejected']), workspace: workspaceView })

@@ -12,18 +12,23 @@ const marker = 'MAILROOM_AGENT_RULE_EDITS_FIXTURE '
 const line = log.split('\n').find(line => line.startsWith(marker))
 assert.ok(line, 'The actual Router test supplies the exact review and saved response')
 const fixture = JSON.parse(line.slice(marker.length))
+const fullMarker = 'MAILROOM_AGENT_RULE_EDITS_FULL_FIXTURE '
+const fullLine = log.split('\n').find(line => line.startsWith(fullMarker))
+assert.ok(fullLine, 'The actual Router test supplies a review at the full rejection history')
+const full = JSON.parse(fullLine.slice(fullMarker.length))
+assert.equal(full.review.reject_receipt, null)
 const audit = resolve(auditArgument), root = resolve(import.meta.dirname, '..')
 await mkdir(audit, { recursive: true })
 const source = (await readFile(`${root}/src/AgentRuleEditReview.svelte`, 'utf8'))
   .replace(/from '(\.\/[^']+)'/gu, (_match, name) => `from '${root}/src/${name.slice(2)}'`)
-for (const confirmed of [false, true]) {
+for (const [name, review, confirmed] of [['false', fixture.review, false], ['true', fixture.review, true], ['full', full.review, true]]) {
   const component = source
-    .replace('let review = $state<AgentEditReview | null>(null)', `let review = $state<AgentEditReview | null>(${JSON.stringify(fixture.review)})`)
+    .replace('let review = $state<AgentEditReview | null>(null)', `let review = $state<AgentEditReview | null>(${JSON.stringify(review)})`)
     .replace('let confirmed = $state(false)', `let confirmed = $state(${confirmed})`)
   assert.notEqual(component, source)
-  await writeFile(`${audit}/Review${confirmed}.svelte`, component)
+  await writeFile(`${audit}/Review${name}.svelte`, component)
 }
-await writeFile(`${audit}/entry.mjs`, `export { default as Unconfirmed } from './Reviewfalse.svelte'; export { default as Confirmed } from './Reviewtrue.svelte'; export { default as Import } from '${root}/src/AgentProposalImport.svelte'; export { previewAgentEdits, confirmAgentEdits } from '${root}/src/api.ts'; export { readAgentProposal } from '${root}/src/agent-exchange.ts'; export { render } from 'svelte/server'`)
+await writeFile(`${audit}/entry.mjs`, `export { default as Unconfirmed } from './Reviewfalse.svelte'; export { default as Confirmed } from './Reviewtrue.svelte'; export { default as Full } from './Reviewfull.svelte'; export { default as Import } from '${root}/src/AgentProposalImport.svelte'; export { previewAgentEdits, confirmAgentEdits } from '${root}/src/api.ts'; export { readAgentProposal } from '${root}/src/agent-exchange.ts'; export { render } from 'svelte/server'`)
 await build({ root, configFile: false, logLevel: 'error', plugins: [svelte({ configFile: false })], ssr: { noExternal: true }, build: { ssr: `${audit}/entry.mjs`, outDir: `${audit}/built`, emptyOutDir: false, minify: false, rollupOptions: { output: { entryFileNames: 'agent-rule-edits.mjs' } } } })
 const ui = await import(pathToFileURL(`${audit}/built/agent-rule-edits.mjs`))
 
@@ -47,11 +52,13 @@ for (const alter of [
 
 const requests = []
 let refused = false
+let reply = null
 globalThis.fetch = async (path, options) => {
   if (path === '/api/session') return Response.json({ token: '0'.repeat(64) })
   assert.equal(path, '/api/accounts/agent-edits')
   const body = JSON.parse(options.body)
   requests.push(body)
+  if (reply) return Response.json(reply)
   if (refused) return Response.json({ error: 'Agent proposal repeats a rejected rule edit' }, { status: 422 })
   return Response.json(body.command.action === 'preview' ? fixture.review : fixture.saved)
 }
@@ -64,9 +71,15 @@ assert.equal(saved.status, 'local_rules_saved')
 refused = true
 await assert.rejects(() => ui.previewAgentEdits(fixture.account, fixture.binding, fixture.proposal))
 
+reply = full.review
+const parsedFull = await ui.previewAgentEdits(full.account, full.binding, full.proposal)
+assert.deepEqual(parsedFull.rejection_history, { recorded: 512, limit: 512 })
+assert.equal(parsedFull.reject_receipt, null)
+reply = { ...full.review, rejection_history: undefined }
+await assert.rejects(() => ui.previewAgentEdits(full.account, full.binding, full.proposal))
 const labels = {
-  en: { original: 'Current override document', resulting: 'Resulting override document', current: 'Current proof', after: 'Resulting proof', accept: 'Save these edits to local rules', reject: 'Reject these exact edits', hold: 'never deploys rules' },
-  de: { original: 'Aktuelles Anpassungsdokument', resulting: 'Resultierendes Anpassungsdokument', current: 'Aktuelle Prüfung', after: 'Resultierende Prüfung', accept: 'Diese Änderungen in lokalen Regeln speichern', reject: 'Genau diese Änderungen ablehnen', hold: 'aktiviert keine Regeln' },
+  en: { original: 'Current override document', resulting: 'Resulting override document', current: 'Current proof', after: 'Resulting proof', accept: 'Save these edits to local rules', reject: 'Reject these exact edits', hold: 'never deploys rules', full: 'The rejection history is full. It holds 512 of 512 rejected edits and has no room for 1 more. Rejections are never removed, so rejected edits are never proposed again.' },
+  de: { original: 'Aktuelles Anpassungsdokument', resulting: 'Resultierendes Anpassungsdokument', current: 'Aktuelle Prüfung', after: 'Resultierende Prüfung', accept: 'Diese Änderungen in lokalen Regeln speichern', reject: 'Genau diese Änderungen ablehnen', hold: 'aktiviert keine Regeln', full: 'Der Ablehnungsverlauf ist voll. Er enthält 512 von 512 abgelehnten Änderungen und hat keinen Platz für 1 weitere. Ablehnungen werden nie gelöscht, damit abgelehnte Änderungen nie wieder vorgeschlagen werden.' },
 }
 let renderings = 0
 for (const lang of ['en', 'de']) {
@@ -87,6 +100,12 @@ for (const lang of ['en', 'de']) {
     await writeFile(`${audit}/review-${lang}-${confirmed}.html`, body)
     renderings++
   }
+  const fullBody = ui.render(ui.Full, { props: { account: full.account, summary: full.binding, proposal: full.proposal, lang } }).body
+  assert.ok(fullBody.includes(l.full), `${lang}: full history message`)
+  assert.equal(fullBody.match(new RegExp(`<button[^>]*>${l.reject}</button>`, 'u'))[0].includes('disabled'), true)
+  assert.equal(fullBody.match(new RegExp(`<button[^>]*>${l.accept}</button>`, 'u'))[0].includes('disabled'), false)
+  await writeFile(`${audit}/review-${lang}-full.html`, fullBody)
+  renderings++
   const empty = ui.render(ui.Import, { props: { account: fixture.account, summary: fixture.summary, binding: fixture.binding, lang } }).body
   assert.ok(empty.includes('type="file"'))
   assert.ok(!empty.includes(l.accept))

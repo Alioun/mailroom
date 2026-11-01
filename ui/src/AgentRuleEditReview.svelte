@@ -10,7 +10,7 @@
       load: 'Review rule edits against saved local rules', patch: 'Change preset rule', addition: 'Add new rule', renamed: 'current ID',
       original: 'Current override document', resulting: 'Resulting override document', diff: 'Document changes', proof: 'Current and resulting proof',
       current: 'Current proof', after: 'Resulting proof', counts: 'Messages / filed / Inbox / copies', gate: 'Proof gate', pins: 'Pin results', omissions: 'Omissions', warnings: 'Warnings', folders: 'Folder changes',
-      blocked: 'Acceptance is blocked by the resulting proof. Rejection is still available.', full: 'Rejection history is full. Nothing was removed.',
+      blocked: 'Acceptance is blocked by the resulting proof. Rejection is still available.', full: (recorded: number, limit: number, count: number) => `The rejection history is full. It holds ${recorded} of ${limit} rejected edits and has no room for ${count} more. Rejections are never removed, so rejected edits are never proposed again. These edits cannot be rejected. Leave them unsaved if you do not want them.`,
       confirm: 'I reviewed these exact documents and proof', accept: 'Save these edits to local rules', reject: 'Reject these exact edits',
       saved: 'Local rules saved. Run fresh proof over the saved rules before any export.', rejected: 'Edits rejected. The same edits are refused if proposed again.',
       failure: 'Review refused or saved state changed. Rejected, conflicting or invalid edits cannot be imported. Review a fresh summary and proposal.',
@@ -21,7 +21,7 @@
       load: 'Regeländerungen mit gespeicherten lokalen Regeln prüfen', patch: 'Vorlagenregel ändern', addition: 'Neue Regel hinzufügen', renamed: 'aktuelle ID',
       original: 'Aktuelles Anpassungsdokument', resulting: 'Resultierendes Anpassungsdokument', diff: 'Änderungen am Dokument', proof: 'Aktuelle und resultierende Prüfung',
       current: 'Aktuelle Prüfung', after: 'Resultierende Prüfung', counts: 'Nachrichten / abgelegt / Posteingang / Kopien', gate: 'Prüfstatus', pins: 'Fixierte Testergebnisse', omissions: 'Auslassungen', warnings: 'Hinweise', folders: 'Ordneränderungen',
-      blocked: 'Die resultierende Prüfung sperrt die Annahme. Ablehnen bleibt möglich.', full: 'Der Ablehnungsverlauf ist voll. Es wurde nichts gelöscht.',
+      blocked: 'Die resultierende Prüfung sperrt die Annahme. Ablehnen bleibt möglich.', full: (recorded: number, limit: number, count: number) => `Der Ablehnungsverlauf ist voll. Er enthält ${recorded} von ${limit} abgelehnten Änderungen und hat keinen Platz für ${count} weitere. Ablehnungen werden nie gelöscht, damit abgelehnte Änderungen nie wieder vorgeschlagen werden. Diese Änderungen lassen sich nicht ablehnen. Lass sie ungespeichert, wenn du sie nicht willst.`,
       confirm: 'Ich habe genau diese Dokumente und diese Prüfung kontrolliert', accept: 'Diese Änderungen in lokalen Regeln speichern', reject: 'Genau diese Änderungen ablehnen',
       saved: 'Lokale Regeln gespeichert. Prüfe die gespeicherten Regeln vor jedem Export erneut.', rejected: 'Änderungen abgelehnt. Dieselben Änderungen werden bei einem neuen Vorschlag abgewiesen.',
       failure: 'Prüfung abgelehnt oder gespeicherter Stand geändert. Abgelehnte, widersprüchliche oder ungültige Änderungen lassen sich nicht übernehmen. Prüfe eine neue Zusammenfassung und einen neuen Vorschlag.',
@@ -85,7 +85,7 @@
     </div>
     <details open><summary>{t.folders}</summary><pre>{JSON.stringify(review.resulting.proof.diff, null, 2)}</pre></details>
     {#if !review.accept_receipt}<p role="alert">{t.blocked}</p>{/if}
-    {#if !review.reject_receipt}<p role="alert">{t.full}</p>{/if}
+    {#if !review.reject_receipt}<p role="alert">{t.full(review.rejection_history.recorded, review.rejection_history.limit, review.edits.length)}</p>{/if}
     <label><input type="checkbox" bind:checked={confirmed} disabled={busy} />{t.confirm}</label>
     <button class="primary" disabled={busy || !confirmed || !review.accept_receipt} onclick={() => decide('accept')}>{t.accept}</button>
     <button disabled={busy || !confirmed || !review.reject_receipt} onclick={() => decide('reject')}>{t.reject}</button>

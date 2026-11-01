@@ -435,7 +435,7 @@ fn rejected_edits_persist_and_are_never_imported_again() {
 }
 
 #[test]
-fn rejection_history_is_bounded_without_pruning() {
+fn full_rejection_history_refuses_new_rejections_and_keeps_old_ones() {
     let (_root, store, mut state) = fixture("agent-edit-bound");
     state.proposals.agent_rejections = (0..REJECTION_LIMIT - 1)
         .map(|i| Rejection {
@@ -445,7 +445,7 @@ fn rejection_history_is_bounded_without_pruning() {
             as_of: 0,
         })
         .collect();
-    let reviewed = review(
+    let two = review(
         &state,
         &context(),
         store.keys(),
@@ -453,11 +453,86 @@ fn rejection_history_is_bounded_without_pruning() {
         SUMMARY,
     )
     .unwrap();
-    assert!(reviewed.reject_receipt.is_none());
-    assert!(reviewed.accept_receipt.is_some());
+    assert!(two.reject_receipt.is_none(), "511 + 2 exceeds the limit");
+    assert!(two.accept_receipt.is_some());
+
+    let trips = proposal(json!({"patches": [{"id": "topic.travel", "folder": "Trips"}]}));
+    let last = review(&state, &context(), store.keys(), &trips, SUMMARY).unwrap();
+    confirm(
+        &mut state,
+        &context(),
+        store.keys(),
+        &trips,
+        SUMMARY,
+        Disposition::Reject,
+        &last.reject_receipt.unwrap(),
+    )
+    .unwrap();
+    store.save_state(&mut state).unwrap();
+    let mut state = store.load_state().unwrap();
+    assert_eq!(state.proposals.agent_rejections.len(), REJECTION_LIMIT);
+
+    for repeat in [
+        trips.clone(),
+        proposal(json!({"patches": [{"id": "trips.old", "folder": "Trips"}]})),
+    ] {
+        let error = review(&state, &context(), store.keys(), &repeat, SUMMARY)
+            .err()
+            .unwrap();
+        assert_eq!(error, "Agent proposal repeats a rejected rule edit");
+    }
+
+    let journeys = proposal(json!({"patches": [{"id": "topic.travel", "folder": "Journeys"}]}));
+    let full = review(&state, &context(), store.keys(), &journeys, SUMMARY).unwrap();
+    assert!(full.reject_receipt.is_none());
+    assert_eq!(full.rejection_history.recorded, REJECTION_LIMIT);
+    assert_eq!(full.rejection_history.limit, REJECTION_LIMIT);
+    let before = serde_json::to_vec(&state).unwrap();
+    let error = confirm(
+        &mut state,
+        &context(),
+        store.keys(),
+        &journeys,
+        SUMMARY,
+        Disposition::Reject,
+        full.accept_receipt.as_ref().unwrap(),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(
+        error,
+        "The rejection history is full. It holds 512 of 512 rejected edits and has no room for 1 more. Rejections are never removed, so rejected edits are never proposed again. Nothing was changed"
+    );
+    assert_eq!(
+        serde_json::to_vec(&state).unwrap(),
+        before,
+        "nothing changed"
+    );
+
+    confirm(
+        &mut state,
+        &context(),
+        store.keys(),
+        &journeys,
+        SUMMARY,
+        Disposition::Accept,
+        &full.accept_receipt.unwrap(),
+    )
+    .unwrap();
+    assert!(
+        overrides(&state)
+            .patches
+            .iter()
+            .any(|p| p.folder.as_deref() == Some("Journeys"))
+    );
+    assert_eq!(state.proposals.agent_rejections.len(), REJECTION_LIMIT);
+
     state
         .proposals
         .agent_rejections
         .push(state.proposals.agent_rejections[0].clone());
-    assert!(state.proposals.validate().is_err(), "duplicate rejection");
+    assert!(
+        state.proposals.validate().is_err(),
+        "duplicate or 513th rejection"
+    );
 }

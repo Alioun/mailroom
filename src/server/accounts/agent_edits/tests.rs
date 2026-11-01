@@ -322,3 +322,106 @@ async fn rejected_agent_edits_stay_rejected_and_owner_edits_make_reviews_stale()
     .await;
     assert_eq!(status, StatusCode::OK, "a changed edit is reviewable");
 }
+
+#[tokio::test]
+async fn a_full_rejection_history_refuses_rejections_and_keeps_refusing_rejected_edits() {
+    use crate::rules::agent_edits::{REJECTION_LIMIT, Rejection};
+    let (state, account) = fixture();
+    let store = state
+        .accounts
+        .repository()
+        .unwrap()
+        .store(&account)
+        .unwrap();
+    let mut saved = store.load_state().unwrap();
+    saved.proposals.agent_rejections = (0..REJECTION_LIMIT - 1)
+        .map(|i| Rejection {
+            edit: format!("{i:064x}"),
+            target: "topic.money".into(),
+            summary: "0".repeat(64),
+            as_of: AS_OF,
+        })
+        .collect();
+    store.save_state(&mut saved).unwrap();
+    drop(store);
+    let (summary, text) = reviewed_summary(&state, &account).await;
+    let trips = proposal(&text, "Trips");
+    let (_, review) = post(
+        &state,
+        "agent-edits",
+        request(&account, &summary, &trips, json!({"action":"preview"})),
+    )
+    .await;
+    assert_eq!(
+        review["rejection_history"],
+        json!({"recorded":511,"limit":512})
+    );
+    let (status, rejected) = post(
+        &state,
+        "agent-edits",
+        request(
+            &account,
+            &summary,
+            &trips,
+            confirm("reject", &review["reject_receipt"], true),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+
+    let (status, again) = post(
+        &state,
+        "agent-edits",
+        request(&account, &summary, &trips, json!({"action":"preview"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        again["error"],
+        "Agent proposal repeats a rejected rule edit"
+    );
+
+    let journeys = proposal(&text, "Journeys");
+    let (status, full) = post(
+        &state,
+        "agent-edits",
+        request(&account, &summary, &journeys, json!({"action":"preview"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{full}");
+    assert_eq!(
+        full["rejection_history"],
+        json!({"recorded":512,"limit":512})
+    );
+    assert!(full["reject_receipt"].is_null());
+    assert!(full["accept_receipt"].is_string());
+    let (status, refused) = post(
+        &state,
+        "agent-edits",
+        request(
+            &account,
+            &summary,
+            &journeys,
+            confirm("reject", &full["accept_receipt"], true),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        refused["error"],
+        "The rejection history is full. It holds 512 of 512 rejected edits and has no room for 1 more. Rejections are never removed, so rejected edits are never proposed again. Nothing was changed"
+    );
+    let store = state
+        .accounts
+        .repository()
+        .unwrap()
+        .store(&account)
+        .unwrap();
+    let kept = store.load_state().unwrap().proposals.agent_rejections;
+    assert_eq!(kept.len(), REJECTION_LIMIT);
+    assert_eq!(kept[0].edit, format!("{:064x}", 0));
+    println!(
+        "MAILROOM_AGENT_RULE_EDITS_FULL_FIXTURE {}",
+        json!({"account":account.id,"binding":summary,"proposal":journeys,"review":full})
+    );
+}

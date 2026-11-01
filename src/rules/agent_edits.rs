@@ -75,6 +75,24 @@ pub struct ReviewedEdit {
     pub target: String,
     pub digest: String,
 }
+/// How full the rejection history is. Entries are never pruned, so at the
+/// limit a rejection cannot be recorded and is refused instead.
+#[derive(Clone, Copy, Serialize)]
+pub struct RejectionHistory {
+    pub recorded: usize,
+    pub limit: usize,
+}
+impl RejectionHistory {
+    fn has_room_for(self, edits: usize) -> bool {
+        self.recorded + edits <= self.limit
+    }
+    fn full(self, edits: usize) -> String {
+        format!(
+            "The rejection history is full. It holds {} of {} rejected edits and has no room for {edits} more. Rejections are never removed, so rejected edits are never proposed again. Nothing was changed",
+            self.recorded, self.limit
+        )
+    }
+}
 #[derive(Clone, Copy, Serialize)]
 pub struct Effects {
     pub accept: &'static str,
@@ -96,6 +114,7 @@ pub struct Review {
     pub resulting: ProofPreview,
     pub accept_receipt: Option<String>,
     pub reject_receipt: Option<String>,
+    pub rejection_history: RejectionHistory,
     pub effects: Effects,
 }
 
@@ -265,7 +284,12 @@ fn prepare(
     );
     let accept_receipt = (resulting.proof.gate != "blocked")
         .then(|| keys.binding_for(Disposition::Accept.purpose(), &payload));
-    let reject_receipt = (state.proposals.agent_rejections.len() + edits.len() <= REJECTION_LIMIT)
+    let rejection_history = RejectionHistory {
+        recorded: state.proposals.agent_rejections.len(),
+        limit: REJECTION_LIMIT,
+    };
+    let reject_receipt = rejection_history
+        .has_room_for(edits.len())
         .then(|| keys.binding_for(Disposition::Reject.purpose(), &payload));
     let review = Review {
         semantics: SEMANTICS,
@@ -282,6 +306,7 @@ fn prepare(
         resulting,
         accept_receipt,
         reject_receipt,
+        rejection_history,
         effects: EFFECTS,
     };
     Ok((review, result))
@@ -309,10 +334,13 @@ pub(crate) fn confirm(
     use subtle::ConstantTimeEq;
     let (review, result) = prepare(state, context, keys, proposal, summary)?;
     let expected = match disposition {
-        Disposition::Accept => review.accept_receipt,
-        Disposition::Reject => review.reject_receipt,
-    }
-    .ok_or("This decision is blocked for the reviewed edits")?;
+        Disposition::Accept => review
+            .accept_receipt
+            .ok_or("The resulting proof blocks saving these edits")?,
+        Disposition::Reject => review
+            .reject_receipt
+            .ok_or_else(|| review.rejection_history.full(review.edits.len()))?,
+    };
     if !bool::from(expected.as_bytes().ct_eq(receipt.as_bytes())) {
         return Err("Agent edit review changed or is stale. Review the proposal again".into());
     }

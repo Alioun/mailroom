@@ -265,7 +265,7 @@ impl Fake {
             tls_name: "localhost".into(),
             root: p.root.clone(),
             epoch: p.epoch.clone(),
-            authority: "test-bound-authority".into(),
+            authority: "fixture-message-move/v1".into(),
             command_timeout: Duration::from_millis(800),
             operation_timeout: Duration::from_secs(10),
         };
@@ -295,7 +295,7 @@ impl Fake {
                 &account.id,
                 account.provider,
                 &account.login,
-                "test-bound-authority",
+                "fixture-message-move/v1",
             )?,
             &SecretValue::new(b"invented".to_vec()),
             cancel,
@@ -1049,7 +1049,7 @@ fn actual_verified_tls_sparse_move_and_reverse_preserve_independent_messages_and
                 &account.id,
                 account.provider,
                 &account.login,
-                "test-bound-authority",
+                "fixture-message-move/v1",
             )
             .unwrap();
         let mut persisted_mapping = false;
@@ -1157,7 +1157,7 @@ fn lost_mapping_never_becomes_success_after_reconnect_and_repeated_observation()
                 &account.id,
                 account.provider,
                 &account.login,
-                "test-bound-authority",
+                "fixture-message-move/v1",
             )
             .unwrap();
         let result = connection.move_messages(&permit, &mut evidence, |_| Ok(()));
@@ -1183,7 +1183,7 @@ fn lost_mapping_never_becomes_success_after_reconnect_and_repeated_observation()
                 &account.id,
                 account.provider,
                 &account.login,
-                "test-bound-authority",
+                "fixture-message-move/v1",
             )
             .unwrap();
         assert_eq!(
@@ -1203,7 +1203,7 @@ fn wrong_source_binding_and_unverified_tls_never_authenticate() {
                 &account.id,
                 Provider::Gmail,
                 &account.login,
-                "test-bound-authority"
+                "fixture-message-move/v1"
             )
             .is_err()
     );
@@ -1248,7 +1248,7 @@ fn partial_no_resolves_only_mapped_entries_and_invalid_mapping_stays_conflicted(
                 &account.id,
                 account.provider,
                 &account.login,
-                "test-bound-authority",
+                "fixture-message-move/v1",
             )
             .unwrap();
         let result = connection.move_messages(&permit, &mut evidence, |_| Ok(()));
@@ -1298,7 +1298,7 @@ fn cancelled_response_wait_retains_effect_and_never_starts_another_mutation() {
             &account.id,
             account.provider,
             &account.login,
-            "test-bound-authority",
+            "fixture-message-move/v1",
         )
         .unwrap();
     let signal = root.path().join("move-effect-reached");
@@ -1338,7 +1338,7 @@ fn failure_to_save_attempt_prevents_move_and_changed_metadata_blocks_admission()
             &account.id,
             account.provider,
             &account.login,
-            "test-bound-authority",
+            "fixture-message-move/v1",
         )
         .unwrap();
     assert_eq!(
@@ -1482,7 +1482,6 @@ fn untrusted_and_expired_tls_are_rejected_before_login() {
 impl Fake {
     pub(crate) fn install(&self, repo: &mut Accounts) {
         let mut source = self.source.clone();
-        source.authority = "fixture-message-move/v1".into();
         source.command_timeout = crate::acquisition::fixture_peer::FIXTURE_COMMAND_TIMEOUT;
         source.operation_timeout = Duration::from_secs(120);
         repo.backlog_source = Some(Arc::new(source));
@@ -1653,7 +1652,7 @@ fn pipelined_checks_stop_at_the_first_unsafe_response_before_any_effect() {
                 &account.id,
                 account.provider,
                 &account.login,
-                "test-bound-authority",
+                "fixture-message-move/v1",
             )
             .unwrap();
         let mut persisted = 0;

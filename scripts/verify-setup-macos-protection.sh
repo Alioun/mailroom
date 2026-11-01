@@ -12,6 +12,7 @@ trap '[[ -n "${KEEP:-}" ]] && echo "work=$work" || { chmod -R u+rwx "${work:?}";
 chmod 700 "$work"
 me="$(id -un)"
 dummy="nk-dummy-wizard-$RANDOM$RANDOM"
+dummy_key=$(printf '%s' "$dummy" | shasum -a 256 | cut -c1-64)
 passed=0
 fail() { echo "FAIL: $1"; exit 1; }
 ok() { passed=$((passed + 1)); }
@@ -24,7 +25,10 @@ cat >"$work/wrapper.c" <<'C'
 int main(int argc, char **argv) {
   char script[4096]; char self[4096]; strncpy(self, argv[0], sizeof self - 1);
   snprintf(script, sizeof script, "%s/fake.sh", dirname(self));
-  execv("/bin/sh", (char *[]){"/bin/sh", script, argc > 1 ? argv[1] : "", argc > 2 ? argv[2] : "", argc > 3 ? argv[3] : "", NULL});
+  char *args[argc + 2]; args[0] = "/bin/sh"; args[1] = script;
+  for (int i = 1; i < argc; i++) args[i + 1] = argv[i];
+  args[argc + 1] = NULL;
+  execv("/bin/sh", args);
   return 127;
 }
 C
@@ -58,6 +62,7 @@ case "$1 $2" in
   "keychain status")
     [ "$scenario" = shaped_class ] && { echo "status=missing class=pinned_self"; exit 1; }
     [ "$3" = acct2-password ] && [ -e "$here/added" ] && { echo "status=ok class=every_access"; exit 0; }
+    case "$3" in *-password-*) [ -e "$here/replaced" ] && { echo "status=ok class=every_access"; exit 0; } ;; esac
     if [ -e "$here/enrolled" ]; then echo "status=ok class=every_access"; else echo "status=missing class=every_access"; exit 1; fi ;;
   "keychain enroll")
     stty -echo </dev/tty; printf 'Password: ' >/dev/tty; IFS= read -r a </dev/tty
@@ -84,6 +89,42 @@ case "$1 $2" in
     printf '{"id":"acct2","provider":"%s","login":"%s","password_ref":"acct2-password","local_secret_ref":"acct2-census-key","generation":0,"identity_ref":null,"connection":"unverified"}' \
       "$3" "$login" >"$here/../../config/acct2.json"
     : >"$here/added"; echo status=created ;;
+  "account replace-password")
+    stty -echo </dev/tty; printf 'Password: ' >/dev/tty; IFS= read -r a </dev/tty
+    [ "$scenario" = replace_killed ] && kill -9 $$
+    printf 'Password again: ' >/dev/tty; IFS= read -r b </dev/tty; stty echo </dev/tty
+    [ "$a" = "$b" ] || { echo status=mismatch; exit 1; }
+    printf '%s' "$a" | shasum >"$here/replaced-password"
+    sed "s/\"password_ref\":\"$3-password\"/\"password_ref\":\"$3-password-0123456789abcdef0123456789abcdef\"/" "$here/../../config/$3.json" >"$here/replaced.json"
+    mv "$here/replaced.json" "$here/../../config/$3.json"; : >"$here/replaced"; echo status=replaced ;;
+  "account recover-local")
+    [ "$scenario" = recover_denied ] && { echo status=denied; exit 1; }
+    rm -f "$here/../../config/lifecycle/$3.json"; echo status=recovered ;;
+  "account rotate-key")
+    [ "$scenario" = rotate_killed ] && kill -9 $$
+    [ "$scenario" = rotate_shaped ] && { echo "status=$(cat "$here/dummy")"; exit 1; }
+    echo status=rotated ;;
+  "account forget")
+    [ "$scenario" = forget_cancelled ] && { echo status=cancelled; exit 1; }
+    rm -f "$here/../../config/$3.json"; echo status=forgotten ;;
+  "account recovery-prepare")
+    [ "$scenario" = prepare_failed ] && { echo status=storage_unavailable; exit 1; }
+    mkdir -p "$here/../../config/recovery-transfer/incoming" "$here/../../config/recovery-transfer/outgoing"
+    echo status=recovery_prepared ;;
+  "account recovery-"*)
+    stty -echo </dev/tty; printf 'Recovery key, 64 lowercase hex characters: ' >/dev/tty; IFS= read -r a </dev/tty
+    [ "$scenario" = recovery_killed ] && kill -9 $$
+    case "$a" in *[!0-9a-f]*) stty echo </dev/tty; echo status=invalid_input; exit 1 ;; esac
+    [ ${#a} -eq 64 ] || { stty echo </dev/tty; echo status=invalid_input; exit 1; }
+    b=$a
+    case "$2" in recovery-capture*) printf 'Recovery key again: ' >/dev/tty; IFS= read -r b </dev/tty ;; esac
+    stty echo </dev/tty
+    [ "$a" = "$b" ] || { echo status=mismatch; exit 1; }
+    printf '%s' "$a" | shasum >"$here/recovery-key"
+    [ "$scenario" = recovery_cancelled ] && { echo status=cancelled; exit 1; }
+    [ "$scenario" = recovery_auth ] && { echo status=authentication_failed; exit 1; }
+    [ "$scenario" = recovery_shaped ] && { echo "status=$a"; exit 1; }
+    case "$2" in recovery-capture*) echo status=captured ;; *) echo status=restored_read_only ;; esac ;;
   *) echo status=usage; exit 2 ;;
 esac
 SH
@@ -155,17 +196,18 @@ install_fake() {
 }
 records() { cat "$out/records" 2>/dev/null || true; }
 calls() { cat "$out/libexec/mailroom/calls.log" 2>/dev/null || true; }
-no_secret() { if grep -rqaF "$dummy" "$out" --exclude=driver.sh --exclude=dummy --exclude=answers; then fail "$1: dummy password appeared in output or a file"; fi; ok; }
+no_secret() { if grep -rqaF -e "$dummy" -e "$dummy_key" "$out" --exclude=driver.sh --exclude=dummy --exclude=answers; then fail "$1: dummy password appeared in output or a file"; fi; ok; }
 stopped() { [[ $(cat "$out/exit") != 0 ]] && grep -qa "Setup incomplete" "$out/transcript" && ! grep -qa "Setup complete" "$out/transcript" || fail "$1 stops setup"; ok; }
 completed() { [[ $(cat "$out/exit") == 0 ]] && grep -qa "Setup complete" "$out/transcript" || fail "$1 completes"; ok; }
 
-# owner_prepare NAME [ADD [PROVIDER]]: answers ADD to "Add one local account now?" and
-# PROVIDER to its provider prompt, and declines every other optional step.
+# owner_prepare NAME [ADD [PROVIDER [REPLACE]]]: answers ADD to "Add one local account now?",
+# PROVIDER to its provider prompt and REPLACE to "Replace one saved password now?", and
+# declines every other optional step.
 owner_prepare() {
   local name="$1"; tree "$name"; install_fake "$name"
   answer "$out" "Password: " "$dummy"; answer "$out" "Repeat it: " "$dummy"; answer "$out" "for a while. [y/N]" ""
   answer "$out" "already saved. [y/N]" "${2:-}"; answer "$out" "Provider: mailbox_org or gmail" "${3:-}"
-  answer "$out" "password now? [y/N]" ""
+  answer "$out" "password now? [y/N]" "${4:-}"
   [[ "$name" == uncommitted ]] && answer "$out" "identity key of acct? [y/N]" y
   return 0
 }
@@ -217,6 +259,147 @@ owner_prepare add_interrupted y; answer "$out" "Account login: " "new@example.te
   && ! grep -q "^keychain" <(calls) \
   && ! grep -q "status=created" <(records) || fail "Ctrl-C at the hidden prompt stops setup"; ok
 unpublished add_interrupted; no_secret add_interrupted
+interrupted() { [[ $(cat "$out/exit") != 0 && -s "$out/transcript" ]] && ! grep -qa "Setup complete" "$out/transcript" || fail "$1 stops setup"; ok; }
+
+# Stage 7 answered yes: the new password enters at hidden prompts, the account moves to a
+# fresh password reference, and the access checks follow the reloaded reference.
+new_ref=acct-password-0123456789abcdef0123456789abcdef
+owner_prepare replace_yes "" "" y; answer "$out" "Account ID" acct; answer "$out" "Password again: " "$dummy"; owner_go
+completed "replacing a password"
+grep -qx "password_replace status=replaced" <(records) || fail "record: password_replace status=replaced"; ok
+grep -qx "account replace-password acct" <(calls) && [[ $(grep -c "^account " <(calls)) == 1 ]] || fail "replace-password gets only the account in argv"; ok
+[[ "$(cat "$out/libexec/mailroom/replaced-password")" == "$(printf '%s' "$dummy" | shasum)" ]] || fail "the new password reaches the binary through the terminal"; ok
+for step in "deny $new_ref status=denied" "allow $new_ref status=ok" "protection $new_ref status=ok"; do
+  grep -qx "$step" <(records) || fail "replaced reference record: $step"; ok
+done
+! grep -q "^deny acct-password " <(records) || fail "the retired reference is not checked after replacement"; ok
+no_secret replace_yes
+owner_prepare replace_mismatch "" "" y; answer "$out" "Account ID" acct; answer "$out" "Password again: " "$dummy-other"; owner_go
+grep -qx "password_replace status=mismatch" <(records) && ! grep -q "keychain probe" <(calls) && grep -q '"password_ref":"acct-password"' "$out/config/acct.json" \
+  || fail "a mismatched replacement stops and keeps the saved reference"; ok; no_secret replace_mismatch; stopped replace_mismatch
+owner_prepare replace_killed "" "" y; answer "$out" "Account ID" acct; owner_go
+grep -qx "password_replace status=terminated" <(records) && ! grep -q "keychain probe" <(calls) || fail "a killed replacement stops"; ok
+no_secret replace_killed; stopped replace_killed
+owner_prepare replace_interrupted "" "" y; answer "$out" "Account ID" acct; answer "$out" "Password again: " $'\003'; owner_go
+interrupted "Ctrl-C at the replacement prompt"; grep -qa "Password again: " "$out/transcript" && ! grep -q "status=replaced" <(records) \
+  && ! grep -q "keychain probe" <(calls) || fail "Ctrl-C at the replacement prompt replaces nothing"; ok; no_secret replace_interrupted
+owner_prepare replace_unknown "" "" y; answer "$out" "Account ID" nobody; owner_go
+grep -qx "account_selection unknown" <(records) && ! grep -q "^account " <(calls) || fail "an unknown account is refused before replacement"; ok; stopped replace_unknown
+
+# Maintenance phase. RECONCILE ROTATE FORGET answer its three optional prompts; ID answers
+# every account selection.
+lifecycle() { mkdir -p "$out/config/lifecycle"; printf '{"intent":{"state":"%s"}}' "$2" >"$out/config/lifecycle/$1.json"; }
+maint_prepare() {
+  tree "$1"; install_fake "$1"
+  answer "$out" "reconcile acct now? [y/N]" "${2:-}"; answer "$out" "local encryption key? [y/N]" "${3:-}"
+  answer "$out" "forget one local account? [y/N]" "${4:-}"; answer "$out" "Account ID" "${5:-acct}"
+}
+maint_go() { run_phase "maintenance_phase \"$frozen\""; }
+no_account_command() { ! grep -q "^account " <(calls) || fail "$1 runs no account command"; ok; }
+
+maint_prepare maint_happy y y y; lifecycle acct creating; maint_go; completed "maintenance"
+for step in "recover acct status=recovered" "key_rotation status=rotated" "local_forget status=forgotten"; do
+  grep -qx "$step" <(records) || fail "maintenance record: $step"; ok
+done
+[[ "$(grep "^account " <(calls))" == $'account recover-local acct\naccount rotate-key acct\naccount forget acct' ]] || fail "maintenance argv"; ok
+[[ ! -e "$out/config/acct.json" ]] || fail "a forgotten account's metadata is gone"; ok; no_secret maint_happy
+maint_prepare maint_decline; maint_go; completed "declined maintenance"; no_account_command "declined maintenance"
+maint_prepare maint_forgotten; lifecycle acct forgotten; maint_go; completed "a finished forget"
+! grep -qa "reconcile acct now" "$out/transcript" || fail "a finished forget is not offered for recovery"; ok; no_account_command "a finished forget"
+maint_prepare maint_recover_declined n; lifecycle acct replacing; maint_go
+! grep -q "^recover " <(records) || fail "a declined recovery records no result"; ok; no_account_command "a declined recovery"
+maint_prepare maint_state; lifecycle acct exploded; maint_go
+grep -qx "lifecycle_state unknown" <(records) || fail "an unknown lifecycle state is refused"; ok; no_account_command "an unknown state"; stopped maint_state
+maint_prepare maint_lifecycle_json; mkdir "$out/config/lifecycle"; echo '{' >"$out/config/lifecycle/acct.json"; maint_go
+grep -qx "lifecycle_metadata unreadable" <(records) || fail "unreadable lifecycle metadata is refused"; ok; stopped maint_lifecycle_json
+maint_prepare maint_lifecycle_link; mkdir "$out/config/lifecycle"; printf '{"intent":{"state":"creating"}}' >"$out/elsewhere.json"
+ln -s "$out/elsewhere.json" "$out/config/lifecycle/acct.json"; maint_go
+grep -qx "lifecycle_metadata unreadable" <(records) && ! grep -q "^account " <(calls) || fail "a symlinked lifecycle file is refused"; ok; stopped maint_lifecycle_link
+maint_prepare maint_lifecycle_name; lifecycle "bad.name" creating; maint_go
+grep -qx "lifecycle_metadata unreadable" <(records) || fail "a lifecycle file with an invalid id is refused"; ok; stopped maint_lifecycle_name
+maint_prepare recover_denied y; lifecycle acct creating; maint_go
+grep -qx "recover acct status=denied" <(records) || fail "a denied recovery stops"; ok; stopped recover_denied
+maint_prepare maint_metadata; printf '%s' '{"id":"other","password_ref":"other-password","local_secret_ref":"other-census-key"}' >"$out/config/acct.json"; maint_go
+grep -qx "account_metadata unreadable" <(records) && ! grep -q "^account " <(calls) || fail "maintenance refuses mismatched metadata"; ok; stopped maint_metadata
+maint_prepare maint_rotate_unknown "" y "" nobody; maint_go
+grep -qx "account_selection unknown" <(records) || fail "an unknown rotation account is refused"; ok; no_account_command "an unknown rotation account"; stopped maint_rotate_unknown
+maint_prepare rotate_shaped "" y; maint_go
+grep -qx "key_rotation status=unexpected" <(records) || fail "a rotation reply outside the known set"; ok; no_secret rotate_shaped; stopped rotate_shaped
+maint_prepare rotate_killed "" y; maint_go
+grep -qx "key_rotation status=terminated" <(records) || fail "a killed rotation stops"; ok; stopped rotate_killed
+maint_prepare maint_rotate_interrupted "" y "" $'\003'; maint_go
+interrupted "Ctrl-C at the rotation account prompt"; no_account_command "Ctrl-C at the rotation account prompt"
+maint_prepare forget_cancelled "" "" y; maint_go
+grep -qx "local_forget status=cancelled" <(records) && [[ -e "$out/config/acct.json" ]] || fail "a cancelled forget stops and keeps the account"; ok; stopped forget_cancelled
+maint_prepare maint_forget_unknown "" "" y nobody; maint_go
+grep -qx "account_selection unknown" <(records) || fail "an unknown forget account is refused"; ok; no_account_command "an unknown forget account"; stopped maint_forget_unknown
+tree maint_digest; install_fake happy; : >"$out/answers"; answer "$out" "approval record:" 0000; maint_go
+grep -qx "tree_digest mismatch" <(records) && [[ ! -e "$out/libexec/mailroom/calls.log" ]] || fail "maintenance refuses a changed tree"; ok
+tree maint_install; install_fake happy; chmod u+w "$out/libexec/mailroom"; ln -s /etc/hosts "$out/libexec/mailroom/extra"; chmod u-w "$out/libexec/mailroom"; maint_go
+grep -qx "installation untrusted" <(records) && [[ ! -e "$out/libexec/mailroom/calls.log" ]] || fail "maintenance refuses an untrusted installation"; ok; stopped maint_install
+
+# Recovery phase. The recovery key is a dummy 64-hex value entered only at the binary's
+# hidden prompts. rec_prepare NAME RUN KIND CHOSEN LEDGER KEY_READY CUSTODY BUNDLE KEY KEY_AGAIN.
+bundle=$(printf 'ab%.0s' {1..32})
+rec_prepare() {
+  tree "$1"; install_fake "$1"
+  answer "$out" "recovery action now? [y/N]" "${2:-}"; answer "$out" "Choose capture, restore or resume" "${3:-}"
+  answer "$out" "separated by spaces" "${4-acct}"; answer "$out" "address ledger in this bundle? [y/N]" "${5:-}"
+  answer "$out" "identical target? [y/N]" "${5:-}"; answer "$out" "available for this action? [y/N]" "${6:-y}"
+  answer "$out" "separately from its key? [y/N]" "${7:-y}"; answer "$out" "without .bundle" "${8:-$bundle}"
+  answer "$out" "64 lowercase hex characters: " "${9:-$dummy_key}"; answer "$out" "Recovery key again: " "${10:-$dummy_key}"
+}
+rec_go() { run_phase "recovery_phase \"$frozen\""; }
+key_entered() { [[ "$(cat "$out/libexec/mailroom/recovery-key")" == "$(printf '%s' "$dummy_key" | shasum)" ]] || fail "$1: the key reaches the binary through the terminal"; ok; }
+rec_argv() { [[ "$(grep "^account " <(calls))" == "account recovery-prepare"$'\n'"$2" ]] || fail "$1 argv"; ok; }
+
+rec_prepare rec_decline; rec_go; completed "declined recovery"; no_account_command "declined recovery"
+rec_prepare rec_capture y; rec_go; completed "capture"
+grep -qx "recovery_directories status=recovery_prepared" <(records) && grep -qx "recovery status=captured" <(records) \
+  && grep -qx "bundle_custody owner_confirmed" <(records) || fail "capture records"; ok
+rec_argv capture "account recovery-capture acct"; key_entered capture; no_secret rec_capture
+rec_prepare rec_capture_ledger y "" acct y y n; rec_go; completed "capture with the ledger"
+rec_argv "capture with the ledger" "account recovery-capture-with-ledger acct"; ! grep -q "^bundle_custody" <(records) || fail "declined custody records no confirmation"; ok
+no_secret rec_capture_ledger
+rec_prepare rec_restore y restore; rec_go; completed "restore"
+grep -qx "recovery status=restored_read_only" <(records) || fail "restore record"; ok; rec_argv restore "account recovery-restore $bundle"; key_entered restore; no_secret rec_restore
+rec_prepare rec_restore_ledger y restore "" y; rec_go; completed "restore with the ledger"; rec_argv "restore with the ledger" "account recovery-restore-with-ledger $bundle"
+rec_prepare rec_resume y resume; rec_go; completed "resume"
+grep -qx "recovery status=restored_read_only" <(records) || fail "resume record"; ok; rec_argv resume "account recovery-resume"; key_entered resume; no_secret rec_resume
+rec_prepare prepare_failed y; rec_go
+grep -qx "recovery_directories status=storage_unavailable" <(records) && [[ "$(grep "^account " <(calls))" == "account recovery-prepare" ]] || fail "a failed prepare stops"; ok; stopped prepare_failed
+rec_prepare rec_action y delete; rec_go
+grep -qx "recovery_action unknown" <(records) && [[ "$(grep "^account " <(calls))" == "account recovery-prepare" ]] || fail "an unknown action is refused"; ok; stopped rec_action
+n=0
+for chosen in "" nobody "acct acct" "acct acct acct acct acct acct acct acct acct" "ac/ct"; do
+  n=$((n + 1)); rec_prepare "rec_selection_$n" y capture "$chosen"; rec_go
+  grep -qx "capture_selection invalid" <(records) && ! grep -q "recovery-capture" <(calls) || fail "capture selection '$chosen' is refused"; ok; stopped "rec_selection_$n"
+done
+for value in xyz "$(printf 'AB%.0s' {1..32})"; do
+  rec_prepare "rec_bundle_${#value}" y restore "" "" y y "$value"; rec_go
+  grep -qx "bundle_selection invalid" <(records) && ! grep -q "recovery-restore" <(calls) || fail "bundle '$value' is refused"; ok; stopped "rec_bundle_${#value}"
+done
+rec_prepare rec_metadata y; printf '%s' '{"id":"other"}' >"$out/config/acct.json"; rec_go
+grep -qx "account_metadata unreadable" <(records) && ! grep -q "recovery-capture" <(calls) || fail "capture refuses mismatched metadata"; ok; stopped rec_metadata
+rec_prepare rec_no_key y "" acct "" n; rec_go
+[[ $(cat "$out/exit") != 0 ]] && ! grep -q "^recovery " <(records) && [[ "$(grep "^account " <(calls))" == "account recovery-prepare" ]] || fail "a missing recovery key stops before the action"; ok
+rec_prepare rec_mismatch y "" acct "" y y "" "$dummy_key" "$(printf '0%.0s' {1..64})"; rec_go
+grep -qx "recovery status=mismatch" <(records) || fail "a mismatched key stops"; ok; no_secret rec_mismatch; stopped rec_mismatch
+rec_prepare rec_invalid y resume "" "" y y "" "$dummy"; rec_go
+grep -qx "recovery status=invalid_input" <(records) || fail "a key that is not 64 hex characters stops"; ok; no_secret rec_invalid; stopped rec_invalid
+rec_prepare recovery_cancelled y; rec_go
+grep -qx "recovery status=cancelled" <(records) || fail "a cancelled native review stops"; ok; no_secret recovery_cancelled; stopped recovery_cancelled
+rec_prepare recovery_auth y restore; rec_go
+grep -qx "recovery status=authentication_failed" <(records) || fail "a bundle that fails authentication stops"; ok; no_secret recovery_auth; stopped recovery_auth
+rec_prepare recovery_killed y; rec_go
+grep -qx "recovery status=terminated" <(records) || fail "a killed recovery stops"; ok; no_secret recovery_killed; stopped recovery_killed
+rec_prepare recovery_shaped y resume; rec_go
+grep -qx "recovery status=unexpected" <(records) || fail "a recovery reply that echoes the key"; ok; no_secret recovery_shaped; stopped recovery_shaped
+rec_prepare rec_interrupted y "" acct "" y y "" "$dummy_key" $'\003'; rec_go
+interrupted "Ctrl-C at the recovery key prompt"; grep -qa "Recovery key again: " "$out/transcript" && ! grep -q "status=captured" <(records) \
+  || fail "Ctrl-C at the recovery key prompt captures nothing"; ok; no_secret rec_interrupted
+tree rec_digest; install_fake happy; : >"$out/answers"; answer "$out" "approval record:" 0000; rec_go
+grep -qx "tree_digest mismatch" <(records) && [[ ! -e "$out/libexec/mailroom/calls.log" ]] || fail "recovery refuses a changed tree"; ok
 
 owner_run probe_wrong; grep -qx "deny acct-password status=ok" <(records) || fail "a silent read is recorded and is not a denial"; ok; stopped probe_wrong
 owner_run trailing_failure; grep -qx "enroll acct-password status=unexpected" <(records) || fail "a failure record after success"; ok; stopped trailing

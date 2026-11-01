@@ -8,11 +8,14 @@ driver kills the child's whole process group, which pty.fork makes a session of 
 so build tools the child started stop with it. The exit code is the child's.
 macOS answers EPERM, not ESRCH, for a group whose members are all exiting.
 """
+import fcntl
 import os
 import pty
 import select
 import signal
+import struct
 import sys
+import termios
 
 driver, transcript, answers = sys.argv[1:4]
 silence = float(sys.argv[4]) if len(sys.argv) > 4 else 20
@@ -20,6 +23,9 @@ rules = [line.split("\t", 1) for line in open(answers).read().splitlines() if "\
 rules = [(prompt.encode(), answer) for prompt, answer in rules] + [(b"Ready to start?", "")]
 pid, fd = pty.fork()
 if pid == 0:
+    # A wide terminal keeps Readline from scrolling a long answer, which would redraw the
+    # prompt and answer it a second time.
+    fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 300, 0, 0))
     os.execv("/bin/bash", ["/bin/bash", driver])
 
 

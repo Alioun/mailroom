@@ -40,7 +40,9 @@ case "$1 $2" in
     if once asked; then echo outcome=approved; else echo outcome=cancelled; fi ;;
   "keychain refs")
     [ "$scenario" = shaped_secret ] && echo "ref=$(cat "$here/dummy")-password class=every_access"
-    echo "ref=acct-password class=every_access"; echo "ref=acct-census-key class=pinned_self"; echo status=ok ;;
+    echo "ref=acct-password class=every_access"; echo "ref=acct-census-key class=pinned_self"
+    [ -e "$here/added" ] && { echo "ref=acct2-password class=every_access"; echo "ref=acct2-census-key class=pinned_self"; }
+    echo status=ok ;;
   "keychain legacy")
     echo "ref=acct-password class=every_access"; echo "ref=acct-census-key class=pinned_self"
     echo "ref=stale-census-key class=pinned_self"; echo status=ok ;;
@@ -55,6 +57,7 @@ case "$1 $2" in
   "keychain retire-legacy") echo status=retired ;;
   "keychain status")
     [ "$scenario" = shaped_class ] && { echo "status=missing class=pinned_self"; exit 1; }
+    [ "$3" = acct2-password ] && [ -e "$here/added" ] && { echo "status=ok class=every_access"; exit 0; }
     if [ -e "$here/enrolled" ]; then echo "status=ok class=every_access"; else echo "status=missing class=every_access"; exit 1; fi ;;
   "keychain enroll")
     stty -echo </dev/tty; printf 'Password: ' >/dev/tty; IFS= read -r a </dev/tty
@@ -66,11 +69,21 @@ case "$1 $2" in
     [ "$scenario" = trailing_failure ] && echo status=terminated
     exit 0 ;;
   "keychain probe")
-    if once probed; then
+    if once "probed-$3"; then
       [ "$scenario" = probe_wrong ] && { echo status=ok; exit 0; }
       echo status=denied; exit 1
     fi
     echo status=ok ;;
+  "account add")
+    stty -echo </dev/tty; printf 'Account login: ' >/dev/tty; IFS= read -r login </dev/tty
+    printf 'Password: ' >/dev/tty; IFS= read -r a </dev/tty
+    [ "$scenario" = add_killed ] && kill -9 $$
+    printf 'Password again: ' >/dev/tty; IFS= read -r b </dev/tty; stty echo </dev/tty
+    [ "$a" = "$b" ] || { echo status=mismatch; exit 1; }
+    printf '%s' "$a" | shasum >"$here/added-password"
+    printf '{"id":"acct2","provider":"%s","login":"%s","password_ref":"acct2-password","local_secret_ref":"acct2-census-key","generation":0,"identity_ref":null,"connection":"unverified"}' \
+      "$3" "$login" >"$here/../../config/acct2.json"
+    : >"$here/added"; echo status=created ;;
   *) echo status=usage; exit 2 ;;
 esac
 SH
@@ -124,7 +137,7 @@ overrides() {
   cat <<DRV
 source "$frozen/scripts/setup-macos-protection.sh"
 SHARE="$out/share"; LIBEXEC_PARENT="$out/libexec"; LIBEXEC="$out/libexec/mailroom"; BUILD_BASE="$out/build"
-TRUSTED_OWNER="$me"; HOME="$out/home"; CONFIG="$out/config"; CARGO="$work/tools/cargo"; RUSTC="$work/tools/rustc"
+TRUSTED_OWNER="$me"; HOME="$out/home"; CONFIG="$out/config"; ENV_FILE=/dev/null; CARGO="$work/tools/cargo"; RUSTC="$work/tools/rustc"
 NODE="$work/tools/node"; NPM_CLI="$work/tools/npm-cli.js"; XCRUN="$work/tools/xcrun"; RECORDS="$out/records"
 DRV
 }
@@ -146,12 +159,19 @@ no_secret() { if grep -rqaF "$dummy" "$out" --exclude=driver.sh --exclude=dummy 
 stopped() { [[ $(cat "$out/exit") != 0 ]] && grep -qa "Setup incomplete" "$out/transcript" && ! grep -qa "Setup complete" "$out/transcript" || fail "$1 stops setup"; ok; }
 completed() { [[ $(cat "$out/exit") == 0 ]] && grep -qa "Setup complete" "$out/transcript" || fail "$1 completes"; ok; }
 
-owner_run() {
+# owner_prepare NAME [ADD [PROVIDER]]: answers ADD to "Add one local account now?" and
+# PROVIDER to its provider prompt, and declines every other optional step.
+owner_prepare() {
   local name="$1"; tree "$name"; install_fake "$name"
   answer "$out" "Password: " "$dummy"; answer "$out" "Repeat it: " "$dummy"; answer "$out" "for a while. [y/N]" ""
+  answer "$out" "already saved. [y/N]" "${2:-}"; answer "$out" "Provider: mailbox_org or gmail" "${3:-}"
+  answer "$out" "password now? [y/N]" ""
   [[ "$name" == uncommitted ]] && answer "$out" "identity key of acct? [y/N]" y
-  run_phase "owner_phase \"$frozen\""
+  return 0
 }
+owner_go() { run_phase "owner_phase \"$frozen\""; }
+owner_run() { owner_prepare "$@"; owner_go; }
+unpublished() { [[ ! -e "$out/config/acct2.json" && ! -e "$out/libexec/mailroom/added" ]] || fail "$1 publishes no account"; ok; }
 
 owner_run happy; completed "owner happy path"
 for step in "tree_digest match" "installation trusted" "native_approve outcome=approved" "native_cancel outcome=cancelled" \
@@ -164,7 +184,39 @@ done
 ! grep -q "retire-legacy" <(calls) || fail "legacy originals kept by default"; ok
 ! grep -qa "stale-census-key" "$out/records" "$out/transcript" || fail "a legacy name of no saved account is never shown"; ok
 grep -qa "1 legacy item(s) belong to no saved account" "$out/transcript" || fail "dropped legacy names are counted"; ok
+! grep -q "^account " <(calls) || fail "a declined account setup runs no account command"; ok
 no_secret happy
+
+# Stage 3 answered yes: login and password enter at the installed binary's hidden prompts,
+# never in argv, output, records or files, and later stages load the new account's references.
+owner_prepare add_yes y gmail
+answer "$out" "Account login: " "new@example.test"; answer "$out" "Password again: " "$dummy"
+owner_go; completed "adding an account"
+grep -qx "account_add status=created" <(records) || fail "record: account_add status=created"; ok
+grep -qx "account add gmail" <(calls) && [[ $(grep -c "^account " <(calls)) == 1 ]] || fail "account add gets only the provider in argv"; ok
+[[ "$(cat "$out/libexec/mailroom/added-password")" == "$(printf '%s' "$dummy" | shasum)" ]] || fail "the password reaches the binary through the terminal"; ok
+for step in "account_refs status=ok" "settle acct2 status=settled" "password acct2-password status=ok" \
+  "deny acct2-password status=denied" "allow acct2-password status=ok" "protection acct2-password status=ok"; do
+  grep -qx "$step" <(records) || fail "added account record: $step"; ok
+done
+! grep -q "enroll acct2-password" <(calls) || fail "an added password is not entered twice"; ok
+no_secret add_yes
+
+owner_run add_wrong_answer maybe; completed "an unrecognised answer declines"
+! grep -q "^account " <(calls) && ! grep -q "^account_add " <(records) || fail "an unrecognised answer adds no account"; ok; unpublished add_wrong_answer
+owner_prepare add_unsupported y imap; owner_go
+grep -qx "account_provider unsupported" <(records) && ! grep -qE "^(account|keychain) " <(calls) || fail "an unsupported provider stops before any command"; ok; stopped add_unsupported
+owner_prepare add_mismatch y; answer "$out" "Account login: " "new@example.test"; answer "$out" "Password again: " "$dummy-other"; owner_go
+grep -qx "account_add status=mismatch" <(records) && grep -qx "account add mailbox_org" <(calls) && ! grep -q "^keychain" <(calls) || fail "a mismatched password stops before the Keychain stages"; ok
+unpublished add_mismatch; no_secret add_mismatch; stopped add_mismatch
+owner_prepare add_killed y; answer "$out" "Account login: " "new@example.test"; owner_go
+grep -qx "account_add status=terminated" <(records) && ! grep -q "^keychain" <(calls) || fail "a killed account setup stops"; ok
+unpublished add_killed; no_secret add_killed; stopped add_killed
+owner_prepare add_interrupted y; answer "$out" "Account login: " "new@example.test"; answer "$out" "Password again: " $'\003'; owner_go
+[[ $(cat "$out/exit") != 0 ]] && grep -qa "Password again: " "$out/transcript" && ! grep -qa "Setup complete" "$out/transcript" \
+  && ! grep -q "^keychain" <(calls) \
+  && ! grep -q "status=created" <(records) || fail "Ctrl-C at the hidden prompt stops setup"; ok
+unpublished add_interrupted; no_secret add_interrupted
 
 owner_run probe_wrong; grep -qx "deny acct-password status=ok" <(records) || fail "a silent read is recorded and is not a denial"; ok; stopped probe_wrong
 owner_run trailing_failure; grep -qx "enroll acct-password status=unexpected" <(records) || fail "a failure record after success"; ok; stopped trailing

@@ -6,6 +6,7 @@ ANSWERS holds "prompt<TAB>answer" lines. Each prompt is answered once it appears
 last answer. After SILENCE_SECONDS without output (default 20), or on SIGTERM, the
 driver kills the child's whole process group, which pty.fork makes a session of its own,
 so build tools the child started stop with it. The exit code is the child's.
+macOS answers EPERM, not ESRCH, for a group whose members are all exiting.
 """
 import os
 import pty
@@ -25,7 +26,7 @@ if pid == 0:
 def stop(*_):
     try:
         os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
 
 

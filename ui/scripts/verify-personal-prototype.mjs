@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
@@ -10,7 +10,8 @@ const artifacts = `${root}.audit/personal-prototype`
 await mkdir(artifacts, { recursive: true })
 const builds = (await readFile(`${artifacts}/bridge-build.jsonl`, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
 const artifact = builds.findLast(record => record.reason === 'compiler-artifact' && record.target.name === 'ui_bridge' && record.executable)
-assert.ok(artifact?.executable?.startsWith(`${root}target/`), 'Use the exact locally compiled test artifact')
+const targetDirectory = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--offline', '--format-version', '1'], { cwd: root, encoding: 'utf8' })).target_directory
+assert.ok(artifact?.executable?.startsWith(`${targetDirectory}/`), 'Use the exact locally compiled test artifact')
 const bridge = spawn(artifact.executable, ['--exact', 'synthetic_ui_bridge', '--ignored', '--nocapture'], { cwd: root, env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
 const pending = new Map()
 let sequence = 0

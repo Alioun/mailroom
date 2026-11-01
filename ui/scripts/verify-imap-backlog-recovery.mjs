@@ -78,6 +78,8 @@ try {
     await page.screenshot({ path: join(artifacts, multiple ? 'german-selected-exact-preview.png' : 'german-single-exact-preview.png'), fullPage: true })
     await approval.check()
     await response('selected_restore', region.getByRole('button', { name: 'Diese erfassten Konten lokal wiederherstellen', exact: true }))
+    // The restored list reloads and reopens the account; the independent observer needs its lock free.
+    await page.waitForLoadState('networkidle')
     const restored = await f.observe()
     assert.equal(restored.ciphertext, capturedState.ciphertext)
     assert.equal(restored.primary, capturedState.primary)

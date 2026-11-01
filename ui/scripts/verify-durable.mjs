@@ -18,6 +18,7 @@ try {
   await page.getByText('Account action complete', { exact: true }).waitFor()
   await page.getByRole('button', { name: 'Run or resume account census', exact: true }).click()
   await page.getByText('Account action complete', { exact: true }).waitFor()
+  await page.locator('.accounts .rules-proof').getByText('Saved workspace loaded.', { exact: true }).waitFor()
   let releaseWorkspace
   const pendingWorkspace = new Promise(resolve => { releaseWorkspace = resolve })
   const requestedWorkspace = page.waitForRequest(request => request.url().endsWith('/api/accounts/workspace/open'))
@@ -63,7 +64,7 @@ try {
   await save().click()
   await region.getByText('Rules and pins saved encrypted.', { exact: true }).waitFor()
   await run().click()
-  await region.getByText('Failing pins block this proof.', { exact: true }).waitFor()
+  await region.getByText('Failing or unknown pins block this proof.', { exact: true }).waitFor()
   assert.equal(await region.getByRole('button', { name: 'Download confirmed Sieve', exact: true }).count(), 0)
   await region.getByLabel('Expected folder', { exact: true }).fill('INBOX')
   await region.getByLabel('Expected folder', { exact: true }).blur()

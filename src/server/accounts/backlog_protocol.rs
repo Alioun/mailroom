@@ -1242,7 +1242,10 @@ mod authority_matrix {
 
     /// What one mutated leaf may do for one action. `observes` marks a fresh
     /// preview under a different but self-consistent installation, which reads
-    /// the mailbox and never writes.
+    /// the mailbox and never writes. Without an installed workspace authority
+    /// the saved rules have no recipient evidence, so nothing matches. Since
+    /// d369fed an empty filing preview is a read-only review rather than an
+    /// error, so that preview answers 200 with nothing to confirm.
     fn expected(leaf: &str, action: &str) -> (StatusCode, bool, bool, bool) {
         const DENIED: StatusCode = StatusCode::UNPROCESSABLE_ENTITY;
         let worker = matches!(action, "confirm" | "resume" | "undo" | "resume_undo");
@@ -1255,8 +1258,7 @@ mod authority_matrix {
             "login" => (status, false, false, false),
             _ if action == "cancel" => (StatusCode::OK, false, false, false),
             "address_port" | "tls_name" | "root" => (status, fresh, false, !fresh),
-            "workspace_absent" => (status, fresh, fresh, !fresh),
-            "epoch" | "workspace_epoch" => (
+            "epoch" | "workspace_epoch" | "workspace_absent" => (
                 if action == "preview" {
                     StatusCode::OK
                 } else {
@@ -1311,7 +1313,7 @@ mod authority_matrix {
                     .repository_accesses
                     .load(Ordering::SeqCst);
                 let credentials = installed.credentials.load(Ordering::SeqCst);
-                let (status, completed, _) = post(&installed.state, &account.id, command).await;
+                let (status, completed, body) = post(&installed.state, &account.id, command).await;
                 let after = observe(root, original, account);
                 let (want, password, login, conflict) = expected(leaf, action);
                 let read_repository = installed
@@ -1324,6 +1326,24 @@ mod authority_matrix {
                 let label = format!("{leaf} {action}");
                 assert_eq!(status, want, "{label}");
                 assert!(!completed, "{label}");
+                if *leaf == "workspace_absent" {
+                    if *action == "preview" {
+                        assert_eq!(body["operation"]["batches"], json!([]), "{label}");
+                        assert_eq!(
+                            body["operation"]["plan"]["filing"]["changes"],
+                            json!([]),
+                            "{label}"
+                        );
+                    }
+                    if matches!(*action, "preview" | "confirm") {
+                        assert_eq!(
+                            serde_json::to_value(&after.journal).unwrap(),
+                            serde_json::to_value(&before.journal).unwrap(),
+                            "{label}"
+                        );
+                    }
+                    assert_eq!(after.wires, before.wires, "{label}");
+                }
                 assert_eq!(read_password, password, "{label}");
                 assert_eq!(after.logins > before.logins, login, "{label}");
                 assert_eq!(after.wires, before.wires, "{label}");

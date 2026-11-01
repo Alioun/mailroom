@@ -2329,6 +2329,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let (repo, account, _fake) =
                 crate::acquisition::folder_provisioning::tests::install(root.path());
+            historical_fixture(&repo, &account);
             let store = repo.store(&account).unwrap();
             let mut historical = serde_json::to_value(store.load_state().unwrap()).unwrap();
             before_composition(&mut historical);
@@ -2371,6 +2372,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (repo, account, _fake) =
             crate::acquisition::folder_provisioning::tests::install(root.path());
+        historical_fixture(&repo, &account);
         let store = repo.store(&account).unwrap();
         let saved = store.load_state().unwrap();
         assert!(!saved.exports.is_empty());
@@ -2530,6 +2532,46 @@ mod tests {
         assert!(store.load_state().unwrap().sieve_transactions == state.sieve_transactions);
     }
 
+    /// The shared account fixtures export and plan `examples/sample.json`,
+    /// whose core sender categories need schema 24, and record the deployed
+    /// artifact, which needs schema 30. This replaces the exports and backlog
+    /// plans with ones of the pre-core sample and drops the deployment record,
+    /// so the state fits the historical schemas these cases stage. The
+    /// workspace stays as it is, as after an edit since that export.
+    fn historical_fixture(
+        repo: &crate::acquisition::Accounts,
+        account: &crate::acquisition::Account,
+    ) {
+        use crate::rules::workspace::{self, WorkspaceContext};
+        let store = repo.store(account).unwrap();
+        let mut state = store.load_state().unwrap();
+        let sample: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/pre-core-sample.json"))
+                .unwrap();
+        let mut exported = state.clone();
+        exported.workspace.as_mut().unwrap().input.documents =
+            serde_json::from_value(sample["documents"].clone()).unwrap();
+        exported.exports.clear();
+        let context = WorkspaceContext::local(account.provider);
+        let proof = workspace::preview(&exported, &context, store.keys()).unwrap();
+        workspace::confirm_export(&mut exported, &context, store.keys(), &proof.receipt).unwrap();
+        for run in &mut state.backlog {
+            run.plan = crate::backlog::preview(
+                &exported,
+                account.provider,
+                store.keys(),
+                run.plan.options.clone(),
+                None,
+            )
+            .unwrap()
+            .plan;
+        }
+        state.exports = exported.exports;
+        state.deployment_artifacts = Default::default();
+        assert!(!uses_sender_sets(&state));
+        store.save_state(&mut state).unwrap();
+    }
+
     /// Schemas before 16 cannot carry a placement choice or composed transactions.
     fn before_composition(state: &mut serde_json::Value) {
         state.as_object_mut().unwrap().remove("sieve_placement");
@@ -2542,6 +2584,7 @@ mod tests {
         let (repo, account, _fake) =
             crate::acquisition::sieve_transaction::tests::install(root.path());
         crate::acquisition::sieve_transaction::tests::commit_fixture_transaction(&repo, &account);
+        historical_fixture(&repo, &account);
         let store = repo.store(&account).unwrap();
         let state = store.load_state().unwrap();
         assert!(state.sieve_transactions.history[0].composition.is_some());
@@ -2598,6 +2641,7 @@ mod tests {
         let (repo, account, _fake) =
             crate::acquisition::sieve_transaction::tests::install(root.path());
         crate::acquisition::sieve_transaction::tests::commit_fixture_transaction(&repo, &account);
+        historical_fixture(&repo, &account);
         let store = repo.store(&account).unwrap();
         let current = store.load_state().unwrap();
         let composition = current.sieve_transactions.history[0]

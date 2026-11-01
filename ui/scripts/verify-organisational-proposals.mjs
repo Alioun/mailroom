@@ -42,12 +42,14 @@ try {
   page.on('pageerror', e => errors.push(e.message))
   page.on('request', r => { if (!r.url().startsWith(metadata.base)) remote.push('Non-local request') })
   await page.addInitScript(() => { window.proposalCsp = []; document.addEventListener('securitypolicyviolation', e => window.proposalCsp.push(e.violatedDirective)) })
+  // The HTTP run left one of its main account's candidates rejected for good; the other account has made no decisions.
+  const account = metadata.other
   const region = page.locator('.accounts .rules-proof')
   const panel = region.locator('.filing-proposals')
   async function open() {
     await page.goto(metadata.base)
     await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()
-    await page.locator('.accounts > .census-actions select').selectOption(metadata.account)
+    await page.locator('.accounts > .census-actions select').selectOption(account)
     await page.getByRole('button', { name: 'Open saved census', exact: true }).click()
     await region.getByText('Saved workspace loaded.', { exact: true }).waitFor()
     await panel.locator(':scope > summary').click()
@@ -78,7 +80,7 @@ try {
   await restart()
   generation = await open()
   const retained = panel.locator(`[data-candidate="${rejectCandidate.id}"]`)
-  await retained.getByText('Exact candidate rejected', { exact: true }).waitFor()
+  await retained.getByText('Sender proposal rejected. It stays unavailable after refresh.', { exact: true }).waitFor()
   assert.equal(await retained.getByRole('checkbox').isDisabled(), true)
   checks.push('Exact rejection persists through actual server replacement and built UI reload')
   const available = generation.candidates.filter(c => !c.rejected)
@@ -110,7 +112,7 @@ try {
     const token = (await (await fetch('/api/session')).json()).token
     const response = await fetch('/api/accounts/workspace/open', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Mailroom-Token': token }, body: JSON.stringify({ account }) })
     return (await response.json()).workspace.input.documents
-  }, metadata.account)
+  }, account)
   assert.deepEqual(documents, reviewed.resulting_documents)
   assert.equal(await region.getByRole('checkbox', { name: 'I confirm this proof for a local Sieve download', exact: true }).count(), 0)
   await region.getByRole('button', { name: 'Prove saved census', exact: true }).click()

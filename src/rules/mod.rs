@@ -1,3 +1,4 @@
+pub(crate) mod agent_edits;
 mod catalog;
 pub mod composition;
 pub mod config;

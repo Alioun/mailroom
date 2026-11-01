@@ -110,7 +110,7 @@
       <p>{t.consent}</p>
       <label><input type="checkbox" bind:checked={confirmed} disabled={busy} />{t.confirm}</label>
       <button class="primary" disabled={busy || !confirmed} onclick={download}>{t.download}</button>
-      {#key preview.summary}<AgentProposalImport summary={preview.summary} {lang} />{/key}
+      {#key preview.summary}<AgentProposalImport {account} summary={preview.summary} binding={{ as_of: report.as_of, version: report.version, approved: [...approved], receipt: preview.receipt }} {lang} />{/key}
     {/if}
   {/if}
 </section>

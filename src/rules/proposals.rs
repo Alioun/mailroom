@@ -20,6 +20,8 @@ const CANDIDATE_LIMIT: usize = 64;
 #[serde(deny_unknown_fields)]
 pub struct Decisions {
     pub history: Vec<Decision>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_rejections: Vec<super::agent_edits::Rejection>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,10 +59,10 @@ impl Decisions {
         {
             return Err("Invalid or full proposal decision history".into());
         }
-        Ok(())
+        super::agent_edits::validate_rejections(&self.agent_rejections)
     }
 }
-fn hex_id(value: &str) -> bool {
+pub(super) fn hex_id(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
@@ -675,7 +677,7 @@ pub struct Review {
     pub acceptance_available: bool,
     pub effects: &'static str,
 }
-fn document_diff(before: &str, after: &str) -> String {
+pub(super) fn document_diff(before: &str, after: &str) -> String {
     if before == after {
         return String::new();
     }

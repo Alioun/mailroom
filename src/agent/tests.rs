@@ -48,6 +48,7 @@ fn proposal() -> Proposal {
             suggested_change: "Review a newsletter category. Preserve unknown recipients in Inbox."
                 .into(),
         }],
+        rule_edits: None,
     }
 }
 
@@ -192,7 +193,8 @@ fn agent_stdio_requires_initialization_and_reports_only_staged_counts() {
     .unwrap();
     assert_eq!(staged["status"], "staged_for_local_review");
     assert_eq!(staged["recommendations"], 1);
-    assert_eq!(staged.as_object().unwrap().len(), 3);
+    assert_eq!(staged["rule_edits"], 0);
+    assert_eq!(staged.as_object().unwrap().len(), 4);
     assert_eq!(responses[5]["result"]["isError"], true);
     assert_eq!(
         fs::read_dir(parent.path().join("exchange/proposals"))
@@ -235,5 +237,42 @@ fn agent_oversized_and_malformed_frames_are_bounded() {
             Vec::new()
         ),
         Err("agent_request_too_large")
+    );
+}
+
+#[test]
+fn agent_rule_edits_stage_only_through_the_closed_schema() {
+    let (parent, exchange) = fixture();
+    let mut edited = serde_json::to_value(proposal()).unwrap();
+    edited["rule_edits"] = json!({"patches":[{"id":"topic.travel","folder":"Trips"}],"additions":[{"id":"user.agent.receipts","category":"orders","stage":"subject","when":[{"kind":"subject_contains","value":"receipt"}]}]});
+    let mut smuggled = edited.clone();
+    smuggled["rule_edits"]["forwards"] = json!([]);
+    let mut empty = edited.clone();
+    empty["rule_edits"] = json!({});
+    let mut requests = handshake();
+    requests.extend([
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"submit_proposal","arguments":smuggled}}),
+        json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"submit_proposal","arguments":empty}}),
+        json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"submit_proposal","arguments":edited}}),
+    ]);
+    let responses = transcript(exchange, &requests);
+    let schema = &responses[1]["result"]["tools"][1]["inputSchema"];
+    assert!(schema["properties"]["rule_edits"].is_object());
+    assert!(schema.to_string().contains("\"additions\""));
+    assert_eq!(responses[2]["result"]["isError"], true);
+    assert_eq!(responses[3]["result"]["isError"], true);
+    let staged: Value = serde_json::from_str(
+        responses[4]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(staged["rule_edits"], 2);
+    assert_eq!(
+        fs::read_dir(parent.path().join("exchange/proposals"))
+            .unwrap()
+            .count(),
+        1
     );
 }

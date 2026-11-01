@@ -8,10 +8,11 @@ use std::{io, path::Path};
 
 const SUMMARY_LIMIT: usize = 262_144;
 const REQUEST_LIMIT: usize = 131_072;
+const EDIT_LIMIT: usize = 20;
 
-#[derive(Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Recommendation {
+pub(crate) struct Recommendation {
     #[schemars(length(min = 1, max = 120))]
     title: String,
     #[schemars(length(min = 1, max = 2000))]
@@ -20,15 +21,31 @@ struct Recommendation {
     suggested_change: String,
 }
 
-#[derive(Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Proposal {
+pub(crate) struct Proposal {
     #[schemars(range(min = 1, max = 1))]
     version: u8,
     #[schemars(regex(pattern = "^[0-9a-f]{64}$"))]
-    summary_sha256: String,
+    pub(crate) summary_sha256: String,
     #[schemars(length(min = 1, max = 20))]
     recommendations: Vec<Recommendation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rule_edits: Option<RuleEdits>,
+}
+
+/// Structured local rule edits for owner review: patches to existing preset
+/// rules and new `user.*` filing rules. Nothing else in the override document
+/// can be proposed.
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuleEdits {
+    #[serde(default)]
+    #[schemars(length(max = 20))]
+    pub(crate) patches: Vec<crate::rules::config::Patch>,
+    #[serde(default)]
+    #[schemars(length(max = 20))]
+    pub(crate) additions: Vec<crate::rules::config::Rule>,
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -44,11 +61,16 @@ fn text(value: &str, limit: usize) -> bool {
 }
 
 impl Proposal {
-    fn validate(&self, summary: &str) -> Result<(), &'static str> {
+    pub(crate) fn validate(&self, summary: &str) -> Result<(), &'static str> {
         if self.version != 1
             || self.summary_sha256 != digest(summary.as_bytes())
             || self.recommendations.is_empty()
             || self.recommendations.len() > 20
+            || self.rule_edits.as_ref().is_some_and(|edits| {
+                let count = edits.patches.len() + edits.additions.len();
+                count == 0 || count > EDIT_LIMIT
+            })
+            || serde_json::to_vec(self).map_or(true, |bytes| bytes.len() > REQUEST_LIMIT)
             || self.recommendations.iter().any(|r| {
                 !text(&r.title, 120) || !text(&r.reason, 2000) || !text(&r.suggested_change, 2000)
             })

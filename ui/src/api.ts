@@ -268,6 +268,23 @@ export async function openProposals(account: string): Promise<ProposalGeneration
 export async function reviewProposals(account: string, selection: ProposalSelection, disposition: ProposalReview['disposition']): Promise<ProposalReview> { return proposalReview.parse(await accountPost('proposals', { account, command: { action: 'preview', selection, disposition } })) }
 export async function confirmProposals(account: string, review: ProposalReview): Promise<ProposalGeneration> { return proposalGeneration.parse(await accountPost('proposals', { account, command: { action: 'confirm', selection: review.selection, disposition: review.disposition, receipt: review.receipt, confirmed: true } })) }
 
+const agentEditReview = z.object({
+  semantics: z.literal('mailroom-agent-rule-edits-v1'), account: z.string(), revision: z.number(), workspace_revision: z.number(), summary_sha256: z.string(),
+  edits: z.array(z.object({ kind: z.enum(['patch', 'addition']), requested: z.string(), target: z.string(), digest: z.string().length(64) })).min(1).max(20),
+  changes: z.record(z.string(), z.json()), original_documents: documents, resulting_documents: documents, document_diff: z.string(),
+  current: proofPreview, resulting: proofPreview, accept_receipt: z.string().length(64).nullable(), reject_receipt: z.string().length(64).nullable(),
+  effects: z.object({ accept: z.string(), reject: z.string() }),
+})
+const agentEditSaved = z.object({ status: z.enum(['local_rules_saved', 'edits_rejected']), workspace: workspaceView })
+export type AgentEditReview = z.infer<typeof agentEditReview>
+export type SummaryBinding = { as_of: number; version: string; approved: string[]; receipt: string }
+export async function previewAgentEdits(account: string, summary: SummaryBinding, proposal: unknown): Promise<AgentEditReview> {
+  return agentEditReview.parse(await accountPost('agent-edits', { account, summary, proposal, command: { action: 'preview' } }))
+}
+export async function confirmAgentEdits(account: string, summary: SummaryBinding, proposal: unknown, disposition: 'accept' | 'reject', receipt: string) {
+  return agentEditSaved.parse(await accountPost('agent-edits', { account, summary, proposal, command: { action: 'confirm', disposition, receipt, confirmed: true } }))
+}
+
 const moveMailbox = z.object({ name: z.object({ decoded: z.string(), wire: z.string() }), uidvalidity: z.number().int().positive() })
 const moveMetadata = z.object({ message_id_hash: z.string(), size: z.number(), internal_date: z.string(), flags: z.array(z.string()) })
 const moveIntent = z.object({ purpose: z.union([z.literal('conditional_undo'), z.object({ filing: z.object({ protect_flagged: z.boolean() }) })]), source: moveMailbox, destination: moveMailbox, messages: z.record(z.string(), moveMetadata) })

@@ -52,9 +52,13 @@ fn call(exchange: &Exchange, params: Value) -> Result<Value, &'static str> {
             let proposal = serde_json::from_value::<Proposal>(call.arguments)
                 .map_err(|_| "invalid_tool_arguments")?;
             let count = proposal.recommendations.len();
+            let edits = proposal
+                .rule_edits
+                .as_ref()
+                .map_or(0, |e| e.patches.len() + e.additions.len());
             let id = exchange.submit(proposal)?;
             Ok(content(
-                json!({"status":"staged_for_local_review","proposal":id,"recommendations":count}),
+                json!({"status":"staged_for_local_review","proposal":id,"recommendations":count,"rule_edits":edits}),
             ))
         }
         _ => Err("unsupported_tool_or_arguments"),
@@ -71,7 +75,7 @@ fn tools() -> Value {
         },
         {
             "name":"submit_proposal",
-            "description":"Stage text recommendations for local owner review, bound to the exact summary SHA-256. This never changes rules, mail, approvals or credentials.",
+            "description":"Stage text recommendations, and optionally structured rule_edits (patches to existing preset rules and new user.* filing rules), for local owner review, bound to the exact summary SHA-256. The owner reviews the resulting documents and proof locally. Staging never changes rules, mail, approvals or credentials.",
             "inputSchema":schemars::schema_for!(Proposal),
             "annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
         }

@@ -293,6 +293,10 @@ fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/accounts/proposals", post(accounts::proposals::handle))
         .route(
+            "/api/accounts/agent-edits",
+            post(accounts::agent_edits::handle),
+        )
+        .route(
             "/api/accounts/managesieve",
             post(accounts::managesieve::handle),
         )

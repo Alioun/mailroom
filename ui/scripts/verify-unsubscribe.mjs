@@ -84,7 +84,7 @@ try {
   await row.getByRole('checkbox').check(); await row.getByRole('combobox').selectOption('local_mail')
   const namedRequest = page.waitForResponse(r => r.url().endsWith('/api/accounts/subscription-review') && r.request().postDataJSON().command.action === 'preview')
   await review.click()
-  const mail = region.getByRole('checkbox', { name: 'Confirm the additional named synthetic mail send', exact: true })
+  const mail = region.getByRole('checkbox', { name: 'Confirm the additional named mail send', exact: true })
   assert.equal(await confirm.isChecked(), false); assert.equal(await mail.isChecked(), false)
   const namedPlan = await (await namedRequest).json()
   assert.equal(namedPlan.confirmation.synthetic, true)

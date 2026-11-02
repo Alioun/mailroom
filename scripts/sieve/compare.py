@@ -41,7 +41,7 @@ for directory in sorted(Path('/fixtures').iterdir()):
         seen = '\\seen' in output.lower() or '\\seen' in trace_text.lower()
         assert seen == decision['mark_read'], (directory.name, i, 'Seen action disagreement')
         if envelopes:
-            flag_lines = re.findall(r'with flags: (.+)', output, re.IGNORECASE)
+            flag_lines = re.findall(r'add IMAP flags: (.+)', output)
             keywords = {token.strip('[]\"').lower() for line in flag_lines for token in line.split() if not token.startswith('\\')}
             assert keywords == {k.lower() for k in decision['keyword_additions']}, (directory.name, i, 'Additive keyword disagreement', keywords)
         count += 1

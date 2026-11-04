@@ -421,6 +421,11 @@ fn enroll(keychain: &Keychain, reference: &str) -> u8 {
 
 /// Shows one invented action through the pinned helper and reports only its verified outcome.
 fn native_check() -> u8 {
+    let (line, success) = native_outcome(crate::confirmation::Boundary::native());
+    record(line, success)
+}
+
+fn native_outcome(mut boundary: crate::confirmation::Boundary) -> (&'static str, bool) {
     let plan = crate::confirmation::Plan {
         exact_receipt: "0".repeat(64),
         actions: vec![crate::confirmation::ExactAction::InvoiceSend {
@@ -434,14 +439,43 @@ fn native_check() -> u8 {
             content_digest: "0".repeat(64),
         }],
     };
-    let mut boundary = crate::confirmation::Boundary::native();
     let Ok((handle, _)) = boundary.offer(plan.clone()) else {
-        return record("outcome=unavailable", false);
+        return ("outcome=unavailable", false);
     };
     match boundary.confirm(&handle, &plan, || Ok(plan.clone())) {
-        Ok(_) => record("outcome=approved", true),
-        Err(error) if error == crate::confirmation::CANCELLED => record("outcome=cancelled", true),
-        Err(_) => record("outcome=denied", false),
+        Ok(_) => ("outcome=approved", true),
+        Err(error) if error == crate::confirmation::CANCELLED => ("outcome=cancelled", true),
+        Err(error) => (denial(&error), false),
+    }
+}
+
+/// Names the first point that refused the answer. Only an exact known error gets its own
+/// code, so no error text, whatever it holds, reaches the record.
+fn denial(error: &str) -> &'static str {
+    use crate::confirmation::{CHANGED_AFTER, MALFORMED, OVERSIZED, UNAUTHENTICATED};
+    use crate::native::LaunchError;
+    let launch = |e: LaunchError| e.to_string() == error;
+    match error {
+        CHANGED_AFTER => "outcome=denied_expired",
+        MALFORMED => "outcome=denied_malformed",
+        UNAUTHENTICATED => "outcome=denied_unauthenticated",
+        OVERSIZED => "outcome=denied_oversized",
+        _ if launch(LaunchError::Failed) => "outcome=denied_failed",
+        _ if launch(LaunchError::Timeout) => "outcome=denied_timeout",
+        _ if launch(LaunchError::Channel) => "outcome=denied_channel",
+        _ if launch(LaunchError::Oversized) => "outcome=denied_oversized",
+        _ if [
+            LaunchError::UntrustedFile,
+            LaunchError::Spawn,
+            LaunchError::IdentityMismatch,
+            LaunchError::UnsupportedPin,
+        ]
+        .into_iter()
+        .any(launch) =>
+        {
+            "outcome=denied_launch"
+        }
+        _ => "outcome=denied_other",
     }
 }
 

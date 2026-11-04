@@ -11,6 +11,10 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 pub(crate) const CANCELLED: &str = "Confirmation cancelled";
+pub(crate) const CHANGED_AFTER: &str = "Plan changed after confirmation";
+pub(crate) const MALFORMED: &str = "Malformed confirmation outcome";
+pub(crate) const UNAUTHENTICATED: &str = "Unauthenticated confirmation outcome";
+pub(crate) const OVERSIZED: &str = "Oversized confirmation outcome";
 const LIFETIME: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -265,7 +269,7 @@ impl Boundary {
             return Err(CANCELLED.into());
         }
         if pending.created.elapsed() >= LIFETIME || revalidate()? != pending.plan {
-            return Err("Plan changed after confirmation".into());
+            return Err(CHANGED_AFTER.into());
         }
         Ok(Confirmed {
             exact_receipt: pending.plan.exact_receipt,
@@ -302,10 +306,9 @@ fn tag(key: &[u8; 32], id: &str, request_digest: &str, outcome: Outcome) -> Stri
 }
 fn authenticate(id: &str, request: &[u8], key: &[u8; 32], bytes: &[u8]) -> Result<Outcome, String> {
     if bytes.len() > 4096 {
-        return Err("Oversized confirmation outcome".into());
+        return Err(OVERSIZED.into());
     }
-    let wire: WireOutcome =
-        serde_json::from_slice(bytes).map_err(|_| "Malformed confirmation outcome")?;
+    let wire: WireOutcome = serde_json::from_slice(bytes).map_err(|_| MALFORMED)?;
     let request_digest = digest(request);
     let expected = tag(key, id, &request_digest, wire.outcome);
     if wire.request_id != id
@@ -313,7 +316,7 @@ fn authenticate(id: &str, request: &[u8], key: &[u8; 32], bytes: &[u8]) -> Resul
         || wire.authentication.len() != 64
         || !bool::from(expected.as_bytes().ct_eq(wire.authentication.as_bytes()))
     {
-        return Err("Unauthenticated confirmation outcome".into());
+        return Err(UNAUTHENTICATED.into());
     }
     Ok(wire.outcome)
 }

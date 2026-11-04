@@ -57,7 +57,7 @@ impl Backend for Fake {
             Fault::Cancelled => answer(request, key, Outcome::Cancelled)?,
             Fault::Malformed => b"{\"approved\":true}".to_vec(),
             Fault::Oversized => vec![b' '; 4097],
-            Fault::Failure => return Err("Helper refused or failed".into()),
+            Fault::Failure => return Err(crate::native::LaunchError::Failed.to_string()),
             Fault::Forged => {
                 let mut wire: WireOutcome =
                     serde_json::from_slice(&answer(request, key, Outcome::Approved)?).unwrap();
@@ -197,15 +197,17 @@ fn summary_consent_binds_every_field_and_never_accepts_another_purpose() {
 
 #[test]
 fn unverified_cancelled_malformed_forged_unauthenticated_and_failed_helpers_deny_and_consume() {
-    for fault in [
-        Fault::Unverified,
-        Fault::Cancelled,
-        Fault::Malformed,
-        Fault::Forged,
-        Fault::OtherResponder,
-        Fault::WrongRequest,
-        Fault::Oversized,
-        Fault::Failure,
+    let unverified = crate::native::LaunchError::IdentityMismatch.to_string();
+    let failed = crate::native::LaunchError::Failed.to_string();
+    for (fault, error) in [
+        (Fault::Unverified, unverified.as_str()),
+        (Fault::Cancelled, CANCELLED),
+        (Fault::Malformed, MALFORMED),
+        (Fault::Forged, UNAUTHENTICATED),
+        (Fault::OtherResponder, UNAUTHENTICATED),
+        (Fault::WrongRequest, UNAUTHENTICATED),
+        (Fault::Oversized, OVERSIZED),
+        (Fault::Failure, failed.as_str()),
     ] {
         let (mut boundary, seen) = boundary(fault);
         let plan = plan();
@@ -215,7 +217,7 @@ fn unverified_cancelled_malformed_forged_unauthenticated_and_failed_helpers_deny
             revalidated = true;
             Ok(plan.clone())
         });
-        assert!(denied.is_err(), "{fault:?}");
+        assert_eq!(denied.err().as_deref(), Some(error), "{fault:?}");
         assert!(!revalidated, "{fault:?}");
         if matches!(fault, Fault::Unverified) {
             assert_eq!(seen.lock().unwrap().prompts, 0);
@@ -269,11 +271,11 @@ fn every_action_binding_is_revalidated_before_and_after_confirmation() {
             let (mut boundary, seen) = boundary(Fault::None);
             let (handle, _) = boundary.offer(plan.clone()).unwrap();
             let current = if after { &plan } else { &changed };
-            assert!(
-                boundary
-                    .confirm(&handle, current, || Ok(changed.clone()))
-                    .is_err()
-            );
+            let denied = boundary
+                .confirm(&handle, current, || Ok(changed.clone()))
+                .err();
+            assert!(denied.is_some());
+            assert_eq!(denied.as_deref() == Some(CHANGED_AFTER), after);
             assert_eq!(seen.lock().unwrap().prompts, usize::from(after));
         }
     }
@@ -457,7 +459,7 @@ fn native_backend_denies_substituted_and_non_answering_helpers() {
             wrong,
             "Started helper does not have the pinned code identity",
         ),
-        (echo, "Malformed confirmation outcome"),
+        (echo, MALFORMED),
     ] {
         let mut boundary = Boundary::with_backend(Box::new(NativeBackend { helper: Ok(helper) }));
         let plan = plan();

@@ -310,7 +310,7 @@ allowed() {
     recovery-prepare) echo "status=recovery_prepared:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=core_dumps_enabled:1" ;;
     recovery-capture|recovery-capture-with-ledger) echo "status=captured:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=no_tty:1 status=invalid_input:1 status=mismatch:1 status=cancelled:1 status=denied:1 status=recovery_required:1 status=authentication_failed:1 status=core_dumps_enabled:1" ;;
     recovery-restore|recovery-restore-with-ledger|recovery-resume) echo "status=restored_read_only:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=no_tty:1 status=invalid_input:1 status=cancelled:1 status=denied:1 status=recovery_required:1 status=authentication_failed:1 status=core_dumps_enabled:1" ;;
-    native-check) echo "outcome=approved:0 outcome=cancelled:0 outcome=denied:1 outcome=unavailable:1" ;;
+    native-check) echo "outcome=approved:0 outcome=cancelled:0 outcome=denied:1 outcome=denied_failed:1 outcome=denied_timeout:1 outcome=denied_expired:1 outcome=denied_malformed:1 outcome=denied_unauthenticated:1 outcome=denied_channel:1 outcome=denied_oversized:1 outcome=denied_launch:1 outcome=denied_other:1 outcome=unavailable:1" ;;
     status) echo "status=ok:0 status=missing:1 status=other_binary:1 status=changed:1 status=denied:1 status=failed:1 $opened" ;;
     probe) echo "status=ok:0 status=denied:1 status=missing:1 status=changed:1 status=other_binary:1 status=failed:1 $opened" ;;
     enroll) echo "status=ok:0 status=exists:1 status=mismatch:1 status=no_tty:1 status=empty:1 status=refused:1 status=denied:1 status=failed:1 status=changed:1 status=other_binary:1 $opened" ;;

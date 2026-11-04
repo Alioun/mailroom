@@ -3,6 +3,7 @@ use crate::acquisition::{
     Provider,
     keychain::tests::{Throwaway, dummy},
 };
+use crate::confirmation::{Backend, Boundary, CHANGED_AFTER};
 
 fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
@@ -48,6 +49,80 @@ fn malformed_options_are_refused_before_any_backend() {
 fn native_check_takes_no_keychain_option() {
     assert!(crate::native::disable_core_dumps());
     assert_eq!(run(&args(&["native-check", "--keychain", "/tmp/a"])), 1);
+}
+
+/// Gives every request the same reply, as the helper or its launcher would.
+struct Reply(Result<Vec<u8>, String>);
+impl Backend for Reply {
+    fn available(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn synthetic(&self) -> bool {
+        false
+    }
+    fn exchange(&mut self, _: &[u8], _: &[u8; 32]) -> Result<Vec<u8>, String> {
+        self.0.clone()
+    }
+}
+fn check(reply: Result<Vec<u8>, String>) -> (&'static str, bool) {
+    native_outcome(Boundary::with_backend(Box::new(Reply(reply))))
+}
+
+#[test]
+fn native_check_approves_and_cancels_as_before() {
+    assert_eq!(
+        native_outcome(Boundary::synthetic()),
+        ("outcome=approved", true)
+    );
+    assert_eq!(
+        check(Err(crate::confirmation::CANCELLED.into())),
+        ("outcome=cancelled", true)
+    );
+    assert_eq!(
+        native_outcome(Boundary::native()),
+        ("outcome=unavailable", false)
+    );
+}
+
+#[test]
+fn native_check_names_each_denial_with_a_fixed_code_and_fails() {
+    use crate::native::LaunchError;
+    let launch = |e: LaunchError| Err(e.to_string());
+    let forged = format!(
+        r#"{{"request_id":"{0}","request_digest":"{0}","outcome":"approved","authentication":"{0}"}}"#,
+        "0".repeat(64)
+    );
+    for (reply, code) in [
+        (launch(LaunchError::Failed), "denied_failed"),
+        (launch(LaunchError::Timeout), "denied_timeout"),
+        (launch(LaunchError::Channel), "denied_channel"),
+        (launch(LaunchError::Oversized), "denied_oversized"),
+        (launch(LaunchError::UntrustedFile), "denied_launch"),
+        (launch(LaunchError::Spawn), "denied_launch"),
+        (launch(LaunchError::IdentityMismatch), "denied_launch"),
+        (launch(LaunchError::UnsupportedPin), "denied_launch"),
+        (Err(CHANGED_AFTER.into()), "denied_expired"),
+        (Ok(b"{\"approved\":true}".to_vec()), "denied_malformed"),
+        (Ok(forged.into_bytes()), "denied_unauthenticated"),
+        (Ok(vec![b' '; 4097]), "denied_oversized"),
+    ] {
+        let (line, success) = check(reply);
+        assert_eq!(line, format!("outcome={code}"));
+        assert!(!success, "{code}");
+    }
+}
+
+#[test]
+fn native_check_reports_any_other_error_as_denied_other_without_its_text() {
+    let secret = String::from_utf8(dummy().to_vec()).unwrap();
+    for error in [
+        secret.clone(),
+        format!("{}: {secret}", crate::native::LaunchError::Timeout),
+        format!("{secret} {}", crate::confirmation::MALFORMED),
+        String::new(),
+    ] {
+        assert_eq!(check(Err(error)), ("outcome=denied_other", false));
+    }
 }
 
 struct Account {

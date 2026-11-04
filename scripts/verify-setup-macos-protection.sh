@@ -41,7 +41,11 @@ echo "$*" >>"$log"
 once() { [ -e "$here/$1" ] && return 1; : >"$here/$1"; }
 case "$1 $2" in
   "native-check ")
-    [ "$scenario" = native_denied ] && { echo outcome=denied; exit 1; }
+    case "$scenario" in
+      native_denied*) echo "outcome=${scenario#native_}"; exit 1 ;;
+      native_cancelled_first) echo outcome=cancelled; exit 0 ;;
+      native_second_*) once asked && { echo outcome=approved; exit 0; }; echo "outcome=${scenario#native_second_}"; exit 1 ;;
+    esac
     if once asked; then echo outcome=approved; else echo outcome=cancelled; fi ;;
   "keychain refs")
     [ "$scenario" = shaped_secret ] && echo "ref=$(cat "$here/dummy")-password class=every_access"
@@ -412,6 +416,17 @@ owner_run shaped_status; grep -qx "enroll acct-password status=unexpected" <(rec
 owner_run shaped_class; grep -qx "password acct-password status=unexpected" <(records) || fail "a class that is not the reference's own"; ok; stopped shaped_class
 owner_run mismatch; grep -qx "migrate acct-password status=mismatch" <(records) && ! grep -q retire-legacy <(calls) || fail "mismatch stops before retirement"; ok
 owner_run native_denied; grep -qx "native_approve outcome=denied" <(records) && ! grep -q keychain <(calls) || fail "denied native check stops first"; ok
+untouched() { ! grep -q -e keychain -e '^account ' <(calls) || fail "$1 runs no keychain or account command"; ok; }
+for code in failed timeout expired malformed unauthenticated channel oversized launch other; do
+  owner_run "native_denied_$code"; grep -qx "native_approve outcome=denied_$code" <(records) || fail "native check denied_$code is recorded"; ok
+  untouched "denied_$code"; stopped "denied_$code"
+done
+owner_run native_denied_bogus; grep -qx "native_approve status=unexpected" <(records) || fail "an unknown denial code is unexpected"; ok
+untouched "an unknown denial code"; stopped "an unknown denial code"
+owner_run native_cancelled_first; grep -qx "native_approve outcome=cancelled" <(records) || fail "a cancel at the approve step is recorded"; ok
+untouched "a cancel at the approve step"; stopped "a cancel at the approve step"
+owner_run native_second_denied_timeout; grep -qx "native_cancel outcome=denied_timeout" <(records) || fail "a denial at the cancel step is recorded"; ok
+untouched "a denial at the cancel step"; stopped "a denial at the cancel step"
 owner_run killed; grep -qx "settle acct status=terminated" <(records) && ! grep -q "keychain enroll" <(calls) || fail "a killed command stops setup"; ok
 owner_run staged_planted; grep -qx "settle acct status=mismatch" <(records) && ! grep -q "keychain migrate" <(calls) || fail "a set that fails verification stops setup"; ok; stopped staged
 owner_run uncommitted; completed uncommitted

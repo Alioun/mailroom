@@ -213,7 +213,7 @@ TOTAL_STAGES=3
 say "Mailroom personal setup walkthrough. This script captures no credentials."
 stage "Complete the approved protected installation"
 step "Follow the owner setup in docs/macos-confirmation.md using the exact approved commit and digest."
-step "Run the frozen setup wizard's owner phase and choose Add one local account when needed."
+step "Run scripts/setup.sh (or scripts/setup.sh keychain after an earlier install) and choose Add one local account when needed."
 note "Only the installed binary reads the hidden login and password. A native dialog confirms the exact local account."
 note "Creating an account saves it locally. It does not establish a provider connection."
 pause "After the approved protected setup is complete, press Enter."

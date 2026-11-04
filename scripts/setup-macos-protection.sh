@@ -419,7 +419,7 @@ sign() {
 }
 
 # Build, as the owner, under the Q28 and Q30 waivers: the owner's toolchains as installed,
-# from `git archive` of the checkout's HEAD commit, with a cleared environment. Leaves only
+# from `git archive` of the confirmed $COMMIT, with a cleared environment. Leaves only
 # the signed outputs in $2/out and sets their identities for the install.
 build_as_owner() {
   local checkout="$1" work="${2:?}"
@@ -428,8 +428,6 @@ build_as_owner() {
     NPM_CONFIG_GLOBALCONFIG="$work/home/global-npmrc" NPM_CONFIG_CACHE="$work/npm-cache" NPM_CONFIG_UPDATE_NOTIFIER=false)
   /bin/mkdir -m 700 "$work/home" "$work/cargo-home" "$work/npm-cache" "$work/out" "$work/src" || return 1
   : >"$work/home/user-npmrc" && : >"$work/home/global-npmrc" || return 1
-  COMMIT=$("$GIT" -C "$checkout" rev-parse --verify HEAD 2>/dev/null) || { BUILD_FAILURE=source; return 1; }
-  [[ "$COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || { BUILD_FAILURE=source; return 1; }
   ("$GIT" --no-replace-objects -C "$checkout" archive --format=tar "$COMMIT" | /usr/bin/tar -xf - -C "$work/src") >/dev/null 2>&1 \
     || { BUILD_FAILURE=source; return 1; }
   /bin/rm -rf "${work:?}/src/ui/dist" "${work:?}/src/ui/node_modules"
@@ -572,8 +570,24 @@ owner_stages "$MAILROOM_CDHASH" "$CONFIRM_CDHASH" || return 1
 finish
 }
 
+# The build reads src/, ui/, native/, scripts/, the Cargo files and .cargo, and src embeds
+# files from agent/, data/, examples/ and tests/. Only docs/, top-level Markdown files and
+# .DS_Store may differ from HEAD.
+BUILD_PATHSPEC=(':(top)' ':(exclude,top)docs' ':(exclude,top,glob)*.md' ':(exclude,top,glob)**/.DS_Store')
+
 build_stage() {
+local changes
 stage "Build and sign as the owner"
+COMMIT=$("$GIT" -C "$CHECKOUT" rev-parse --verify HEAD 2>/dev/null) && [[ "$COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] \
+  || { expect build ok source || stop_incomplete; return 1; }
+changes=$("$GIT" -C "$CHECKOUT" status --porcelain --untracked-files=all -- "${BUILD_PATHSPEC[@]}" 2>/dev/null) || changes=error
+[[ -z "$changes" ]] || { expect checkout clean changed || stop_incomplete; return 1; }
+expect checkout clean clean
+say "The checkout has no uncommitted change. Its HEAD commit is:"
+say "  $COMMIT"
+confirm_no "Install this commit? Compare it with the approved commit first." \
+  || { expect install_commit confirmed declined || stop_incomplete; return 1; }
+expect install_commit confirmed confirmed
 say "Owner decisions Q28 and Q30 waive the frozen copy: this wizard and the build run straight"
 say "from the checkout. Any program running as you, agents included, could alter the wizard,"
 say "the sources or the binaries before they are signed. The install checks only that its"
@@ -595,11 +609,12 @@ INSTALL_RESULTS=" install=ok:0 install=malformed:1 install=failed:1 install=untr
 install_stage() {
 local output code=0 result=unexpected
 stage "Install as root"
-say "sudo may ask for your login password. The install copies the signed outputs into $LIBEXEC"
-say "and refuses copies that differ from what this run built."
-output=$("$SUDO" /usr/bin/env -i PATH="$EXPECTED_PATH" /bin/bash -p "$SCRIPT" install \
+say "sudo asks for your login password and keeps no cached login afterwards. The install copies"
+say "the signed outputs into $LIBEXEC and refuses copies that differ from what this run built."
+output=$("$SUDO" -k /usr/bin/env -i PATH="$EXPECTED_PATH" /bin/bash -p "$SCRIPT" install \
   "$BUILD_DIR/out" "$MAILROOM_CDHASH" "$CONFIRM_CDHASH" "$UI_DIGEST") || code=$?
 output="${output%$'\r'}"
+"$SUDO" -k >/dev/null 2>&1 || true
 [[ "$output" =~ ^install=[a-z_]+$ && "$INSTALL_RESULTS" == *" $output:$code "* ]] && result="${output#install=}"
 /bin/rm -rf "${BUILD_DIR:?}"
 expect install ok "$result" || { stop_incomplete; return 1; }

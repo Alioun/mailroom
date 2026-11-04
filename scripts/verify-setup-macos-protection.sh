@@ -451,6 +451,8 @@ bash -c 'source "$1"; has_acl "$2"' _ "$tree_script" "$work/absent" || fail "an 
 # variable in the caller's environment must not reach the build.
 cat >"$work/fake-sudo" <<'SH'
 #!/bin/bash
+printf '%s\n' "$*" >>"${0%/*}/sudo-log"
+[ "$*" = -k ] && exit 0
 argv="$*"; shift $(($# - 4)); output="$1"; root="${output%/build/*}"
 printf '%s\n' "$argv" >"$root/sudo-argv"
 ls -A "${output%/out}" >"$root/handoff-contents"; cp -R "$output" "$root/handoff"
@@ -458,14 +460,19 @@ case "$(cat "$root/tamper" 2>/dev/null)" in
   binary) codesign -s - -f -o runtime --identifier org.mailroom.other "$output/mailroom" 2>/dev/null ;;
   ui) echo changed >"$output/ui/index.html" ;;
   extra) echo install=ok ;;
+  ok_exit1) /bin/bash "$root/install-driver.sh" "$@"; exit 1 ;;
+  identity_exit0) echo install=identity; exit 0 ;;
+  bogus) echo install=bogus; exit 1 ;;
 esac
 exec /bin/bash "$root/install-driver.sh" "$@"
 SH
 chmod 755 "$work/fake-sudo"
 
-# setup_prepare NAME [TAMPER]: a checkout, a saved account and the owner phase's answers.
+# setup_prepare NAME [TAMPER [INSTALL_COMMIT]]: a checkout, a saved account and the owner
+# phase's answers. INSTALL_COMMIT answers "Install this commit?" and defaults to y.
 setup_prepare() {
   owner_prepare_answers "$1"
+  answer "$out" "approved commit first. [y/N]" "${3-y}"
   [[ -n "${2:-}" ]] && echo "$2" >"$out/tamper"
   local fixtures="$out/libexec/mailroom"
   { overrides; cat <<DRV
@@ -483,17 +490,19 @@ built_value() { sed -n "s/^$1 //p" "$out/records"; }
 build_removed() { [[ -z "$(ls -A "$out/build")" ]] || fail "$1 removes the build directory"; ok; }
 never_launched() { [[ ! -e "$out/libexec/mailroom/calls.log" ]] || fail "$1 launches no mailroom"; ok; }
 
-: >"$work/tools/env-names"
+: >"$work/tools/env-names"; : >"$work/sudo-log"
 setup_prepare setup_happy
 RUSTC_WRAPPER=/tmp/evil NODE_OPTIONS=--require=/tmp/evil setup_go; completed "one-command setup"
-for step in "build ok" "install ok" "installation trusted" "native_approve outcome=approved" "settle acct status=settled" \
+for step in "checkout clean" "install_commit confirmed" "build ok" "install ok" "installation trusted" "native_approve outcome=approved" "settle acct status=settled" \
   "migrate acct-password status=migrated" "enroll acct-password status=ok" "allow acct-password status=ok" "protection acct-password status=ok"; do
   grep -qx "$step" <(records) || fail "setup record: $step"; ok
 done
 grep -qx "install ok" "$out/install-records" || fail "the install phase records its result"; ok
 mailroom_hash=$(built_value mailroom_cdhash); confirm_hash=$(built_value confirm_cdhash); ui_digest=$(built_value ui_digest)
 [[ "$(built_value commit)" == "$(git -C "$checkout" rev-parse HEAD)" ]] || fail "the build records the checkout's HEAD commit"; ok
-[[ "$(cat "$out/sudo-argv")" == "/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p $checkout/scripts/setup-macos-protection.sh install $(built_value output) $mailroom_hash $confirm_hash $ui_digest" ]] \
+grep -qa "  $(git -C "$checkout" rev-parse HEAD)" "$out/transcript" || fail "the full HEAD commit is shown before the build"; ok
+[[ "$(cat "$work/sudo-log")" == "-k /usr/bin/env -i"*$'\n'"-k" ]] || fail "sudo ignores a cached login and drops it after the install"; ok
+[[ "$(cat "$out/sudo-argv")" == "-k /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p $checkout/scripts/setup-macos-protection.sh install $(built_value output) $mailroom_hash $confirm_hash $ui_digest" ]] \
   || fail "sudo gets a cleared environment and the build's identities"; ok
 [[ "$(cat "$out/handoff-contents")" == out ]] || fail "only the signed outputs remain at the handoff"; ok
 [[ "$mailroom_hash" == "$(cdhash "$out/handoff/mailroom")" && "$confirm_hash" == "$(cdhash "$out/handoff/mailroom-confirm")" ]] || fail "recorded identities"; ok
@@ -517,6 +526,20 @@ grep -qx "install unexpected" <(records) || fail "an install reply with an extra
 setup_prepare setup_other_pins pins; setup_go
 grep -qx "install ok" <(records) && grep -qx "installation untrusted" <(records) || fail "pins that differ from the build are refused"; ok
 never_launched "pins that differ from the build"; stopped setup_other_pins
+for mode in ok_exit1 identity_exit0 bogus; do
+  setup_prepare "setup_reply_$mode" "$mode"; setup_go
+  grep -qx "install unexpected" <(records) || fail "install reply $mode is unexpected"; ok; never_launched "install reply $mode"; stopped "setup_reply_$mode"
+done
+not_built() { [[ ! -e "$out/sudo-argv" && -z "$(ls -A "$out/build")" ]] || fail "$1 builds nothing and never calls sudo"; ok; }
+setup_prepare setup_dirty_tracked; echo "# edit" >>"$checkout/scripts/setup-macos-protection.sh"; setup_go
+grep -qx "checkout changed" <(records) && ! grep -qa "Install this commit" "$out/transcript" || fail "an uncommitted script change is refused before the confirmation"; ok
+not_built "a changed checkout"; stopped setup_dirty_tracked
+setup_prepare setup_dirty_untracked; mkdir -p "$checkout/src"; echo new >"$checkout/src/new.rs"; setup_go
+grep -qx "checkout changed" <(records) || fail "an untracked file the build could read is refused"; ok; not_built "an untracked source"; stopped setup_dirty_untracked
+setup_prepare setup_docs_changed; mkdir -p "$checkout/docs"; echo note >"$checkout/docs/n.md"; echo note >"$checkout/NOTES.md"; : >"$checkout/.DS_Store"
+setup_go; completed "changes outside the build set"; grep -qx "checkout clean" <(records) || fail "docs, top-level Markdown and .DS_Store do not block"; ok
+setup_prepare setup_declined "" ""; setup_go
+grep -qx "install_commit declined" <(records) || fail "a declined commit is recorded"; ok; not_built "a declined commit"; stopped setup_declined
 setup_prepare outside_config; mkdir "$out/build/.cargo"; setup_go
 grep -qx "build outside_config" <(records) && [[ "$(ls -A "$out/build")" == .cargo && ! -e "$out/sudo-argv" ]] \
   || fail "a cargo config above the build is refused before sudo and its directory removed"; ok; stopped outside_config

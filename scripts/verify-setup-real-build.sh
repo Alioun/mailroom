@@ -27,7 +27,8 @@ install_phase "\$@"
 DRV
 cat >"$work/sudo" <<SH
 #!/bin/bash
-printf '%s\n' "\$*" >"$work/sudo-argv"
+printf '%s\n' "\$*" >>"$work/sudo-argv"
+[ "\$*" = -k ] && exit 0
 ls -A "\${@: -4:1}/.." >"$work/handoff-contents"
 shift \$((\$# - 4)); exec /bin/bash "$work/install.sh" "\$@"
 SH
@@ -39,7 +40,8 @@ CHECKOUT="$repo"; SCRIPT="$repo/scripts/setup-macos-protection.sh"; SUDO="$work/
 RECORDS="$work/records"; TOTAL_STAGES=2
 build_stage && install_stage
 DRV
-/usr/bin/python3 -I "$repo/scripts/drive-wizard.py" "$work/setup.sh" "$work/transcript" /dev/null 1800 \
+printf '%s\t%s\n' "approved commit first. [y/N]" y >"$work/answers"
+/usr/bin/python3 -I "$repo/scripts/drive-wizard.py" "$work/setup.sh" "$work/transcript" "$work/answers" 1800 \
   || fail "build and install exit $?: $(grep -a 'build \|install ' "$work/records" || true)"
 value() { sed -n "s/^$1 //p" "$work/records"; }
 grep -qx "build ok" "$work/records" && grep -qx "install ok" "$work/records" || fail "build and install records"
@@ -47,7 +49,8 @@ grep -qx "build ok" "$work/records" && grep -qx "install ok" "$work/records" || 
 [[ "$(value output)" == /private/tmp/mailroom-build.*/out ]] || fail "the build ran under /private/tmp"
 [[ "$(cat "$work/handoff-contents")" == out ]] || fail "only the signed outputs remain at the handoff"
 [[ ! -e "$(value output)" ]] || fail "the build directory is removed after the install"
-grep -q "^/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p $repo/scripts/setup-macos-protection.sh install " "$work/sudo-argv" \
+[[ "$(tail -1 "$work/sudo-argv")" == -k ]] || fail "the cached sudo login is dropped after the install"
+grep -q "^-k /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p $repo/scripts/setup-macos-protection.sh install " "$work/sudo-argv" \
   || fail "sudo gets a cleared environment"
 echo "built commit $(value commit): mailroom $(value mailroom_cdhash) mailroom-confirm $(value confirm_cdhash) ui $(value ui_digest)"
 

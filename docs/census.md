@@ -85,7 +85,7 @@ Starting the binary with `--synthetic-accounts` installs a fake credential backe
 ## Required follow-up units
 
 - Validate the protected OS adapters and real provider behavior through the approved owner-run process. Current evidence establishes synthetic behavior only. The personal release targets this Mac; other platforms remain later product work.
-- Complete installed acceptance of [local lifecycle controls](account-lifecycle.md) and [encrypted recovery](recovery-format.md). Replacement, forgetting, rotation, interrupted-creation cleanup and recovery are implemented with dummy backends. Real credential operations require the approved frozen owner CLI and wizard; ordinary scan retry does not replace credentials.
+- Complete installed acceptance of [local lifecycle controls](account-lifecycle.md) and [encrypted recovery](recovery-format.md). Replacement, forgetting, rotation, interrupted-creation cleanup and recovery are implemented with dummy backends. Real credential operations require the approved installed owner CLI and setup wizard; ordinary scan retry does not replace credentials.
 - Census saves (scan checkpoints) still rewrite the whole snapshot, and loading still decrypts and parses all of it. Journal saves no longer do. The 512 MiB snapshot limit applies.
 - Add Takeout MBOX import without body or attachment persistence.
 - Validate actual provider topology and optional counts through owner-run checks. Saved current mailbox totals never establish continuous historical Spam coverage.

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Drives the wizard's real stage logic in a pseudo-terminal: the build phase with fake
-# tools, the install phase on signed fake outputs, the owner phase with a signed fake
-# mailroom, the ACL scanner on large and unreadable trees, and the freeze bootstrap block
-# copied from docs/macos-confirmation.md. A temporary tree owned by the test user stands
-# in for the root-owned locations. No sudo, Keychain or real build;
+# Drives the wizard's real stage logic in a pseudo-terminal: the one-command setup end to
+# end (build with fake tools, a fake sudo that runs the install phase as the test user, then
+# the Keychain stages with the installed fake mailroom), the install phase on signed fake
+# outputs, the keychain, maintenance and recovery phases with a signed fake mailroom, and
+# the ACL scanner on large and unreadable trees. A temporary tree owned by the test user
+# stands in for the root-owned locations. No sudo, Keychain or real build;
 # scripts/verify-setup-real-build.sh runs the real build.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -161,23 +162,24 @@ drive() {
 }
 answer() { printf '%s\t%s\n' "$2" "$3" >>"$1/answers"; }
 
-# tree NAME: a frozen copy and its digest, owned by the test user.
+test_git() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -c user.name=t -c user.email=t@example.invalid "$@"; }
+# tree NAME: a git checkout owned by the test user, with a committed copy of the wizard.
 tree() {
-  local root="$work/$1"; rm -rf "${root:?}"; mkdir -p "$root/share" "$root/libexec" "$root/home" "$root/build" "$root/config"
-  chmod 755 "$root" "$root/share" "$root/libexec" "$root/build"
-  frozen="$root/share/setup-0123456789abcdef0123456789abcdef01234567"
-  mkdir -p "$frozen/scripts" "$frozen/ui" "$frozen/native/macos"
-  sed '$d' "$repo/scripts/setup-macos-protection.sh" >"$frozen/scripts/setup-macos-protection.sh"
-  echo "approved source" >"$frozen/README"
-  chmod -R go-w "$frozen"
-  bash -c 'source "$1"; tree_digest "$2"' _ "$frozen/scripts/setup-macos-protection.sh" "$frozen" >"$root/digest"
+  local root="$work/$1"; rm -rf "${root:?}"; mkdir -p "$root/libexec" "$root/home" "$root/build" "$root/config"
+  chmod 755 "$root" "$root/libexec" "$root/build"
+  checkout="$root/checkout"
+  mkdir -p "$checkout/scripts" "$checkout/ui" "$checkout/native/macos"
+  sed '$d' "$repo/scripts/setup-macos-protection.sh" >"$checkout/scripts/setup-macos-protection.sh"
+  echo "approved source" >"$checkout/README"; echo '{}' >"$checkout/ui/package.json"; echo '// swift' >"$checkout/native/macos/Package.swift"
+  test_git -C "$checkout" init -q && test_git -C "$checkout" add -A && test_git -C "$checkout" commit -qm tree
   out="$root"
-  answer "$out" "approval record:" "$(cat "$out/digest")"
+  touch "$out/answers"
 }
 overrides() {
   cat <<DRV
-source "$frozen/scripts/setup-macos-protection.sh"
-SHARE="$out/share"; LIBEXEC_PARENT="$out/libexec"; LIBEXEC="$out/libexec/mailroom"; BUILD_BASE="$out/build"
+source "$checkout/scripts/setup-macos-protection.sh"
+CHECKOUT="$checkout"; SCRIPT="$checkout/scripts/setup-macos-protection.sh"; SUDO="$work/fake-sudo"
+LIBEXEC_PARENT="$out/libexec"; LIBEXEC="$out/libexec/mailroom"; BUILD_BASE="$out/build"
 TRUSTED_OWNER="$me"; HOME="$out/home"; CONFIG="$out/config"; ENV_FILE=/dev/null; CARGO="$work/tools/cargo"; RUSTC="$work/tools/rustc"
 NODE="$work/tools/node"; NPM_CLI="$work/tools/npm-cli.js"; XCRUN="$work/tools/xcrun"; RECORDS="$out/records"
 DRV
@@ -192,31 +194,35 @@ install_fake() {
   printf 'MAILROOM_CONFIRM_HELPER_CDHASH=%s\nMAILROOM_CDHASH=%s\n' "$hash" "$hash" >"$out/libexec/mailroom/pins"
   echo "$1" >"$out/libexec/mailroom/scenario"; echo "$dummy" >"$out/libexec/mailroom/dummy"
   chmod -R go-w "$out/libexec/mailroom"
+  save_account
+}
+save_account() {
   printf '%s' '{"id":"acct","provider":"mailbox_org","login":"x@example.test","password_ref":"acct-password","local_secret_ref":"acct-census-key","generation":0,"identity_ref":null,"connection":"unverified"}' >"$out/config/acct.json"
 }
 records() { cat "$out/records" 2>/dev/null || true; }
 calls() { cat "$out/libexec/mailroom/calls.log" 2>/dev/null || true; }
-no_secret() { if grep -rqaF -e "$dummy" -e "$dummy_key" "$out" --exclude=driver.sh --exclude=dummy --exclude=answers; then fail "$1: dummy password appeared in output or a file"; fi; ok; }
+no_secret() { if grep -rqaF -e "$dummy" -e "$dummy_key" "$out" --exclude=driver.sh --exclude=install-driver.sh --exclude=dummy --exclude=answers; then fail "$1: dummy password appeared in output or a file"; fi; ok; }
 stopped() { [[ $(cat "$out/exit") != 0 ]] && grep -qa "Setup incomplete" "$out/transcript" && ! grep -qa "Setup complete" "$out/transcript" || fail "$1 stops setup"; ok; }
 completed() { [[ $(cat "$out/exit") == 0 ]] && grep -qa "Setup complete" "$out/transcript" || fail "$1 completes"; ok; }
 
 # owner_prepare NAME [ADD [PROVIDER [REPLACE]]]: answers ADD to "Add one local account now?",
 # PROVIDER to its provider prompt and REPLACE to "Replace one saved password now?", and
 # declines every other optional step.
-owner_prepare() {
-  local name="$1"; tree "$name"; install_fake "$name"
+owner_prepare() { owner_prepare_answers "$@"; install_fake "$1"; }
+owner_prepare_answers() {
+  local name="$1"; tree "$name"; save_account
   answer "$out" "Password: " "$dummy"; answer "$out" "Repeat it: " "$dummy"; answer "$out" "for a while. [y/N]" ""
   answer "$out" "already saved. [y/N]" "${2:-}"; answer "$out" "Provider: mailbox_org or gmail" "${3:-}"
   answer "$out" "password now? [y/N]" "${4:-}"
   [[ "$name" == uncommitted ]] && answer "$out" "identity key of acct? [y/N]" y
   return 0
 }
-owner_go() { run_phase "owner_phase \"$frozen\""; }
+owner_go() { run_phase owner_phase; }
 owner_run() { owner_prepare "$@"; owner_go; }
 unpublished() { [[ ! -e "$out/config/acct2.json" && ! -e "$out/libexec/mailroom/added" ]] || fail "$1 publishes no account"; ok; }
 
 owner_run happy; completed "owner happy path"
-for step in "tree_digest match" "installation trusted" "native_approve outcome=approved" "native_cancel outcome=cancelled" \
+for step in "installation trusted" "native_approve outcome=approved" "native_cancel outcome=cancelled" \
   "account_refs status=ok" "legacy_list status=ok" "settle acct status=settled" "migrate acct-password status=migrated" \
   "enroll acct-password status=ok" "deny acct-password status=denied" "allow acct-password status=ok" "protection acct-password status=ok"; do
   grep -qx "$step" <(records) || fail "record: $step"; ok
@@ -294,7 +300,7 @@ maint_prepare() {
   answer "$out" "reconcile acct now? [y/N]" "${2:-}"; answer "$out" "local encryption key? [y/N]" "${3:-}"
   answer "$out" "forget one local account? [y/N]" "${4:-}"; answer "$out" "Account ID" "${5:-acct}"
 }
-maint_go() { run_phase "maintenance_phase \"$frozen\""; }
+maint_go() { run_phase maintenance_phase; }
 no_account_command() { ! grep -q "^account " <(calls) || fail "$1 runs no account command"; ok; }
 
 maint_prepare maint_happy y y y; lifecycle acct creating; maint_go; completed "maintenance"
@@ -333,8 +339,6 @@ maint_prepare forget_cancelled "" "" y; maint_go
 grep -qx "local_forget status=cancelled" <(records) && [[ -e "$out/config/acct.json" ]] || fail "a cancelled forget stops and keeps the account"; ok; stopped forget_cancelled
 maint_prepare maint_forget_unknown "" "" y nobody; maint_go
 grep -qx "account_selection unknown" <(records) || fail "an unknown forget account is refused"; ok; no_account_command "an unknown forget account"; stopped maint_forget_unknown
-tree maint_digest; install_fake happy; : >"$out/answers"; answer "$out" "approval record:" 0000; maint_go
-grep -qx "tree_digest mismatch" <(records) && [[ ! -e "$out/libexec/mailroom/calls.log" ]] || fail "maintenance refuses a changed tree"; ok
 tree maint_install; install_fake happy; chmod u+w "$out/libexec/mailroom"; ln -s /etc/hosts "$out/libexec/mailroom/extra"; chmod u-w "$out/libexec/mailroom"; maint_go
 grep -qx "installation untrusted" <(records) && [[ ! -e "$out/libexec/mailroom/calls.log" ]] || fail "maintenance refuses an untrusted installation"; ok; stopped maint_install
 
@@ -349,7 +353,7 @@ rec_prepare() {
   answer "$out" "separately from its key? [y/N]" "${7:-y}"; answer "$out" "without .bundle" "${8:-$bundle}"
   answer "$out" "64 lowercase hex characters: " "${9:-$dummy_key}"; answer "$out" "Recovery key again: " "${10:-$dummy_key}"
 }
-rec_go() { run_phase "recovery_phase \"$frozen\""; }
+rec_go() { run_phase recovery_phase; }
 key_entered() { [[ "$(cat "$out/libexec/mailroom/recovery-key")" == "$(printf '%s' "$dummy_key" | shasum)" ]] || fail "$1: the key reaches the binary through the terminal"; ok; }
 rec_argv() { [[ "$(grep "^account " <(calls))" == "account recovery-prepare"$'\n'"$2" ]] || fail "$1 argv"; ok; }
 
@@ -399,8 +403,6 @@ grep -qx "recovery status=unexpected" <(records) || fail "a recovery reply that 
 rec_prepare rec_interrupted y "" acct "" y y "" "$dummy_key" $'\003'; rec_go
 interrupted "Ctrl-C at the recovery key prompt"; grep -qa "Recovery key again: " "$out/transcript" && ! grep -q "status=captured" <(records) \
   || fail "Ctrl-C at the recovery key prompt captures nothing"; ok; no_secret rec_interrupted
-tree rec_digest; install_fake happy; : >"$out/answers"; answer "$out" "approval record:" 0000; rec_go
-grep -qx "tree_digest mismatch" <(records) && [[ ! -e "$out/libexec/mailroom/calls.log" ]] || fail "recovery refuses a changed tree"; ok
 
 owner_run probe_wrong; grep -qx "deny acct-password status=ok" <(records) || fail "a silent read is recorded and is not a denial"; ok; stopped probe_wrong
 owner_run trailing_failure; grep -qx "enroll acct-password status=unexpected" <(records) || fail "a failure record after success"; ok; stopped trailing
@@ -415,24 +417,16 @@ owner_run staged_planted; grep -qx "settle acct status=mismatch" <(records) && !
 owner_run uncommitted; completed uncommitted
 grep -qx "settle acct status=uncommitted" <(records) && grep -qx "adopt acct status=settled" <(records) || fail "an uncommitted identity is adopted only after the owner agrees"; ok
 
-tree wrong_digest; install_fake happy; : >"$out/answers"; answer "$out" "approval record:" 0000
-run_phase "owner_phase \"$frozen\""
-grep -qx "tree_digest mismatch" <(records) && [[ ! -e "$out/libexec/mailroom/calls.log" ]] || fail "a changed tree is refused"; ok
-
 tree bad_metadata; install_fake happy; printf '%s' '{"id":"other","password_ref":"other-password","local_secret_ref":"other-census-key"}' >"$out/config/acct.json"
-run_phase "owner_phase \"$frozen\""
+run_phase owner_phase
 grep -qx "account_metadata unreadable" <(records) && [[ ! -e "$out/libexec/mailroom/calls.log" ]] || fail "metadata whose id differs from its file name is refused"; ok; stopped bad_metadata
 
-tree acl_frozen; install_fake happy; chmod +a "user:$me allow write" "$frozen/README"
-run_phase "owner_phase \"$frozen\""
-grep -qx "frozen_copy untrusted" <(records) || fail "a file ACL granting writes is refused"; ok
-
 tree symlink_install; install_fake happy; chmod u+w "$out/libexec/mailroom"; ln -s /etc/hosts "$out/libexec/mailroom/extra"; chmod u-w,go-w "$out/libexec/mailroom"
-run_phase "owner_phase \"$frozen\""
+run_phase owner_phase
 grep -qx "installation untrusted" <(records) && [[ ! -e "$out/libexec/mailroom/calls.log" ]] || fail "a symlink in the installation is refused"; ok
 
 tree acl_install; install_fake happy; chmod +a "user:$me allow add_file" "$out/libexec/mailroom"
-run_phase "owner_phase \"$frozen\""
+run_phase owner_phase
 grep -qx "installation untrusted" <(records) || fail "an ACL on the installation is refused"; ok; stopped acl_install
 
 # The ACL scanner consumes the whole listing. An ACL on the first entry of a listing far
@@ -451,112 +445,106 @@ chmod -N "$scan/aaa"; mkdir -m 755 "$scan/locked"; chmod 000 "$scan/locked"
 chmod 755 "$scan/locked"
 bash -c 'source "$1"; has_acl "$2"' _ "$tree_script" "$work/absent" || fail "an unreadable ACL counts as an ACL"; ok
 
-# Build phase with fake tools. A hostile variable in the caller's environment must not
-# reach the build, and only the signed outputs remain.
+# One-command setup with fake tools. The fake sudo records its argv, keeps a copy of the
+# handed-over outputs, applies the case's tampering, then runs the install phase as the
+# test user and drops the fake mailroom's fixtures into the fresh installation. A hostile
+# variable in the caller's environment must not reach the build.
+cat >"$work/fake-sudo" <<'SH'
+#!/bin/bash
+argv="$*"; shift $(($# - 4)); output="$1"; root="${output%/build/*}"
+printf '%s\n' "$argv" >"$root/sudo-argv"
+ls -A "${output%/out}" >"$root/handoff-contents"; cp -R "$output" "$root/handoff"
+case "$(cat "$root/tamper" 2>/dev/null)" in
+  binary) codesign -s - -f -o runtime --identifier org.mailroom.other "$output/mailroom" 2>/dev/null ;;
+  ui) echo changed >"$output/ui/index.html" ;;
+  extra) echo install=ok ;;
+esac
+exec /bin/bash "$root/install-driver.sh" "$@"
+SH
+chmod 755 "$work/fake-sudo"
+
+# setup_prepare NAME [TAMPER]: a checkout, a saved account and the owner phase's answers.
+setup_prepare() {
+  owner_prepare_answers "$1"
+  [[ -n "${2:-}" ]] && echo "$2" >"$out/tamper"
+  local fixtures="$out/libexec/mailroom"
+  { overrides; cat <<DRV
+RECORDS="$out/install-records"
+install_phase "\$@" || exit 1
+cp "$work/fake.sh" "$fixtures/fake.sh"; echo happy >"$fixtures/scenario"; echo "$dummy" >"$fixtures/dummy"; chmod go-w "$fixtures"/*
+if [ "\$(cat "$out/tamper" 2>/dev/null)" = pins ]; then
+  printf 'MAILROOM_CONFIRM_HELPER_CDHASH=%s\nMAILROOM_CDHASH=%s\n' $(printf '1%.0s' {1..40}) $(printf '1%.0s' {1..40}) >"$fixtures/pins"
+fi
+DRV
+  } >"$out/install-driver.sh"
+}
+setup_go() { run_phase setup_phase; }
+built_value() { sed -n "s/^$1 //p" "$out/records"; }
+build_removed() { [[ -z "$(ls -A "$out/build")" ]] || fail "$1 removes the build directory"; ok; }
+never_launched() { [[ ! -e "$out/libexec/mailroom/calls.log" ]] || fail "$1 launches no mailroom"; ok; }
+
 : >"$work/tools/env-names"
-tree build_happy
-RUSTC_WRAPPER=/tmp/evil NODE_OPTIONS=--require=/tmp/evil run_phase "build_phase \"$frozen\""
-completed "build phase"
-built=$(sed -n 's/^output //p' "$out/records")
-[[ -f "$built/mailroom" && -f "$built/mailroom-confirm" && -f "$built/ui/index.html" ]] || fail "signed outputs"; ok
-[[ "$(ls -A "$(dirname "$built")")" == out ]] || fail "intermediates are removed"; ok
-grep -qx "mailroom_cdhash $(cdhash "$built/mailroom")" <(records) && grep -qx "confirm_cdhash $(cdhash "$built/mailroom-confirm")" <(records) || fail "printed identities"; ok
-grep -qa "install $built" "$out/transcript" || fail "the build prints the install command"; ok
+setup_prepare setup_happy
+RUSTC_WRAPPER=/tmp/evil NODE_OPTIONS=--require=/tmp/evil setup_go; completed "one-command setup"
+for step in "build ok" "install ok" "installation trusted" "native_approve outcome=approved" "settle acct status=settled" \
+  "migrate acct-password status=migrated" "enroll acct-password status=ok" "allow acct-password status=ok" "protection acct-password status=ok"; do
+  grep -qx "$step" <(records) || fail "setup record: $step"; ok
+done
+grep -qx "install ok" "$out/install-records" || fail "the install phase records its result"; ok
+mailroom_hash=$(built_value mailroom_cdhash); confirm_hash=$(built_value confirm_cdhash); ui_digest=$(built_value ui_digest)
+[[ "$(built_value commit)" == "$(git -C "$checkout" rev-parse HEAD)" ]] || fail "the build records the checkout's HEAD commit"; ok
+[[ "$(cat "$out/sudo-argv")" == "/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p $checkout/scripts/setup-macos-protection.sh install $(built_value output) $mailroom_hash $confirm_hash $ui_digest" ]] \
+  || fail "sudo gets a cleared environment and the build's identities"; ok
+[[ "$(cat "$out/handoff-contents")" == out ]] || fail "only the signed outputs remain at the handoff"; ok
+[[ "$mailroom_hash" == "$(cdhash "$out/handoff/mailroom")" && "$confirm_hash" == "$(cdhash "$out/handoff/mailroom-confirm")" ]] || fail "recorded identities"; ok
+[[ "$(cat "$out/libexec/mailroom/pins")" == "MAILROOM_CONFIRM_HELPER_CDHASH=$confirm_hash"$'\n'"MAILROOM_CDHASH=$mailroom_hash" ]] || fail "setup pins"; ok
+build_removed "setup"
 grep -qE "^(RUSTC_WRAPPER|NODE_OPTIONS|DEVELOPER_DIR|BASH_ENV)$" "$work/tools/env-names" && fail "a hostile variable reached the build"; ok
 grep -qx "CARGO_HOME" "$work/tools/env-names" || fail "builds get a fresh CARGO_HOME"; ok
-mailroom_hash=$(sed -n 's/^mailroom_cdhash //p' "$out/records"); confirm_hash=$(sed -n 's/^confirm_cdhash //p' "$out/records")
-ui_digest=$(sed -n 's/^ui_digest //p' "$out/records")
-cp -R "$built" "$work/built"
+[[ $(grep -c "Ready to start?" "$out/transcript") == 1 ]] || fail "one run asks to start once"; ok
+no_secret setup_happy
+cp -R "$out/handoff" "$work/built"
 
-tree outside_config; mkdir "$out/build/.cargo"; run_phase "build_phase \"$frozen\""
-grep -qx "build outside_config" <(records) && [[ "$(ls -A "$out/build")" == .cargo ]] || fail "a cargo config above the build is refused and its directory removed"; ok; stopped outside_config
+setup_prepare setup_tampered_binary binary; setup_go
+grep -qx "install identity" <(records) && grep -qx "install identity" "$out/install-records" && [[ ! -e "$out/libexec/mailroom" ]] \
+  || fail "a binary re-signed after the build is refused at the handoff"; ok
+never_launched "a refused handoff"; build_removed "a refused handoff"; stopped setup_tampered_binary
+setup_prepare setup_tampered_ui ui; setup_go
+grep -qx "install ui_digest" <(records) && [[ ! -e "$out/libexec/mailroom" ]] || fail "a UI changed after the build is refused at the handoff"; ok
+never_launched "a changed UI"; stopped setup_tampered_ui
+setup_prepare setup_extra_reply extra; setup_go
+grep -qx "install unexpected" <(records) || fail "an install reply with an extra line is unexpected"; ok; never_launched "an extra install reply"; stopped setup_extra_reply
+setup_prepare setup_other_pins pins; setup_go
+grep -qx "install ok" <(records) && grep -qx "installation untrusted" <(records) || fail "pins that differ from the build are refused"; ok
+never_launched "pins that differ from the build"; stopped setup_other_pins
+setup_prepare outside_config; mkdir "$out/build/.cargo"; setup_go
+grep -qx "build outside_config" <(records) && [[ "$(ls -A "$out/build")" == .cargo && ! -e "$out/sudo-argv" ]] \
+  || fail "a cargo config above the build is refused before sudo and its directory removed"; ok; stopped outside_config
+setup_prepare setup_no_commit; rm -rf "$checkout/.git"; setup_go
+grep -qx "build source" <(records) && [[ ! -e "$out/sudo-argv" ]] || fail "a checkout without a commit is refused before sudo"; ok; build_removed "a refused source"; stopped setup_no_commit
 
-# Install phase on the built outputs.
-install_run() {
-  local name="$1"; tree "$name"; rm -rf "${out:?}/out"; cp -R "$work/built" "$out/out"
-  answer "$out" "mailroom cdhash:" "${2:-$mailroom_hash}"; answer "$out" "mailroom-confirm cdhash:" "$confirm_hash"; answer "$out" "UI digest:" "$ui_digest"
-}
-install_go() { run_phase "install_phase \"$frozen\" \"$out/out\""; }
+# Install phase on the built outputs, as sudo starts it.
+install_run() { local name="$1"; tree "$name"; rm -rf "${out:?}/out"; cp -R "$work/built" "$out/out"; typed_mailroom="${2:-$mailroom_hash}"; }
+install_go() { run_phase "install_phase \"$out/out\" \"$typed_mailroom\" \"$confirm_hash\" \"$ui_digest\""; }
 installed() { [[ -e "$out/libexec/mailroom" ]]; }
+refused() { [[ $(cat "$out/exit") != 0 && "$(tr -d '\r' <"$out/transcript")" == "install=$1" ]] && grep -qx "install $1" <(records) && ! installed || fail "$2"; ok; }
 
-install_run install_happy; install_go; completed "install phase"
+install_run install_happy; install_go
+[[ $(cat "$out/exit") == 0 && "$(tr -d '\r' <"$out/transcript")" == install=ok ]] || fail "the install phase prints only its result"; ok
 grep -qx "install ok" <(records) || fail "install record"; ok
 bash -c 'source "$1"; TRUSTED_OWNER="$2"; trusted_tree "$3"' _ "$tree_script" "$me" "$out/libexec/mailroom" || fail "installation is a trusted tree"; ok
 [[ "$(cat "$out/libexec/mailroom/pins")" == "MAILROOM_CONFIRM_HELPER_CDHASH=$confirm_hash"$'\n'"MAILROOM_CDHASH=$mailroom_hash" ]] || fail "pins"; ok
 [[ "$(ls -A "$out/libexec")" == mailroom ]] || fail "no staging is left behind"; ok
 
-install_run install_wrong 0000000000000000000000000000000000000000; install_go
-grep -qx "install identity" <(records) && ! installed || fail "a copy with another cdhash is refused"; ok; stopped install_wrong
-install_run install_ui; echo changed >"$out/out/ui/index.html"; install_go
-grep -qx "install ui_digest" <(records) && ! installed || fail "a changed UI is refused"; ok
-install_run install_symlink; rm "$out/out/mailroom"; ln -s /etc/hosts "$out/out/mailroom"; install_go
-grep -qx "install not_plain" <(records) && ! installed || fail "a symlinked output is copied as a link and refused"; ok
-install_run install_fifo; rm "$out/out/mailroom-confirm"; mkfifo "$out/out/mailroom-confirm"; install_go
-grep -qx "install not_plain" <(records) && ! installed || fail "a FIFO output is never read and is refused"; ok; stopped install_fifo
-install_run install_malformed "not-a-cdhash"; install_go
-grep -qx "identities malformed" <(records) && ! installed || fail "a malformed typed identity is refused"; ok; stopped install_malformed
+install_run install_wrong 0000000000000000000000000000000000000000; install_go; refused identity "a copy with another cdhash is refused"
+install_run install_ui; echo changed >"$out/out/ui/index.html"; install_go; refused ui_digest "a changed UI is refused"
+install_run install_symlink; rm "$out/out/mailroom"; ln -s /etc/hosts "$out/out/mailroom"; install_go; refused not_plain "a symlinked output is copied as a link and refused"
+install_run install_fifo; rm "$out/out/mailroom-confirm"; mkfifo "$out/out/mailroom-confirm"; install_go; refused not_plain "a FIFO output is never read and is refused"
+install_run install_malformed "not-a-cdhash"; install_go; refused malformed "a malformed identity is refused"
 [[ -z "$(ls -A "$work/install_wrong/libexec")" && -z "$(ls -A "$work/install_fifo/libexec")" ]] || fail "refused staging is removed"; ok
 install_run planted_pins; mkdir -m 755 "$out/libexec/mailroom"; echo keep >"$out/victim"; ln -s "$out/victim" "$out/libexec/mailroom/pins"; install_go
 [[ "$(cat "$out/victim")" == keep && ! -L "$out/libexec/mailroom/pins" ]] && grep -qx "install ok" <(records) || fail "a planted pins symlink is moved aside, never followed"; ok
-install_run acl_parent; chmod +a "user:$me allow add_subdirectory" "$out/libexec"; install_go
-grep -qx "install untrusted_parent" <(records) && ! installed || fail "an ACL on the install parent is refused"; ok; stopped acl_parent
-
-# The freeze bootstrap, copied from the docs and run without sudo: it accepts only the
-# approved digest, ignores Git replacement objects, never reuses a destination and never
-# extracts into a shared or ACL-granting directory.
-block="$work/freeze.sh"
-awk '/^<!-- freeze-block -->$/ {on=1; next} on && /^```sh$/ {inside=1; next} inside && /^```$/ {exit} inside {print}' \
-  "$repo/docs/macos-confirmation.md" >"$block"
-grep -q '/usr/bin/sudo ' "$block" && grep -q -- '--no-replace-objects' "$block" || fail "the docs hold the freeze block"; ok
-head_commit=$(git -C "$repo" rev-parse HEAD)
-mkdir "$work/expected"; git -C "$repo" archive --format=tar "$head_commit" | tar -x -C "$work/expected"
-head_digest=$(bash -c 'source "$1"; tree_digest "$2"' _ "$tree_script" "$work/expected")
-freeze() {
-  local base="$1" source="$2" commit="$3" digest="$4" fault="${5:-s#^##}"
-  sed -e 's#/usr/bin/sudo ##' -e "s#/usr/local/share/mailroom#$base/share/mailroom#g" -e "s#\"\$HOME/projects/mailroom\"#\"$source\"#" \
-    -e "s#^COMMIT=.*#COMMIT=$commit#" -e "s#^DIGEST=.*#DIGEST=$digest#" -e "$fault" "$block" >"$base/freeze-run.sh"
-  bash "$base/freeze-run.sh" >"$base/freeze.out" 2>&1
-}
-fresh_base() { rm -rf "${work:?}/$1"; mkdir -p "$work/$1/share"; chmod 755 "$work/$1" "$work/$1/share"; echo "$work/$1"; }
-base=$(fresh_base freeze_happy); freeze "$base" "$repo" "$head_commit" "$head_digest" || fail "the approved commit freezes: $(cat "$base/freeze.out")"; ok
-frozen_copy="$base/share/mailroom/setup-$head_commit"
-[[ "$(bash -c 'source "$1"; tree_digest "$2"' _ "$tree_script" "$frozen_copy")" == "$head_digest" ]] || fail "the frozen copy has the approved digest"; ok
-bash -c 'source "$1"; TRUSTED_OWNER="$2"; trusted_tree "$3"' _ "$tree_script" "$me" "$frozen_copy" || fail "the frozen copy is a trusted tree"; ok
-! freeze "$base" "$repo" "$head_commit" "$head_digest" || fail "an existing frozen copy is never reused"; ok
-base=$(fresh_base freeze_wrong); ! freeze "$base" "$repo" "$head_commit" "$(printf '0%.0s' {1..64})" || fail "another digest refuses"; ok
-[[ -z "$(ls -A "$base/share/mailroom")" ]] || fail "a refused freeze leaves nothing behind"; ok
-base=$(fresh_base freeze_acl); mkdir -m 755 "$base/share/mailroom"; chmod +a "user:$me allow add_subdirectory" "$base/share/mailroom"
-! freeze "$base" "$repo" "$head_commit" "$head_digest" && [[ -z "$(ls -A "$base/share/mailroom")" ]] || fail "a destination with a granting ACL refuses"; ok
-base=$(fresh_base freeze_link); mkdir -m 755 "$base/elsewhere"; ln -s "$base/elsewhere" "$base/share/mailroom"
-! freeze "$base" "$repo" "$head_commit" "$head_digest" && [[ -z "$(ls -A "$base/elsewhere")" ]] || fail "a symlinked destination refuses"; ok
-base=$(fresh_base freeze_shared); chmod 777 "$base/share"
-! freeze "$base" "$repo" "$head_commit" "$head_digest" || fail "a writable ancestor refuses"; ok
-# Each stand-in runs the real tool, so its output looks right, then exits 1. The block must
-# refuse on the status alone and leave nothing behind.
-mkdir "$work/faults"
-for tool in /bin/ls /usr/bin/find /usr/bin/sort; do
-  printf '#!/bin/sh\n%s "$@"\nexit 1\n' "$tool" >"$work/faults/$(basename "$tool")"
-done
-chmod 755 "$work/faults"/*
-for fault in "ls:s#/bin/ls -lde#$work/faults/ls -lde#" \
-  "find:s#(/usr/bin/find \"\$fresh\"#($work/faults/find \"\$fresh\"#" \
-  "sort:s#/usr/bin/sort -z#$work/faults/sort -z#"; do
-  name=${fault%%:*}; base=$(fresh_base "freeze_fault_$name")
-  freeze "$base" "$repo" "$head_commit" "$head_digest" "${fault#*:}" && fail "a failed $name stage freezes"
-  grep -q "$work/faults/$name" "$base/freeze-run.sh" || fail "the $name fault was injected"
-  [[ -z "$(ls -A "$base/share/mailroom" 2>/dev/null)" ]] || fail "a failed $name stage leaves nothing behind"; ok
-done
-# A replacement object swaps the setup script under the same commit name. Git honours it
-# by default; the bootstrap does not.
-clone="$work/clone"; git clone -q --no-local "$repo" "$clone"; git -C "$clone" checkout -q "$head_commit"
-echo "echo replaced" >>"$clone/scripts/setup-macos-protection.sh"
-git -C "$clone" -c user.name=t -c user.email=t@example.invalid commit -qam replaced
-git -C "$clone" replace "$head_commit" "$(git -C "$clone" rev-parse HEAD)"
-replaced=$(git -C "$clone" archive --format=tar "$head_commit" | tar -xO scripts/setup-macos-protection.sh)
-[[ $'\n'"$replaced"$'\n' == *$'\n''echo replaced'$'\n'* ]] \
-  || fail "the replacement object fixture changes plain git archive output"; ok
-base=$(fresh_base freeze_replaced); freeze "$base" "$clone" "$head_commit" "$head_digest" || fail "the bootstrap ignores replacement objects: $(cat "$base/freeze.out")"; ok
-! grep -q "^echo replaced$" "$base/share/mailroom/setup-$head_commit/scripts/setup-macos-protection.sh" || fail "replaced bytes were frozen"; ok
+install_run acl_parent; chmod +a "user:$me allow add_subdirectory" "$out/libexec"; install_go; refused untrusted_parent "an ACL on the install parent is refused"
 
 # The driver stops the whole process group on silence and on SIGTERM, so tools a
 # phase started never outlive it, even ones that ignore the hangup a closed terminal sends.
@@ -582,5 +570,11 @@ script="$repo/scripts/setup-macos-protection.sh"
 /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash "$script" </dev/null >/dev/null 2>&1 && fail "without -p"; ok
 /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin RUSTC_WRAPPER=/tmp/evil /bin/bash -p "$script" build </dev/null >/dev/null 2>&1 && fail "with a hostile variable"; ok
 /usr/bin/env -i PATH=/opt/homebrew/bin:/usr/bin:/bin /bin/bash -p "$script" </dev/null >/dev/null 2>&1 && fail "with another PATH"; ok
-/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p "$script" install "$work" </dev/null >/dev/null 2>&1 && fail "install as non-root"; ok
+/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p "$script" install "$work" "$mailroom_hash" "$confirm_hash" "$ui_digest" </dev/null >/dev/null 2>&1 && fail "install as non-root"; ok
+# The launcher clears the caller's environment, so the wizard refuses only for the missing
+# terminal, and bash -p ignores BASH_ENV in the launcher itself.
+printf 'touch "%s/bash-env-ran"\n' "$work" >"$work/bash-env.sh"
+entry=$(BASH_ENV="$work/bash-env.sh" RUSTC_WRAPPER=/tmp/evil "$repo/scripts/setup.sh" </dev/null 2>&1) && fail "the launcher without a terminal"
+[[ "$entry" == "Run scripts/setup.sh in a terminal"* && ! -e "$work/bash-env-ran" ]] || fail "the launcher clears the environment"; ok
+[[ "$(cd "$repo/scripts" && ./setup.sh --plan | wc -l)" -eq 3 ]] || fail "the launcher finds the wizard beside it"; ok
 echo "wizard runs: $passed checks passed"

@@ -209,15 +209,16 @@ finish() {
 # ──────────────────────────────────────────────────────────────────────────
 
 
-# This file has three phases. Each starts with an absolute command copied from
-# docs/macos-confirmation.md, never through PATH or `#!/usr/bin/env`:
-#   build    as the owner: builds and signs from the frozen tree with the owner's toolchains
-#   install  as root: copies the signed outputs into a fresh root-owned directory
-#   (none)   as the owner: the Keychain stages
-# Owner decision Q28 waives the frozen-copy requirement for the build step only.
+# scripts/setup.sh starts this file with a cleared environment. Run from the checkout:
+#   (none)       as the owner: build and sign, install through sudo, then the Keychain stages
+#   keychain     as the owner: the Keychain stages alone, against the existing installation
+#   maintenance  as the owner: optional local account maintenance
+#   recovery     as the owner: optional encrypted recovery
+#   install      as root, started only by the first phase through sudo
+# Owner decisions Q28 and Q30 waive the frozen copy: the wizard and the build run straight
+# from the checkout.
 
 # Trusted locations and tools. Tests override these only by sourcing this file.
-SHARE=/usr/local/share/mailroom
 LIBEXEC_PARENT=/usr/local/libexec
 LIBEXEC=/usr/local/libexec/mailroom
 BUILD_BASE=/private/tmp
@@ -231,6 +232,9 @@ NODE=/usr/local/bin/node
 NPM_CLI=/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js
 XCRUN=/usr/bin/xcrun
 CODESIGN=/usr/bin/codesign
+GIT=/usr/bin/git
+SUDO=/usr/bin/sudo
+CHECKOUT=""; SCRIPT=""
 INCOMPLETE=()
 
 # Exported variables the launch commands produce. Anything else refuses, which covers
@@ -243,8 +247,8 @@ clean_environment() {
   done
 }
 
-# The tree digest the approval record names: SHA-256 of the sorted per-file SHA-256 list,
-# without ui/dist. The bootstrap in docs/macos-confirmation.md computes the same pipeline.
+# SHA-256 of the sorted per-file SHA-256 list, without ui/dist. The install compares the
+# UI copy's digest with the build's.
 tree_digest() {
   (cd "$1" && LC_ALL=C /usr/bin/find . -type f ! -path './ui/dist/*' -print0 | LC_ALL=C /usr/bin/sort -z \
     | /usr/bin/xargs -0 /usr/bin/shasum -a 256) | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-64
@@ -414,17 +418,20 @@ sign() {
   [[ "$SIGNED_CDHASH" =~ ^[0-9a-f]{40}$ ]]
 }
 
-# Build phase, as the owner, under the Q28 waiver: the owner's toolchains as installed,
-# from a copy of the frozen tree, with a cleared environment. Leaves only the signed
-# outputs in $2/out and sets their identities for the install phase.
+# Build, as the owner, under the Q28 and Q30 waivers: the owner's toolchains as installed,
+# from `git archive` of the checkout's HEAD commit, with a cleared environment. Leaves only
+# the signed outputs in $2/out and sets their identities for the install.
 build_as_owner() {
-  local frozen="$1" work="${2:?}"
+  local checkout="$1" work="${2:?}"
   local build=(/usr/bin/env -i PATH="/usr/bin:/bin:$(/usr/bin/dirname "$RUSTC"):$(/usr/bin/dirname "$NODE")" HOME="$work/home"
     CARGO_HOME="$work/cargo-home" RUSTC="$RUSTC" CARGO_TARGET_DIR="$work/target" NPM_CONFIG_USERCONFIG="$work/home/user-npmrc"
     NPM_CONFIG_GLOBALCONFIG="$work/home/global-npmrc" NPM_CONFIG_CACHE="$work/npm-cache" NPM_CONFIG_UPDATE_NOTIFIER=false)
-  /bin/mkdir -m 700 "$work/home" "$work/cargo-home" "$work/npm-cache" "$work/out" || return 1
+  /bin/mkdir -m 700 "$work/home" "$work/cargo-home" "$work/npm-cache" "$work/out" "$work/src" || return 1
   : >"$work/home/user-npmrc" && : >"$work/home/global-npmrc" || return 1
-  /usr/bin/ditto "$frozen" "$work/src" || return 1
+  COMMIT=$("$GIT" -C "$checkout" rev-parse --verify HEAD 2>/dev/null) || { BUILD_FAILURE=source; return 1; }
+  [[ "$COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || { BUILD_FAILURE=source; return 1; }
+  ("$GIT" --no-replace-objects -C "$checkout" archive --format=tar "$COMMIT" | /usr/bin/tar -xf - -C "$work/src") >/dev/null 2>&1 \
+    || { BUILD_FAILURE=source; return 1; }
   /bin/rm -rf "${work:?}/src/ui/dist" "${work:?}/src/ui/node_modules"
   no_outside_config "$work" || { BUILD_FAILURE=outside_config; return 1; }
   (cd "$work/src/ui" && "${build[@]}" "$NODE" "$NPM_CLI" ci && "${build[@]}" "$NODE" "$NPM_CLI" run build) >/dev/null 2>&1 \
@@ -449,8 +456,8 @@ build_as_owner() {
 # Install phase, as root. Nothing from the owner's build directory runs. tar copies its
 # entries into a fresh root-only staging directory without following links or reading
 # special files. The copies must be plain files and directories, and must match the
-# identities the owner typed from the build phase, before the directory is renamed into
-# place. An existing installation is moved aside, never written into or followed.
+# identities the build produced, before the directory is renamed into place. An existing
+# installation is moved aside, never written into or followed.
 install_fresh() {
   local output="$1" staging previous odd
   trusted_path "$(/usr/bin/dirname "$LIBEXEC_PARENT")" || { INSTALL_FAILURE=untrusted_parent; return 1; }
@@ -504,127 +511,133 @@ run_wizard() {
 owner_home() { /usr/bin/dscl . -read "/Users/$(/usr/bin/id -un)" NFSHomeDirectory 2>/dev/null | /usr/bin/sed -n 's/^NFSHomeDirectory: //p'; }
 
 setup_main() {
-local script frozen phase=owner arguments=0
-script="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(/usr/bin/basename "${BASH_SOURCE[0]}")"
-frozen="$(/usr/bin/dirname "$(/usr/bin/dirname "$script")")"
+local phase=setup arguments=0
+SCRIPT="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(/usr/bin/basename "${BASH_SOURCE[0]}")"
+CHECKOUT="$(/usr/bin/dirname "$(/usr/bin/dirname "$SCRIPT")")"
 case "${1:-}" in
   --plan)
     printf '%s\n' \
-      'Build phase (owner): 1. check the frozen copy; 2. build and sign with the installed toolchains, then print the identities.' \
-      "Install phase (root): 1. check the frozen copy; 2. copy the signed outputs into a fresh root-owned $LIBEXEC after checking the typed identities." \
-      "Owner phase: 1. check the frozen copy and installation; 2. approve then cancel an invented action; 3. optionally create one local account with hidden entry and exact native consent; 4. move each account's keys from an earlier build; 5. migrate and verify legacy passwords; 6. enter missing passwords; 7. optionally replace a saved password with exact native consent; 8. check the prompt at every password read. Optional maintenance phase: check the frozen installation, then review local recovery, key rotation or local forgetting. Optional recovery phase: select accounts and ledger policy, enter the separately held key privately, then confirm capture, absent-account restoration or interrupted local restoration."
+      "Setup (owner, one run): 1. build and sign the checkout's HEAD commit with the installed toolchains; 2. through sudo, copy the signed outputs into a fresh root-owned $LIBEXEC after checking them against the build's identities; 3. check the installation; 4. approve then cancel an invented action; 5. optionally create one local account with hidden entry and exact native consent; 6. move each account's keys from an earlier build; 7. migrate and verify legacy passwords; 8. enter missing passwords; 9. optionally replace a saved password with exact native consent; 10. check the prompt at every password read. The keychain subcommand repeats steps 3 to 10 against the existing installation." \
+      'Optional maintenance subcommand: check the installation, then review local recovery, key rotation or local forgetting.' \
+      'Optional recovery subcommand: select accounts and ledger policy, enter the separately held key privately, then confirm capture, absent-account restoration or interrupted local restoration.'
     return 0 ;;
-  --digest) tree_digest "$frozen"; return 0 ;;
-  build) phase=build; shift ;;
+  keychain) phase=owner; shift ;;
   maintenance) phase=maintenance; shift ;;
   recovery) phase=recovery; shift ;;
-  install) phase=root; arguments=1; shift ;;
+  install) phase=root; arguments=4; shift ;;
 esac
 if ! clean_environment; then
-  printf '%s\n' 'Start this with the exact command from docs/macos-confirmation.md (env -i, /bin/bash -p).' >&2
+  printf '%s\n' 'Start this with scripts/setup.sh from the checkout.' >&2
   return 2
 fi
 if [[ $# -ne $arguments || ! -t 0 ]]; then
-  printf '%s\n' 'Run this in a terminal with the exact command from docs/macos-confirmation.md.' >&2
+  printf '%s\n' 'Run scripts/setup.sh in a terminal, with no argument or one of keychain, maintenance or recovery.' >&2
   return 2
 fi
 ENV_FILE=/dev/null
 if [[ $phase == root ]]; then
   [[ $EUID -eq 0 ]] || { printf '%s\n' 'The install phase runs as root through sudo.' >&2; return 2; }
   RECORDS="$ROOT_RECORDS"
-  install_phase "$frozen" "$1"
+  install_phase "$@"
   return
 fi
 [[ $EUID -ne 0 ]] || { printf '%s\n' 'This phase runs as the owner, not root.' >&2; return 2; }
 [[ "$HOME" == "$(owner_home)" ]] || { printf '%s\n' 'HOME must be your account home.' >&2; return 2; }
 /bin/mkdir -p -m 700 "$HOME/.config/mailroom" || return 2
 CONFIG="$HOME/.config/mailroom"
-if [[ $phase == build ]]; then
-  RECORDS="$CONFIG/native-build-records"
-  build_phase "$frozen"
+if [[ $phase == setup ]]; then
+  RECORDS="$CONFIG/native-setup-records"
+  setup_phase
 elif [[ $phase == maintenance ]]; then
   RECORDS="$CONFIG/native-maintenance-records"
-  maintenance_phase "$frozen"
+  maintenance_phase
 elif [[ $phase == recovery ]]; then
   RECORDS="$CONFIG/native-recovery-records"
-  recovery_phase "$frozen"
+  recovery_phase
 else
   RECORDS="$CONFIG/native-setup-records"
-  owner_phase "$frozen"
+  owner_phase
 fi
 }
 
-check_frozen() {
-  local frozen="$1" expected actual
-  if [[ ! "$frozen" =~ ^$SHARE/setup-[0-9a-f]{40}$ ]] || ! trusted_tree "$frozen"; then
-    expect frozen_copy trusted untrusted; return 1
-  fi
-  ask expected "Tree digest from your approval record:"
-  actual="$(tree_digest "$frozen")"
-  expect tree_digest match "$([[ "$actual" == "$expected" ]] && echo match || echo mismatch)"
+# The default phase: build, install and the Keychain stages in one run. The identities
+# pass from the build to the install as arguments; none of them is a secret.
+setup_phase() {
+TOTAL_STAGES=10
+/bin/mkdir -p "$(/usr/bin/dirname "$RECORDS")" && : >"$RECORDS"
+banner "Mailroom native setup"
+build_stage || return 1
+install_stage || return 1
+owner_stages "$MAILROOM_CDHASH" "$CONFIRM_CDHASH" || return 1
+finish
 }
 
-build_phase() {
-TOTAL_STAGES=2
-local frozen="$1" work
-: >"$RECORDS"
-banner "Mailroom native build (owner)"
-stage "Check the frozen approved copy"
-check_frozen "$frozen" || { stop_incomplete; return 1; }
-
+build_stage() {
 stage "Build and sign as the owner"
-say "Owner decision Q28 waives the frozen-copy requirement for this build step only."
-say "Any program running as you, agents included, could alter these binaries or their"
-say "build inputs before they are signed. The install phase checks only that its copies"
-say "match what this phase signed; it cannot show that the build was untouched."
-work="$(/usr/bin/mktemp -d "$BUILD_BASE/mailroom-build.XXXXXX")" || { expect build_dir created failed || stop_incomplete; return 1; }
+say "Owner decisions Q28 and Q30 waive the frozen copy: this wizard and the build run straight"
+say "from the checkout. Any program running as you, agents included, could alter the wizard,"
+say "the sources or the binaries before they are signed. The install checks only that its"
+say "copies match what this run signed; it cannot show that the build was untouched."
+BUILD_DIR="$(/usr/bin/mktemp -d "$BUILD_BASE/mailroom-build.XXXXXX")" || { expect build_dir created failed || stop_incomplete; return 1; }
 BUILD_FAILURE=failed
-if ! build_as_owner "$frozen" "$work"; then /bin/rm -rf "${work:?}"; expect build ok "$BUILD_FAILURE" || stop_incomplete; return 1; fi
+if ! build_as_owner "$CHECKOUT" "$BUILD_DIR"; then /bin/rm -rf "${BUILD_DIR:?}"; expect build ok "$BUILD_FAILURE" || stop_incomplete; return 1; fi
 expect build ok ok
-note_result output "$work/out"
+note_result commit "$COMMIT"; note_result output "$BUILD_DIR/out"
 note_result mailroom_cdhash "$MAILROOM_CDHASH"; note_result confirm_cdhash "$CONFIRM_CDHASH"; note_result ui_digest "$UI_DIGEST"
-say "Type these three values into the install phase. Keep this output open."
-say "  mailroom cdhash:         $MAILROOM_CDHASH"
-say "  mailroom-confirm cdhash: $CONFIRM_CDHASH"
-say "  UI digest:               $UI_DIGEST"
-say "Then start the install phase:"
-say "  /usr/bin/sudo /usr/bin/env -i PATH=$EXPECTED_PATH /bin/bash -p $frozen/scripts/setup-macos-protection.sh install $work/out"
-finish
+say "Built commit $COMMIT: mailroom $MAILROOM_CDHASH, mailroom-confirm $CONFIRM_CDHASH."
 }
 
+# Known install results and their exit codes, as install_phase prints them.
+INSTALL_RESULTS=" install=ok:0 install=malformed:1 install=failed:1 install=untrusted_parent:1 install=staging:1 install=copy:1 install=not_plain:1 install=identity:1 install=ui_digest:1 install=move_aside:1 install=publish:1 install=untrusted_install:1 "
+
+# Runs the install as root with a cleared environment, then removes the build directory.
+# The reply must be exactly one known result line with its matching exit code.
+install_stage() {
+local output code=0 result=unexpected
+stage "Install as root"
+say "sudo may ask for your login password. The install copies the signed outputs into $LIBEXEC"
+say "and refuses copies that differ from what this run built."
+output=$("$SUDO" /usr/bin/env -i PATH="$EXPECTED_PATH" /bin/bash -p "$SCRIPT" install \
+  "$BUILD_DIR/out" "$MAILROOM_CDHASH" "$CONFIRM_CDHASH" "$UI_DIGEST") || code=$?
+output="${output%$'\r'}"
+[[ "$output" =~ ^install=[a-z_]+$ && "$INSTALL_RESULTS" == *" $output:$code "* ]] && result="${output#install=}"
+/bin/rm -rf "${BUILD_DIR:?}"
+expect install ok "$result" || { stop_incomplete; return 1; }
+}
+
+# Install, as root, non-interactive. Prints only its fixed result line.
 install_phase() {
-TOTAL_STAGES=2
-local frozen="$1" output="$2"
+local output="$1"
+MAILROOM_CDHASH="$2"; CONFIRM_CDHASH="$3"; UI_DIGEST="$4"
 : >"$RECORDS"
-banner "Mailroom native install (root)"
-stage "Check the frozen approved copy"
-check_frozen "$frozen" || { stop_incomplete; return 1; }
-
-stage "Install the signed outputs"
-say "Type the three values the build phase printed. A copy that differs is refused."
-ask MAILROOM_CDHASH "mailroom cdhash:"
-ask CONFIRM_CDHASH "mailroom-confirm cdhash:"
-ask UI_DIGEST "UI digest:"
-if [[ ! "$MAILROOM_CDHASH" =~ ^[0-9a-f]{40}$ || ! "$CONFIRM_CDHASH" =~ ^[0-9a-f]{40}$ || ! "$UI_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
-  expect identities typed malformed || stop_incomplete; return 1
-fi
 INSTALL_FAILURE=failed
-install_fresh "$output" || { expect install ok "$INSTALL_FAILURE" || stop_incomplete; return 1; }
-expect install ok ok
+if [[ ! "$MAILROOM_CDHASH" =~ ^[0-9a-f]{40}$ || ! "$CONFIRM_CDHASH" =~ ^[0-9a-f]{40}$ || ! "$UI_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+  INSTALL_FAILURE=malformed
+elif install_fresh "$output"; then
+  INSTALL_FAILURE=ok
+fi
+note_result install "$INSTALL_FAILURE"
+printf 'install=%s\n' "$INSTALL_FAILURE"
+[[ $INSTALL_FAILURE == ok ]] || return 1
 note_result confirm_cdhash "$CONFIRM_CDHASH"; note_result mailroom_cdhash "$MAILROOM_CDHASH"
-say "Installed mailroom $MAILROOM_CDHASH and mailroom-confirm $CONFIRM_CDHASH."
-finish
 }
 
+# The keychain subcommand: the Keychain stages alone, against the existing installation.
 owner_phase() {
 TOTAL_STAGES=8
-local frozen="$1" reference class id all_ok=1
 /bin/mkdir -p "$(/usr/bin/dirname "$RECORDS")" && : >"$RECORDS"
 banner "Mailroom native confirmation and Keychain setup"
+owner_stages || return 1
+finish
+}
 
-stage "Check the frozen copy and the installation"
-check_frozen "$frozen" || { stop_incomplete; return 1; }
-read_pins || { expect installation trusted untrusted || stop_incomplete; return 1; }
+# owner_stages [MAILROOM_CDHASH CONFIRM_CDHASH]: with the build's identities, the pins
+# must name exactly them.
+owner_stages() {
+local reference class id all_ok=1
+stage "Check the installation"
+read_pins && [[ -z "${1:-}" || ( "$MAILROOM_CDHASH" == "$1" && "$CONFIRM_CDHASH" == "${2:-}" ) ]] \
+  || { expect installation trusted untrusted || stop_incomplete; return 1; }
 expect installation trusted trusted
 expected_references || { expect account_metadata readable unreadable || stop_incomplete; return 1; }
 
@@ -727,7 +740,6 @@ while read -r reference class <&3; do
   mailroom keychain probe "$reference"; expect "allow $reference" status=ok "$RESULT" || { stop_incomplete; return 1; }
   mailroom keychain status "$reference"; expect "protection $reference" status=ok "$RESULT" || { stop_incomplete; return 1; }
 done 3<<<"$EXPECTED"
-finish
 }
 
 select_saved_account() {
@@ -741,11 +753,10 @@ select_saved_account() {
 
 maintenance_phase() {
 TOTAL_STAGES=4
-local frozen="$1" file id kind
+local file id kind
 /bin/mkdir -p "$(/usr/bin/dirname "$RECORDS")" && : >"$RECORDS"
 banner "Mailroom local account maintenance"
-stage "Check the frozen copy and installation"
-check_frozen "$frozen" || { stop_incomplete; return 1; }
+stage "Check the installation"
 read_pins || { expect installation trusted untrusted || stop_incomplete; return 1; }
 say "Stop active census and sorting work first. Account and store locks refuse competing work."
 say "These actions change local storage only. They never resume a provider action."
@@ -791,12 +802,11 @@ finish
 
 recovery_phase() {
 TOTAL_STAGES=5
-local frozen="$1" kind command expected id bundle chosen="" transfer="$CONFIG/recovery-transfer"
+local kind command expected id bundle chosen="" transfer="$CONFIG/recovery-transfer"
 local selected=()
 /bin/mkdir -p "$(/usr/bin/dirname "$RECORDS")" && : >"$RECORDS"
 banner "Mailroom encrypted recovery"
-stage "Check the frozen copy and installation"
-check_frozen "$frozen" || { stop_incomplete; return 1; }
+stage "Check the installation"
 read_pins || { expect installation trusted untrusted || stop_incomplete; return 1; }
 say "Stop active account work first. This phase never connects to a provider or resumes a mail action."
 say "Use this exact version only after its secret-flow tests, review and owner approval."

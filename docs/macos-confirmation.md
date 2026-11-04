@@ -20,7 +20,7 @@ Setup creates mode-0700 directories relative to checked parent descriptors. It r
 
 ## Local maintenance
 
-The frozen wizard has an optional `maintenance` phase. It first checks the frozen tree and installed identities. It then offers reconciliation of recorded local lifecycle operations, key rotation and local forgetting. Each consequential operation gets exact native confirmation. The installed binary accepts only an operation and account ID on argv. It chooses fixed private local directories and prints one fixed result record. It reads the selected protected mailbox credential only when reconciling a published password replacement, to verify it before retiring the previous reference. It never contacts a provider.
+The setup wizard has an optional `maintenance` subcommand. It first checks the installation against its pins. It then offers reconciliation of recorded local lifecycle operations, key rotation and local forgetting. Each consequential operation gets exact native confirmation. The installed binary accepts only an operation and account ID on argv. It chooses fixed private local directories and prints one fixed result record. It reads the selected protected mailbox credential only when reconciling a published password replacement, to verify it before retiring the previous reference. It never contacts a provider.
 
 Forgetting derives its resource preview while the account lease and every dependent store lock remain held. The native request binds that exact preview and names the local deletion consequences. Rotation binds the current account, revision and resource manifest before any new key or lifecycle intent is written. Local recovery binds the validated recorded intent before cleanup or key retirement. It describes the pending phase, including continued deletion when applicable. No pending intent means no confirmation or effect. An incomplete recovery-bundle restore blocks these lifecycle actions.
 
@@ -28,7 +28,7 @@ Active account work keeps its account lease, so the separate owner command refus
 
 ## Owner-held encrypted recovery
 
-The optional frozen `recovery` phase prepares private transfer directories, selects up to eight accounts, and offers capture, absent-account restoration or interrupted local restoration. Ledger inclusion and restoration each start disabled. The script receives account IDs, a bundle ID and fixed result codes. The installed binary reads the separate random 256-bit recovery key from the controlling terminal with echo disabled. Capture requires the same key twice. Encoded and decoded key buffers have erasing owners. The key never travels through argv, a browser request or result output.
+The optional `recovery` subcommand prepares private transfer directories, selects up to eight accounts, and offers capture, absent-account restoration or interrupted local restoration. Ledger inclusion and restoration each start disabled. The script receives account IDs, a bundle ID and fixed result codes. The installed binary reads the separate random 256-bit recovery key from the controlling terminal with echo disabled. Capture requires the same key twice. Encoded and decoded key buffers have erasing owners. The key never travels through argv, a browser request or result output.
 
 Native consent names each account, capture time, schema, generation, revision and resource count. Shared exclusions appear once. Restore and resume explicitly say whether the installed ledger is preserved or the bundled ledger is restored. The immutable receipt binds the complete source plan and entered key using a fresh private HMAC key. Capture and restoration recompute under their transaction leases. Resume obtains new consent under installation and account leases before continuing recorded local effects.
 
@@ -95,76 +95,32 @@ Options are parsed before any backend opens. A missing value, a repeated option 
 
 ## Owner setup
 
-Setup has a freeze step and three phases. The owner types every command from the approval record.
+The owner runs one command from the checkout and answers only what a person must answer: the `sudo` password once, the native dialogs, hidden password entry and yes or no questions.
 
-1. **Freeze.** The approval record names a commit and a tree digest: the SHA-256 of the sorted per-file SHA-256 list of `git archive <commit>`, without `ui/dist`. The block below runs only system tools. Git runs as the owner with a cleared environment and `--no-replace-objects`, so replacement objects cannot swap the archived bytes. Root then checks that `/usr/local/share/mailroom` and every directory above it is a root-owned directory without group or other write and without ACLs, creating it if absent. It extracts into a fresh `mktemp -d` directory there, without owners, ACLs, extended attributes or flags from the archive. It refuses anything but plain files and directories, compares the digest with `/usr/bin/shasum` before anything from the tree runs, and publishes by rename to `setup-<commit>`, which must not exist yet. Every listing, scan and digest stage must exit 0: the block runs with `pipefail`, captures each listing before inspecting it, and refuses on any failed command even when its output looks right. Any refusal removes the fresh directory.
-2. **Build, as the owner.** Owner decision Q28, answered on 2026-10-27, reads: "The owner explicitly accepts, for this build step only, that any program running as the owner, agents included, could alter the binaries or their build inputs before they are signed and pinned. This is a deliberate waiver of the secrets.md frozen-copy requirement for the build step; it is not a waiver for anything else." The build is therefore not protected. It runs the Homebrew Rust and npm, Node and Xcode toolchains as installed, from a copy of the frozen tree in a fresh `/private/tmp/mailroom-build.*` directory, with a cleared environment, a fresh `CARGO_HOME` and npm cache, and fresh empty npm user and global configuration files. It signs both binaries ad hoc with the hardened runtime and prints the mailroom cdhash, the helper cdhash, the UI digest and the install command.
-3. **Install, as root.** Nothing from the build directory runs as root. `tar` copies the three outputs into a fresh root-only staging directory without following links or reading special files. The install refuses anything but plain files and directories, and refuses copies whose `codesign --verify` cdhash or UI digest differs from the values the owner typed from the build output. It writes `pins` as a new file and renames the directory into `/usr/local/libexec/mailroom`. An existing installation is moved aside, never written into or followed.
-4. **Keychain stages, as the owner.** The phase refuses an installation that is not root-owned, has ACLs, symlinks or special files, or does not match its pins. It verifies `mailroom` with `codesign` against its cdhash before every launch and accepts from each command exactly one known result with its expected exit code. It reads the expected references from the account metadata with `plutil`. `refs` must list exactly those, `legacy` names outside them are dropped and counted, and a `status` class must be the reference's own. It optionally creates a local account, settles each account, migrates legacy passwords, enrolls missing passwords, optionally replaces a saved password and checks the prompt at every password read. After adding an account or replacing a password, it reloads the expected references before accepting later command output.
+```sh
+cd ~/projects/mailroom
+scripts/setup.sh
+```
+
+Owner decision Q30, answered on 2026-11-04 with "Waive the freeze", waives the secrets.md frozen-copy requirement for this setup wizard. The decision record reads: "The owner waives the secrets.md frozen-copy requirement for the personal mailroom setup wizard, as Q28 did for the build step. The wizard runs straight from the checkout. The owner accepts that any program running as the owner, agents included, could change the wizard before it runs." The consequence is that nothing protects the wizard itself. A program running as the owner can change `scripts/setup.sh` or `scripts/setup-macos-protection.sh` in the checkout, and the changed wizard then runs as the owner and, for the install step, as root through `sudo`. The installation checks below still bind the installed bytes to what that run built, but they cannot show that the wizard or the build was untouched. Q30 does not waive the credential-free tests, the separate secret-flow review, owner approval of the exact resulting commit, the root-owned installation with its pins, the cdhash checks before every launch, fixed-record output, or the rule that no secret enters argv or output.
+
+`scripts/setup.sh` starts the wizard as `/usr/bin/env -i HOME="$HOME" TERM="$TERM" PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p scripts/setup-macos-protection.sh`. The wizard refuses any other environment, PATH or missing `-p` before its first stage. One run has three parts:
+
+1. **Build, as the owner.** Owner decision Q28, answered on 2026-10-27, reads: "The owner explicitly accepts, for this build step only, that any program running as the owner, agents included, could alter the binaries or their build inputs before they are signed and pinned. This is a deliberate waiver of the secrets.md frozen-copy requirement for the build step; it is not a waiver for anything else." The build is therefore not protected. It extracts `git archive` of the checkout's HEAD commit, with `--no-replace-objects`, into a fresh `/private/tmp/mailroom-build.*` directory. Uncommitted changes are not built. It runs the Homebrew Rust and npm, Node and Xcode toolchains as installed, with a cleared environment, a fresh `CARGO_HOME` and npm cache, and fresh empty npm user and global configuration files. It signs both binaries ad hoc with the hardened runtime and records the commit, the mailroom cdhash, the helper cdhash and the UI digest.
+2. **Install, as root.** The wizard runs `/usr/bin/sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p scripts/setup-macos-protection.sh install <output directory> <mailroom cdhash> <helper cdhash> <UI digest>`. These four values come straight from the build. None of them is a secret, and the owner no longer types them. Nothing from the build directory runs as root. `tar` copies the three outputs into a fresh root-only staging directory without following links or reading special files. The install refuses anything but plain files and directories, and refuses copies whose `codesign --verify` cdhash or UI digest differs from the values the build produced. It writes `pins` as a new file and renames the directory into `/usr/local/libexec/mailroom`. An existing installation is moved aside, never written into or followed. The root step prints exactly one line, `install=<result>`, and the owner side accepts only a known result with its matching exit code. The owner side then removes the build directory, whatever the result.
+3. **Keychain stages, as the owner.** The phase refuses an installation that is not root-owned, has ACLs, symlinks or special files, or whose pins differ from the identities this run built. It verifies `mailroom` with `codesign` against its cdhash before every launch, launches it with `env -i` and discards its stderr, and accepts from each command exactly one known result with its expected exit code. It reads the expected references from the account metadata with `plutil`. `refs` must list exactly those, `legacy` names outside them are dropped and counted, and a `status` class must be the reference's own. It optionally creates a local account, settles each account, migrates legacy passwords, enrolls missing passwords, optionally replaces a saved password and checks the prompt at every password read. After adding an account or replacing a password, it reloads the expected references before accepting later command output.
 
 The ACL scans capture each listing whole and match it in bash. A listing or scan error refuses.
 
-<!-- freeze-block -->
-```sh
-COMMIT=<approved commit from the approval record>
-DIGEST=<approved tree digest from the approval record>
-/usr/bin/env -i /usr/bin/git --no-replace-objects -C "$HOME/projects/mailroom" archive --format=tar "$COMMIT" \
-| /usr/bin/sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p -c '
-set -euo pipefail
-nl=$(printf "\nx"); nl=${nl%x}
-commit=$1 digest=$2 share=/usr/local/share/mailroom me=$(/usr/bin/id -u)
-refuse() { echo "refused: $1" >&2; exit 1; }
-trusted() {
-  [ -d "$1" ] && [ ! -L "$1" ] || return 1
-  stat=$(/usr/bin/stat -f "%u %Lp" "$1") || return 1
-  case "${stat%% *}" in 0|"$me") ;; *) return 1 ;; esac
-  [ $(( 8#${stat##* } & 8#022 )) -eq 0 ] || return 1
-  listing=$(/bin/ls -lde "$1") || return 1
-  case "$listing" in *"$nl"*) return 1 ;; esac
-}
-dir=$(/usr/bin/dirname "$share")
-while :; do trusted "$dir" || refuse "$dir"; [ "$dir" = / ] && break; dir=$(/usr/bin/dirname "$dir"); done
-[ -e "$share" ] || [ -L "$share" ] || /bin/mkdir -m 755 "$share"
-trusted "$share" || refuse "$share"
-final="$share/setup-$commit"
-[ ! -e "$final" ] && [ ! -L "$final" ] || refuse "$final exists"
-fresh=$(/usr/bin/mktemp -d "$share/.incoming.XXXXXX")
-trap "/bin/rm -rf \"$fresh\"" EXIT
-/usr/bin/tar -x -f - -C "$fresh" --no-same-owner --no-acls --no-xattrs --no-fflags --no-mac-metadata
-/bin/chmod -R go-w "$fresh"
-odd=$(/usr/bin/find "$fresh" ! -type f ! -type d -print) || refuse "plain-entry scan"
-[ -z "$odd" ] || refuse "not plain files"
-actual=$(cd "$fresh" && LC_ALL=C /usr/bin/find . -type f ! -path "./ui/dist/*" -print0 | LC_ALL=C /usr/bin/sort -z \
-  | /usr/bin/xargs -0 /usr/bin/shasum -a 256 | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-64) || refuse "digest scan"
-[ "$actual" = "$digest" ] || refuse "digest"
-/bin/chmod 755 "$fresh"
-/bin/mv "$fresh" "$final"
-echo "frozen $final"
-' freeze "$COMMIT" "$DIGEST"
-```
-
-Then the three phases. The build prints the exact install command with its output directory.
+The same command takes one optional subcommand. Each checks the existing installation against its pins first:
 
 ```sh
-F=/usr/local/share/mailroom/setup-$COMMIT/scripts/setup-macos-protection.sh
-/usr/bin/env -i HOME="$HOME" TERM="$TERM" PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p "$F" build
-/usr/bin/sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p "$F" install <output directory the build printed>
-/usr/bin/env -i HOME="$HOME" TERM="$TERM" PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p "$F"
+scripts/setup.sh keychain     # the Keychain stages again, without a rebuild or sudo
+scripts/setup.sh maintenance  # approved local account maintenance
+scripts/setup.sh recovery     # approved encrypted recovery
 ```
 
-For approved local maintenance, run the same frozen wizard as the owner with the optional phase:
-
-```sh
-/usr/bin/env -i HOME="$HOME" TERM="$TERM" PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p "$F" maintenance
-```
-
-For approved encrypted recovery, use the same frozen wizard's optional phase:
-
-```sh
-/usr/bin/env -i HOME="$HOME" TERM="$TERM" PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p "$F" recovery
-```
-
-Daily use runs `/usr/local/libexec/mailroom/mailroom`, which serves the root-owned UI copy installed beside it. Each phase stops with "Setup incomplete" on any unexpected result and keeps fixed records.
+Daily use runs `/usr/local/libexec/mailroom/mailroom`, which serves the root-owned UI copy installed beside it. Each phase stops with "Setup incomplete" on any unexpected result and keeps fixed records in `~/.config/mailroom/native-*-records`. The root step keeps its own in `/private/var/root/mailroom-install-records`.
 
 ## Verification
 
@@ -175,11 +131,12 @@ bash scripts/verify-setup-macos-protection.sh
 bash scripts/verify-setup-real-build.sh
 ```
 
-The Rust tests run the Keychain code in process, and the real owner commands of a hardened signed copy, against throwaway keychains they create and delete. They never touch the login keychain. The wizard test drives every phase's stage logic with fake tools in a tree owned by the test user, and runs the freeze block from this page without sudo. The real-build test runs the build phase with the installed toolchains and the install phase into a temporary prefix, both as the test user. A test cannot click a real dialog or run sudo. The visible prompts, per-access approval, reading an earlier build's keys, migration of real items and the sudo steps remain owner checks.
+The Rust tests run the Keychain code in process, and the real owner commands of a hardened signed copy, against throwaway keychains they create and delete. They never touch the login keychain. The wizard test drives the one-command setup end to end with fake tools in a tree owned by the test user, with a stand-in for `sudo` that runs the install phase as the test user. It includes outputs changed between the build and the install, which the install refuses. It also drives the keychain, maintenance and recovery phases. The real-build test runs the build stage with the installed toolchains from this checkout and the install stage into a temporary prefix, both as the test user. A test cannot click a real dialog or run sudo. The visible prompts, per-access approval, reading an earlier build's keys, migration of real items and the sudo steps remain owner checks.
 
 ## Residual exposure the owner accepts
 
-- **The build (Q28).** The owner builds as the owner, under the waiver quoted in Owner setup. A program running as the owner can change the sources copied for the build, the toolchains or the outputs before they are signed. The install phase proves only that the installed bytes are the ones the build phase signed and printed.
+- **The wizard (Q30).** The wizard runs from the checkout, under the waiver quoted in Owner setup. A program running as the owner can change it before it runs as the owner or, for the install step, as root.
+- **The build (Q28).** The owner builds as the owner, under the waiver quoted in Owner setup. A program running as the owner can change the checkout's commits, the toolchains or the outputs before they are signed. The install proves only that the installed bytes are the ones this run built and signed.
 - **Package install scripts.** npm runs install scripts from lock-pinned packages during the build.
 - **Adopted identities.** `adopt` trusts an uncommitted identity key as it is when the owner runs it.
 - **Planted key with replaced state.** Described under Keychain items.

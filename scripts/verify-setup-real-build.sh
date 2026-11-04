@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Runs the wizard's real build phase with the installed toolchains, then its install phase
-# into a temporary prefix, both as the test user. The frozen copy is `git archive HEAD`.
-# Needs network for crates and npm packages and about 4 GiB of free space. No sudo,
-# Keychain item, account or dialog.
+# Runs the one-command setup's real build stage with the installed toolchains from this
+# checkout, then its install stage into a temporary prefix through a stand-in for sudo,
+# both as the test user. It stops before the Keychain stages. Needs network for crates and
+# npm packages and about 4 GiB of free space. No sudo, Keychain item, account or dialog.
 set -euo pipefail
-repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 work="$(mktemp -d)"; work="$(cd "$work" && pwd -P)"
-built=""
 cleanup() {
+  local built; built=$(sed -n 's/^output //p' "$work/records" 2>/dev/null || true); built="${built%/out}"
   [[ "$built" == /private/tmp/mailroom-build.* ]] && rm -rf "${built:?}"
   [[ -n "${KEEP:-}" ]] && echo "work=$work" || { chmod -R u+rwx "${work:?}"; rm -rf "${work:?}"; }
 }
@@ -16,38 +16,40 @@ chmod 700 "$work"
 me="$(id -un)"
 fail() { echo "FAIL: $1"; exit 1; }
 
-commit=$(git -C "$repo" rev-parse HEAD)
-mkdir -m 755 "$work/share" "$work/libexec"
-frozen="$work/share/setup-$commit"
-mkdir "$frozen"; git -C "$repo" archive --format=tar "$commit" | tar -x -C "$frozen"
-chmod -R go-w "$frozen"; chmod 755 "$frozen"
-wizard="$work/wizard.sh"; sed '$d' "$frozen/scripts/setup-macos-protection.sh" >"$wizard"
-digest=$(bash -c 'source "$1"; tree_digest "$2"' _ "$wizard" "$frozen")
-
-phase() {
-  local name="$1" call="$2"
-  cat >"$work/$name.sh" <<DRV
+wizard="$work/wizard.sh"; sed '$d' "$repo/scripts/setup-macos-protection.sh" >"$wizard"
+mkdir -m 755 "$work/libexec"
+overrides="LIBEXEC_PARENT=\"$work/libexec\"; LIBEXEC=\"$work/libexec/mailroom\"; TRUSTED_OWNER=\"$me\""
+cat >"$work/install.sh" <<DRV
 source "$wizard"
-SHARE="$work/share"; LIBEXEC_PARENT="$work/libexec"; LIBEXEC="$work/libexec/mailroom"; TRUSTED_OWNER="$me"
-RECORDS="$work/$name-records"
-$call
+$overrides
+RECORDS="$work/install-records"
+install_phase "\$@"
 DRV
-  /usr/bin/python3 -I "$repo/scripts/drive-wizard.py" "$work/$name.sh" "$work/$name-transcript" "$work/$name-answers" 1800
-}
-
-printf '%s\t%s\n' "approval record:" "$digest" >"$work/build-answers"
-phase build "build_phase \"$frozen\"" || fail "build phase exit $?: $(grep -a 'build ' "$work/build-records" || true)"
-built=$(sed -n 's/^output //p' "$work/build-records"); built="${built%/out}"
-[[ "$built" == /private/tmp/mailroom-build.* ]] || fail "the build ran under /private/tmp"
-grep -qx "build ok" "$work/build-records" || fail "build record"
-[[ "$(ls -A "$built")" == out ]] || fail "only the signed outputs remain"
-value() { sed -n "s/^$1 //p" "$work/build-records"; }
-echo "built mailroom $(value mailroom_cdhash) mailroom-confirm $(value confirm_cdhash) ui $(value ui_digest)"
-
-printf '%s\t%s\n' "approval record:" "$digest" "mailroom cdhash:" "$(value mailroom_cdhash)" \
-  "mailroom-confirm cdhash:" "$(value confirm_cdhash)" "UI digest:" "$(value ui_digest)" >"$work/install-answers"
-phase install "install_phase \"$frozen\" \"$built/out\"" || fail "install phase exit $?: $(cat "$work/install-records")"
-grep -qx "install ok" "$work/install-records" || fail "install record"
+cat >"$work/sudo" <<SH
+#!/bin/bash
+printf '%s\n' "\$*" >"$work/sudo-argv"
+ls -A "\${@: -4:1}/.." >"$work/handoff-contents"
+shift \$((\$# - 4)); exec /bin/bash "$work/install.sh" "\$@"
+SH
+chmod 755 "$work/sudo"
+cat >"$work/setup.sh" <<DRV
+source "$wizard"
+$overrides
+CHECKOUT="$repo"; SCRIPT="$repo/scripts/setup-macos-protection.sh"; SUDO="$work/sudo"
+RECORDS="$work/records"; TOTAL_STAGES=2
+build_stage && install_stage
+DRV
+/usr/bin/python3 -I "$repo/scripts/drive-wizard.py" "$work/setup.sh" "$work/transcript" /dev/null 1800 \
+  || fail "build and install exit $?: $(grep -a 'build \|install ' "$work/records" || true)"
+value() { sed -n "s/^$1 //p" "$work/records"; }
+grep -qx "build ok" "$work/records" && grep -qx "install ok" "$work/records" || fail "build and install records"
+[[ "$(value commit)" == "$(git -C "$repo" rev-parse HEAD)" ]] || fail "the build used the checkout's HEAD commit"
+[[ "$(value output)" == /private/tmp/mailroom-build.*/out ]] || fail "the build ran under /private/tmp"
+[[ "$(cat "$work/handoff-contents")" == out ]] || fail "only the signed outputs remain at the handoff"
+[[ ! -e "$(value output)" ]] || fail "the build directory is removed after the install"
+grep -q "^/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -p $repo/scripts/setup-macos-protection.sh install " "$work/sudo-argv" \
+  || fail "sudo gets a cleared environment"
+echo "built commit $(value commit): mailroom $(value mailroom_cdhash) mailroom-confirm $(value confirm_cdhash) ui $(value ui_digest)"
 
 installed="$work/libexec/mailroom"
 bash -c 'source "$1"; TRUSTED_OWNER="$2"; trusted_tree "$3"' _ "$wizard" "$me" "$installed" || fail "the installation is a trusted tree"

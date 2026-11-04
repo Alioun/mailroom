@@ -1,6 +1,6 @@
 # Local account lifecycle
 
-The protected macOS owner CLI supports local account creation, password replacement, forgetting, key rotation and reconciliation of interrupted lifecycle operations. It uses exact native consent and fixed result records. The frozen setup wizard offers creation and password replacement. Its optional maintenance phase offers the remaining operations. These paths require exact version approval and owner-run installed verification before real credentials are used. See [Native confirmation and protected Keychain credentials](macos-confirmation.md).
+The protected macOS owner CLI supports local account creation, password replacement, forgetting, key rotation and reconciliation of interrupted lifecycle operations. It uses exact native consent and fixed result records. The setup wizard, `scripts/setup.sh`, offers creation and password replacement. Its optional `maintenance` subcommand offers the remaining operations. These paths require exact version approval and owner-run installed verification before real credentials are used. See [Native confirmation and protected Keychain credentials](macos-confirmation.md).
 
 The HTTP lifecycle handler remains synthetic-only. Production HTTP lifecycle requests and new browser connections return 403 before credential access. Owner commands never connect to a provider. No lifecycle result enables a provider write.
 

@@ -257,7 +257,7 @@ try {
     assert.ok(!pending.includes('href="#account-rules"'))
     const empty = await screen('empty', lang, { status: { synthetic: false, job: null }, accounts: [], selected: '', savedAccount: { kind: 'empty' }, accountLoad: { kind: 'ready' } })
     assert.ok(empty.includes(lang === 'en' ? 'No saved accounts yet.' : 'Noch keine gespeicherten Konten.'))
-    assert.ok(empty.includes(lang === 'en' ? 'approved protected setup' : 'freigegebene geschützte Einrichtung'))
+    assert.ok(empty.includes(lang === 'en' ? 'Use scripts/setup.sh to add or update local accounts.' : 'Lokale Konten mit scripts/setup.sh anlegen oder ändern.'))
     assert.ok(!empty.includes(lang === 'en' ? 'Add synthetic account' : 'Synthetisches Konto hinzufügen'))
     const stale = await screen('mismatched', lang, { ...base, savedAccount: { kind: 'ready', account: second.id, view: secondView } })
     assert.ok(!stale.includes('id="account-overview"'))

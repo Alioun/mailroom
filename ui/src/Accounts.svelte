@@ -21,8 +21,8 @@
   let { lang }: { lang: 'en' | 'de' } = $props()
   const strings = {
     en: {
-      title: 'Accounts', detail: 'Saved account census and local lifecycle. Production account creation requires a protected installation. Real provider writes remain locked.',
-      protectedUnavailable: 'Add or update accounts through the approved protected setup. This page opens saved accounts.',
+      title: 'Accounts', detail: 'Saved account census and local lifecycle. Add real accounts through local setup. Real provider writes remain locked.',
+      protectedUnavailable: 'Use scripts/setup.sh to add or update local accounts. This page opens saved accounts.',
       synthetic: 'Synthetic account verification. Temporary files and fake credentials only. No provider or OS credential store is contacted.', add: 'Add synthetic account', addGmail: 'Add synthetic Gmail account',
       load: 'Load saved accounts', choose: 'Choose an account', scan: 'Run or resume account census', cancel: 'Cancel account census', open: 'Open saved census',
       idle: 'Ready', running: 'Account action running', cancelled: 'Account census cancelled', complete: 'Account action complete', failed: 'Account action failed', saved: 'headers saved', folders: 'folders',
@@ -34,8 +34,8 @@
       tools: 'Account tasks', overview: 'Census and addresses', rules: 'Rules and address policy', backlog: 'Existing mail', invoices: 'Invoices', subscriptions: 'Unsubscribe and mute', winddown: 'Wind-down', setup: 'Setup and recovery', workspaceLoading: 'Opening the saved census…', workspaceError: 'Could not open or update this account. Saved files were retained. Retry opening its census.', workspaceRetry: 'Retry opening census', waiting: 'The saved workspace will open when the account activity ends.', activity: 'Account activity', empty: 'No saved accounts yet.', emptySynthetic: 'Add a synthetic account above to explore the workflow with invented mail.',
     },
     de: {
-      title: 'Konten', detail: 'Gespeicherte Kontoerfassung und lokale Kontoverwaltung. Neue produktive Konten erfordern eine geschützte Installation. Anbieteränderungen bleiben gesperrt.',
-      protectedUnavailable: 'Konten werden über die freigegebene geschützte Einrichtung angelegt oder geändert. Hier werden gespeicherte Konten geöffnet.',
+      title: 'Konten', detail: 'Gespeicherte Kontoerfassung und lokale Kontoverwaltung. Echte Konten werden über die lokale Einrichtung hinzugefügt. Anbieteränderungen bleiben gesperrt.',
+      protectedUnavailable: 'Lokale Konten mit scripts/setup.sh anlegen oder ändern. Hier werden gespeicherte Konten geöffnet.',
       synthetic: 'Synthetische Kontoprüfung. Nur temporäre Dateien und erfundene Zugangsdaten. Kein Anbieter oder Zugangsdaten-Speicher des Betriebssystems wird kontaktiert.', add: 'Synthetisches Konto hinzufügen', addGmail: 'Synthetisches Gmail-Konto hinzufügen',
       load: 'Gespeicherte Konten laden', choose: 'Konto wählen', scan: 'Kontoerfassung starten oder fortsetzen', cancel: 'Kontoerfassung abbrechen', open: 'Gespeicherte Erfassung öffnen',
       idle: 'Bereit', running: 'Kontoaktion läuft', cancelled: 'Kontoerfassung abgebrochen', complete: 'Kontoaktion abgeschlossen', failed: 'Kontoaktion fehlgeschlagen', saved: 'Kopfzeilen gespeichert', folders: 'Ordner',

@@ -48,7 +48,7 @@ esac
     driver = work / "driver.sh"
     driver.write_text("set -euo pipefail\n" + allowed + "\n" + wrapper + """
 trusted_path() { return 0; }
-LIBEXEC=$1
+RUNTIME=$1
 CODESIGN=/usr/bin/true
 MAILROOM_CDHASH=0000000000000000000000000000000000000000
 EXPECTED=; RESULT=; REFS=; DROPPED=0
@@ -105,14 +105,14 @@ owner = script.split("owner_phase() {", 1)[1].split("\nselect_saved_account() {"
 assert '/bin/mkdir -p -m 700 "$HOME/.config/mailroom"' in script
 maintenance = script.split("maintenance_phase() {",1)[1].split("\nrecovery_phase() {",1)[0]
 assert "TOTAL_STAGES=4" in maintenance and maintenance.count('stage "') == 4
-assert maintenance.index("read_pins") < maintenance.index("mailroom account recover-local") < maintenance.index("mailroom account rotate-key") < maintenance.index("mailroom account forget")
+assert maintenance.index("check_runtime") < maintenance.index("mailroom account recover-local") < maintenance.index("mailroom account rotate-key") < maintenance.index("mailroom account forget")
 assert "TOTAL_STAGES=8" in owner and owner.count('stage "') == 8
 assert owner.index('mailroom account add') < owner.index('mailroom keychain refs')
 assert owner.index('expected_references ||', owner.index('mailroom account add')) < owner.index('mailroom keychain refs')
 assert owner.index('expected_references ||', owner.index('mailroom account replace-password')) < owner.index('stage "Check the prompt')
 recovery = script.split("recovery_phase() {",1)[1]
 assert "TOTAL_STAGES=5" in recovery and recovery.count('stage "') == 5
-assert recovery.index("read_pins") < recovery.index("mailroom account recovery-prepare") < recovery.index('ask bundle') < recovery.index('mailroom account "$command"')
+assert recovery.index("check_runtime") < recovery.index("mailroom account recovery-prepare") < recovery.index('ask bundle') < recovery.index('mailroom account "$command"')
 assert "ask_secret" not in recovery and "generate-password" not in recovery
 connect = (root / "scripts/connect-account.sh").read_text()
 assert "hidden UI field" not in connect and "Connect account privately" not in connect

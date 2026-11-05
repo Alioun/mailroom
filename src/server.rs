@@ -327,7 +327,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/census/demo/start", post(demo_start))
         .route("/api/census/demo/cancel", post(demo_cancel))
         .route("/api/census/demo/confirm", post(demo_confirm))
-        // An installed build serves the root-owned copy the setup wizard put next to it.
+        // A setup build serves the UI copy the wizard published next to it.
         .fallback_service(ServeDir::new(
             option_env!("MAILROOM_UI_DIR")
                 .unwrap_or(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/dist")),

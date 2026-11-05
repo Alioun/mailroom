@@ -18,7 +18,7 @@ Install Rust with Cargo and Node.js 22.12 or newer with npm. From this checkout,
 
 Open <http://127.0.0.1:4173>. The launcher installs locked UI dependencies, builds the UI and Rust binary, and starts the server. Stop it with Ctrl+C. Use this exact URL because the server rejects other Host headers.
 
-Real account setup belongs to the root-owned macOS installation that `scripts/setup.sh` builds and installs, described in [Native confirmation and protected Keychain credentials](docs/macos-confirmation.md). Its owner wizard offers hidden terminal entry and exact native consent for adding a local account or replacing its password. A checkout build cannot use that path without the protection requirements. Local creation leaves connectivity unverified. Actual terminal, Keychain, helper and provider acceptance remain owner-run work. The connection walkthrough captures no credentials and uses the saved-account interface. Provider writes remain held.
+Real accounts use the signed local runtime that `scripts/setup.sh` builds from the HEAD commit into `build/local/<commit>`, without `sudo` or any installation, described in [Native confirmation and protected Keychain credentials](docs/macos-confirmation.md). Its owner wizard offers hidden terminal entry and exact native consent for adding a local account or replacing its password. After setup, `scripts/setup.sh run` starts the server from that runtime without a rebuild. `./scripts/run-local.sh` builds without a helper pin or hardened runtime, so it cannot use real accounts. Local creation leaves connectivity unverified. Actual terminal, Keychain, helper and provider acceptance remain owner-run work. The connection walkthrough captures no credentials and uses the saved-account interface. Provider writes remain held.
 
 For fake-only account verification, run `./scripts/run-local.sh --synthetic-accounts`. This mode uses temporary encrypted files, fake credentials and 100 invented headers. It cannot connect to a provider or the OS backend. The UI labels the mode explicitly.
 
@@ -59,7 +59,7 @@ node ui/scripts/verify-rules.mjs
 
 The Sieve check builds an isolated image and runs check-sieve and Pigeonhole against synthetic artifacts. It starts no global service and mounts no credentials or personal directories. Its runtime container has no network access.
 
-See [Native confirmation and protected Keychain credentials](docs/macos-confirmation.md) for the pinned confirmation helper, the single-use confirmation boundary and Keychain protection. The owner runs the setup wizard from a root-owned copy of the approved commit, as that page describes; `--plan` previews it.
+See [Native confirmation and protected Keychain credentials](docs/macos-confirmation.md) for the pinned confirmation helper, the single-use confirmation boundary and Keychain protection. The owner runs the setup wizard from a clean checkout of the approved commit, as that page describes. `scripts/setup.sh --plan` previews it.
 
 ## Encrypted recovery development
 
@@ -69,7 +69,7 @@ Inspect the [owner-run recovery wizard](scripts/recovery-wizard.sh) with `bash s
 
 ## Account boundary
 
-[Local account lifecycle](docs/account-lifecycle.md) adds synthetic-only password replacement, interrupted-creation cleanup, exact local forgetting and safe key generations. The protected owner CLI adds local account creation and password replacement. Other real lifecycle controls remain held. Actual installation and credential access still require exact approval and owner-run verification.
+[Local account lifecycle](docs/account-lifecycle.md) adds synthetic-only password replacement, interrupted-creation cleanup, exact local forgetting and safe key generations. The protected owner CLI adds local account creation and password replacement. Other real lifecycle controls remain held. Actual runtime use and credential access still require exact approval and owner-run verification.
 
 Read-only adapters use fixed provider TLS endpoints. There are no write-enable flags or caller-supplied source URLs. The central policy denies rule upload and activation, folder creation, moves, flags, forwarding changes, sends and unsubscribe requests. The new proof route reads the saved census under the existing account-operation lock. It assigns no recipient trust or forwarding authority.
 

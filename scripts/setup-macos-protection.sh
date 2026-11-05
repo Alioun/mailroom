@@ -209,21 +209,19 @@ finish() {
 # ──────────────────────────────────────────────────────────────────────────
 
 
-# scripts/setup.sh starts this file with a cleared environment. Run from the checkout:
-#   (none)       as the owner: build and sign, install through sudo, then the Keychain stages
-#   keychain     as the owner: the Keychain stages alone, against the existing installation
-#   maintenance  as the owner: optional local account maintenance
-#   recovery     as the owner: optional encrypted recovery
-#   install      as root, started only by the first phase through sudo
+# scripts/setup.sh starts this file with a cleared environment. Everything runs as the owner,
+# from the checkout, against the runtime of its HEAD commit in build/local/<commit>:
+#   (none)       build and sign that runtime unless a verified one exists, then the Keychain stages
+#   run          start the local server from the verified runtime
+#   keychain     the Keychain stages alone
+#   maintenance  optional local account maintenance
+#   recovery     optional encrypted recovery
 # Owner decisions Q28 and Q30 waive the frozen copy: the wizard and the build run straight
 # from the checkout.
 
 # Trusted locations and tools. Tests override these only by sourcing this file.
-LIBEXEC_PARENT=/usr/local/libexec
-LIBEXEC=/usr/local/libexec/mailroom
 BUILD_BASE=/private/tmp
-ROOT_RECORDS=/private/var/root/mailroom-install-records
-TRUSTED_OWNER=root
+TRUSTED_OWNER=""
 EXPECTED_PATH=/usr/bin:/bin:/usr/sbin:/sbin
 CONFIG=""
 CARGO=/opt/homebrew/opt/rust/bin/cargo
@@ -233,8 +231,7 @@ NPM_CLI=/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js
 XCRUN=/usr/bin/xcrun
 CODESIGN=/usr/bin/codesign
 GIT=/usr/bin/git
-SUDO=/usr/bin/sudo
-CHECKOUT=""; SCRIPT=""
+CHECKOUT=""; COMMIT=""; RUNTIME=""
 INCOMPLETE=()
 
 # Exported variables the launch commands produce. Anything else refuses, which covers
@@ -247,18 +244,25 @@ clean_environment() {
   done
 }
 
-# SHA-256 of the sorted per-file SHA-256 list, without ui/dist. The install compares the
-# UI copy's digest with the build's.
+# SHA-256 of the sorted per-file SHA-256 list, without ui/dist. The runtime's pins keep the
+# digest of its UI copy.
 tree_digest() {
   (cd "$1" && LC_ALL=C /usr/bin/find . -type f ! -path './ui/dist/*' -print0 | LC_ALL=C /usr/bin/sort -z \
     | /usr/bin/xargs -0 /usr/bin/shasum -a 256) | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-64
 }
 
 # A macOS ACL can grant writes that the mode bits do not show. `ls -e` prints each entry on
-# a line of its own that starts with a space and its index. Listings are captured whole and
-# matched in bash, so no early-exiting pipe can turn a match into success, and a listing
-# error counts as an ACL.
-acl_listed() { [[ $'\n'"$1" == *$'\n '[0-9]* ]]; }
+# a line of its own: a space, its index, a colon, then the entry. Only an entry that allows
+# something counts, since every home folder carries "group:everyone deny delete". Listings
+# are captured whole and matched in bash, so no early-exiting pipe can turn a match into
+# success, and a listing error counts as a granting ACL.
+acl_listed() {
+  local line
+  while IFS= read -r line; do
+    [[ "$line" =~ ^\ [0-9]+:\ .*\ allow\  ]] && return 0
+  done <<<"$1"
+  return 1
+}
 has_acl() { local listing; listing=$(/bin/ls -lde "$1" 2>/dev/null) || return 0; acl_listed "$listing"; }
 
 # Every component up to / must be a directory or file owned by root or the trusted owner,
@@ -352,7 +356,7 @@ expected_references() {
   done
 }
 
-# Runs the installed mailroom only after checking its location and exact cdhash, then
+# Runs the runtime's mailroom only after checking its location and exact cdhash, then
 # reduces the reply to one known result: the record, or a fixed failure code. A reply
 # must be exactly one known result with its matching exit code. `refs` and `legacy` may
 # list references first: `refs` must list exactly the expected set, and `legacy` names
@@ -363,9 +367,9 @@ mailroom() {
   local command="$1" output code=0 line results=0 known listed=""
   [[ "$1" == keychain || "$1" == account ]] && command="${2:-}"
   RESULT="status=unverified_launch"; REFS=""; DROPPED=0
-  trusted_path "$LIBEXEC/mailroom" || return 0
-  "$CODESIGN" --verify --strict -R="cdhash H\"$MAILROOM_CDHASH\"" "$LIBEXEC/mailroom" >/dev/null 2>&1 || return 0
-  output=$(/usr/bin/env -i HOME="$HOME" "$LIBEXEC/mailroom" "$@" 2>/dev/null) || code=$?
+  trusted_path "$RUNTIME/mailroom" || return 0
+  "$CODESIGN" --verify --strict -R="cdhash H\"$MAILROOM_CDHASH\"" "$RUNTIME/mailroom" >/dev/null 2>&1 || return 0
+  output=$(/usr/bin/env -i HOME="$HOME" "$RUNTIME/mailroom" "$@" 2>/dev/null) || code=$?
   RESULT="status=unexpected"
   (( code >= 128 )) && { RESULT="status=terminated"; return 0; }
   known=" $(allowed "$command") "
@@ -412,6 +416,8 @@ stop_incomplete() {
   printf '\n%s%s  ✗ Setup incomplete%s\n' "$BOLD" "$YELLOW" "$RESET"
   note "Failed step: ${INCOMPLETE[*]}"
   note "Every step is recorded in $RECORDS. Fix the cause and run this phase again; finished steps converge."
+  [[ "${INCOMPLETE[*]}" == runtime && $RUNTIME_STATE == missing ]] && note "Run scripts/setup.sh first. It builds this commit's runtime."
+  [[ "${INCOMPLETE[*]}" == runtime && $RUNTIME_STATE == untrusted ]] && note "Delete $RUNTIME, then run scripts/setup.sh to build it again."
   return 1
 }
 
@@ -421,10 +427,57 @@ sign() {
   SIGNED_CDHASH=$(cdhash_of "$1")
   [[ "$SIGNED_CDHASH" =~ ^[0-9a-f]{40}$ ]]
 }
+# signed FILE CDHASH: codesign accepts FILE only with exactly CDHASH and the hardened runtime.
+signed() {
+  local details
+  "$CODESIGN" --verify --strict -R="cdhash H\"$2\"" "$1" >/dev/null 2>&1 || return 1
+  details=$("$CODESIGN" -d --verbose=2 "$1" 2>&1) || return 1
+  [[ "$details" =~ flags=0x[0-9a-f]+\([a-z,-]*runtime ]]
+}
+
+# The runtime of the checkout's HEAD commit. Its binaries are compiled against this path.
+head_runtime() {
+  COMMIT=$("$GIT" -C "$CHECKOUT" rev-parse --verify HEAD 2>/dev/null) && [[ "$COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || return 1
+  RUNTIME="$CHECKOUT/build/local/$COMMIT"
+}
+
+# A runtime is trusted only whole: a tree of the owner's plain files without granting ACLs,
+# whose pins name its commit, both binaries' cdhashes and the UI digest, and whose binaries
+# carry those cdhashes and the hardened runtime. Sets the identities from the pins.
+RUNTIME_STATE=missing
+verify_runtime() {
+  local line commit=""
+  CONFIRM_CDHASH=""; MAILROOM_CDHASH=""; UI_DIGEST=""
+  [[ -n "$RUNTIME" && ( -e "$RUNTIME" || -L "$RUNTIME" ) ]] || { RUNTIME_STATE=missing; return 1; }
+  RUNTIME_STATE=untrusted
+  trusted_tree "$RUNTIME" && [[ -f "$RUNTIME/pins" ]] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      COMMIT=*) commit="${line#*=}" ;;
+      MAILROOM_CONFIRM_HELPER_CDHASH=*) CONFIRM_CDHASH="${line#*=}" ;;
+      MAILROOM_CDHASH=*) MAILROOM_CDHASH="${line#*=}" ;;
+      UI_DIGEST=*) UI_DIGEST="${line#*=}" ;;
+      *) return 1 ;;
+    esac
+  done <"$RUNTIME/pins"
+  [[ "$commit" == "$COMMIT" && "$CONFIRM_CDHASH" =~ ^[0-9a-f]{40}$ && "$MAILROOM_CDHASH" =~ ^[0-9a-f]{40}$ && "$UI_DIGEST" =~ ^[0-9a-f]{64}$ ]] || return 1
+  signed "$RUNTIME/mailroom" "$MAILROOM_CDHASH" && signed "$RUNTIME/mailroom-confirm" "$CONFIRM_CDHASH" || return 1
+  [[ -f "$RUNTIME/ui/index.html" && "$(tree_digest "$RUNTIME/ui")" == "$UI_DIGEST" ]]
+}
+
+# check_runtime [MAILROOM_CDHASH CONFIRM_CDHASH]: records the HEAD commit's runtime as
+# trusted, missing or untrusted and fails unless trusted. With identities, the pins must
+# name exactly them.
+check_runtime() {
+  RUNTIME_STATE=missing
+  head_runtime && verify_runtime && [[ -z "${1:-}" || ( "$MAILROOM_CDHASH" == "$1" && "$CONFIRM_CDHASH" == "${2:-}" ) ]] \
+    && RUNTIME_STATE=trusted
+  expect runtime trusted "$RUNTIME_STATE"
+}
 
 # Build, as the owner, under the Q28 and Q30 waivers: the owner's toolchains as installed,
-# from `git archive` of the confirmed $COMMIT, with a cleared environment. Leaves only
-# the signed outputs in $2/out and sets their identities for the install.
+# from `git archive` of the confirmed $COMMIT, with a cleared environment, compiled against
+# the paths of $RUNTIME. Leaves only the signed outputs in $2/out and sets their identities.
 build_as_owner() {
   local checkout="$1" work="${2:?}"
   local build=(/usr/bin/env -i PATH="/usr/bin:/bin:$(/usr/bin/dirname "$RUSTC"):$(/usr/bin/dirname "$NODE")" HOME="$work/home"
@@ -444,8 +497,8 @@ build_as_owner() {
   /bin/cp "$work/swift/release/mailroom-confirm" "$work/out/mailroom-confirm" || { BUILD_FAILURE=swift; return 1; }
   sign "$work/out/mailroom-confirm" org.mailroom.confirm || { BUILD_FAILURE=sign; return 1; }
   CONFIRM_CDHASH="$SIGNED_CDHASH"
-  (cd "$work/src" && "${build[@]}" "$CARGO" fetch --locked && "${build[@]}" MAILROOM_CONFIRM_HELPER="$LIBEXEC/mailroom-confirm" \
-    MAILROOM_CONFIRM_HELPER_CDHASH="$CONFIRM_CDHASH" MAILROOM_UI_DIR="$LIBEXEC/ui" "$CARGO" build --release --frozen) >/dev/null 2>&1 \
+  (cd "$work/src" && "${build[@]}" "$CARGO" fetch --locked && "${build[@]}" MAILROOM_CONFIRM_HELPER="$RUNTIME/mailroom-confirm" \
+    MAILROOM_CONFIRM_HELPER_CDHASH="$CONFIRM_CDHASH" MAILROOM_UI_DIR="$RUNTIME/ui" "$CARGO" build --release --frozen) >/dev/null 2>&1 \
     || { BUILD_FAILURE=cargo; return 1; }
   /bin/cp "$work/target/release/mailroom" "$work/out/mailroom" || { BUILD_FAILURE=cargo; return 1; }
   sign "$work/out/mailroom" org.mailroom || { BUILD_FAILURE=sign; return 1; }
@@ -455,55 +508,34 @@ build_as_owner() {
   /bin/rm -rf "${work:?}/src" "${work:?}/target" "${work:?}/swift" "${work:?}/cargo-home" "${work:?}/npm-cache" "${work:?}/home"
 }
 
-# Install phase, as root. Nothing from the owner's build directory runs. tar copies its
-# entries into a fresh root-only staging directory without following links or reading
-# special files. The copies must be plain files and directories, and must match the
-# identities the build produced, before the directory is renamed into place. An existing
-# installation is moved aside, never written into or followed.
-install_fresh() {
-  local output="$1" staging previous odd
-  trusted_path "$(/usr/bin/dirname "$LIBEXEC_PARENT")" || { INSTALL_FAILURE=untrusted_parent; return 1; }
-  if [[ ! -e "$LIBEXEC_PARENT" ]]; then /bin/mkdir -m 755 "$LIBEXEC_PARENT" || return 1; fi
-  trusted_path "$LIBEXEC_PARENT" || { INSTALL_FAILURE=untrusted_parent; return 1; }
-  staging=$(/usr/bin/mktemp -d "$LIBEXEC_PARENT/.mailroom-staging.XXXXXX") || { INSTALL_FAILURE=staging; return 1; }
+# Publishes the signed outputs as $RUNTIME. tar copies them into a fresh staging directory
+# beside it without following links or reading special files. The copies must be plain
+# files and directories with the build's identities before the directory is renamed into
+# place. An existing runtime is never written into or replaced.
+publish_runtime() {
+  local output="$1" base="$CHECKOUT/build/local" staging odd
+  if ! /bin/mkdir -p "$base" 2>/dev/null || ! trusted_path "$base"; then PUBLISH_FAILURE=untrusted_parent; return 1; fi
+  [[ ! -e "$RUNTIME" && ! -L "$RUNTIME" ]] || { PUBLISH_FAILURE=exists; return 1; }
+  staging=$(/usr/bin/mktemp -d "$base/.staging.XXXXXX") || { PUBLISH_FAILURE=staging; return 1; }
   if ! { (cd "$output" && /usr/bin/tar -cf - --no-xattrs --no-acls --no-mac-metadata mailroom mailroom-confirm ui) 2>/dev/null \
       | (cd "$staging" && /usr/bin/tar -xf - --no-same-owner --no-xattrs --no-acls --no-fflags --no-mac-metadata) 2>/dev/null; } \
-    || ! /usr/sbin/chown -R "$TRUSTED_OWNER" "$staging" || ! /bin/chmod -R go-w "$staging"; then
-    /bin/rm -rf "${staging:?}"; INSTALL_FAILURE=copy; return 1
+    || ! /bin/chmod -R go-w "$staging"; then
+    /bin/rm -rf "${staging:?}"; PUBLISH_FAILURE=copy; return 1
   fi
   odd=$(/usr/bin/find "$staging" ! -type f ! -type d -print -quit 2>/dev/null) || odd=error
   if [[ -n "$odd" || ! -f "$staging/mailroom" || ! -f "$staging/mailroom-confirm" || ! -f "$staging/ui/index.html" ]]; then
-    /bin/rm -rf "${staging:?}"; INSTALL_FAILURE=not_plain; return 1
+    /bin/rm -rf "${staging:?}"; PUBLISH_FAILURE=not_plain; return 1
   fi
-  if ! "$CODESIGN" --verify --strict -R="cdhash H\"$MAILROOM_CDHASH\"" "$staging/mailroom" >/dev/null 2>&1 \
-    || ! "$CODESIGN" --verify --strict -R="cdhash H\"$CONFIRM_CDHASH\"" "$staging/mailroom-confirm" >/dev/null 2>&1; then
-    /bin/rm -rf "${staging:?}"; INSTALL_FAILURE=identity; return 1
+  if ! signed "$staging/mailroom" "$MAILROOM_CDHASH" || ! signed "$staging/mailroom-confirm" "$CONFIRM_CDHASH"; then
+    /bin/rm -rf "${staging:?}"; PUBLISH_FAILURE=identity; return 1
   fi
-  if [[ "$(tree_digest "$staging/ui")" != "$UI_DIGEST" ]]; then /bin/rm -rf "${staging:?}"; INSTALL_FAILURE=ui_digest; return 1; fi
-  if ! (set -o noclobber; printf 'MAILROOM_CONFIRM_HELPER_CDHASH=%s\nMAILROOM_CDHASH=%s\n' "$CONFIRM_CDHASH" "$MAILROOM_CDHASH" >"$staging/pins") \
+  if [[ "$(tree_digest "$staging/ui")" != "$UI_DIGEST" ]]; then /bin/rm -rf "${staging:?}"; PUBLISH_FAILURE=ui_digest; return 1; fi
+  if ! (set -o noclobber; printf 'COMMIT=%s\nMAILROOM_CONFIRM_HELPER_CDHASH=%s\nMAILROOM_CDHASH=%s\nUI_DIGEST=%s\n' \
+        "$COMMIT" "$CONFIRM_CDHASH" "$MAILROOM_CDHASH" "$UI_DIGEST" >"$staging/pins") \
     || ! /bin/chmod 755 "$staging" || ! /bin/chmod 644 "$staging/pins"; then
-    /bin/rm -rf "${staging:?}"; INSTALL_FAILURE=copy; return 1
+    /bin/rm -rf "${staging:?}"; PUBLISH_FAILURE=copy; return 1
   fi
-  if [[ -e "$LIBEXEC" || -L "$LIBEXEC" ]]; then
-    previous="$LIBEXEC_PARENT/.mailroom-previous-$(/bin/date +%Y%m%d%H%M%S)-$$"
-    /bin/mv "$LIBEXEC" "$previous" || { INSTALL_FAILURE=move_aside; return 1; }
-  fi
-  /bin/mv "$staging" "$LIBEXEC" || { INSTALL_FAILURE=publish; return 1; }
-  trusted_tree "$LIBEXEC" || { INSTALL_FAILURE=untrusted_install; return 1; }
-}
-
-read_pins() {
-  local line
-  CONFIRM_CDHASH=""; MAILROOM_CDHASH=""
-  trusted_tree "$LIBEXEC" || return 1
-  while IFS= read -r line; do
-    case "$line" in
-      MAILROOM_CONFIRM_HELPER_CDHASH=*) CONFIRM_CDHASH="${line#*=}" ;;
-      MAILROOM_CDHASH=*) MAILROOM_CDHASH="${line#*=}" ;;
-      *) return 1 ;;
-    esac
-  done <"$LIBEXEC/pins"
-  [[ "$CONFIRM_CDHASH" =~ ^[0-9a-f]{40}$ && "$MAILROOM_CDHASH" =~ ^[0-9a-f]{40}$ ]]
+  /bin/mv "$staging" "$RUNTIME" || { /bin/rm -rf "${staging:?}"; PUBLISH_FAILURE=publish; return 1; }
 }
 
 run_wizard() {
@@ -513,63 +545,51 @@ run_wizard() {
 owner_home() { /usr/bin/dscl . -read "/Users/$(/usr/bin/id -un)" NFSHomeDirectory 2>/dev/null | /usr/bin/sed -n 's/^NFSHomeDirectory: //p'; }
 
 setup_main() {
-local phase=setup arguments=0
+local phase=setup
 SCRIPT="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(/usr/bin/basename "${BASH_SOURCE[0]}")"
 CHECKOUT="$(/usr/bin/dirname "$(/usr/bin/dirname "$SCRIPT")")"
 case "${1:-}" in
   --plan)
     printf '%s\n' \
-      "Setup (owner, one run): 1. build and sign the checkout's HEAD commit with the installed toolchains; 2. through sudo, copy the signed outputs into a fresh root-owned $LIBEXEC after checking them against the build's identities; 3. check the installation; 4. approve then cancel an invented action; 5. optionally create one local account with hidden entry and exact native consent; 6. move each account's keys from an earlier build; 7. migrate and verify legacy passwords; 8. enter missing passwords; 9. optionally replace a saved password with exact native consent; 10. check the prompt at every password read. The keychain subcommand repeats steps 3 to 10 against the existing installation." \
-      'Optional maintenance subcommand: check the installation, then review local recovery, key rotation or local forgetting.' \
+      "Setup (owner, one run, nothing installed): 1. confirm the checkout's HEAD commit, then build and sign it with the installed toolchains into build/local/<commit>, or reuse that runtime when it verifies; 2. check the runtime; 3. approve then cancel an invented action; 4. optionally create one local account with hidden entry and exact native consent; 5. move each account's keys from an earlier build; 6. migrate and verify legacy passwords; 7. enter missing passwords; 8. optionally replace a saved password with exact native consent; 9. check the prompt at every password read. The keychain subcommand repeats steps 2 to 9." \
+      'Daily run subcommand: check the runtime of the HEAD commit, then start the local server from it without a rebuild.' \
+      'Optional maintenance subcommand: check the runtime, then review local recovery, key rotation or local forgetting.' \
       'Optional recovery subcommand: select accounts and ledger policy, enter the separately held key privately, then confirm capture, absent-account restoration or interrupted local restoration.'
     return 0 ;;
+  run) phase=serve; shift ;;
   keychain) phase=owner; shift ;;
   maintenance) phase=maintenance; shift ;;
   recovery) phase=recovery; shift ;;
-  install) phase=root; arguments=4; shift ;;
 esac
 if ! clean_environment; then
   printf '%s\n' 'Start this with scripts/setup.sh from the checkout.' >&2
   return 2
 fi
-if [[ $# -ne $arguments || ! -t 0 ]]; then
-  printf '%s\n' 'Run scripts/setup.sh in a terminal, with no argument or one of keychain, maintenance or recovery.' >&2
+if [[ $# -ne 0 || ! -t 0 ]]; then
+  printf '%s\n' 'Run scripts/setup.sh in a terminal, with no argument or one of run, keychain, maintenance or recovery.' >&2
   return 2
 fi
 ENV_FILE=/dev/null
-if [[ $phase == root ]]; then
-  [[ $EUID -eq 0 ]] || { printf '%s\n' 'The install phase runs as root through sudo.' >&2; return 2; }
-  RECORDS="$ROOT_RECORDS"
-  install_phase "$@"
-  return
-fi
-[[ $EUID -ne 0 ]] || { printf '%s\n' 'This phase runs as the owner, not root.' >&2; return 2; }
+[[ $EUID -ne 0 ]] || { printf '%s\n' 'Run this as yourself, not root.' >&2; return 2; }
 [[ "$HOME" == "$(owner_home)" ]] || { printf '%s\n' 'HOME must be your account home.' >&2; return 2; }
+TRUSTED_OWNER="$(/usr/bin/id -un)"
 /bin/mkdir -p -m 700 "$HOME/.config/mailroom" || return 2
 CONFIG="$HOME/.config/mailroom"
-if [[ $phase == setup ]]; then
-  RECORDS="$CONFIG/native-setup-records"
-  setup_phase
-elif [[ $phase == maintenance ]]; then
-  RECORDS="$CONFIG/native-maintenance-records"
-  maintenance_phase
-elif [[ $phase == recovery ]]; then
-  RECORDS="$CONFIG/native-recovery-records"
-  recovery_phase
-else
-  RECORDS="$CONFIG/native-setup-records"
-  owner_phase
-fi
+case $phase in
+  setup) RECORDS="$CONFIG/native-setup-records"; setup_phase ;;
+  serve) RECORDS="$CONFIG/native-run-records"; serve_phase ;;
+  maintenance) RECORDS="$CONFIG/native-maintenance-records"; maintenance_phase ;;
+  recovery) RECORDS="$CONFIG/native-recovery-records"; recovery_phase ;;
+  *) RECORDS="$CONFIG/native-setup-records"; owner_phase ;;
+esac
 }
 
-# The default phase: build, install and the Keychain stages in one run. The identities
-# pass from the build to the install as arguments; none of them is a secret.
+# The default phase: the runtime, then the Keychain stages in one run.
 setup_phase() {
-TOTAL_STAGES=10
+TOTAL_STAGES=9
 /bin/mkdir -p "$(/usr/bin/dirname "$RECORDS")" && : >"$RECORDS"
 banner "Mailroom native setup"
 build_stage || return 1
-install_stage || return 1
 owner_stages "$MAILROOM_CDHASH" "$CONFIRM_CDHASH" || return 1
 finish
 }
@@ -579,69 +599,54 @@ finish
 # .DS_Store may differ from HEAD.
 BUILD_PATHSPEC=(':(top)' ':(exclude,top)docs' ':(exclude,top,glob)*.md' ':(exclude,top,glob)**/.DS_Store')
 
+# Confirms the HEAD commit, then reuses its verified runtime or builds and publishes it.
 build_stage() {
 local changes
-stage "Build and sign as the owner"
-COMMIT=$("$GIT" -C "$CHECKOUT" rev-parse --verify HEAD 2>/dev/null) && [[ "$COMMIT" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] \
-  || { expect build ok source || stop_incomplete; return 1; }
+stage "Build and sign the local runtime"
+head_runtime || { expect build ok source || stop_incomplete; return 1; }
 changes=$("$GIT" -C "$CHECKOUT" status --porcelain --untracked-files=all -- "${BUILD_PATHSPEC[@]}" 2>/dev/null) || changes=error
 [[ -z "$changes" ]] || { expect checkout clean changed || stop_incomplete; return 1; }
 expect checkout clean clean
 say "The checkout has no uncommitted change. Its HEAD commit is:"
 say "  $COMMIT"
-confirm_no "Install this commit? Compare it with the approved commit first." \
-  || { expect install_commit confirmed declined || stop_incomplete; return 1; }
-expect install_commit confirmed confirmed
+confirm_no "Use this commit? Compare it with the approved commit first." \
+  || { expect use_commit confirmed declined || stop_incomplete; return 1; }
+expect use_commit confirmed confirmed
+if verify_runtime; then
+  note_result runtime reused
+  say "Reusing the verified runtime in $RUNTIME: mailroom $MAILROOM_CDHASH, mailroom-confirm $CONFIRM_CDHASH."
+  return 0
+fi
+[[ $RUNTIME_STATE == missing ]] || { expect runtime trusted untrusted || stop_incomplete; return 1; }
 say "Owner decisions Q28 and Q30 waive the frozen copy: this wizard and the build run straight"
 say "from the checkout. Any program running as you, agents included, could alter the wizard,"
-say "the sources or the binaries before they are signed. The install checks only that its"
-say "copies match what this run signed; it cannot show that the build was untouched."
+say "the sources or the binaries before they are signed. The checks below show only that the"
+say "runtime holds what this run signed; they cannot show that the build was untouched."
 BUILD_DIR="$(/usr/bin/mktemp -d "$BUILD_BASE/mailroom-build.XXXXXX")" || { expect build_dir created failed || stop_incomplete; return 1; }
 BUILD_FAILURE=failed
 if ! build_as_owner "$CHECKOUT" "$BUILD_DIR"; then /bin/rm -rf "${BUILD_DIR:?}"; expect build ok "$BUILD_FAILURE" || stop_incomplete; return 1; fi
 expect build ok ok
 note_result commit "$COMMIT"; note_result output "$BUILD_DIR/out"
 note_result mailroom_cdhash "$MAILROOM_CDHASH"; note_result confirm_cdhash "$CONFIRM_CDHASH"; note_result ui_digest "$UI_DIGEST"
-say "Built commit $COMMIT: mailroom $MAILROOM_CDHASH, mailroom-confirm $CONFIRM_CDHASH."
-}
-
-# Known install results and their exit codes, as install_phase prints them.
-INSTALL_RESULTS=" install=ok:0 install=malformed:1 install=failed:1 install=untrusted_parent:1 install=staging:1 install=copy:1 install=not_plain:1 install=identity:1 install=ui_digest:1 install=move_aside:1 install=publish:1 install=untrusted_install:1 "
-
-# Runs the install as root with a cleared environment, then removes the build directory.
-# The reply must be exactly one known result line with its matching exit code.
-install_stage() {
-local output code=0 result=unexpected
-stage "Install as root"
-say "sudo asks for your login password and keeps no cached login afterwards. The install copies"
-say "the signed outputs into $LIBEXEC and refuses copies that differ from what this run built."
-output=$("$SUDO" -k /usr/bin/env -i PATH="$EXPECTED_PATH" /bin/bash -p "$SCRIPT" install \
-  "$BUILD_DIR/out" "$MAILROOM_CDHASH" "$CONFIRM_CDHASH" "$UI_DIGEST") || code=$?
-output="${output%$'\r'}"
-"$SUDO" -k >/dev/null 2>&1 || true
-[[ "$output" =~ ^install=[a-z_]+$ && "$INSTALL_RESULTS" == *" $output:$code "* ]] && result="${output#install=}"
+PUBLISH_FAILURE=failed
+publish_runtime "$BUILD_DIR/out" && PUBLISH_FAILURE=ok
 /bin/rm -rf "${BUILD_DIR:?}"
-expect install ok "$result" || { stop_incomplete; return 1; }
+expect publish ok "$PUBLISH_FAILURE" || { stop_incomplete; return 1; }
+say "Built commit $COMMIT into $RUNTIME: mailroom $MAILROOM_CDHASH, mailroom-confirm $CONFIRM_CDHASH."
 }
 
-# Install, as root, non-interactive. Prints only its fixed result line.
-install_phase() {
-local output="$1"
-MAILROOM_CDHASH="$2"; CONFIRM_CDHASH="$3"; UI_DIGEST="$4"
-: >"$RECORDS"
-INSTALL_FAILURE=failed
-if [[ ! "$MAILROOM_CDHASH" =~ ^[0-9a-f]{40}$ || ! "$CONFIRM_CDHASH" =~ ^[0-9a-f]{40}$ || ! "$UI_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
-  INSTALL_FAILURE=malformed
-elif install_fresh "$output"; then
-  INSTALL_FAILURE=ok
-fi
-note_result install "$INSTALL_FAILURE"
-printf 'install=%s\n' "$INSTALL_FAILURE"
-[[ $INSTALL_FAILURE == ok ]] || return 1
-note_result confirm_cdhash "$CONFIRM_CDHASH"; note_result mailroom_cdhash "$MAILROOM_CDHASH"
+# The run subcommand: the verified runtime's server, in place of this wizard. No prompt.
+serve_phase() {
+TOTAL_STAGES=1
+/bin/mkdir -p "$(/usr/bin/dirname "$RECORDS")" && : >"$RECORDS"
+stage "Start the local server"
+check_runtime || { stop_incomplete; return 1; }
+say "Commit $COMMIT, mailroom $MAILROOM_CDHASH."
+say "Open http://127.0.0.1:4173. Stop the server with Ctrl+C."
+exec /usr/bin/env -i HOME="$HOME" "$RUNTIME/mailroom"
 }
 
-# The keychain subcommand: the Keychain stages alone, against the existing installation.
+# The keychain subcommand: the Keychain stages alone, against the HEAD commit's runtime.
 owner_phase() {
 TOTAL_STAGES=8
 /bin/mkdir -p "$(/usr/bin/dirname "$RECORDS")" && : >"$RECORDS"
@@ -654,10 +659,8 @@ finish
 # must name exactly them.
 owner_stages() {
 local reference class id all_ok=1
-stage "Check the installation"
-read_pins && [[ -z "${1:-}" || ( "$MAILROOM_CDHASH" == "$1" && "$CONFIRM_CDHASH" == "${2:-}" ) ]] \
-  || { expect installation trusted untrusted || stop_incomplete; return 1; }
-expect installation trusted trusted
+stage "Check the local runtime"
+check_runtime "$@" || { stop_incomplete; return 1; }
 expected_references || { expect account_metadata readable unreadable || stop_incomplete; return 1; }
 
 stage "See the native confirmation"
@@ -669,7 +672,7 @@ mailroom native-check; expect native_cancel outcome=cancelled "$RESULT" || { sto
 
 stage "Optionally add a local account"
 say "Account setup saves local metadata and a protected credential. It does not connect to a provider."
-say "The installed binary reads the login and password privately from this terminal."
+say "The runtime's mailroom reads the login and password privately from this terminal."
 say "Read the native dialog carefully. Cancelling publishes no account or credential."
 if confirm_no "Add one local account now? Skip if the account is already saved."; then
   local provider
@@ -775,8 +778,8 @@ TOTAL_STAGES=4
 local file id kind
 /bin/mkdir -p "$(/usr/bin/dirname "$RECORDS")" && : >"$RECORDS"
 banner "Mailroom local account maintenance"
-stage "Check the installation"
-read_pins || { expect installation trusted untrusted || stop_incomplete; return 1; }
+stage "Check the local runtime"
+check_runtime || { stop_incomplete; return 1; }
 say "Stop active census and sorting work first. Account and store locks refuse competing work."
 say "These actions change local storage only. They never resume a provider action."
 
@@ -825,8 +828,8 @@ local kind command expected id bundle chosen="" transfer="$CONFIG/recovery-trans
 local selected=()
 /bin/mkdir -p "$(/usr/bin/dirname "$RECORDS")" && : >"$RECORDS"
 banner "Mailroom encrypted recovery"
-stage "Check the installation"
-read_pins || { expect installation trusted untrusted || stop_incomplete; return 1; }
+stage "Check the local runtime"
+check_runtime || { stop_incomplete; return 1; }
 say "Stop active account work first. This phase never connects to a provider or resumes a mail action."
 say "Use this exact version only after its secret-flow tests, review and owner approval."
 if ! confirm_no "Run one local recovery action now?"; then finish; return 0; fi
@@ -853,7 +856,7 @@ case "$kind" in
     expected=status=captured
     ;;
   restore)
-    say "In Finder, use Go > Go to Folder to open $transfer/incoming to select the incoming folder prepared by the installed binary."
+    say "In Finder, use Go > Go to Folder to open $transfer/incoming to select the incoming folder prepared by mailroom."
     say "Place the encrypted <bundle-id>.bundle file there. Keep owner-only mode 0600. The binary refuses links and unsafe files."
     say "Only absent captured accounts can be restored. A different installed ledger is never replaced."
     ask bundle "Enter the 64-character lowercase bundle ID, without .bundle"
@@ -874,7 +877,7 @@ esac
 stage "Keep the recovery key separately"
 say "Use the separately held random 256-bit key, encoded as 64 lowercase hex characters. A memorable password is not a recovery key."
 say "Generate and store a new capture key privately in the owner's secret manager. Keep it apart from the encrypted bundle."
-say "The wizard never receives or records the key. The installed binary reads it from the controlling terminal with echo disabled."
+say "The wizard never receives or records the key. The runtime's mailroom reads it from the controlling terminal with echo disabled."
 confirm_no "Is the separate recovery key available for this action?" || { expect recovery_key available unavailable || stop_incomplete; return 1; }
 
 stage "Confirm the exact local recovery action"
@@ -889,7 +892,7 @@ expect recovery "$expected" "$RESULT" || { stop_incomplete; return 1; }
 stage "Check bundle custody and restored-account holds"
 if [[ $kind == capture ]]; then
   say "In Finder, open $transfer/outgoing. Move the completed encrypted bundle outside this Mac using the owner's chosen storage."
-  say "Keep the recovery key separately. Preserve a usable bundle while testing restoration in an isolated protected installation."
+  say "Keep the recovery key separately. Preserve a usable bundle while testing restoration in an isolated runtime and home."
   confirm_no "Has the encrypted bundle been stored separately from its key?" || { expect bundle_custody owner_confirmed unconfirmed || stop_incomplete; return 1; }
   note_result bundle_custody owner_confirmed
 else

@@ -215,9 +215,9 @@ if [[ "${1:-}" == "--plan" ]]; then
     '1. Verify protected native launch, authenticated IPC and Keychain access before real recovery.' \
     '2. Use scripts/setup.sh recovery from the approved commit, with a separately held random 256-bit recovery key.' \
     '3. Review the exact selected account set, optional authoritative ledger, captured resources, boundary and exclusions; approve creation once.' \
-    '4. Keep the completed encrypted bundle outside this Mac, apart from its key, and verify local authentication in an isolated installation.' \
+    '4. Keep the completed encrypted bundle outside this Mac, apart from its key, and verify local authentication with an isolated runtime and home.' \
     '5. Reconnect privately, acquire fresh provider evidence and reconcile later effects before any operation resumes.' \
-    'HOLD: checkout execution and reconnection remain unavailable. Protected owner recovery requires exact approval and installed acceptance. No storage provider, schedule, retention or escrow is selected.'
+    'HOLD: checkout execution and reconnection remain unavailable. Protected owner recovery requires exact approval and owner acceptance of the local runtime. No storage provider, schedule, retention or escrow is selected.'
   return 0
 fi
 if [[ $# -ne 0 || ! -t 0 ]]; then
@@ -227,7 +227,7 @@ fi
 ENV_FILE=/dev/null
 banner "Encrypted recovery acceptance prerequisites"
 stage "Establish protected local access"
-say "Real recovery requires verified protected installation, native launch, authenticated IPC and Keychain access."
+say "Real recovery requires a verified local runtime, native launch, authenticated IPC and Keychain access."
 say "Complete those boundaries and owner-run verification before handling any real recovery key or bundle."
 pause "Record this unmet prerequisite privately."
 stage "Hold the recovery key separately"
@@ -240,7 +240,7 @@ say "Review every selected account, schema, generation, revision, capture time a
 say "Approve this exact plan once through protected native confirmation after the protected recovery setup is accepted."
 say "Authoritative ledger inclusion is optional and initially unchecked. Review its exact bytes and source version. Provider passwords and external mail effects are excluded."
 pause "Use only scripts/setup.sh recovery from the approved commit for actual capture."
-stage "Verify outside this installation"
+stage "Verify outside this runtime"
 say "Keep the durable encrypted bundle outside this Mac in a location you choose."
 say "Retain a usable copy while authenticating an isolated restoration with only its separate recovery key."
 say "Verify rules, decisions and histories exactly before replacing or losing any original state."

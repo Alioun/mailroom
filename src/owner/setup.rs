@@ -6,6 +6,7 @@ use crate::{
 use hmac::{Hmac, Mac};
 use rand::{RngCore, rngs::OsRng};
 use sha2::Sha256;
+use std::cell::Cell;
 use subtle::ConstantTimeEq;
 
 pub(super) enum Command {
@@ -81,12 +82,20 @@ pub(super) fn run(tail: &[&str]) -> u8 {
 }
 
 /// A fresh private HMAC key binds the password without exposing a reusable password digest.
-struct Binding(Zeroizing<[u8; 32]>);
+/// `refused` keeps the fixed code of a refused consent, so a refused dialog is never reported
+/// as a Keychain failure, nor the reverse.
+struct Binding {
+    key: Zeroizing<[u8; 32]>,
+    refused: Cell<Option<&'static str>>,
+}
 impl Binding {
     fn new() -> Self {
         let mut key = Zeroizing::new([0; 32]);
         OsRng.fill_bytes(key.as_mut());
-        Self(key)
+        Self {
+            key,
+            refused: Cell::new(None),
+        }
     }
     fn plan(
         &self,
@@ -99,7 +108,7 @@ impl Binding {
             serde_json::to_vec(&(account, operation, revision))
                 .map_err(|_| AcquisitionError::Storage)?,
         );
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.0.as_ref()).expect("HMAC key");
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.key.as_ref()).expect("HMAC key");
         mac.update(b"mailroom/local-account-consent/v1\0");
         mac.update(&(metadata.len() as u64).to_be_bytes());
         mac.update(&metadata);
@@ -126,9 +135,13 @@ impl Binding {
         boundary: &mut Boundary,
     ) -> Result<(), AcquisitionError> {
         let plan = self.plan(account, operation, revision, password)?;
+        let refuse = |code| {
+            self.refused.set(Some(code));
+            AcquisitionError::Credentials
+        };
         let (handle, _) = boundary
             .offer(plan.clone())
-            .map_err(|_| AcquisitionError::Credentials)?;
+            .map_err(|_| refuse("unavailable"))?;
         boundary
             .confirm(&handle, &plan, || {
                 self.plan(account, operation, revision, password)
@@ -139,7 +152,7 @@ impl Binding {
                 if e == crate::confirmation::CANCELLED {
                     AcquisitionError::Cancelled
                 } else {
-                    AcquisitionError::Credentials
+                    refuse(super::denial(&e))
                 }
             })
     }
@@ -203,12 +216,16 @@ fn perform(
             })
             .map(|_| "replaced"),
     };
-    result.map_err(|e| match e {
-        AcquisitionError::Cancelled => "cancelled",
-        AcquisitionError::Credentials | AcquisitionError::CredentialMissing => "denied",
-        AcquisitionError::InvalidInput => "invalid_input",
-        AcquisitionError::LifecyclePending => "recovery_required",
-        _ => "storage_unavailable",
+    result.map_err(|e| {
+        binding.refused.get().unwrap_or(match e {
+            AcquisitionError::Cancelled => "cancelled",
+            AcquisitionError::Credentials | AcquisitionError::CredentialMissing => {
+                "keychain_failed"
+            }
+            AcquisitionError::InvalidInput => "invalid_input",
+            AcquisitionError::LifecyclePending => "recovery_required",
+            _ => "storage_unavailable",
+        })
     })
 }
 

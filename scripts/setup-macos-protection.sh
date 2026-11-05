@@ -300,10 +300,14 @@ no_outside_config() {
 
 # Known result codes per command, and the exit code each one comes with.
 allowed() {
-  local opened="status=keychain_unavailable:1 status=unhardened:1 status=core_dumps_enabled:1"
+  local opened="status=keychain_unavailable:1 status=unhardened:1 status=core_dumps_enabled:1" code credential
+  # account add and replace-password name a refused consent as native-check does, and a
+  # Keychain failure after consent as keychain_failed.
+  credential="status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=no_tty:1 status=invalid_input:1 status=mismatch:1 status=cancelled:1 status=unavailable:1 status=keychain_failed:1 status=recovery_required:1 status=core_dumps_enabled:1"
+  for code in failed timeout expired malformed unauthenticated channel oversized launch other; do credential+=" status=denied_$code:1"; done
   case "$1" in
-    add) echo "status=created:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=no_tty:1 status=invalid_input:1 status=mismatch:1 status=cancelled:1 status=denied:1 status=recovery_required:1 status=core_dumps_enabled:1" ;;
-    replace-password) echo "status=replaced:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=no_tty:1 status=invalid_input:1 status=mismatch:1 status=cancelled:1 status=denied:1 status=recovery_required:1 status=core_dumps_enabled:1" ;;
+    add) echo "status=created:0 $credential" ;;
+    replace-password) echo "status=replaced:0 $credential" ;;
     forget) echo "status=forgotten:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=cancelled:1 status=denied:1 status=invalid_input:1 status=recovery_required:1 status=rollback_copies_full:1 status=core_dumps_enabled:1" ;;
     rotate-key) echo "status=rotated:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=cancelled:1 status=denied:1 status=invalid_input:1 status=recovery_required:1 status=rollback_copies_full:1 status=core_dumps_enabled:1" ;;
     recover-local) echo "status=recovered:0 status=usage:1 status=protection_unavailable:1 status=storage_unavailable:1 status=cancelled:1 status=denied:1 status=invalid_input:1 status=recovery_required:1 status=rollback_copies_full:1 status=core_dumps_enabled:1" ;;

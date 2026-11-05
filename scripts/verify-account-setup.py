@@ -34,6 +34,10 @@ case "$scenario" in
   capture_extra) echo OWNER-SETUP-DUMMY-6b92af; echo status=captured ;;
   cancelled) echo status=cancelled; exit 1 ;;
   denied) echo status=denied; exit 1 ;;
+  denied_malformed) echo status=denied_malformed; exit 1 ;;
+  denied_launch) echo status=denied_launch; exit 1 ;;
+  unavailable) echo status=unavailable; exit 1 ;;
+  keychain_failed) echo status=keychain_failed; exit 1 ;;
   wrong_exit) echo status=created; exit 1 ;;
   extra_output) echo OWNER-SETUP-DUMMY-6b92af; echo status=created ;;
   private_stderr) echo OWNER-SETUP-DUMMY-6b92af >&2; echo status=created ;;
@@ -58,7 +62,13 @@ printf '%s\\n' "$RESULT"
         ("add", "gmail", "replaced", "status=unexpected"),
         ("replace-password", "invented-account", "created", "status=unexpected"),
         ("add", "gmail", "cancelled", "status=cancelled"),
-        ("add", "gmail", "denied", "status=denied"),
+        ("add", "gmail", "denied", "status=unexpected"),
+        ("add", "gmail", "denied_malformed", "status=denied_malformed"),
+        ("replace-password", "invented-account", "denied_launch", "status=denied_launch"),
+        ("add", "gmail", "unavailable", "status=unavailable"),
+        ("add", "gmail", "keychain_failed", "status=keychain_failed"),
+        ("replace-password", "invented-account", "keychain_failed", "status=keychain_failed"),
+        ("forget", "invented-account", "denied", "status=denied"),
         ("add", "gmail", "wrong_exit", "status=unexpected"),
         ("add", "gmail", "extra_output", "status=unexpected"),
         ("add", "gmail", "private_stderr", "status=created"),

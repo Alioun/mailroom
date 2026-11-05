@@ -191,28 +191,96 @@ fn account_setup_input_failures_publish_no_account_or_credential() {
 }
 
 #[test]
-fn account_setup_cancelled_and_unauthenticated_consent_write_no_intent_or_credential() {
-    for reply in [
-        Reply {
-            outcome: "cancelled",
-            malformed: false,
-        },
-        Reply {
-            outcome: "approved",
-            malformed: true,
-        },
+fn account_setup_cancelled_and_refused_consent_name_the_refusal_and_write_nothing() {
+    for (mut boundary, code) in [
+        (
+            Boundary::with_backend(Box::new(Reply {
+                outcome: "cancelled",
+                malformed: false,
+            })),
+            "cancelled",
+        ),
+        (
+            Boundary::with_backend(Box::new(Reply {
+                outcome: "approved",
+                malformed: true,
+            })),
+            "denied_malformed",
+        ),
+        (Boundary::native(), "unavailable"),
     ] {
         let f = Fixture::new();
-        let mut boundary = Boundary::with_backend(Box::new(reply));
         let result = perform(
             &f.repo,
             Command::Add(Provider::Gmail),
             &mut input(&[b"owner@example.test", DUMMY, DUMMY]),
             &mut boundary,
         );
-        assert!(result.is_err());
+        assert_eq!(result, Err(code));
         f.empty();
     }
+}
+
+#[test]
+fn account_setup_reports_a_keychain_failure_after_consent_apart_from_a_refusal() {
+    let f = Fixture::new();
+    let failing = Accounts::new(
+        f.repo.paths.clone(),
+        Arc::new(FailPassword(f.memory.clone())),
+    );
+    let mut boundary = approve();
+    assert_eq!(
+        perform(
+            &failing,
+            Command::Add(Provider::Gmail),
+            &mut input(&[b"owner@example.test", DUMMY, DUMMY]),
+            &mut boundary
+        ),
+        Err("keychain_failed")
+    );
+    assert_eq!(boundary.accesses, 1);
+    assert!(f.repo.list().unwrap().is_empty());
+    assert_eq!(f.repo.recovery_status().unwrap().len(), 1);
+    assert!(
+        f.memory
+            .0
+            .lock()
+            .unwrap()
+            .values()
+            .all(|v| v.as_slice() != DUMMY)
+    );
+}
+
+#[test]
+fn password_replacement_reports_an_unreadable_key_before_any_consent() {
+    let f = Fixture::new();
+    perform(
+        &f.repo,
+        Command::Add(Provider::MailboxOrg),
+        &mut input(&[b"owner@example.test", DUMMY, DUMMY]),
+        &mut approve(),
+    )
+    .unwrap();
+    let account = f.repo.list().unwrap().remove(0);
+    f.memory.delete(account.key_references()[0]).unwrap();
+    let mut boundary = approve();
+    assert_eq!(
+        perform(
+            &f.repo,
+            Command::Replace(account.id.clone()),
+            &mut input(&[b"REPLACEMENT-DUMMY-1c4e", b"REPLACEMENT-DUMMY-1c4e"]),
+            &mut boundary
+        ),
+        Err("keychain_failed")
+    );
+    assert_eq!(boundary.accesses, 0);
+    assert!(
+        f.memory
+            .get(account.credential_references()[0])
+            .unwrap()
+            .bytes()
+            == DUMMY
+    );
 }
 
 #[test]

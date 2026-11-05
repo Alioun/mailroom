@@ -16,6 +16,8 @@ The owner wizard can add one account or replace one saved password through the i
 
 The native dialog names the exact local operation, account, provider and login. A fresh private HMAC key binds the immutable metadata, saved revision and exact password without exposing a reusable password digest. Consent runs inside the existing transaction lease, before any lifecycle intent or credential write. Duplicate provider/login creation is refused under the installation lease. Creation publishes metadata last. Replacement keeps the encrypted history and local key, selects a new password reference before retiring the old one, and preserves the restored-account hold. Both leave connectivity unverified and make no provider connection.
 
+A refused consent prints the same code `native-check` prints, as `status=denied_<check>` or `status=unavailable`. A Keychain failure, after consent for an addition or before it for a replacement, prints `status=keychain_failed`. Before this split both printed `status=denied`.
+
 Setup creates mode-0700 directories relative to checked parent descriptors. It rejects symlinks, granting ACLs, unsafe ownership and writable shared parents. An existing final directory with broader permissions is refused, not silently repaired. The credential-free checks exercise injected input, native replies and memory credentials. Actual hidden terminal entry, Keychain dialogs and installed helper invocation still need approved owner-run acceptance. Changing this code or its wizard requires fresh secret-flow review and exact approval before real use.
 
 ## Local maintenance

@@ -70,18 +70,12 @@ fn check(reply: Result<Vec<u8>, String>) -> (&'static str, bool) {
 
 #[test]
 fn native_check_approves_and_cancels_as_before() {
-    assert_eq!(
-        native_outcome(Boundary::synthetic()),
-        ("outcome=approved", true)
-    );
+    assert_eq!(native_outcome(Boundary::synthetic()), ("approved", true));
     assert_eq!(
         check(Err(crate::confirmation::CANCELLED.into())),
-        ("outcome=cancelled", true)
+        ("cancelled", true)
     );
-    assert_eq!(
-        native_outcome(Boundary::native()),
-        ("outcome=unavailable", false)
-    );
+    assert_eq!(native_outcome(Boundary::native()), ("unavailable", false));
 }
 
 #[test]
@@ -107,7 +101,7 @@ fn native_check_names_each_denial_with_a_fixed_code_and_fails() {
         (Ok(vec![b' '; 4097]), "denied_oversized"),
     ] {
         let (line, success) = check(reply);
-        assert_eq!(line, format!("outcome={code}"));
+        assert_eq!(line, code);
         assert!(!success, "{code}");
     }
 }
@@ -121,7 +115,7 @@ fn native_check_reports_any_other_error_as_denied_other_without_its_text() {
         format!("{secret} {}", crate::confirmation::MALFORMED),
         String::new(),
     ] {
-        assert_eq!(check(Err(error)), ("outcome=denied_other", false));
+        assert_eq!(check(Err(error)), ("denied_other", false));
     }
 }
 

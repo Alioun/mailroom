@@ -3,6 +3,8 @@ pub(crate) mod exclusive;
 pub(crate) mod keychain;
 pub mod lifecycle;
 pub(crate) mod recovery;
+#[cfg(unix)]
+pub(crate) mod vault;
 use super::AcquisitionError;
 use crate::census::{AccountId, AccountState, Census, CensusKeys, EncryptedStore, LocalSecret};
 use rand::{RngCore, rngs::OsRng};

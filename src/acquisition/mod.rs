@@ -48,6 +48,8 @@ pub enum AcquisitionError {
     Cancelled,
     /// A key change refused because the account already keeps the most rollback copies.
     RollbackCopiesFull,
+    /// The local web vault holds every credential and is not unlocked in this process.
+    VaultLocked,
 }
 impl From<CensusError> for AcquisitionError {
     fn from(_: CensusError) -> Self {
@@ -66,6 +68,7 @@ impl std::fmt::Display for AcquisitionError {
             Self::Authentication => "Account authentication failed. Check the existing credential privately.",
             Self::Protocol | Self::Incomplete => "Provider response was incomplete or unsupported. Saved data was retained; retry later.",
             Self::Cancelled => "Census cancelled. Saved checkpoints remain available.",
+            Self::VaultLocked => "The Mailroom vault is locked. Unlock it in the browser with the master password.",
             Self::RollbackCopiesFull => "This account already keeps 8 copies from interrupted key changes in one store directory, so a key change can neither start nor roll back. Review the account's .<account>.rollback folder in that store directory and delete it by hand, or forget the account, then retry.",
         })
     }

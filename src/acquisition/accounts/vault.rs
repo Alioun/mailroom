@@ -314,9 +314,10 @@ impl Vault {
         };
         let params = argon2::Params::new(memory, passes, lanes, Some(32))
             .map_err(|_| VaultError::Storage)?;
+        let mut blocks = Zeroizing::new(vec![argon2::Block::default(); params.block_count()]);
         let mut key = Zeroizing::new([0; 32]);
         argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
-            .hash_password_into(password, salt, key.as_mut())
+            .hash_password_into_with_memory(password, salt, key.as_mut(), blocks.as_mut_slice())
             .map_err(|_| VaultError::Storage)?;
         Ok(key)
     }

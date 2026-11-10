@@ -66,12 +66,29 @@ out="$(launch approve "$repo" "${commit:0:12}" || true)"
 [[ "$out" == "status=commit_not_exact" ]] || die "abbreviated commit refused: $out"
 out="$(launch approve "$repo" "$(printf '%040d' 0)" || true)"
 [[ "$out" == "status=commit_unknown" ]] || die "unknown commit refused: $out"
-out="$(git -C "$repo" show "$commit:scripts/local-web.sh" | /bin/bash -s -- approve "$repo" abc || true)"
+out="$(/usr/bin/env -i HOME="$home" PATH=/usr/bin:/bin /usr/bin/git --no-replace-objects -C "$repo" show "$commit:scripts/local-web.sh" |
+  /usr/bin/env -i HOME="$home" PATH=/usr/bin:/bin /bin/bash -s -- approve "$repo" abc || true)"
 [[ "$out" == "status=commit_not_exact" ]] || die "piped launcher refuses a short commit: $out"
 out="$(env -i HOME="$home" /bin/bash "$source_script" || true)"
 [[ "$out" == "status=not_approved" ]] || die "daily start before approval: $out"
 [[ ! -e "$home/exec-args" ]] || die "nothing started before approval"
 pass "approval needs the exact full commit, and nothing starts before it"
+
+original="$(git --no-replace-objects -C "$repo" rev-parse "$commit:scripts/local-web.sh")"
+replacement="$(printf 'printf "UNREVIEWED-LAUNCHER\\n"\n' | git -C "$repo" hash-object -w --stdin)"
+git -C "$repo" replace "$original" "$replacement"
+[[ "$(git -C "$repo" show "$commit:scripts/local-web.sh")" == *UNREVIEWED-LAUNCHER* ]] || die "replace fixture substitutes the launcher"
+printf 'printf "UNREVIEWED-STARTUP\\n"\n' >"$root/startup"
+out="$(
+  export BASH_ENV="$root/startup"
+  uname() { printf 'UNREVIEWED-FUNCTION\n'; }
+  export -f uname
+  /usr/bin/env -i HOME="$home" PATH=/usr/bin:/bin /usr/bin/git --no-replace-objects -C "$repo" show "$commit:scripts/local-web.sh" |
+    /usr/bin/env -i HOME="$home" PATH=/usr/bin:/bin /bin/bash -s -- approve "$repo" abc || true
+)"
+[[ "$out" == "status=commit_not_exact" ]] || die "only committed launcher code ran: $out"
+git -C "$repo" replace -d "$original" >/dev/null
+pass "the exact entry command ignores Git replacements, BASH_ENV and exported functions"
 
 mkdir -p "$root/configured/.cargo" "$root/configured/base"
 out="$(MAILROOM_TEST_BUILD_BASE="$root/configured/base" launch approve "$repo" "$commit" || true)"
@@ -95,7 +112,7 @@ version="$rt/versions/$commit"
 grep -q "# ui=$version/ui" "$version/mailroom" || die "UI path compiled to the frozen runtime"
 grep -q committed "$version/ui/index.html" || die "UI built from the commit"
 ! grep -q DIRTY-WORKTREE "$version/local-web.sh" "$rt/start" || die "launcher from the commit, not the working tree"
-cmp -s "$rt/start" <(git -C "$repo" show "$commit:scripts/local-web.sh") || die "daily start is the committed launcher"
+cmp -s "$rt/start" <(git --no-replace-objects -C "$repo" show "$commit:scripts/local-web.sh") || die "daily start is the committed launcher"
 [[ -z "$(find "$version" -perm -200 -type f -print -quit)" ]] || die "frozen files are read-only"
 [[ -z "$(find "$rt" \( -perm -020 -o -perm -002 \) -print -quit)" ]] || die "runtime private"
 [[ -z "$(ls "$build_base")" ]] || die "build workspace removed"

@@ -5,7 +5,8 @@
 #
 # First start of a version. Naming the exact commit is the owner's approval of that version,
 # and the script that runs is the one inside that commit, never the working tree:
-#   git -C <checkout> show <commit>:scripts/local-web.sh | /bin/bash -s -- approve <checkout> <commit>
+#   /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin /usr/bin/git --no-replace-objects -C <checkout> show <commit>:scripts/local-web.sh |
+#     /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin /bin/bash -s -- approve <checkout> <commit>
 # Every later start, with no rebuild and nothing loaded from a checkout:
 #   "$HOME/Library/Application Support/Mailroom Web Runtime/start"
 #

@@ -7,10 +7,11 @@ The local web setup runs Mailroom on your own computer from one command. Creatin
 The first start of a version builds that exact commit once. Running this command, with the full 40-character commit, is the owner's approval of that version:
 
 ```sh
-git -C <checkout> show <commit>:scripts/local-web.sh | /bin/bash -s -- approve <checkout> <commit>
+/usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin /usr/bin/git --no-replace-objects -C <checkout> show <commit>:scripts/local-web.sh |
+  /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin /bin/bash -s -- approve <checkout> <commit>
 ```
 
-The script that runs comes from the commit, never from the working tree. It exports the commit with `git archive`, builds the UI and the release binary in a cleared environment with a private home, cargo home and npm cache under `/private/tmp`, and refuses to build below any `.cargo` directory. It publishes the result read-only to `~/Library/Application Support/Mailroom Web Runtime/versions/<commit>` with one rename. It pins the binary, the UI tree and the launcher by SHA-256, installs the launcher as `start` and starts the server.
+The script that runs comes from the commit, never from the working tree. The command ignores Git replacement objects and clears the environment before either Git or Bash starts. It exports the commit with `git archive`, builds the UI and the release binary in a cleared environment with a private home, cargo home and npm cache under `/private/tmp`, and refuses to build below any `.cargo` directory. It publishes the result read-only to `~/Library/Application Support/Mailroom Web Runtime/versions/<commit>` with one rename. It pins the binary, the UI tree and the launcher by SHA-256, installs the launcher as `start` and starts the server.
 
 Every later start is one command, with no build, install or checkout access:
 
@@ -28,7 +29,7 @@ Account passwords and census keys live in one encrypted file, `~/.config/mailroo
 
 The format is fixed by its version: Argon2id v0x13 with 64 MiB, 3 passes and 4 lanes derives the AES-256-GCM key from the password and a random salt. The header is authenticated. Every write uses a fresh random nonce and a higher generation, is synced to disk and replaces the file with one rename. Bounds are checked before any key derivation, so a damaged or oversized file costs nothing to refuse. A wrong password and a modified file give the same refusal. Mailroom refuses, and never repairs, a vault file that is a link, has another owner, more than one link, or permissions beyond `0600`, and a root directory that others can write.
 
-One server owns the vault for its whole life. A second server stops with `status=vault_in_use` before it binds the port. If another program replaces the vault file while it is open, Mailroom forgets the key and asks for the master password again.
+One server owns the vault for its whole life. A second server stops with `status=vault_in_use` before it binds the port. Before changing credentials, Mailroom checks whether another program replaced the vault file. If so, it forgets the key and asks for the master password again. Reads use the unlocked copy in memory and do not detect replacement on their own.
 
 ## Accounts
 

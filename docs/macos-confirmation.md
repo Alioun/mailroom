@@ -1,5 +1,7 @@
 # Native confirmation and protected Keychain credentials on macOS
 
+This page covers the native setup. The browser-only [local web setup](local-web.md) keeps its credentials in an encrypted vault instead and has its own threat model.
+
 The mailroom binary itself holds Keychain access. A small Swift helper in `native/macos`, `mailroom-confirm`, shows one exact action and returns a signed answer. Mailroom launches it only when the running process has the cdhash pinned into the mailroom binary at build time. Both binaries are ad-hoc signed with the hardened runtime and published, owned by the owner, in the checkout's `build/local/<commit>`.
 
 ## Exact-action requests

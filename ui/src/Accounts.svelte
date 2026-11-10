@@ -15,6 +15,8 @@
   import Invoices from './Invoices.svelte'
   import Unsubscribe from './Unsubscribe.svelte'
   import RulesProof from './RulesProof.svelte'
+  import Vault from './Vault.svelte'
+  import ConnectAccount from './ConnectAccount.svelte'
   import { readAccountStatus, listAccounts, syntheticAccount, scanAccount, cancelAccount, confirmAccount, type Account, type AccountStatus } from './api'
   import { accountWorkspace, type SavedAccountState } from './account-workspace'
   let unsubscribe: Unsubscribe | undefined = $state()
@@ -22,6 +24,8 @@
   const strings = {
     en: {
       title: 'Accounts', detail: 'Saved account census and local lifecycle. Add real accounts through local setup. Real provider writes remain locked.',
+      webDetail: 'Add your mail accounts here and open their saved census. Mailroom only reads from providers; every provider write stays locked.',
+      connectionFailed: 'connection failed', connectionUnverified: 'connection not checked',
       protectedUnavailable: 'Use scripts/setup.sh to add or update local accounts. This page opens saved accounts.',
       synthetic: 'Synthetic account verification. Temporary files and fake credentials only. No provider or OS credential store is contacted.', add: 'Add synthetic account', addGmail: 'Add synthetic Gmail account',
       load: 'Load saved accounts', choose: 'Choose an account', scan: 'Run or resume account census', cancel: 'Cancel account census', open: 'Open saved census',
@@ -35,6 +39,8 @@
     },
     de: {
       title: 'Konten', detail: 'Gespeicherte Kontoerfassung und lokale Kontoverwaltung. Echte Konten werden über die lokale Einrichtung hinzugefügt. Anbieteränderungen bleiben gesperrt.',
+      webDetail: 'Füge hier deine Postfächer hinzu und öffne ihre gespeicherte Erfassung. Mailroom liest bei Anbietern nur; alle Änderungen beim Anbieter bleiben gesperrt.',
+      connectionFailed: 'Verbindung fehlgeschlagen', connectionUnverified: 'Verbindung nicht geprüft',
       protectedUnavailable: 'Lokale Konten mit scripts/setup.sh anlegen oder ändern. Hier werden gespeicherte Konten geöffnet.',
       synthetic: 'Synthetische Kontoprüfung. Nur temporäre Dateien und erfundene Zugangsdaten. Kein Anbieter oder Zugangsdaten-Speicher des Betriebssystems wird kontaktiert.', add: 'Synthetisches Konto hinzufügen', addGmail: 'Synthetisches Gmail-Konto hinzufügen',
       load: 'Gespeicherte Konten laden', choose: 'Konto wählen', scan: 'Kontoerfassung starten oder fortsetzen', cancel: 'Kontoerfassung abbrechen', open: 'Gespeicherte Erfassung öffnen',
@@ -59,6 +65,8 @@
   type AccountLoad = { kind: 'loading'; revision: number } | { kind: 'ready' } | { kind: 'error' }
   let accountLoad = $state<AccountLoad>({ kind: 'loading', revision: 0 })
   let running = $derived(status?.job?.progress.state === 'running')
+  let web = $derived(status?.source === 'vault')
+  let sealed = $derived(web && status?.vault !== 'unlocked')
   let active = true
   let polling = false
   let cacheEpoch = $state(0)
@@ -70,7 +78,9 @@
     workspace.clear()
     error = ''
     try {
-      const [next, saved] = await Promise.all([readAccountStatus(), listAccounts()])
+      const next = await readAccountStatus()
+      // A locked vault refuses the account list, so only its unlock form is shown.
+      const saved = next.source === 'vault' && next.vault !== 'unlocked' ? [] : await listAccounts()
       if (!active || requestedRevision !== revision) return
       accounts = saved
       if (!accounts.some(account => account.id === selected)) selected = ''
@@ -97,7 +107,11 @@
   }
   async function act(action: () => Promise<void>) {
     revision += 1; busy = true; error = ''
-    try { await action() } catch { error = t.loadError } finally { busy = false }
+    try { await action() } catch {
+      error = t.loadError
+      // The vault may have locked itself; the status shows its unlock form again.
+      if (web) await readAccountStatus().then(accept).catch(() => {})
+    } finally { busy = false }
   }
   async function refresh() {
     if (polling || busy) return
@@ -105,12 +119,16 @@
     const requestedRevision = revision
     try {
       const next = await readAccountStatus()
-      if (active && requestedRevision === revision) accept(next)
+      if (active && requestedRevision === revision) {
+        accept(next)
+        // A finished connection changes the saved account's connection state.
+        if (next.source === 'vault' && next.job?.progress.state !== 'running') void loadAccounts()
+      }
     } catch { if (active && requestedRevision === revision) error = t.loadError } finally { polling = false }
   }
   $effect(() => {
     const account = selected
-    if (accountLoad.kind !== 'ready' || running) { workspace.clear(); return }
+    if (accountLoad.kind !== 'ready' || running || sealed) { workspace.clear(); return }
     void workspace.load(account)
   })
   onMount(() => {
@@ -122,16 +140,21 @@
 
 <section class="accounts" aria-labelledby="accounts-heading" aria-busy={accountLoad.kind === 'loading'}>
   <h2 id="accounts-heading">{t.title}</h2>
-  <p>{t.detail}</p>
+  <p>{web ? t.webDetail : t.detail}</p>
   {#if accountLoad.kind === 'loading'}
     <p role="status">{t.loading}</p>
   {:else if accountLoad.kind === 'error'}
     <div class="account-load-error"><p role="alert">{t.loadError}</p><button onclick={loadAccounts}>{t.retry}</button></div>
   {/if}
+  {#if status && sealed}
+    <Vault {status} {lang} onOpened={(next) => { accept(next); void loadAccounts() }} />
+  {:else}
   {#if status?.synthetic}
     <p class="source">{t.synthetic}</p>
     <button disabled={busy || running || accountLoad.kind === 'loading'} onclick={() => act(async () => { selected = ''; workspace.clear(); accept(await syntheticAccount()) })}>{t.add}</button>
     <button disabled={busy || running || accountLoad.kind === 'loading'} onclick={() => act(async () => { selected = ''; workspace.clear(); accept(await syntheticAccount(true)) })}>{t.addGmail}</button>
+  {:else if status && web}
+    <ConnectAccount {status} account={accounts.find(a => a.id === selected)} disabled={busy || accountLoad.kind === 'loading'} {lang} onStatus={(next) => { selected = next.job?.account?.id ?? selected; workspace.clear(); accept(next) }} />
   {:else if status}
     <p>{t.protectedUnavailable}</p>
   {/if}
@@ -139,7 +162,7 @@
   <div class="census-actions">
     <button disabled={busy || running || accountLoad.kind === 'loading'} onclick={loadAccounts}>{t.load}</button>
     {#if accounts.length}
-      <label>{t.choose}<select bind:value={selected} disabled={busy || running}><option value="">{t.choose}</option>{#each accounts as account (account.id)}<option value={account.id}>{account.login} · {account.provider === 'gmail' ? 'Gmail' : 'mailbox.org'}</option>{/each}</select></label>
+      <label>{t.choose}<select bind:value={selected} disabled={busy || running}><option value="">{t.choose}</option>{#each accounts as account (account.id)}<option value={account.id}>{account.login} · {account.provider === 'gmail' ? 'Gmail' : 'mailbox.org'}{web && account.connection === 'failed' ? ` · ${t.connectionFailed}` : web && account.connection === 'unverified' ? ` · ${t.connectionUnverified}` : ''}</option>{/each}</select></label>
       <button disabled={busy || running || !selected} onclick={() => act(async () => { workspace.clear(); accept(await scanAccount(selected)) })}>{t.scan}</button>
       <button disabled={busy || !running} onclick={() => act(async () => { accept(await cancelAccount()) })}>{t.cancel}</button>
       <button disabled={busy || running || !selected || savedAccount.kind === 'loading'} onclick={() => workspace.load(selected)}>{t.open}</button>
@@ -151,7 +174,7 @@
   {#if busy}<p role="status">{t.working}</p>{/if}
   {#if status?.job}
     <div aria-live="polite">{#if status.job.account}<p>{t.activity} · {status.job.account.login}</p>{/if}<p class="scan-state">{t[status.job.progress.state]}</p><p>{status.job.progress.saved} {t.saved} · {status.job.progress.folders} {t.folders}</p></div>
-    {#if status.job.error}<p role="alert">{t.error}</p>{/if}
+    {#if status.job.error && !web}<p role="alert">{t.error}</p>{/if}
   {/if}
   {#if selected}
     <nav class="account-tasks" aria-label={t.tools}>
@@ -198,5 +221,6 @@
       <details><summary>{t.details}</summary>{#each Object.entries(view.census.folders) as [name, folder] (name)}<h3>{name}</h3><p>{Object.keys(folder.messages).length} {t.saved} · UIDVALIDITY {folder.uidvalidity}</p>{#each Object.values(folder.messages) as message (message.uid)}<p>{message.headers.subject} · {message.headers.direction} · UID {message.uid}</p>{/each}{/each}</details>
     {/if}
   </div>
+  {/if}
   <p class="help">{t.limits}</p>
 </section>

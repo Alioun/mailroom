@@ -77,9 +77,13 @@ export async function censusAction(action: 'start' | 'cancel' | 'confirm', input
   })))
 }
 
-const account = z.object({ id: z.string(), provider: z.enum(['mailbox_org', 'gmail']), login: z.string() })
+const account = z.object({ id: z.string(), provider: z.enum(['mailbox_org', 'gmail']), login: z.string(), connection: z.enum(['unverified', 'observed', 'failed']) })
 const accountStatus = z.object({
   synthetic: z.boolean(),
+  source: z.enum(['native', 'unavailable', 'installed', 'synthetic', 'vault']),
+  vault: z.enum(['absent', 'locked', 'unlocked', 'unavailable']).nullable(),
+  vault_problem: z.enum(['unsafe_file', 'damaged', 'unsupported_version']).nullable(),
+  interrupted: z.array(z.string()),
   job: z.object({ account: account.nullable(), progress: z.object({ state: z.enum(['idle', 'running', 'cancelled', 'complete', 'failed']), saved: z.number(), folders: z.number() }), error: z.string().nullable() }).nullable(),
 })
 const accountView = z.object({
@@ -102,6 +106,23 @@ async function accountPost(action: string, input: unknown): Promise<unknown> {
 export async function readAccountStatus(): Promise<AccountStatus> { return accountStatus.parse(await responseJson(await localFetch('/api/accounts/status'))) }
 export async function listAccounts(): Promise<Account[]> { return z.array(account).parse(await accountPost('list', {})) }
 export async function connectAccount(input: { provider: Account['provider']; login: string; password: string }): Promise<AccountStatus> { return accountStatus.parse(await accountPost('connect', input)) }
+export async function reconnectAccount(account: string, password?: string): Promise<AccountStatus> { return accountStatus.parse(await accountPost('reconnect', password === undefined ? { account } : { account, password })) }
+export async function finishInterrupted(account: string): Promise<AccountStatus> { return accountStatus.parse(await accountPost('interrupted', { account })) }
+/** A refused vault action, named by the server's fixed code. */
+export class VaultRefusal extends Error {
+  constructor(readonly code: string) { super(code) }
+}
+async function vaultPost(action: 'create' | 'unlock', input: unknown): Promise<AccountStatus> {
+  const response = await localFetch(`/api/vault/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) })
+  const value: unknown = await response.json().catch(() => null)
+  if (!response.ok) {
+    const refusal = z.object({ code: z.string() }).safeParse(value)
+    throw new VaultRefusal(refusal.success ? refusal.data.code : 'unavailable')
+  }
+  return accountStatus.parse(value)
+}
+export async function createVault(password: string, confirmation: string): Promise<AccountStatus> { return vaultPost('create', { password, confirmation }) }
+export async function unlockVault(password: string): Promise<AccountStatus> { return vaultPost('unlock', { password }) }
 export async function syntheticAccount(gmail = false): Promise<AccountStatus> { return accountStatus.parse(await accountPost(gmail ? 'synthetic-gmail' : 'synthetic', {})) }
 export async function scanAccount(account: string): Promise<AccountStatus> { return accountStatus.parse(await accountPost('scan', { account })) }
 export async function cancelAccount(): Promise<AccountStatus> { return accountStatus.parse(await accountPost('cancel', {})) }

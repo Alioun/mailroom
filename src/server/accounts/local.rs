@@ -238,7 +238,7 @@ mod tests {
             app.accounts.source = AccountSource::Installed {
                 accounts: services.accounts,
             };
-            app.accounts.ledger = Some(services.ledger);
+            app.accounts.installed_ledger = Some(services.ledger);
             assert!(!app.accounts.synthetic());
             assert!(app.accounts.local_bookkeeping());
             Arc::new(app)
@@ -354,7 +354,13 @@ mod tests {
         )
         .await;
         {
-            let guard = reopened.accounts.ledger.as_ref().unwrap().lock().unwrap();
+            let guard = reopened
+                .accounts
+                .installed_ledger
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap();
             let snapshot = guard.read().unwrap();
             let mut document = snapshot.document;
             document.entries[0].note = "external private edit".into();
@@ -518,7 +524,7 @@ mod tests {
         state.accounts.source = AccountSource::Installed {
             accounts: local.accounts,
         };
-        state.accounts.ledger = Some(local.ledger);
+        state.accounts.installed_ledger = Some(local.ledger);
         let app = Arc::new(state);
         let store = fresh.store(&fresh.load(&f.account.id).unwrap()).unwrap();
         let before = std::fs::read(store.path()).unwrap();

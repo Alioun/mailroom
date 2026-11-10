@@ -53,7 +53,7 @@ pub(in crate::server) async fn handle(
         let store = repo.store(&account).map_err(|e| e.to_string())?;
         let mut saved = store.load_state().map_err(|e| e.to_string())?;
         let context = repo.workspace_context(&account, &store).map_err(|e| e.to_string())?;
-        let guard = state.accounts.ledger.as_ref().map(|l| l.lock()).transpose()?;
+        let guard = state.accounts.ledger().map_err(|e| e.to_string())?.map(|l| l.lock()).transpose()?;
         sync_ledger(&mut saved, &store, &context, guard.as_ref())?;
         let mut report = saved
             .census

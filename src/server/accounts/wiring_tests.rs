@@ -127,7 +127,7 @@ fn app(f: &Fixture, fake: Fake) -> Arc<AppState> {
         _directory: tempfile::tempdir().unwrap(),
         mailboxes: f.root.path().join("mailboxes"),
     };
-    app.accounts.ledger =
+    app.accounts.installed_ledger =
         Some(crate::ledger::InstalledLedger::install(f.root.path().join("ledger")).unwrap());
     app.accounts.writes = Endpoints::Fake(fake);
     Arc::new(app)

@@ -165,6 +165,11 @@ impl Vault {
     pub(crate) fn open(root: &Path) -> Result<Self, VaultError> {
         Self::open_with(root, Cost::Standard)
     }
+    /// A vault with a cheap key derivation, which never opens a standard vault.
+    #[cfg(test)]
+    pub(crate) fn open_for_tests(root: &Path) -> Result<Self, VaultError> {
+        Self::open_with(root, Cost::Test)
+    }
     fn open_with(root: &Path, cost: Cost) -> Result<Self, VaultError> {
         let directory = crate::private_fs::prepare(root).map_err(|_| VaultError::Unsafe)?;
         let lease = lease(&directory)?;

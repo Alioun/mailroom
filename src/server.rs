@@ -35,14 +35,36 @@ struct AppState {
 
 impl AppState {
     fn new(synthetic_accounts: bool) -> Self {
+        Self::with_accounts(accounts::AccountController::new(synthetic_accounts))
+    }
+    fn with_accounts(accounts: accounts::AccountController) -> Self {
         let mut random = Zeroizing::new([0; 32]);
         OsRng.fill_bytes(random.as_mut());
         Self {
-            accounts: accounts::AccountController::new(synthetic_accounts),
+            accounts,
             token: Zeroizing::new(data_encoding::HEXLOWER.encode(random.as_ref())),
             demo: Mutex::new(DemoCensus::new().expect("synthetic sandbox must be writable")),
         }
     }
+}
+
+/// While the vault is locked, every account route but status answers 423 before its handler.
+async fn vault_gate(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    if path.starts_with("/api/accounts/")
+        && path != "/api/accounts/status"
+        && state.accounts.vault_locked()
+    {
+        return (
+            StatusCode::LOCKED,
+            Json(json!({
+                "error": crate::acquisition::AcquisitionError::VaultLocked.to_string(),
+                "code": "vault_locked",
+            })),
+        )
+            .into_response();
+    }
+    next.run(request).await
 }
 
 async fn boundary(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
@@ -273,6 +295,19 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/accounts/lifecycle", post(accounts::lifecycle::handle))
         .route("/api/accounts/recovery", post(accounts::recovery::handle))
         .route("/api/accounts/connect", post(accounts::connect))
+        .route("/api/accounts/reconnect", post(accounts::web::reconnect))
+        .route(
+            "/api/accounts/interrupted",
+            post(accounts::web::finish_interrupted),
+        )
+        .route(
+            "/api/vault/create",
+            post(accounts::web::create).layer(DefaultBodyLimit::max(VAULT_BODY_LIMIT)),
+        )
+        .route(
+            "/api/vault/unlock",
+            post(accounts::web::unlock).layer(DefaultBodyLimit::max(VAULT_BODY_LIMIT)),
+        )
         .route("/api/accounts/synthetic", post(accounts::synthetic))
         .route(
             "/api/accounts/synthetic-gmail",
@@ -333,15 +368,34 @@ fn router(state: Arc<AppState>) -> Router {
                 .unwrap_or(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/dist")),
         ))
         .layer(DefaultBodyLimit::max(256 * 1024))
+        .layer(middleware::from_fn_with_state(state.clone(), vault_gate))
         .layer(middleware::from_fn_with_state(state.clone(), boundary))
         .with_state(state)
 }
 
+const VAULT_BODY_LIMIT: usize = 16 * 1024;
+
 pub async fn run() -> std::io::Result<()> {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let synthetic = arguments.iter().any(|arg| arg == "--synthetic-accounts");
+    let local_vault = arguments.iter().any(|arg| arg == "--local-vault");
+    let state = if local_vault {
+        if synthetic {
+            println!("status=conflicting_modes");
+            return Err(std::io::Error::other("conflicting modes"));
+        }
+        // The vault takes its lease before the port is bound, so a second server stops here.
+        match accounts::AccountController::local_vault() {
+            Ok(accounts) => AppState::with_accounts(accounts),
+            Err(error) => {
+                println!("status=vault_{}", error.code());
+                return Err(std::io::Error::other("vault unavailable"));
+            }
+        }
+    } else {
+        AppState::new(synthetic)
+    };
     let listener = tokio::net::TcpListener::bind(ADDRESS).await?;
-    let synthetic = std::env::args()
-        .skip(1)
-        .any(|arg| arg == "--synthetic-accounts");
     println!("mailroom local interface: {ORIGIN}");
-    axum::serve(listener, build_app(synthetic)).await
+    axum::serve(listener, router(Arc::new(state))).await
 }

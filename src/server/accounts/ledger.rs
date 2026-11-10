@@ -41,7 +41,7 @@ pub(in crate::server) async fn handle(
         if store.recovery_pending() { return Err("Fresh provider evidence and reconciliation required after recovery".into()); }
         let mut saved = store.load_state().map_err(|e| e.to_string())?;
         let context = repo.workspace_context(&account, &store).map_err(|e| e.to_string())?;
-        let installed = state.accounts.ledger.as_ref().ok_or("No installed ledger")?;
+        let installed = state.accounts.ledger().map_err(|e| e.to_string())?.ok_or("No installed ledger")?;
         let guard = installed.lock()?;
         let snapshot = guard.read()?;
         let changed = ledger::reconcile(&mut saved, &snapshot, &context)?;

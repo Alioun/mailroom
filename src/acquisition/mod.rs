@@ -16,6 +16,7 @@ use crate::census::CensusError;
 pub(crate) use accounts::keychain;
 pub use accounts::lifecycle;
 pub(crate) use accounts::recovery;
+pub(crate) use accounts::vault;
 pub use accounts::{
     Account, AccountPaths, Accounts, CredentialBackend, OsCredentials, Provider, SecretValue,
 };

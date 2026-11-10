@@ -13,6 +13,7 @@ pub(super) mod recovery;
 pub(super) mod sieve_transactions;
 pub(super) mod subscription_review;
 pub(super) mod unsubscribe;
+pub(super) mod web;
 pub(super) mod winddown;
 #[cfg(test)]
 mod wiring_tests;
@@ -20,7 +21,7 @@ use super::{AppState, EmptyRequest};
 use crate::{
     acquisition::{
         self, Account, AccountPaths, Accounts, AcquisitionError, Cancellation, OsCredentials,
-        Provider, ScanProgress, SecretValue,
+        Provider, ScanProgress, SecretValue, vault::Vault,
     },
     census::{AccountId, Census, ScanState},
     policy::{self, Operation},
@@ -42,7 +43,8 @@ pub(super) struct AccountController {
     operation: Mutex<()>,
     admission: Mutex<()>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
-    ledger: Option<crate::ledger::InstalledLedger>,
+    /// Read only through `ledger()`, which refuses while the vault is locked.
+    installed_ledger: Option<crate::ledger::InstalledLedger>,
     confirmations: Mutex<crate::confirmation::Boundary>,
     /// The real send, one-click and mail-app adapters, each behind a write permit.
     writes: crate::send::wiring::Endpoints,
@@ -59,6 +61,11 @@ enum AccountSource {
         accounts: Arc<Accounts>,
         _directory: tempfile::TempDir,
         mailboxes: std::path::PathBuf,
+    },
+    /// The browser setup: its own roots, every credential in the vault.
+    Vault {
+        accounts: Arc<Accounts>,
+        vault: Arc<Vault>,
     },
 }
 #[derive(Clone, Serialize)]
@@ -131,8 +138,11 @@ impl AccountController {
             }
             _ => installed_ledger,
         };
+        Self::assemble(source, ledger)
+    }
+    fn assemble(source: AccountSource, ledger: Option<crate::ledger::InstalledLedger>) -> Self {
         Self {
-            confirmations: Mutex::new(if synthetic {
+            confirmations: Mutex::new(if matches!(source, AccountSource::Synthetic { .. }) {
                 crate::confirmation::Boundary::synthetic()
             } else {
                 crate::confirmation::Boundary::native()
@@ -140,7 +150,7 @@ impl AccountController {
             writes: crate::send::wiring::Endpoints::Real,
             #[cfg(test)]
             repository_accesses: std::sync::atomic::AtomicUsize::new(0),
-            ledger,
+            installed_ledger: ledger,
             source,
             job: Mutex::new(None),
             operation: Mutex::new(()),
@@ -161,16 +171,36 @@ impl AccountController {
             AccountSource::Installed { accounts } | AccountSource::Synthetic { accounts, .. } => {
                 Ok(accounts.clone())
             }
+            AccountSource::Vault { accounts, vault } if vault.unlocked() => Ok(accounts.clone()),
+            AccountSource::Vault { .. } => Err(AcquisitionError::VaultLocked),
         }
+    }
+    /// The installed ledger, refused while the vault is locked like every account route.
+    fn ledger(&self) -> Result<Option<&crate::ledger::InstalledLedger>, AcquisitionError> {
+        if self.vault_locked() {
+            return Err(AcquisitionError::VaultLocked);
+        }
+        Ok(self.installed_ledger.as_ref())
+    }
+    fn vault(&self) -> Option<&Arc<Vault>> {
+        match &self.source {
+            AccountSource::Vault { vault, .. } => Some(vault),
+            _ => None,
+        }
+    }
+    pub(super) fn vault_locked(&self) -> bool {
+        self.vault().is_some_and(|vault| !vault.unlocked())
     }
     fn synthetic(&self) -> bool {
         matches!(self.source, AccountSource::Synthetic { .. })
     }
     fn local_bookkeeping(&self) -> bool {
-        self.ledger.is_some()
+        self.installed_ledger.is_some()
             && matches!(
                 self.source,
-                AccountSource::Installed { .. } | AccountSource::Synthetic { .. }
+                AccountSource::Installed { .. }
+                    | AccountSource::Synthetic { .. }
+                    | AccountSource::Vault { .. }
             )
     }
     fn reserve(&self) -> Result<Cancellation, AcquisitionError> {
@@ -243,7 +273,23 @@ fn input<T>(value: Result<Json<T>, JsonRejection>) -> Result<T, Response> {
     }
 }
 pub(super) async fn status(State(state): State<Arc<AppState>>) -> Response {
-    Json(json!({"synthetic": state.accounts.synthetic(), "job": state.accounts.job.lock().expect("account job").clone()})).into_response()
+    let accounts = &state.accounts;
+    let source = match &accounts.source {
+        AccountSource::Os => "native",
+        AccountSource::Unavailable => "unavailable",
+        AccountSource::Installed { .. } => "installed",
+        AccountSource::Synthetic { .. } => "synthetic",
+        AccountSource::Vault { .. } => "vault",
+    };
+    Json(json!({
+        "synthetic": accounts.synthetic(),
+        "source": source,
+        "vault": accounts.vault().map(|vault| vault.status()),
+        "vault_problem": accounts.vault().and_then(|vault| vault.problem()),
+        "interrupted": web::interrupted(accounts),
+        "job": accounts.job.lock().expect("account job").clone(),
+    }))
+    .into_response()
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -254,12 +300,27 @@ pub(super) struct ConnectRequest {
 }
 pub(super) async fn connect(
     State(state): State<Arc<AppState>>,
-    _body: Result<Json<ConnectRequest>, JsonRejection>,
+    body: Result<Json<ConnectRequest>, JsonRejection>,
 ) -> Response {
-    if state.accounts.synthetic() {
+    if state.accounts.vault().is_none() {
+        if state.accounts.synthetic() {
+            return failure(AcquisitionError::InvalidInput);
+        }
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"Protected account installation is unavailable. Production account creation is denied before credential or provider access."}))).into_response();
+    }
+    let request = match input(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if !policy::authorize(Operation::Connect).allowed {
         return failure(AcquisitionError::InvalidInput);
     }
-    (StatusCode::FORBIDDEN, Json(json!({"error":"Protected account installation is unavailable. Production account creation is denied before credential or provider access."}))).into_response()
+    launch_connection(state, move |repo| {
+        repo.create_reviewed(request.provider, request.login, &request.password, |_| {
+            web::connect_allowed()
+        })
+    })
+    .await
 }
 pub(super) async fn synthetic(
     State(state): State<Arc<AppState>>,
@@ -286,17 +347,21 @@ pub(super) async fn synthetic_gmail(
     synthetic_connection(state, Provider::Gmail).await
 }
 async fn synthetic_connection(state: Arc<AppState>, provider: Provider) -> Response {
-    launch_connection(
-        state,
-        ConnectRequest {
+    launch_connection(state, move |repo| {
+        repo.create(
             provider,
-            login: "owner@example.test".into(),
-            password: SecretValue::new(b"synthetic-account-password".to_vec()),
-        },
-    )
+            "owner@example.test".into(),
+            &SecretValue::new(b"synthetic-account-password".to_vec()),
+        )
+    })
     .await
 }
-async fn launch_connection(state: Arc<AppState>, input: ConnectRequest) -> Response {
+/// Runs `establish` in the account worker, then probes the account it returns read-only and
+/// records whether the provider accepted the connection.
+async fn launch_connection(
+    state: Arc<AppState>,
+    establish: impl FnOnce(&Accounts) -> Result<Account, AcquisitionError> + Send + 'static,
+) -> Response {
     let admission = match state.accounts.admission.try_lock() {
         Ok(guard) => guard,
         Err(_) => return failure(AcquisitionError::LifecyclePending),
@@ -310,7 +375,7 @@ async fn launch_connection(state: Arc<AppState>, input: ConnectRequest) -> Respo
         let _operation = worker.accounts.operation.lock().expect("account operation");
         let result = (|| {
             let repo = worker.accounts.repository()?;
-            let account = repo.create(input.provider, input.login, &input.password)?;
+            let account = establish(&repo)?;
             worker
                 .accounts
                 .job
@@ -776,8 +841,7 @@ async fn workspace_action(
         let context = repo.workspace_context(&account, &store)?;
         let ledger_guard = state
             .accounts
-            .ledger
-            .as_ref()
+            .ledger()?
             .map(|l| l.lock())
             .transpose()
             .map_err(|_| AcquisitionError::Storage)?;
@@ -881,7 +945,7 @@ async fn provider_evidence_server_fixture() {
         _directory: tempfile::tempdir().unwrap(),
         mailboxes: root.join("mailboxes"),
     };
-    state.accounts.ledger =
+    state.accounts.installed_ledger =
         Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
     let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
     axum::serve(listener, super::router(Arc::new(state)))
@@ -905,7 +969,7 @@ async fn durable_browser_server_fixture() {
         _directory: tempfile::tempdir().unwrap(),
         mailboxes: std::path::Path::new(&root).join("mailboxes"),
     };
-    state.accounts.ledger = Some(
+    state.accounts.installed_ledger = Some(
         crate::ledger::InstalledLedger::install(
             std::env::var_os("MAILROOM_RECOVERY_LEDGER")
                 .map(std::path::PathBuf::from)
@@ -1071,7 +1135,7 @@ async fn managesieve_server_fixture() {
         _directory: tempfile::tempdir().unwrap(),
         mailboxes: root.join("mailboxes"),
     };
-    state.accounts.ledger =
+    state.accounts.installed_ledger =
         Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
     let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
     axum::serve(listener, super::router(Arc::new(state)))
@@ -1098,7 +1162,7 @@ async fn managesieve_transactions_server_fixture() {
         _directory: tempfile::tempdir().unwrap(),
         mailboxes: root.join("mailboxes"),
     };
-    state.accounts.ledger =
+    state.accounts.installed_ledger =
         Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
     let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
     axum::serve(listener, super::router(Arc::new(state)))
@@ -1125,7 +1189,7 @@ async fn folder_provisioning_server_fixture() {
         _directory: tempfile::tempdir().unwrap(),
         mailboxes: root.join("mailboxes"),
     };
-    state.accounts.ledger =
+    state.accounts.installed_ledger =
         Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
     let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
     axum::serve(listener, super::router(Arc::new(state)))
@@ -1148,7 +1212,7 @@ async fn envelope_keyword_server_fixture() {
         _directory: tempfile::tempdir().unwrap(),
         mailboxes: root.join("mailboxes"),
     };
-    state.accounts.ledger =
+    state.accounts.installed_ledger =
         Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
     let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
     axum::serve(listener, super::router(Arc::new(state)))
@@ -1173,7 +1237,7 @@ async fn gmail_backlog_server_fixture() {
         _directory: tempfile::tempdir().unwrap(),
         mailboxes: root.join("mailboxes"),
     };
-    state.accounts.ledger =
+    state.accounts.installed_ledger =
         Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
     let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
     axum::serve(listener, super::router(Arc::new(state)))
@@ -1198,7 +1262,7 @@ async fn backlog_protocol_server_fixture() {
         _directory: tempfile::tempdir().unwrap(),
         mailboxes: root.join("mailboxes"),
     };
-    state.accounts.ledger =
+    state.accounts.installed_ledger =
         Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
     let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
     axum::serve(listener, super::router(Arc::new(state)))

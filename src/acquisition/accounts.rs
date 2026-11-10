@@ -3,7 +3,6 @@ pub(crate) mod exclusive;
 pub(crate) mod keychain;
 pub mod lifecycle;
 pub(crate) mod recovery;
-#[cfg(unix)]
 pub(crate) mod vault;
 use super::AcquisitionError;
 use crate::census::{AccountId, AccountState, Census, CensusKeys, EncryptedStore, LocalSecret};
@@ -180,6 +179,18 @@ impl AccountPaths {
         Ok(Self {
             config,
             data: dirs.data_local_dir().join("mailroom"),
+        })
+    }
+    /// The browser setup's own roots. Nothing here touches the native setup's accounts.
+    pub fn local_web() -> Result<Self, AcquisitionError> {
+        let dirs = directories::BaseDirs::new().ok_or(AcquisitionError::Storage)?;
+        #[cfg(target_os = "macos")]
+        let config = dirs.home_dir().join(".config/mailroom-web");
+        #[cfg(not(target_os = "macos"))]
+        let config = dirs.config_dir().join("mailroom-web");
+        Ok(Self {
+            config,
+            data: dirs.data_local_dir().join("mailroom-web"),
         })
     }
 }

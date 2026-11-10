@@ -65,7 +65,7 @@ pub(in crate::server) async fn handle(
         let store = repo.store(&account).map_err(|e| e.to_string())?;
         if store.recovery_pending() && !matches!(request.command, Action::Open) { return Err("Fresh provider evidence and reconciliation required after recovery".into()); }
         let mut saved = store.load_state().map_err(|e| e.to_string())?;
-        let ledger_guard = if matches!(request.command, Action::Stop { .. }) { None } else { state.accounts.ledger.as_ref().map(|l| l.lock()).transpose()? };
+        let ledger_guard = if matches!(request.command, Action::Stop { .. }) { None } else { state.accounts.ledger().map_err(|e| e.to_string())?.map(|l| l.lock()).transpose()? };
         // Stop must persist even when the authoritative ledger needs repair.
         if !matches!(request.command, Action::Stop { .. }) {
             sync_ledger(&mut saved, &store, &repo.workspace_context(&account, &store).map_err(|e| e.to_string())?, ledger_guard.as_ref())?;

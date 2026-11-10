@@ -137,8 +137,7 @@ fn execute(
     }
     let guard = state
         .accounts
-        .ledger
-        .as_ref()
+        .ledger()?
         .map(|l| l.lock())
         .transpose()
         .map_err(|_| AcquisitionError::Storage)?;

@@ -395,8 +395,7 @@ fn execute(
     }
     let guard = state
         .accounts
-        .ledger
-        .as_ref()
+        .ledger()?
         .map(|l| l.lock())
         .transpose()
         .map_err(|_| AcquisitionError::Storage)?;
@@ -1129,7 +1128,7 @@ mod authority_matrix {
             _directory: tempfile::tempdir().unwrap(),
             mailboxes: root.join("mailboxes"),
         };
-        app.accounts.ledger =
+        app.accounts.installed_ledger =
             Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
         Installed {
             state: Arc::new(app),

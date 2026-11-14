@@ -55,7 +55,7 @@ pub(in crate::server) async fn handle(
             Ok(g) => g,
             Err(_) => return failure(AcquisitionError::LifecyclePending),
         };
-        let cancel = match state.accounts.reserve() {
+        let cancel = match state.accounts.reserve("sieve_probe") {
             Ok(c) => c,
             Err(e) => return failure(e),
         };

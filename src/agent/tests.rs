@@ -206,6 +206,7 @@ fn handshake() -> Vec<Value> {
 #[test]
 fn agent_stdio_requires_initialization_and_reports_only_staged_counts() {
     let (parent, exchange) = fixture();
+    assert!(!exchange.was_read());
     let mut requests = vec![
         json!({"jsonrpc":"2.0","id":0,"method":"tools/call","params":{"name":"read_reviewed_summary","arguments":{}}}),
     ];
@@ -238,6 +239,11 @@ fn agent_stdio_requires_initialization_and_reports_only_staged_counts() {
     assert_eq!(staged["rule_edits"], 0);
     assert_eq!(staged.as_object().unwrap().len(), 4);
     assert_eq!(responses[5]["result"]["isError"], true);
+    assert!(
+        files::Exchange::open(&parent.path().join("exchange"))
+            .unwrap()
+            .was_read()
+    );
     assert_eq!(
         fs::read_dir(parent.path().join("exchange/proposals"))
             .unwrap()

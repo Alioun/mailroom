@@ -1,5 +1,7 @@
-mod files;
+pub(crate) mod files;
+pub(crate) mod inbox;
 mod protocol;
+pub(crate) mod t3;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -86,15 +88,41 @@ pub fn run(arguments: &[String]) -> u8 {
         eprintln!("status=invalid_agent_command");
         return 64;
     };
-    if folder_flag != "--folder" || !matches!(command.as_str(), "init" | "serve") {
+    if folder_flag != "--folder"
+        || !matches!(command.as_str(), "init" | "serve" | "read" | "submit")
+    {
         eprintln!("status=invalid_agent_command");
         return 64;
     }
     let result = if command == "init" {
         files::Exchange::initialize(Path::new(folder)).map(|_| ())
-    } else {
+    } else if command == "serve" {
         files::Exchange::open(Path::new(folder))
             .and_then(|exchange| protocol::serve(exchange, io::stdin().lock(), io::stdout().lock()))
+    } else {
+        files::Exchange::open(Path::new(folder)).and_then(|exchange| {
+            let arguments = if command == "read" {
+                serde_json::json!({})
+            } else {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                io::stdin().take(REQUEST_LIMIT as u64 + 1).read_to_end(&mut bytes).map_err(|_| "invalid_proposal")?;
+                if bytes.len() > REQUEST_LIMIT { return Err("proposal_too_large"); }
+                serde_json::from_slice(&bytes).map_err(|_| "invalid_proposal")?
+            };
+            let name = if command == "read" { "read_reviewed_summary" } else { "submit_proposal" };
+            let input = format!("{}\n{}\n{}\n",
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"mailroom-local-client","version":"1"}}}),
+                serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+                serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":name,"arguments":arguments}}));
+            let mut output = Vec::new();
+            protocol::serve(exchange, io::Cursor::new(input), &mut output)?;
+            let reply = String::from_utf8(output).map_err(|_| "invalid_mcp_reply")?;
+            let reply: serde_json::Value = serde_json::from_str(reply.lines().last().ok_or("invalid_mcp_reply")?).map_err(|_| "invalid_mcp_reply")?;
+            if reply.get("error").is_some() || reply["result"]["isError"] == true { return Err("proposal_refused"); }
+            println!("{}", reply["result"]);
+            Ok(())
+        })
     };
     match result {
         Ok(()) => {

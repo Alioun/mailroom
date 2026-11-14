@@ -44,6 +44,7 @@ fn call(exchange: &Exchange, params: Value) -> Result<Value, &'static str> {
     match call.name.as_str() {
         "read_reviewed_summary" if call.arguments == json!({}) => {
             let summary = exchange.summary()?;
+            exchange.record_read()?;
             Ok(content(
                 json!({"summary_sha256":digest(summary.as_bytes()),"summary":summary}),
             ))

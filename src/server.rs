@@ -327,6 +327,7 @@ fn router(state: Arc<AppState>) -> Router {
             post(accounts::workspace_save),
         )
         .route("/api/accounts/proposals", post(accounts::proposals::handle))
+        .route("/api/accounts/assistant", post(accounts::assistant::handle))
         .route(
             "/api/accounts/agent-edits",
             post(accounts::agent_edits::handle),

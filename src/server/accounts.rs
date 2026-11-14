@@ -1,4 +1,5 @@
 pub(super) mod agent_edits;
+pub(super) mod assistant;
 pub(super) mod backlog;
 pub(super) mod backlog_protocol;
 mod disclosure;
@@ -38,6 +39,8 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 
 pub(super) struct AccountController {
+    #[cfg(test)]
+    assistant_cli: Option<crate::agent::t3::Client>,
     source: AccountSource,
     job: Mutex<Option<Job>>,
     operation: Mutex<()>,
@@ -70,6 +73,7 @@ enum AccountSource {
 }
 #[derive(Clone, Serialize)]
 struct Job {
+    operation: &'static str,
     #[serde(skip)]
     backlog_account: Option<AccountId>,
     #[serde(skip)]
@@ -142,6 +146,8 @@ impl AccountController {
     }
     fn assemble(source: AccountSource, ledger: Option<crate::ledger::InstalledLedger>) -> Self {
         Self {
+            #[cfg(test)]
+            assistant_cli: None,
             confirmations: Mutex::new(if matches!(source, AccountSource::Synthetic { .. }) {
                 crate::confirmation::Boundary::synthetic()
             } else {
@@ -203,7 +209,7 @@ impl AccountController {
                     | AccountSource::Vault { .. }
             )
     }
-    fn reserve(&self) -> Result<Cancellation, AcquisitionError> {
+    fn reserve(&self, operation: &'static str) -> Result<Cancellation, AcquisitionError> {
         let mut job = self.job.lock().expect("account job");
         if job
             .as_ref()
@@ -213,6 +219,7 @@ impl AccountController {
         }
         let cancel = Cancellation::default();
         *job = Some(Job {
+            operation,
             backlog_account: None,
             folder_account: None,
             sieve_account: None,
@@ -366,7 +373,7 @@ async fn launch_connection(
         Ok(guard) => guard,
         Err(_) => return failure(AcquisitionError::LifecyclePending),
     };
-    let cancel = match state.accounts.reserve() {
+    let cancel = match state.accounts.reserve("connect") {
         Ok(c) => c,
         Err(e) => return failure(e),
     };
@@ -428,7 +435,7 @@ pub(super) async fn scan(
         Ok(guard) => guard,
         Err(_) => return failure(AcquisitionError::LifecyclePending),
     };
-    let cancel = match state.accounts.reserve() {
+    let cancel = match state.accounts.reserve("scan") {
         Ok(c) => c,
         Err(e) => return failure(e),
     };

@@ -160,7 +160,7 @@ async fn lifecycle_cancels_and_joins_folder_work_before_rotation_and_clears_its_
         mailboxes: root.path().join("mailboxes"),
     };
     let state = Arc::new(app);
-    let cancel = state.accounts.reserve().unwrap();
+    let cancel = state.accounts.reserve("folders").unwrap();
     state
         .accounts
         .job

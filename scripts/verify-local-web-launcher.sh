@@ -81,12 +81,13 @@ git -C "$repo" replace "$original" "$replacement"
 printf 'printf "UNREVIEWED-STARTUP\\n"\n' >"$root/startup"
 out="$(
   export BASH_ENV="$root/startup"
-  uname() { printf 'UNREVIEWED-FUNCTION\n'; }
+  uname() { printf 'UNREVIEWED-FUNCTION\n' >"$HOME/exported-function-ran"; /usr/bin/uname "$@"; }
   export -f uname
   /usr/bin/env -i HOME="$home" PATH=/usr/bin:/bin /usr/bin/git --no-replace-objects -C "$repo" show "$commit:scripts/local-web.sh" |
     /usr/bin/env -i HOME="$home" PATH=/usr/bin:/bin /bin/bash -s -- approve "$repo" abc || true
 )"
 [[ "$out" == "status=commit_not_exact" ]] || die "only committed launcher code ran: $out"
+[[ ! -e "$home/exported-function-ran" ]] || die "the exported uname function ran"
 git -C "$repo" replace -d "$original" >/dev/null
 pass "the exact entry command ignores Git replacements, BASH_ENV and exported functions"
 

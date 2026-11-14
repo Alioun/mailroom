@@ -1313,6 +1313,8 @@ code {
 }
 @media (max-width: 767px) {
   .sidebar.mobile-drawer {
+    overflow-y: auto;
+    overscroll-behavior: contain;
     transform: none;
     width: min(280px, 90vw);
     z-index: 51;

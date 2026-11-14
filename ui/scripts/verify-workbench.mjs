@@ -257,6 +257,26 @@ try {
   check(
     "connect automatically starts the census and opens readable findings without report generation",
   );
+  await page.setViewportSize({ width: 667, height: 375 });
+  await page
+    .getByRole("button", { name: "Open navigation", exact: true })
+    .click();
+  const shortSettings = page
+    .locator(".mobile-drawer")
+    .getByRole("button", { name: "Settings", exact: true });
+  await shortSettings.scrollIntoViewIfNeeded();
+  const settingsBox = await shortSettings.boundingBox();
+  assert.ok(
+    settingsBox &&
+      settingsBox.y >= 0 &&
+      settingsBox.y + settingsBox.height <= 375,
+    "Settings remains reachable in a short landscape drawer",
+  );
+  await shortSettings.click();
+  await page.getByRole("heading", { name: "Settings", exact: true }).waitFor();
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await navigate("Overview");
+  check("short landscape navigation scrolls to Settings");
   await page.screenshot({
     path: join(artifacts, "overview-desktop.png"),
     fullPage: true,
@@ -574,6 +594,30 @@ try {
   await page.waitForFunction(() =>
     document.activeElement?.closest(".mobile-drawer"),
   );
+  await page.keyboard.press("Shift+Tab");
+  await page.waitForFunction(
+    () => document.activeElement?.closest(".mobile-drawer"),
+    null,
+    { timeout: 3000 },
+  );
+  assert.ok(
+    await page.evaluate(
+      () => document.activeElement?.closest(".mobile-drawer") !== null,
+    ),
+  );
+  for (let step = 0; step < 14; step++) {
+    await page.keyboard.press("Tab");
+    await page.waitForFunction(
+      () => document.activeElement?.closest(".mobile-drawer"),
+      null,
+      { timeout: 3000 },
+    );
+    assert.ok(
+      await page.evaluate(
+        () => document.activeElement?.closest(".mobile-drawer") !== null,
+      ),
+    );
+  }
   await page.keyboard.press("Escape");
   await page.waitForFunction(
     () =>

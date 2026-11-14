@@ -92,7 +92,7 @@ try {
   page.on('request', r => { if (r.url().endsWith('/api/accounts/backlog')) actions.push(r.postDataJSON().command.action) })
   await page.addInitScript(() => { window.cancelCsp = []; document.addEventListener('securitypolicyviolation', e => window.cancelCsp.push(e.violatedDirective)) })
   async function openAccount(id) {
-    await page.goto(base)
+    await page.goto(new URL('/advanced.html', base).href)
     await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()
     await page.locator('.accounts > .census-actions select').selectOption(id)
     await page.getByRole('button', { name: 'Open saved census', exact: true }).click()

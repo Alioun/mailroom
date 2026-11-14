@@ -24,6 +24,7 @@
     </ToggleGroup.Root>
   </header>
   <main id="main-content" tabindex="-1">
+    <p><a href="/">{lang === 'en' ? '← Back to workspace' : '← Zurück zum Arbeitsbereich'}</a></p>
     <div class="intro"><h1>{t.title}</h1><p>{t.intro}</p><div class="status-line"><span class="source">{lang === 'en' ? 'Local interface' : 'Lokale Oberfläche'}</span><span>{t.locked}</span></div></div>
     <Accounts {lang} />
     <details class="example-workspace">

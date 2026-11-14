@@ -30,7 +30,7 @@ try {
     assert.equal(route.request().postDataJSON().command.action, 'open', 'Ordering fixture never authorizes an effect')
     await route.fulfill({ json: fixture })
   })
-  await page.goto(base)
+  await page.goto(new URL('/advanced.html', base).href)
   const region = page.locator('.accounts .unsubscribe')
   await region.locator('.sender-group').first().waitFor()
   const observed = await region.locator('.sender-group').evaluateAll(groups => groups.map(group => ({

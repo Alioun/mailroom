@@ -56,7 +56,7 @@ try {
   await page.addInitScript(() => { window.envelopeCsp = []; document.addEventListener('securitypolicyviolation', e => window.envelopeCsp.push(e.violatedDirective)) })
   const rules = page.locator('.accounts .rules-proof')
   async function open(german = false) {
-    await page.goto(m.base)
+    await page.goto(new URL('/advanced.html', m.base).href)
     await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()
     await page.locator('.accounts > .census-actions select').selectOption(m.account)
     await page.getByRole('button', { name: 'Open saved census', exact: true }).click()

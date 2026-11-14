@@ -27,7 +27,7 @@ try {
   const rules = page.locator('.accounts .rules-proof')
   const panel = page.locator('.gmail-backlog')
   async function open(german = false) {
-    await page.goto(base)
+    await page.goto(new URL('/advanced.html', base).href)
     await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()
     await page.locator('.accounts > .census-actions select').selectOption(f.account)
     await page.getByRole('button', { name: 'Open saved census', exact: true }).click()

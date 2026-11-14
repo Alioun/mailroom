@@ -240,7 +240,7 @@ try {
       const response = await request(url.pathname + url.search, { method: incoming.method(), headers: await incoming.allHeaders(), body: incoming.postData() ?? '' })
       await route.fulfill({ status: response.status, headers: response.headers, body: response.body })
     })
-    await page.goto('http://127.0.0.1:4173', { waitUntil: 'domcontentloaded' })
+    await page.goto(new URL('/advanced.html', 'http://127.0.0.1:4173').href, { waitUntil: 'domcontentloaded' })
     await page.getByText('Loading saved accounts…', { exact: true }).waitFor()
     await page.keyboard.press('Tab')
     assert.equal(await page.getByRole('link', { name: 'Skip to content', exact: true }).evaluate(link => link === document.activeElement), true)

@@ -14,7 +14,7 @@ try {
     window.censusCspViolations = []
     document.addEventListener('securitypolicyviolation', event => window.censusCspViolations.push(event.violatedDirective))
   })
-  await page.goto('http://127.0.0.1:4173')
+  await page.goto(new URL('/advanced.html', 'http://127.0.0.1:4173').href)
   await page.getByText('Examples with invented mail', { exact: true }).click()
   const start = page.getByRole('button', { name: 'Start synthetic census', exact: true })
   await start.waitFor()

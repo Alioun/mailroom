@@ -17,7 +17,7 @@ try {
     window.ledgerCspViolations = []
     document.addEventListener('securitypolicyviolation', event => window.ledgerCspViolations.push(event.violatedDirective))
   })
-  await page.goto('http://127.0.0.1:4173')
+  await page.goto(new URL('/advanced.html', 'http://127.0.0.1:4173').href)
   await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()
   await page.locator('.accounts > .census-actions select').selectOption(retained.account)
   await page.getByRole('button', { name: 'Open saved census', exact: true }).click()

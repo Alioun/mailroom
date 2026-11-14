@@ -13,7 +13,7 @@ try {
     window.rulesCspViolations = []
     document.addEventListener('securitypolicyviolation', event => window.rulesCspViolations.push(event.violatedDirective))
   })
-  await page.goto('http://127.0.0.1:4173')
+  await page.goto(new URL('/advanced.html', 'http://127.0.0.1:4173').href)
   await page.getByText('Examples with invented mail', { exact: true }).click()
   const section = page.locator('.example-workspace').getByRole('region', { name: 'Rules and proof', exact: true })
   const run = section.getByRole('button', { name: 'Run sample preview', exact: true })

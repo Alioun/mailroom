@@ -84,7 +84,7 @@ const accountStatus = z.object({
   vault: z.enum(['absent', 'locked', 'unlocked', 'unavailable']).nullable(),
   vault_problem: z.enum(['unsafe_file', 'damaged', 'unsupported_version']).nullable(),
   interrupted: z.array(z.string()),
-  job: z.object({ account: account.nullable(), progress: z.object({ state: z.enum(['idle', 'running', 'cancelled', 'complete', 'failed']), saved: z.number(), folders: z.number() }), error: z.string().nullable() }).nullable(),
+  job: z.object({ operation: z.string().optional(), account: account.nullable(), progress: z.object({ state: z.enum(['idle', 'running', 'cancelled', 'complete', 'failed']), saved: z.number(), folders: z.number() }), error: z.string().nullable() }).nullable(),
 })
 const accountView = z.object({
   landing: landingReport,

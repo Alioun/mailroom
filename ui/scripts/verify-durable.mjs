@@ -13,7 +13,7 @@ try {
     window.durableCspViolations = []
     document.addEventListener('securitypolicyviolation', event => window.durableCspViolations.push(event.violatedDirective))
   })
-  await page.goto('http://127.0.0.1:4173')
+  await page.goto(new URL('/advanced.html', 'http://127.0.0.1:4173').href)
   await page.getByRole('button', { name: 'Add synthetic account', exact: true }).click()
   await page.locator('.accounts [aria-live=polite]').getByText('Account action complete', { exact: true }).waitFor()
   await page.getByRole('button', { name: 'Run or resume account census', exact: true }).click()

@@ -10,7 +10,7 @@ try {
   const errors = []
   page.on('pageerror', error => errors.push(error.message))
   await page.addInitScript(() => { window.invoiceCsp = []; document.addEventListener('securitypolicyviolation', event => window.invoiceCsp.push(event.violatedDirective)) })
-  await page.goto('http://127.0.0.1:4173')
+  await page.goto(new URL('/advanced.html', 'http://127.0.0.1:4173').href)
   const retained = JSON.parse(await readFile(fileURLToPath(new URL('../../.audit/invoice-retained.json', import.meta.url)), 'utf8'))
   await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()
   await page.locator('.accounts > .census-actions select').selectOption(retained.account)

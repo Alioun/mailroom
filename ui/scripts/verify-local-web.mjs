@@ -95,7 +95,7 @@ try {
   try { ({ chromium } = await import('playwright')); browser = await chromium.launch({ headless: true, timeout: 15_000 }) } catch (error) { browser = undefined; console.log(`browser unavailable: ${error.message.split('\n')[0]}`) }
   if (browser) {
     const page = await browser.newPage()
-    await page.goto(ORIGIN)
+    await page.goto(new URL('/advanced.html', ORIGIN).href)
     await page.getByRole('heading', { name: 'Create your Mailroom password' }).waitFor()
     assert.ok(await page.getByText('If you forget the master password, nobody can open the vault').isVisible())
     await page.getByLabel('Master password', { exact: true }).fill(MASTER)

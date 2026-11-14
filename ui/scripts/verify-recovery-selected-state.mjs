@@ -43,7 +43,7 @@ try {
   const errors = [], urls = []
   page.on('pageerror', e => errors.push(e.message)); page.on('request', r => urls.push(r.url()))
   await page.addInitScript(() => { window.recoveryCsp = []; document.addEventListener('securitypolicyviolation', e => window.recoveryCsp.push(e.violatedDirective)) })
-  await page.goto(retained.base)
+  await page.goto(new URL('/advanced.html', retained.base).href)
   await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()
   const region = page.locator('.accounts .recovery')
   await region.locator(':scope > summary').click()

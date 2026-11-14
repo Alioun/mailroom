@@ -57,7 +57,7 @@ try {
   const before = JSON.parse(await readFile(join(retained.directory, 'config', `${account}.json`), 'utf8'))
   await interrupt('replace_password', { action: 'replace_password', account, password: 'synthetic-ui-recovery-only' })
   const page = await browser.newPage({ viewport: { width: 1280, height: 950 } })
-  await page.goto(retained.base)
+  await page.goto(new URL('/advanced.html', retained.base).href)
   await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()
   await page.locator('.accounts > .census-actions select').selectOption(account)
   const region = page.locator('.accounts .lifecycle')

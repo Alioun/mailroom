@@ -14,7 +14,7 @@ try {
     window.acquisitionCspViolations = []
     document.addEventListener('securitypolicyviolation', event => window.acquisitionCspViolations.push(event.violatedDirective))
   })
-  await page.goto('http://127.0.0.1:4173')
+  await page.goto(new URL('/advanced.html', 'http://127.0.0.1:4173').href)
   const job = page.locator('.accounts [aria-live=polite]')
   await page.getByText('Synthetic account verification.', { exact: false }).waitFor()
   assert.equal(await page.locator('input[type=password]:not(.lifecycle input)').count(), 0)

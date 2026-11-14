@@ -2,7 +2,9 @@
 
 The development exchange lets an agent read a supplied census-summary export and return text recommendations, optionally with structured rule edits, for local review. It includes separate input and proposal directories, `AGENTS.md`, an agent skill and a stdio MCP command. This unit uses no account repository, census key, credential backend, native helper or provider connection.
 
-The existing summary download now requires browser review and [native action-naming confirmation](census-reports.md#reviewed-summary-boundary), followed by census revalidation. Automatic publication into the exchange, installed agent restrictions and agent proof exports remain unfinished. Only invented exports and injected confirmation backends have acceptance coverage. Installed native and owner acceptance of this disclosure action remain unverified. This is not personal daily-use acceptance.
+The browser workspace publishes a reviewed summary into a server-owned request exchange and starts T3 from Recommendations. Returned proposals appear automatically. Local-vault mode uses the explicit browser sharing action and revalidates the exact summary receipt. Native mode retains its native confirmation boundary. See [Browser workspace](browser-workspace.md) for this path and its verification limits.
+
+The standalone exchange below remains available for manual development. A manually supplied file has no automatic approval provenance. The native summary download retains [native action-naming confirmation](census-reports.md#reviewed-summary-boundary).
 
 ## Files
 
@@ -15,11 +17,11 @@ reviewed/
 proposals/
 ```
 
-Initialization copies static agent instructions. It exports no account data. A file equal to the current packaged version stays. A file equal to an earlier packaged version, kept byte for byte in `agent/superseded/`, was never edited, so initialization replaces it through a staged file and a rename. Any other content is the user's, and initialization refuses to replace it. It can finish creating missing static files, or replacing earlier ones, after an interruption. The server never creates missing directories when it starts.
+Initialization copies static agent instructions. It exports no account data. A file equal to the current packaged version stays. A file equal to an earlier packaged version, kept byte for byte in `agent/superseded/`, was never edited, so initialization replaces it through a staged file and a rename. Any other content is the user's, and initialization refuses to replace it. It can finish creating missing static files, or replacing earlier ones, after an interruption. The stdio server never creates missing directories when it starts.
 
 The supplied input is `reviewed/census-summary.md`, a UTF-8 export no larger than 256 KiB with the census summary heading. The file must have mode `0600`, belong to the current user and have a single hard link. The fixed child directories and files reject symbolic links. Directory handles anchor child access after the exchange opens.
 
-File placement and Unix permissions do not establish approval provenance or isolate another process running as the same user. These checks are not a substitute for an enforced agent sandbox. The owner must approve the exact disclosure before real account data enters an installed exchange. This command does not implement an automatic publication path or authenticate the provenance of a supplied file.
+File placement and Unix permissions do not establish approval provenance or isolate another process running as the same user. These checks are not a substitute for an enforced agent sandbox. The owner must approve the exact disclosure before real account data enters an installed exchange. The standalone command does not authenticate the provenance of a supplied file. The browser publication path separately binds its stored request to the reviewed summary receipt.
 
 The exchange contains user-managed exported copies. Account forgetting, encrypted rotation and recovery do not manage these copies. Account removal cannot erase exports, backups or copies already read by an agent. The exchange must stay separate from private account storage and the shared address ledger.
 

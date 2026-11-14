@@ -202,9 +202,10 @@ const AGENTS: Packaged = Packaged {
 const SKILL: Packaged = Packaged {
     name: "SKILL.md",
     current: include_bytes!("../../agent/skills/mailroom-assistant/SKILL.md"),
-    superseded: &[include_bytes!(
-        "../../agent/superseded/021643c/skills/mailroom-assistant/SKILL.md"
-    )],
+    superseded: &[
+        include_bytes!("../../agent/superseded/021643c/skills/mailroom-assistant/SKILL.md"),
+        include_bytes!("../../agent/superseded/85a5fc7/skills/mailroom-assistant/SKILL.md"),
+    ],
 };
 
 fn install(parent: &File, packaged: &Packaged) -> Result<(), &'static str> {

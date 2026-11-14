@@ -81,7 +81,7 @@ try {
   const finalStatus = () => page.waitForResponse(r => r.url().endsWith('/api/accounts/folders') && r.request().postDataJSON().command.action === 'status')
   const rules = page.locator('.accounts .rules-proof')
   async function open() {
-    await page.goto(metadata.base)
+    await page.goto(new URL('/advanced.html', metadata.base).href)
     await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()
     await page.locator('.accounts > .census-actions select').selectOption(metadata.account)
   }

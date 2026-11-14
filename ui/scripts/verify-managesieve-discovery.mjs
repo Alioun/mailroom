@@ -18,7 +18,7 @@ try {
     window.sieveCsp = []
     document.addEventListener('securitypolicyviolation', e => window.sieveCsp.push(e.violatedDirective))
   })
-  await page.goto(metadata.base)
+  await page.goto(new URL('/advanced.html', metadata.base).href)
   await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()
   await page.locator('.accounts > .census-actions select').selectOption(metadata.account)
   const sieve = page.locator('.accounts .account-setup > .sieve')

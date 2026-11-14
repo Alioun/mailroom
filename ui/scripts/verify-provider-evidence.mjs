@@ -18,7 +18,7 @@ try {
     window.providerEvidenceCsp = []
     document.addEventListener('securitypolicyviolation', e => window.providerEvidenceCsp.push(e.violatedDirective))
   })
-  await page.goto(metadata.base)
+  await page.goto(new URL('/advanced.html', metadata.base).href)
   await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()
   await page.locator('.accounts select').first().selectOption(metadata.account)
   await page.getByRole('button', { name: 'Open saved census', exact: true }).click()

@@ -14,7 +14,7 @@ try {
     window.reportCspViolations = []
     document.addEventListener('securitypolicyviolation', event => window.reportCspViolations.push(event.violatedDirective))
   })
-  await page.goto('http://127.0.0.1:4173')
+  await page.goto(new URL('/advanced.html', 'http://127.0.0.1:4173').href)
   await page.getByText('Synthetic account verification.', { exact: false }).waitFor()
   await page.getByRole('button', { name: 'Add synthetic Gmail account', exact: true }).click()
   await page.locator('.accounts [aria-live=polite]').getByText('Account action complete', { exact: true }).waitFor()

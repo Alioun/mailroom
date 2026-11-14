@@ -13,7 +13,7 @@ try {
     window.backlogCspViolations = []
     document.addEventListener('securitypolicyviolation', event => window.backlogCspViolations.push(event.violatedDirective))
   })
-  await page.goto('http://127.0.0.1:4173')
+  await page.goto(new URL('/advanced.html', 'http://127.0.0.1:4173').href)
   const retained = await readFile(fileURLToPath(new URL('../../.audit/backlog-retained.json', import.meta.url)), 'utf8').then(JSON.parse, () => null)
   if (retained) {
     await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()

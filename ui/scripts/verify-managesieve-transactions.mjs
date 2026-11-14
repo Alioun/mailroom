@@ -42,7 +42,7 @@ try {
   page.on('request', r => { if (!r.url().startsWith(metadata.base)) remote.push('Non-local request') })
   await page.addInitScript(() => { window.transactionCsp = []; document.addEventListener('securitypolicyviolation', e => window.transactionCsp.push(e.violatedDirective)) })
   async function load() {
-    await page.goto(metadata.base)
+    await page.goto(new URL('/advanced.html', metadata.base).href)
     await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()
     await page.locator('.accounts > .census-actions select').selectOption(metadata.account)
   }

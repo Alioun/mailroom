@@ -15,7 +15,7 @@ try {
   page.on('pageerror', error => errors.push(error.message))
   page.on('request', r => { urls.push(r.url()); if (r.url().endsWith('/api/accounts/winddown')) actions.push(r.postDataJSON().command.action) })
   await page.addInitScript(() => { window.winddownCsp = []; document.addEventListener('securitypolicyviolation', e => window.winddownCsp.push(e.violatedDirective)) })
-  await page.goto(retained.base)
+  await page.goto(new URL('/advanced.html', retained.base).href)
   await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()
   await page.locator('.accounts > .census-actions select').selectOption(retained.account)
   await page.getByRole('button', { name: 'Open saved census', exact: true }).click()

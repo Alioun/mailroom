@@ -36,7 +36,7 @@ try {
   page.on('pageerror', e => errors.push(e.message))
   page.on('request', r => requests.push(r.url()))
   await page.addInitScript(() => { window.unsubscribeCsp = []; document.addEventListener('securitypolicyviolation', e => window.unsubscribeCsp.push(e.violatedDirective)) })
-  await page.goto(base)
+  await page.goto(new URL('/advanced.html', base).href)
   const region = page.locator('.accounts .unsubscribe')
   const retained = JSON.parse(await readFile(fileURLToPath(new URL('../../.audit/unsubscribe-retained.json', import.meta.url)), 'utf8'))
   const recovered = await post('unsubscribe', { account: retained.account, command: { action: 'open', as_of: sample.as_of } })

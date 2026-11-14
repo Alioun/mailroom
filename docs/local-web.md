@@ -2,6 +2,8 @@
 
 The local web setup runs Mailroom on your own computer from one command. Creating the vault, unlocking it, adding accounts and the census then all happen in the browser at `http://127.0.0.1:4173`. Nothing is installed system-wide: no `sudo`, no launch agent, no global package, no Keychain entry and no native dialog.
 
+The [browser workspace](browser-workspace.md) opens saved findings automatically after a scan. Recommendations share a reviewed summary with T3 and receive proposals without downloading or importing files.
+
 ## Start it
 
 The first start of a version builds that exact commit once. Running this command, with the full 40-character commit, is the owner's approval of that version:

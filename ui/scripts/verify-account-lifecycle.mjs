@@ -16,7 +16,7 @@ try {
   page.on('pageerror', e => errors.push(e.message))
   page.on('request', r => { urls.push(r.url()); if (r.url().endsWith('/api/accounts/lifecycle')) actions.push(r.postDataJSON().action) })
   await page.addInitScript(() => { window.lifecycleCsp = []; document.addEventListener('securitypolicyviolation', e => window.lifecycleCsp.push(e.violatedDirective)) })
-  await page.goto(retained.base)
+  await page.goto(new URL('/advanced.html', retained.base).href)
   await page.getByRole('button', { name: 'Load saved accounts', exact: true }).click()
   const selector = page.locator('.accounts > .census-actions select')
   await selector.selectOption(retained.account)

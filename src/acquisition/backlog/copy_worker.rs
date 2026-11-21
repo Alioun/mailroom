@@ -159,6 +159,7 @@ impl CopyWorker<'_> {
         let permit = repo
             .backlog_source(self.account)?
             .runtime_permit(&runtime)
+            .map(|p| p.into_owned())
             .map_err(failure)?;
         let mut transport = match session {
             Some(connection) => connection,

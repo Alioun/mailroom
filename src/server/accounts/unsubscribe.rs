@@ -164,7 +164,11 @@ pub(in crate::server) async fn handle(
         Action::Recover { .. } if wired => return (StatusCode::FORBIDDEN, Json(json!({"error":"Wired unsubscribe effects are resolved by the owner, not reconciled against a fixture"}))).into_response(),
         Action::Recover { .. } => None,
         Action::Resolve { .. } if !wired => return (StatusCode::FORBIDDEN, Json(json!({"error":"Synthetic effects reconcile against their fixture"}))).into_response(),
-        _ if wired => match state.accounts.writes.permit(Operation::Unsubscribe) {
+        _ if wired => match state
+            .accounts
+            .writes
+            .permit_with_mode(Operation::Unsubscribe, state.accounts.live_writes())
+        {
             Ok(permit) => Some(permit),
             Err(reason) => return (StatusCode::FORBIDDEN, Json(json!({"error":reason}))).into_response(),
         },

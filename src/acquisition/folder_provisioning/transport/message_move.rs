@@ -39,32 +39,79 @@ pub(in crate::acquisition) struct RuntimeBinding {
     pub topology: String,
 }
 
-pub(in crate::acquisition) struct BacklogPermit<'a>(&'a InstalledSource);
+pub(in crate::acquisition) struct BacklogPermit<'a>(std::borrow::Cow<'a, InstalledSource>);
 
 impl BacklogPermit<'_> {
     pub(in crate::acquisition) fn source(&self) -> &InstalledSource {
-        self.0
+        &self.0
+    }
+    pub(in crate::acquisition) fn into_owned(self) -> BacklogPermit<'static> {
+        BacklogPermit(std::borrow::Cow::Owned(self.0.into_owned()))
     }
 }
 
+pub(in crate::acquisition) const LIVE_MOVE_EPOCH: &str = "live-imap-move/v1";
+pub(in crate::acquisition) const LIVE_MOVE_AUTHORITY: &str = "live-message-move/v1";
+
 impl InstalledSource {
+    pub(in crate::acquisition) fn is_live(&self) -> bool {
+        self.epoch == LIVE_MOVE_EPOCH
+            && self.authority == LIVE_MOVE_AUTHORITY
+            && self.tls_name == "imap.mailbox.org"
+            && self.root.is_empty()
+            && !self.address.ip().is_loopback()
+    }
+    pub(in crate::acquisition) fn real_mailbox_org(
+        account: &super::super::super::Account,
+    ) -> Result<Self, Error> {
+        use std::net::ToSocketAddrs;
+        let host = "imap.mailbox.org";
+        let address = (host, 993)
+            .to_socket_addrs()
+            .map_err(|_| Error::Connect)?
+            .find(|a| !a.ip().is_loopback())
+            .ok_or(Error::Connect)?;
+        Ok(Self {
+            account: account.id.clone(),
+            login: account.login.clone(),
+            address,
+            tls_name: host.to_owned(),
+            root: Vec::new(),
+            epoch: LIVE_MOVE_EPOCH.to_owned(),
+            authority: LIVE_MOVE_AUTHORITY.to_owned(),
+            command_timeout: Duration::from_secs(10),
+            operation_timeout: Duration::from_secs(60),
+        })
+    }
     pub(in crate::acquisition) fn identity(&self) -> String {
         use sha2::{Digest, Sha256};
-        let bytes = serde_json::to_vec(&(
-            if self.profile() == Ok(Profile::Copy) {
-                "loopback-imap-copy-condstore/v1"
-            } else {
-                "loopback-imap-move-uidplus/v1"
-            },
-            &self.account,
-            &self.login,
-            self.address,
-            &self.tls_name,
-            &self.root,
-            &self.epoch,
-            &self.authority,
-        ))
-        .expect("installed IMAP filing source");
+        let bytes = if self.is_live() {
+            serde_json::to_vec(&(
+                "live-imap-move-uidplus/v1",
+                &self.account,
+                &self.login,
+                &self.tls_name,
+                &self.epoch,
+                &self.authority,
+            ))
+            .expect("live IMAP filing source")
+        } else {
+            serde_json::to_vec(&(
+                if self.profile() == Ok(Profile::Copy) {
+                    "loopback-imap-copy-condstore/v1"
+                } else {
+                    "loopback-imap-move-uidplus/v1"
+                },
+                &self.account,
+                &self.login,
+                self.address,
+                &self.tls_name,
+                &self.root,
+                &self.epoch,
+                &self.authority,
+            ))
+            .expect("installed IMAP filing source")
+        };
         data_encoding::HEXLOWER.encode(&Sha256::digest(bytes))
     }
 
@@ -81,15 +128,17 @@ impl InstalledSource {
             || binding.topology.is_empty()
             || self.profile().is_err()
             || self.epoch.is_empty()
-            || !self.address.ip().is_loopback()
             || self.login.is_empty()
-            || self.root.is_empty()
-            || self.root.len() > 8192
             || self.tls_name.is_empty()
         {
             return Err(Error::Unsupported);
         }
-        Ok(BacklogPermit(self))
+        if !self.is_live()
+            && (!self.address.ip().is_loopback() || self.root.is_empty() || self.root.len() > 8192)
+        {
+            return Err(Error::Unsupported);
+        }
+        Ok(BacklogPermit(std::borrow::Cow::Borrowed(self)))
     }
     #[cfg(test)]
     pub(in crate::acquisition) fn permit(
@@ -113,7 +162,7 @@ impl InstalledSource {
         {
             return Err(Error::Unsupported);
         }
-        Ok(BacklogPermit(self))
+        Ok(BacklogPermit(std::borrow::Cow::Borrowed(self)))
     }
 }
 
@@ -149,7 +198,7 @@ impl Connection {
         password: &SecretValue,
         cancel: Cancellation,
     ) -> Result<Self, Error> {
-        let source = permit.0;
+        let source = permit.source();
         let profile = source.profile()?;
         let mut io = Session::open(
             Endpoint {

@@ -41,6 +41,9 @@ struct Endpoint<'a> {
     operation_timeout: Duration,
 }
 
+pub(in crate::acquisition) const LIVE_FOLDER_EPOCH: &str = "live-imap-folders/v1";
+
+#[derive(Clone)]
 pub(in crate::acquisition) struct InstalledSource {
     pub account: AccountId,
     pub address: SocketAddr,
@@ -50,31 +53,80 @@ pub(in crate::acquisition) struct InstalledSource {
     pub command_timeout: Duration,
     pub operation_timeout: Duration,
 }
-pub(super) struct CreatePermit<'a>(&'a InstalledSource);
+pub(super) struct CreatePermit<'a>(std::borrow::Cow<'a, InstalledSource>);
 impl InstalledSource {
+    pub(in crate::acquisition) fn is_live(&self) -> bool {
+        self.epoch == LIVE_FOLDER_EPOCH
+            && self.root.is_empty()
+            && matches!(
+                self.tls_name.as_str(),
+                "imap.mailbox.org" | "imap.gmail.com"
+            )
+            && !self.address.ip().is_loopback()
+    }
+    pub(in crate::acquisition) fn real_for_account(
+        account: &super::super::Account,
+    ) -> Result<Self, Error> {
+        use std::net::ToSocketAddrs;
+        let host = account.provider.host();
+        let address = (host, 993)
+            .to_socket_addrs()
+            .map_err(|_| Error::Connect)?
+            .find(|a| !a.ip().is_loopback())
+            .ok_or(Error::Connect)?;
+        Ok(Self {
+            account: account.id.clone(),
+            address,
+            tls_name: host.to_owned(),
+            root: Vec::new(),
+            epoch: LIVE_FOLDER_EPOCH.to_owned(),
+            command_timeout: Duration::from_secs(10),
+            operation_timeout: Duration::from_secs(60),
+        })
+    }
     pub(in crate::acquisition) fn identity(&self) -> String {
         use sha2::{Digest, Sha256};
-        let bytes = serde_json::to_vec(&(
-            &self.account,
-            self.address,
-            &self.tls_name,
-            &self.root,
-            &self.epoch,
-            crate::census::folder_provisioning::PROFILE,
-        ))
-        .expect("installed identity");
+        let bytes = if self.is_live() {
+            serde_json::to_vec(&(
+                "live-imap-folders/v1",
+                &self.account,
+                &self.tls_name,
+                &self.epoch,
+                crate::census::folder_provisioning::PROFILE,
+            ))
+            .expect("live folder identity")
+        } else {
+            serde_json::to_vec(&(
+                &self.account,
+                self.address,
+                &self.tls_name,
+                &self.root,
+                &self.epoch,
+                crate::census::folder_provisioning::PROFILE,
+            ))
+            .expect("installed identity")
+        };
         data_encoding::HEXLOWER.encode(&Sha256::digest(bytes))
     }
     pub(super) fn permit(&self, account: &AccountId) -> Result<CreatePermit<'_>, Error> {
-        if self.account != *account
-            || !self.address.ip().is_loopback()
+        if self.account != *account {
+            return Err(Error::Unsupported);
+        }
+        if self.is_live() {
+            return Ok(CreatePermit(std::borrow::Cow::Borrowed(self)));
+        }
+        if !self.address.ip().is_loopback()
             || self.epoch.is_empty()
             || self.root.is_empty()
             || self.tls_name.is_empty()
         {
             return Err(Error::Unsupported);
         }
-        Ok(CreatePermit(self))
+        Ok(CreatePermit(std::borrow::Cow::Borrowed(self)))
+    }
+    pub(super) fn permit_owned(self, account: &AccountId) -> Result<CreatePermit<'static>, Error> {
+        self.permit(account)?;
+        Ok(CreatePermit(std::borrow::Cow::Owned(self)))
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -216,7 +268,7 @@ impl Session {
         password: &SecretValue,
         cancel: Cancellation,
     ) -> Result<Self, Error> {
-        let source = permit.0;
+        let source = &*permit.0;
         Self::open(
             Endpoint {
                 address: source.address,
@@ -245,9 +297,14 @@ impl Session {
         if login.is_empty() || password.bytes().is_empty() {
             return Err(Error::Authentication);
         }
+        let connect_timeout = if source.root.is_empty() {
+            Duration::from_secs(10)
+        } else {
+            Duration::from_millis(250)
+        };
         let tcp = TcpStream::connect_timeout(
             &source.address,
-            Duration::from_millis(250).min(end.saturating_duration_since(Instant::now())),
+            connect_timeout.min(end.saturating_duration_since(Instant::now())),
         )
         .map_err(|_error| {
             #[cfg(test)]
@@ -260,10 +317,12 @@ impl Session {
         let command_end = (Instant::now() + timeout).min(end);
         let mut builder = TlsConnector::builder();
         builder.min_protocol_version(Some(native_tls::Protocol::Tlsv12));
-        builder.disable_built_in_roots(true);
-        builder.add_root_certificate(
-            native_tls::Certificate::from_der(source.root).map_err(|_| Error::Tls)?,
-        );
+        if !source.root.is_empty() {
+            builder.disable_built_in_roots(true);
+            builder.add_root_certificate(
+                native_tls::Certificate::from_der(source.root).map_err(|_| Error::Tls)?,
+            );
+        }
         let connector = builder.build().map_err(|_| Error::Tls)?;
         let mut handshake = connector.connect(source.tls_name, tcp);
         let stream = loop {

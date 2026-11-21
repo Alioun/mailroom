@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  BookUser,
   ChevronRight,
+  FileText,
+  FolderSync,
   LayoutDashboard,
+  Lock,
   LockKeyhole,
   Mail,
+  MailX,
   Menu,
   Plus,
   RefreshCw,
   Settings,
+  ShieldAlert,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
@@ -17,6 +23,7 @@ import {
   cancelAccount,
   finishInterrupted,
   listAccounts,
+  lockVault,
   readAccountStatus,
   scanAccount,
 } from "../api";
@@ -42,6 +49,10 @@ const pages: Page[] = [
   "senders",
   "recommendations",
   "rules",
+  "backlog",
+  "invoices",
+  "subscriptions",
+  "addresses",
   "settings",
 ];
 function stored(key: string) {
@@ -95,24 +106,25 @@ function Workbench({
   language: Language;
   onLanguage: (value: Language) => void;
 }) {
-  const t = useCopy(),
-    [status, setStatus] = useState<AccountStatus | null>(null),
-    [accounts, setAccounts] = useState<Account[]>([]),
-    [selected, setSelected] = useState(stored("mailroom.account") ?? "");
-  const [page, setPage] = useState<Page>(initialPage),
-    [add, setAdd] = useState(false),
-    [menu, setMenu] = useState(false),
-    [error, setError] = useState(""),
-    [notice, setNotice] = useState("");
-  const [refresh, setRefresh] = useState(0),
-    [pending, setPending] = useState(false),
-    [counts, setCounts] = useState<Record<string, number>>({});
-  const heading = useRef<HTMLHeadingElement>(null),
-    polling = useRef(false),
-    lastJob = useRef<string | null>(null),
-    wasUsable = useRef(false),
-    menuTrigger = useRef<HTMLButtonElement>(null);
+  const t = useCopy();
+  const [status, setStatus] = useState<AccountStatus | null>(null);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [selected, setSelected] = useState(stored("mailroom.account") ?? "");
+  const [page, setPage] = useState<Page>(initialPage);
+  const [add, setAdd] = useState(false);
+  const [menu, setMenu] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [refresh, setRefresh] = useState(0);
+  const [pending, setPending] = useState(false);
+  const [counts, setCounts] = useState<Record<string, number>>({});
+  const heading = useRef<HTMLHeadingElement>(null);
+  const polling = useRef(false);
+  const lastJob = useRef<string | null>(null);
+  const wasUsable = useRef(false);
+  const menuTrigger = useRef<HTMLButtonElement>(null);
   const account = accounts.find((value) => value.id === selected);
+
   const loadAccounts = useCallback(async () => {
     const values = await listAccounts();
     setAccounts(values);
@@ -123,6 +135,7 @@ function Workbench({
     );
     return values;
   }, []);
+
   const applyStatus = useCallback(
     async (next: AccountStatus) => {
       setStatus(next);
@@ -160,6 +173,7 @@ function Workbench({
     },
     [loadAccounts],
   );
+
   useEffect(() => {
     let active = true;
     const poll = async () => {
@@ -190,20 +204,24 @@ function Workbench({
       clearInterval(timer);
     };
   }, [applyStatus]);
+
   useEffect(() => {
     if (selected) remember("mailroom.account", selected);
   }, [selected]);
+
   useEffect(() => {
     const query = new URLSearchParams(location.search);
     query.set("view", page);
     history.replaceState(null, "", `${location.pathname}?${query}`);
   }, [page]);
+
   function navigate(next: Page) {
     setPage(next);
     setMenu(false);
     requestAnimationFrame(() => heading.current?.focus());
     window.scrollTo({ top: 0 });
   }
+
   async function action(work: () => Promise<AccountStatus>) {
     setPending(true);
     setNotice("");
@@ -220,7 +238,8 @@ function Workbench({
       setPending(false);
     }
   }
-  const nav = [
+
+  const mailboxNav = [
     {
       page: "overview",
       label: t("Overview", "Übersicht"),
@@ -232,15 +251,41 @@ function Workbench({
       label: t("Recommendations", "Vorschläge"),
       icon: Sparkles,
     },
+  ] satisfies { page: Page; label: string; icon: typeof Mail }[];
+
+  const organizeNav = [
     {
       page: "rules",
-      label: t("Local rules", "Lokale Regeln"),
+      label: t("Rules & deploy", "Regeln & Bereitstellung"),
       icon: SlidersHorizontal,
     },
+    {
+      page: "backlog",
+      label: t("Backlog", "Bestand sortieren"),
+      icon: FolderSync,
+    },
+    {
+      page: "invoices",
+      label: t("Invoices", "Rechnungen"),
+      icon: FileText,
+    },
+    {
+      page: "subscriptions",
+      label: t("Subscriptions", "Abonnements"),
+      icon: MailX,
+    },
+    {
+      page: "addresses",
+      label: t("Addresses & wind-down", "Adressen & Abbau"),
+      icon: BookUser,
+    },
   ] satisfies { page: Page; label: string; icon: typeof Mail }[];
+
+  const allNav = [...mailboxNav, ...organizeNav];
   const currentTitle =
-    nav.find((item) => item.page === page)?.label ??
+    allNav.find((item) => item.page === page)?.label ??
     t("Settings", "Einstellungen");
+
   const subtitles: Record<Page, string> = {
     overview: t(
       "A clearer view of your mailbox.",
@@ -255,19 +300,37 @@ function Workbench({
       "Nützliche Vorschläge, bereit für deine Prüfung.",
     ),
     rules: t(
-      "Review and test how your mail could be organized.",
-      "Prüfe, wie deine Nachrichten geordnet werden könnten.",
+      "Edit rules, simulate saved mail, provision folders, and deploy Sieve safely.",
+      "Regeln bearbeiten, lokal prüfen, Ordner anlegen und Sieve sicher bereitstellen.",
+    ),
+    backlog: t(
+      "Sort existing mail with previews, journals, flag protection, and undo.",
+      "Sortiere deinen Bestand mit Vorschau, Protokoll, Markierungsschutz und Rücknahme.",
+    ),
+    invoices: t(
+      "Review business invoices and forward verified originals to accounting.",
+      "Prüfe Geschäftsrechnungen und leite verifizierte Originale an die Buchhaltung weiter.",
+    ),
+    subscriptions: t(
+      "Unsubscribe from bulk senders or mute them into dedicated folders.",
+      "Melde Massenabsender ab oder schalte sie in eigene Ordner stumm.",
+    ),
+    addresses: t(
+      "Manage per-service addresses, Gmail forwarding, and account wind-down.",
+      "Verwalte Dienstadressen, Gmail-Weiterleitung und den Konto-Abbau.",
     ),
     settings: t(
-      "Your account, connections, and local data.",
-      "Dein Konto, Verbindungen und lokale Daten.",
+      "Safety mode, account connections, Takeout import, T3 config, and vault backup.",
+      "Sicherheitsmodus, Konten, Takeout-Import, T3-Konfiguration und Tresor-Sicherung.",
     ),
   };
+
   const vaultGated =
     !!status &&
     (status.vault === "absent" ||
       status.vault === "locked" ||
       status.vault === "unavailable");
+
   return (
     <>
       <a className="skip-link" href="#main-content">
@@ -277,83 +340,98 @@ function Workbench({
         className={`workbench ${menu ? "menu-open" : ""} ${vaultGated ? "gated" : ""}`}
       >
         {!vaultGated && (
-          <>
-            <NavigationDrawer
-              open={menu}
-              onOpenChange={setMenu}
-              triggerRef={menuTrigger}
-            >
-              <a href="/" className="brand">
-                <span className="brand-icon">
-                  <Mail size={21} />
+          <NavigationDrawer
+            open={menu}
+            onOpenChange={setMenu}
+            triggerRef={menuTrigger}
+          >
+            <a href="/" className="brand">
+              <span className="brand-icon">
+                <Mail size={21} />
+              </span>
+              mailroom<span className="brand-dot">.</span>
+            </a>
+            <div className="account-switcher">
+              <span className="eyebrow">
+                {t("Workspace", "Arbeitsbereich")}
+              </span>
+              {accounts.length > 0 ? (
+                <Choice
+                  label={t("Select account", "Konto auswählen")}
+                  value={selected}
+                  onChange={(value) => {
+                    setSelected(value);
+                    setMenu(false);
+                  }}
+                  options={accounts.map((value) => ({
+                    value: value.id,
+                    label: `${value.login} · ${value.provider === "gmail" ? "Gmail" : "mailbox.org"}`,
+                  }))}
+                />
+              ) : (
+                <span className="muted">
+                  {t("No account yet", "Noch kein Konto")}
                 </span>
-                mailroom<span className="brand-dot">.</span>
-              </a>
-              <div className="account-switcher">
-                <span className="eyebrow">
-                  {t("Workspace", "Arbeitsbereich")}
-                </span>
-                {accounts.length > 0 ? (
-                  <Choice
-                    label={t("Select account", "Konto auswählen")}
-                    value={selected}
-                    onChange={(value) => {
-                      setSelected(value);
-                      setMenu(false);
-                    }}
-                    options={accounts.map((value) => ({
-                      value: value.id,
-                      label: `${value.login} · ${value.provider === "gmail" ? "Gmail" : "mailbox.org"}`,
-                    }))}
-                  />
-                ) : (
-                  <span className="muted">
-                    {t("No account yet", "Noch kein Konto")}
-                  </span>
-                )}
-                <Action className="add-account" onClick={() => setAdd(true)}>
-                  <Plus size={15} />
-                  {t("Add account", "Konto hinzufügen")}
-                </Action>
-              </div>
-              <nav aria-label={t("Main navigation", "Hauptnavigation")}>
-                {nav.map((item) => (
-                  <button
-                    className={`nav-item ${page === item.page ? "active" : ""}`}
-                    key={item.page}
-                    aria-current={page === item.page ? "page" : undefined}
-                    onClick={() => navigate(item.page)}
-                  >
-                    <item.icon size={19} />
-                    <span>{item.label}</span>
-                    {item.page === "recommendations" &&
-                      (counts[selected] ?? 0) > 0 && (
-                        <span className="nav-count">{counts[selected]}</span>
-                      )}
-                  </button>
-                ))}
-              </nav>
-              <div className="sidebar-bottom">
+              )}
+              <Action className="add-account" onClick={() => setAdd(true)}>
+                <Plus size={15} />
+                {t("Add account", "Konto hinzufügen")}
+              </Action>
+            </div>
+            <nav aria-label={t("Main navigation", "Hauptnavigation")}>
+              <span className="nav-section-label">
+                {t("Mailbox", "Postfach")}
+              </span>
+              {mailboxNav.map((item) => (
                 <button
-                  className={`nav-item ${page === "settings" ? "active" : ""}`}
-                  onClick={() => navigate("settings")}
+                  className={`nav-item ${page === item.page ? "active" : ""}`}
+                  key={item.page}
+                  aria-current={page === item.page ? "page" : undefined}
+                  onClick={() => navigate(item.page)}
                 >
-                  <Settings size={19} />
-                  {t("Settings", "Einstellungen")}
-                </button>
-                <div className="local-status">
-                  <span className="status-dot" />
-                  {t("Running on this Mac", "Läuft auf diesem Mac")}
-                  <small>
-                    {t(
-                      "Your workspace stays local",
-                      "Dein Arbeitsbereich bleibt lokal",
+                  <item.icon size={18} />
+                  <span>{item.label}</span>
+                  {item.page === "recommendations" &&
+                    (counts[selected] ?? 0) > 0 && (
+                      <span className="nav-count">{counts[selected]}</span>
                     )}
-                  </small>
-                </div>
+                </button>
+              ))}
+              <span className="nav-section-label">
+                {t("Organize", "Ordnen")}
+              </span>
+              {organizeNav.map((item) => (
+                <button
+                  className={`nav-item ${page === item.page ? "active" : ""}`}
+                  key={item.page}
+                  aria-current={page === item.page ? "page" : undefined}
+                  onClick={() => navigate(item.page)}
+                >
+                  <item.icon size={18} />
+                  <span>{item.label}</span>
+                </button>
+              ))}
+            </nav>
+            <div className="sidebar-bottom">
+              <button
+                className={`nav-item ${page === "settings" ? "active" : ""}`}
+                onClick={() => navigate("settings")}
+              >
+                <Settings size={18} />
+                {t("Settings", "Einstellungen")}
+              </button>
+              <div className="local-status">
+                <span className="status-dot" />
+                {t("Running on this Mac", "Läuft auf diesem Mac")}
+                <small>
+                  {t(
+                    "Your workspace stays local",
+                    "Dein Arbeitsbereich bleibt lokal",
+                  )}
+                </small>
               </div>
-            </NavigationDrawer>
-          </>
+            </div>
+          </NavigationDrawer>
         )}
         <div className="main-shell">
           <header className="topbar">
@@ -383,10 +461,39 @@ function Workbench({
               )}
             </div>
             <div className="topbar-actions">
-              <span className="readonly-badge">
-                <ShieldCheck size={14} />
-                {t("Provider read-only", "Anbieter nur lesbar")}
-              </span>
+              {!vaultGated && (
+                <button
+                  type="button"
+                  className={`readonly-badge ${status?.live_writes ? "live" : ""}`}
+                  onClick={() => navigate("settings")}
+                  title={t(
+                    "Manage safety mode in Settings",
+                    "Sicherheitsmodus in den Einstellungen verwalten",
+                  )}
+                >
+                  {status?.live_writes ? (
+                    <>
+                      <ShieldAlert size={14} />
+                      {t("Live writes armed", "Live-Schreibzugriff aktiv")}
+                    </>
+                  ) : (
+                    <>
+                      <ShieldCheck size={14} />
+                      {t("Provider read-only", "Anbieter nur lesbar")}
+                    </>
+                  )}
+                </button>
+              )}
+              {!vaultGated && status?.source === "vault" && (
+                <Action
+                  disabled={pending}
+                  onClick={() => void action(lockVault)}
+                  aria-label={t("Lock vault", "Tresor sperren")}
+                >
+                  <Lock size={14} />
+                  {t("Lock", "Sperren")}
+                </Action>
+              )}
               <Choice
                 label={t("Language", "Sprache")}
                 value={language}
@@ -547,6 +654,8 @@ function Workbench({
                     <AccountArea
                       key={value.id}
                       account={value}
+                      accounts={accounts}
+                      status={status}
                       hidden={value.id !== selected}
                       page={page}
                       refresh={refresh}
@@ -560,6 +669,10 @@ function Workbench({
                         )
                       }
                       onStatus={(next) => void applyStatus(next)}
+                      onRefresh={() => {
+                        void loadAccounts();
+                        setRefresh((v) => v + 1);
+                      }}
                     />
                   ))
                 )}
@@ -572,10 +685,15 @@ function Workbench({
                   {t("Encrypted local vault", "Verschlüsselter lokaler Tresor")}
                 </span>
                 <span>
-                  {t(
-                    "Mailroom never changes provider mail in this mode.",
-                    "Mailroom verändert in diesem Modus keine Nachrichten beim Anbieter.",
-                  )}
+                  {status?.live_writes
+                    ? t(
+                        "Live writes armed for this session; every change still requires preview and confirmation.",
+                        "Live-Schreibzugriff für diese Sitzung aktiv; jede Änderung erfordert Vorschau und Bestätigung.",
+                      )
+                    : t(
+                        "Read-only mode active. Enable Live writes in Settings when ready to deploy or sort.",
+                        "Nur-Lese-Modus aktiv. Aktiviere Live-Schreibzugriff in den Einstellungen zur Ausführung.",
+                      )}
                 </span>
               </footer>
             )}

@@ -14,8 +14,9 @@ impl AccountController {
         let vault = Arc::new(Vault::open(&paths.config)?);
         Self::with_vault(Accounts::new(paths, vault.clone()), vault)
     }
-    fn with_vault(accounts: Accounts, vault: Arc<Vault>) -> Result<Self, VaultError> {
+    fn with_vault(mut accounts: Accounts, vault: Arc<Vault>) -> Result<Self, VaultError> {
         crate::private_fs::prepare(&accounts.paths.data).map_err(|_| VaultError::Unsafe)?;
+        accounts.live_transports = true;
         let ledger = crate::ledger::InstalledLedger::install_under(&accounts.paths.data)
             .map_err(|_| VaultError::Storage)?;
         let accounts = Arc::new(accounts);
@@ -159,6 +160,127 @@ pub(in crate::server) async fn unlock(
         Err(e) => return e,
     };
     transition(state, move |vault| vault.unlock(&request.password)).await
+}
+
+pub(in crate::server) async fn lock(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<EmptyRequest>, JsonRejection>,
+) -> Response {
+    if state.accounts.vault().is_none() {
+        return not_local_web();
+    }
+    if let Err(e) = input(body) {
+        return e;
+    }
+    state.accounts.set_live_writes(false);
+    transition(state, |vault| vault.lock()).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::server) struct ChangePasswordRequest {
+    current: SecretValue,
+    password: SecretValue,
+    confirmation: SecretValue,
+}
+
+pub(in crate::server) async fn change_password(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<ChangePasswordRequest>, JsonRejection>,
+) -> Response {
+    if state.accounts.vault().is_none() {
+        return not_local_web();
+    }
+    let request = match input(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    transition(state, move |vault| {
+        vault.change_password(&request.current, &request.password, &request.confirmation)
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::server) struct WriteModeRequest {
+    live_writes: bool,
+    #[serde(default)]
+    confirmed: bool,
+}
+
+pub(in crate::server) async fn write_mode(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<WriteModeRequest>, JsonRejection>,
+) -> Response {
+    let request = match input(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if !request.live_writes {
+        state.accounts.set_live_writes(false);
+        return status(State(state)).await;
+    }
+    if !request.confirmed {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "Confirm explicitly before arming live provider writes."})),
+        )
+            .into_response();
+    }
+    if !state.accounts.vault_live() && !state.accounts.synthetic() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Live browser write mode requires the local vault or synthetic mode."})),
+        )
+            .into_response();
+    }
+    state.accounts.set_live_writes(true);
+    status(State(state)).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::server) struct TakeoutRequest {
+    account: AccountId,
+    path: String,
+}
+
+pub(in crate::server) async fn takeout(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<TakeoutRequest>, JsonRejection>,
+) -> Response {
+    let request = match input(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let trimmed = request.path.trim().to_owned();
+    if trimmed.is_empty() || trimmed.len() > 2048 || trimmed.contains('\0') {
+        return failure(AcquisitionError::InvalidInput);
+    }
+    let worker = state.clone();
+    match tokio::task::spawn_blocking(move || {
+        let _admission = worker.accounts.admission.lock().expect("account admission");
+        if worker
+            .accounts
+            .job
+            .lock()
+            .expect("account job")
+            .as_ref()
+            .is_some_and(|j| j.progress.state == ScanState::Running)
+        {
+            return Err(AcquisitionError::LifecyclePending);
+        }
+        let _operation = worker.accounts.operation.lock().expect("account operation");
+        let repo = worker.accounts.repository()?;
+        repo.import_takeout(&request.account, std::path::Path::new(&trimmed))
+    })
+    .await
+    {
+        Ok(Ok(summary)) => Json(json!({"summary": summary})).into_response(),
+        Ok(Err(e)) => failure(e),
+        Err(_) => failure(AcquisitionError::Storage),
+    }
 }
 
 #[derive(Deserialize)]

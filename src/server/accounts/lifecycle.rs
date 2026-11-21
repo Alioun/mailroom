@@ -41,7 +41,8 @@ pub(in crate::server) async fn handle(
     State(state): State<Arc<AppState>>,
     body: Result<Json<Request>, JsonRejection>,
 ) -> Response {
-    if !state.accounts.synthetic() {
+    let is_vault = state.accounts.vault_live();
+    if !state.accounts.synthetic() && !is_vault {
         return (StatusCode::FORBIDDEN, Json(json!({"error":"Protected lifecycle installation is unavailable. Production lifecycle actions are denied before credential access."}))).into_response();
     }
     let request = match input(body) {
@@ -95,13 +96,16 @@ pub(in crate::server) async fn handle(
         }
         let _operation = state.accounts.operation.lock().expect("account operation");
         let repo = state.accounts.repository()?;
-        let AccountSource::Synthetic { mailboxes, .. } = &state.accounts.source else {
-            return Err(AcquisitionError::InvalidInput);
+        let data_root = match &state.accounts.source {
+            AccountSource::Synthetic { mailboxes, .. } => mailboxes.clone(),
+            AccountSource::Vault { .. } => repo.paths.data.clone(),
+            _ => return Err(AcquisitionError::InvalidInput),
         };
+        let mailboxes = &data_root;
         match &request {
             Request::Status { .. } => {
                 return Ok(
-                    json!({"recovery":repo.recovery_status()?,"production_available":false}),
+                    json!({"recovery":repo.recovery_status()?,"production_available":state.accounts.vault_live()}),
                 );
             }
             Request::ReplacePassword { account, password } => {

@@ -1,8 +1,10 @@
 # mailroom
 
-Inspect a synthetic header census and preview deterministic mail rules locally. The Rust core serves a Svelte interface with Ark UI controls. The census supports owner-run read-only mailbox.org and Gmail acquisition, encrypted persistence, cancellation and resume. Independent synthetic modes demonstrate it without a provider or credential store. Local census reports, reviewed summary downloads, encrypted rule workspaces and confirmed local Sieve downloads are available. The complete census and personal workflow remain unfinished. All account writes remain denied.
+Inspect a header census, preview deterministic mail rules locally, and run the personal Mac workflow for mailbox.org and Gmail. The Rust core serves a unified React + Base UI workbench at `http://127.0.0.1:4173`. Every server launch starts in **Read-only** mode (`live_writes: false`); live provider writes (ManageSieve deployment, IMAP folder provisioning, backlog sorting, invoice send-on, and unsubscribe execution) stay blocked until explicitly armed for the current session in Settings, and every mutation still requires an exact preview and confirmation. Locking the vault or restarting disarms live writes automatically.
 
-The [development agent exchange](docs/agent-exchange.md) includes separate folders, a skill, a stdio MCP command and local review of text recommendations. Summary download requires exact native confirmation. Installed native and agent acceptance remain unfinished.
+The workbench unifies all nine views (`Overview`, `Senders`, `Recommendations`, `Rules & deploy`, `Backlog`, `Invoices`, `Subscriptions`, `Addresses & wind-down`, and `Settings`), includes a curated CC0 starter sender catalog (`data/*.csv`, v1.1.0), supports local Google Takeout `.mbox` header-only import alongside IMAP census, configurable T3 provider/model settings, and full local-vault lifecycle & passphrase-encrypted recovery.
+
+The [development agent exchange](docs/agent-exchange.md) includes separate folders, a skill, a stdio MCP command and local review of text recommendations. Summary sharing shows the exact masked summary in the browser before launching T3.
 
 ## Run locally
 

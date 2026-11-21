@@ -113,16 +113,28 @@ impl Accounts {
         self.folder_source
             .as_ref()
             .is_some_and(|s| s.permit(&s.account).is_ok())
+            || self.live_transports
     }
     pub(crate) fn folders_account(&self, id: &crate::census::AccountId) -> bool {
         self.folder_source
             .as_ref()
             .is_some_and(|s| s.account == *id)
+            || self.live_transports
     }
-    fn folder_source(&self, account: &Account) -> Result<&InstalledSource, AcquisitionError> {
-        let source = self.folder_source.as_deref().ok_or_else(invalid)?;
-        source.permit(&account.id).map_err(protocol)?;
-        Ok(source)
+    fn folder_source(
+        &self,
+        account: &Account,
+    ) -> Result<std::borrow::Cow<'_, InstalledSource>, AcquisitionError> {
+        if let Some(source) = self.folder_source.as_deref() {
+            source.permit(&account.id).map_err(protocol)?;
+            return Ok(std::borrow::Cow::Borrowed(source));
+        }
+        if self.live_transports {
+            let source = InstalledSource::real_for_account(account).map_err(protocol)?;
+            source.permit(&account.id).map_err(protocol)?;
+            return Ok(std::borrow::Cow::Owned(source));
+        }
+        Err(invalid())
     }
     fn provision_context(
         &self,
@@ -163,12 +175,13 @@ impl Accounts {
         account: &Account,
         store: &EncryptedStore,
         cancel: Cancellation,
-    ) -> Result<Creator<'_>, AcquisitionError> {
+    ) -> Result<Creator<'static>, AcquisitionError> {
         Ok(match target {
             Target::Folders => {
                 let permit = self
                     .folder_source(account)?
-                    .permit(&account.id)
+                    .into_owned()
+                    .permit_owned(&account.id)
                     .map_err(protocol)?;
                 let password = self.password(account)?;
                 let session = Session::connect(&permit, &account.login, &password, cancel)

@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     ffi::OsString,
@@ -9,6 +10,75 @@ use std::{
 
 const OUTPUT_LIMIT: usize = 262_144;
 const DEADLINE: Duration = Duration::from_secs(20);
+pub(crate) const DEFAULT_PROVIDER: &str = "codex_home_v2";
+pub(crate) const DEFAULT_MODEL: &str = "gpt-6.1-sol";
+const CONFIG_FILE: &str = "assistant-settings.json";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Config {
+    pub provider: String,
+    pub model: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            provider: DEFAULT_PROVIDER.to_owned(),
+            model: DEFAULT_MODEL.to_owned(),
+        }
+    }
+}
+
+fn valid_option(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && !value.starts_with('-')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':' | b'/'))
+}
+
+impl Config {
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        if !valid_option(&self.provider) {
+            return Err("Invalid T3 provider name");
+        }
+        if !valid_option(&self.model) {
+            return Err("Invalid T3 model name");
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn load_config(config_root: &Path) -> Config {
+    let path = config_root.join(CONFIG_FILE);
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        return Config::default();
+    };
+    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > 4096 {
+        return Config::default();
+    }
+    std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Config>(&bytes).ok())
+        .filter(|cfg| cfg.validate().is_ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn save_config(config_root: &Path, config: &Config) -> Result<Config, &'static str> {
+    config.validate()?;
+    crate::private_fs::prepare(config_root).map_err(|_| "Config directory unavailable")?;
+    let path = config_root.join(CONFIG_FILE);
+    let tmp = config_root.join(format!(".{CONFIG_FILE}.tmp-{:016x}", rand::random::<u64>()));
+    let bytes = serde_json::to_vec_pretty(config).map_err(|_| "Config encoding failed")?;
+    std::fs::write(&tmp, &bytes).map_err(|_| "Could not write assistant config")?;
+    std::fs::rename(&tmp, &path).map_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+        "Could not save assistant config"
+    })?;
+    Ok(config.clone())
+}
 
 #[derive(Clone)]
 pub(crate) struct Client {
@@ -108,6 +178,7 @@ impl Client {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn launch(
         &self,
         folder: &Path,
@@ -115,6 +186,21 @@ impl Client {
         prompt: &str,
         allow_create: bool,
     ) -> Result<Thread, Failure> {
+        self.launch_with_config(folder, title, prompt, allow_create, &Config::default())
+    }
+
+    pub(crate) fn launch_with_config(
+        &self,
+        folder: &Path,
+        title: &str,
+        prompt: &str,
+        allow_create: bool,
+        config: &Config,
+    ) -> Result<Thread, Failure> {
+        config.validate().map_err(|_| Failure {
+            message: "Invalid T3 assistant provider or model configuration",
+            uncertain: false,
+        })?;
         let folder_text = folder.to_str().ok_or(Failure {
             message: "Assistant folder unavailable",
             uncertain: !allow_create,
@@ -158,14 +244,40 @@ impl Client {
                     uncertain: true,
                 })?,
             [] if allow_create => {
-                let bytes = self.command(folder, &["thread", "start", "--title", title, "--provider", "codex_home_v2", "--model", "gpt-6.1-sol", "--json", folder_text, "-"], prompt.as_bytes())
-                    .map_err(|_| Failure { message: "T3 launch outcome is unknown. Retry checks for the existing thread", uncertain: true })?;
+                let bytes = self
+                    .command(
+                        folder,
+                        &[
+                            "thread",
+                            "start",
+                            "--title",
+                            title,
+                            "--provider",
+                            &config.provider,
+                            "--model",
+                            &config.model,
+                            "--json",
+                            folder_text,
+                            "-",
+                        ],
+                        prompt.as_bytes(),
+                    )
+                    .map_err(|_| Failure {
+                        message: "T3 launch outcome is unknown. Retry checks for the existing thread",
+                        uncertain: true,
+                    })?;
                 let result: Value = serde_json::from_slice(&bytes).map_err(|_| Failure {
                     message: "T3 launch outcome is unknown. Retry checks for the existing thread",
                     uncertain: true,
                 })?;
-                result["threadId"].as_str().filter(|s| valid_thread_id(s)).map(str::to_owned)
-                    .ok_or(Failure { message: "T3 launch outcome is unknown. Retry checks for the existing thread", uncertain: true })?
+                result["threadId"]
+                    .as_str()
+                    .filter(|s| valid_thread_id(s))
+                    .map(str::to_owned)
+                    .ok_or(Failure {
+                        message: "T3 launch outcome is unknown. Retry checks for the existing thread",
+                        uncertain: true,
+                    })?
             }
             [] => {
                 return Err(Failure {

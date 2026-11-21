@@ -226,6 +226,18 @@ try {
     0,
   );
   await page.unrouteAll({ behavior: "wait" });
+  // Verify top bar Lock button locks the vault and returns to Welcome back
+  await page.getByRole("button", { name: "Lock vault", exact: true }).click();
+  await page
+    .getByRole("heading", { name: "Welcome back", exact: true })
+    .waitFor();
+  await page.getByLabel("Master password", { exact: true }).fill(master);
+  await page
+    .getByRole("button", { name: "Unlock Mailroom", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Connect and scan", exact: true })
+    .waitFor();
   const storage = await page.evaluate(() =>
     JSON.stringify({
       local: { ...localStorage },
@@ -234,8 +246,12 @@ try {
   );
   assert.ok(!storage.includes(master) && !storage.includes("wrong browser"));
   check(
-    "restart unlock loads saved-account listing without a job change and wrong-password recovery leaves no password in storage",
+    "restart unlock loads saved-account listing, top-bar lock/unlock works, and wrong-password recovery leaves no password in storage",
   );
+  // Verify /advanced.html is retired
+  const advStatus = await fetch(`${origin}/advanced.html`).then((r) => r.status);
+  assert.equal(advStatus, 404, "/advanced.html must be retired");
+  check("/advanced.html is retired (404)");
   await stop();
   server = await start("--synthetic-accounts");
   await page.reload();
@@ -363,7 +379,7 @@ try {
   );
   await page.unroute("**/api/accounts/report");
   await page.reload();
-  await navigate("Local rules");
+  await navigate("Rules & deploy");
   await page
     .getByRole("button", { name: "Create local rules", exact: true })
     .click();
@@ -384,7 +400,7 @@ try {
     .getByLabel("Override YAML", { exact: true })
     .fill(original + "\n# invented draft");
   await navigate("Overview");
-  await navigate("Local rules");
+  await navigate("Rules & deploy");
   assert.ok(
     (
       await page.getByLabel("Override YAML", { exact: true }).inputValue()
@@ -572,16 +588,86 @@ try {
       { exact: true },
     )
     .waitFor();
-  await navigate("Local rules");
+  await navigate("Rules & deploy");
   await page.getByText("Edit exact rule documents", { exact: true }).click();
   assert.ok(
     (
       await page.getByLabel("Override YAML", { exact: true }).inputValue()
     ).includes("TravelReview"),
   );
+  // Check Rules & deploy sub-tabs
+  for (const sub of ["Folders", "Sieve deploy", "Placement check", "Local rules & proof"]) {
+    await page.getByRole("tab", { name: sub, exact: true }).click();
+  }
   check(
-    "browser shares the exact masked summary, real MCP read/submit arrives automatically, retries deduplicate, and saving updates local rules",
+    "browser shares the exact masked summary, real MCP read/submit arrives automatically, retries deduplicate, saving updates local rules, and all Rules & deploy sub-tabs render",
   );
+  // Exercise unified Organize views (Backlog, Invoices, Subscriptions, Addresses & wind-down)
+  await navigate("Backlog");
+  await page.getByRole("heading", { name: "Backlog", exact: true }).waitFor();
+  await navigate("Invoices");
+  await page.getByRole("heading", { name: "Invoices", exact: true }).waitFor();
+  await navigate("Subscriptions");
+  await page.getByRole("heading", { name: "Subscriptions", exact: true }).waitFor();
+  await navigate("Addresses & wind-down");
+  await page
+    .getByRole("heading", { name: "Addresses & wind-down", exact: true })
+    .waitFor();
+  for (const sub of ["Gmail forwarding", "Gmail wind-down", "Address ledger"]) {
+    await page.getByRole("tab", { name: sub, exact: true }).click();
+  }
+  check("unified Backlog, Invoices, Subscriptions, and Addresses & wind-down views render cleanly");
+  // Exercise Settings: Safety Mode toggle, Takeout .mbox import, T3 provider/model config
+  await navigate("Settings");
+  await page
+    .getByRole("button", { name: "Enable live writes for this session", exact: true })
+    .click();
+  await page
+    .getByRole("dialog")
+    .getByRole("checkbox")
+    .check();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Enable live writes", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Return to read-only", exact: true })
+    .waitFor();
+  await page
+    .getByRole("button", { name: "Return to read-only", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Enable live writes for this session", exact: true })
+    .waitFor();
+  const mboxPath = join(temp, "sample-takeout.mbox");
+  await writeFile(
+    mboxPath,
+    [
+      "From 1@xxx Sat Nov 21 00:00:00 +0000 2026",
+      "X-Gmail-Labels: Inbox,Unread",
+      "From: Bank <info@dkb.de>",
+      "To: owner@example.test",
+      "Subject: Statement",
+      "Date: Sat, 21 Nov 2026 00:00:00 +0000",
+      "",
+      "PRIVATE-BODY-NEVER-STORED",
+      "",
+    ].join("\n"),
+  );
+  await page
+    .getByLabel("Local .mbox file path", { exact: true })
+    .fill(mboxPath);
+  await page
+    .getByRole("button", { name: "Import .mbox headers", exact: true })
+    .click();
+  await page.getByText(/Last import: 1 imported/).waitFor();
+  await page.getByLabel("T3 provider", { exact: true }).fill("anthropic");
+  await page.getByLabel("T3 model", { exact: true }).fill("claude-opus");
+  await page.getByRole("button", { name: "Save T3 settings", exact: true }).click();
+  await page.getByText("T3 assistant configuration saved.", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Reset defaults", exact: true }).click();
+  await page.getByRole("button", { name: "Save T3 settings", exact: true }).click();
+  check("Settings Safety Mode toggle, local Takeout .mbox import, and T3 provider/model config work end-to-end");
   await page.setViewportSize({ width: 320, height: 900 });
   await page
     .getByRole("button", { name: "Open navigation", exact: true })
@@ -634,7 +720,11 @@ try {
       "Overview",
       "Senders",
       "Recommendations",
-      "Local rules",
+      "Rules & deploy",
+      "Backlog",
+      "Invoices",
+      "Subscriptions",
+      "Addresses & wind-down",
       "Settings",
     ]) {
       await navigate(name);

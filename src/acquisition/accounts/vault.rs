@@ -303,6 +303,81 @@ impl Vault {
         Ok(())
     }
 
+    /// Locks an unlocked vault immediately, zeroizing the in-memory key and decrypted entries.
+    pub(crate) fn lock(&self) -> Result<(), VaultError> {
+        let _transition = self.transition.try_lock().map_err(|_| VaultError::Busy)?;
+        let mut state = self.state();
+        match &*state {
+            State::Unlocked(_) => {
+                *state = State::Locked;
+                Ok(())
+            }
+            State::Locked => Ok(()),
+            State::Absent => Err(VaultError::Absent),
+            State::Unavailable(_) => Err(VaultError::Unavailable),
+        }
+    }
+
+    /// Verifies `current`, derives a new key with a fresh salt, and atomically re-seals the vault.
+    pub(crate) fn change_password(
+        &self,
+        current_password: &SecretValue,
+        next_password: &SecretValue,
+        confirmation: &SecretValue,
+    ) -> Result<(), VaultError> {
+        let _transition = self.transition.try_lock().map_err(|_| VaultError::Busy)?;
+        if current_password.bytes().is_empty()
+            || current_password.bytes().len() > MAX_PASSWORD_BYTES
+        {
+            return Err(VaultError::UnlockFailed);
+        }
+        new_password(next_password, confirmation)?;
+        let (salt, existing_key) = {
+            let state = self.state();
+            match &*state {
+                State::Unlocked(open) => (open.salt, open.key.clone()),
+                State::Locked => return Err(VaultError::UnlockFailed),
+                State::Absent => return Err(VaultError::Absent),
+                State::Unavailable(_) => return Err(VaultError::Unavailable),
+            }
+        };
+        let verified = self.derive(current_password.bytes(), &salt)?;
+        if !bool::from(verified.as_slice().ct_eq(existing_key.as_slice())) {
+            return Err(VaultError::UnlockFailed);
+        }
+        let mut next_salt = [0u8; 16];
+        OsRng.fill_bytes(&mut next_salt);
+        let next_key = self.derive(next_password.bytes(), &next_salt)?;
+        let mut state = self.state();
+        let State::Unlocked(open) = &mut *state else {
+            return Err(VaultError::UnlockFailed);
+        };
+        if current(&self.directory) != Some((open.identity, open.generation, open.salt)) {
+            *state = State::Locked;
+            return Err(VaultError::UnlockFailed);
+        }
+        let generation = open.generation + 1;
+        if generation > MAX_GENERATION {
+            return Err(VaultError::Storage);
+        }
+        let sealed = seal(&next_key, &next_salt, generation, &open.entries)
+            .map_err(|_| VaultError::Storage)?;
+        match write(&self.directory, &sealed, Placement::Replace) {
+            Ok(identity) => {
+                open.key = next_key;
+                open.salt = next_salt;
+                open.generation = generation;
+                open.identity = identity;
+                Ok(())
+            }
+            Err(Written::No(_)) => Err(VaultError::Storage),
+            Err(Written::Uncertain) => {
+                *state = State::Locked;
+                Err(VaultError::Storage)
+            }
+        }
+    }
+
     fn derive(&self, password: &[u8], salt: &[u8; 16]) -> Result<Zeroizing<[u8; 32]>, VaultError> {
         #[cfg(test)]
         self.derivations

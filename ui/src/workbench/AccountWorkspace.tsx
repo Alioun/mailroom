@@ -1,12 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowUpRight, CheckCircle2 } from "lucide-react";
-import {
-  confirmAccount,
-  openAccount,
-  openWorkspace,
-  readReport,
-  reconnectAccount,
-} from "../api";
+import { openAccount, openWorkspace, readReport } from "../api";
 import type {
   Account,
   AccountStatus,
@@ -14,15 +7,31 @@ import type {
   CensusReport,
   WorkspaceView,
 } from "../api";
-import { Action, Details, Empty, Notice, useCopy } from "./components";
+import { Action, Empty, Notice, useCopy } from "./components";
 import { Overview, Senders } from "./Findings";
 import { Assistant } from "./Assistant";
 import { Rules } from "./Rules";
+import { Backlog } from "./Backlog";
+import { Invoices } from "./Invoices";
+import { Subscriptions } from "./Subscriptions";
+import { AddressesWinddown } from "./AddressesWinddown";
+import { AccountSettings } from "./Settings";
 
 export type Page =
-  "overview" | "senders" | "recommendations" | "rules" | "settings";
+  | "overview"
+  | "senders"
+  | "recommendations"
+  | "rules"
+  | "backlog"
+  | "invoices"
+  | "subscriptions"
+  | "addresses"
+  | "settings";
+
 export function AccountArea({
   account,
+  accounts,
+  status,
   hidden,
   page,
   refresh,
@@ -30,8 +39,11 @@ export function AccountArea({
   onNavigate,
   onCount,
   onStatus,
+  onRefresh,
 }: {
   account: Account;
+  accounts: Account[];
+  status: AccountStatus;
   hidden: boolean;
   page: Page;
   refresh: number;
@@ -39,14 +51,16 @@ export function AccountArea({
   onNavigate: (page: Page) => void;
   onCount: (count: number) => void;
   onStatus: (value: AccountStatus) => void;
+  onRefresh: () => void;
 }) {
-  const t = useCopy(),
-    [report, setReport] = useState<CensusReport | null>(null),
-    [view, setView] = useState<AccountView | null>(null),
-    [workspace, setWorkspace] = useState<WorkspaceView | null>(null),
-    [error, setError] = useState(""),
-    [loading, setLoading] = useState(true);
+  const t = useCopy();
+  const [report, setReport] = useState<CensusReport | null>(null);
+  const [view, setView] = useState<AccountView | null>(null);
+  const [workspace, setWorkspace] = useState<WorkspaceView | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
   const [loaded, setLoaded] = useState(false);
+
   const fetchSaved = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -55,8 +69,8 @@ export function AccountArea({
       openAccount(account.id),
       openWorkspace(account.id),
     ]);
-    const first = results[0],
-      second = results[1];
+    const first = results[0];
+    const second = results[1];
     if (first.status === "fulfilled") setReport(first.value);
     else
       setError(
@@ -69,12 +83,15 @@ export function AccountArea({
     if (results[2].status === "fulfilled") setWorkspace(results[2].value);
     setLoading(false);
   }, [account.id]);
+
   useEffect(() => {
     if (hidden && !loaded) return;
     setLoaded(true);
     if (!running) void fetchSaved();
   }, [hidden, refresh, running, fetchSaved]);
+
   if (!loaded) return null;
+
   return (
     <div hidden={hidden}>
       {error && (
@@ -104,8 +121,8 @@ export function AccountArea({
               )}
             >
               {t(
-                "Start a scan above. Your saved findings will appear here automatically.",
-                "Starte oben eine Erfassung. Deine gespeicherten Ergebnisse erscheinen hier automatisch.",
+                "Start a scan above or import a Google Takeout .mbox file in Settings. Your saved findings will appear here automatically.",
+                "Starte oben eine Erfassung oder importiere eine Google-Takeout-.mbox-Datei in den Einstellungen. Deine Ergebnisse erscheinen hier automatisch.",
               )}
             </Empty>
           )
@@ -156,13 +173,58 @@ export function AccountArea({
       </section>
       <section
         hidden={page !== "rules"}
-        aria-label={t("Local rules", "Lokale Regeln")}
+        aria-label={t("Rules & deploy", "Regeln & Bereitstellung")}
       >
         <Rules
-          account={account.id}
+          account={account}
+          view={view}
           workspace={workspace}
+          liveWrites={status.live_writes}
           onWorkspace={setWorkspace}
+          onGoSettings={() => onNavigate("settings")}
         />
+      </section>
+      <section
+        hidden={page !== "backlog"}
+        aria-label={t("Backlog", "Bestand sortieren")}
+      >
+        {page === "backlog" && (
+          <Backlog
+            account={account}
+            liveWrites={status.live_writes}
+            onGoSettings={() => onNavigate("settings")}
+          />
+        )}
+      </section>
+      <section
+        hidden={page !== "invoices"}
+        aria-label={t("Invoices", "Rechnungen")}
+      >
+        {page === "invoices" && (
+          <Invoices
+            account={account}
+            liveWrites={status.live_writes}
+            onGoSettings={() => onNavigate("settings")}
+          />
+        )}
+      </section>
+      <section
+        hidden={page !== "subscriptions"}
+        aria-label={t("Subscriptions", "Abonnements")}
+      >
+        {page === "subscriptions" && (
+          <Subscriptions
+            account={account}
+            liveWrites={status.live_writes}
+            onGoSettings={() => onNavigate("settings")}
+          />
+        )}
+      </section>
+      <section
+        hidden={page !== "addresses"}
+        aria-label={t("Addresses & wind-down", "Adressen & Abbau")}
+      >
+        {page === "addresses" && <AddressesWinddown account={account} />}
       </section>
       <section
         hidden={page !== "settings"}
@@ -170,176 +232,19 @@ export function AccountArea({
       >
         <AccountSettings
           account={account}
+          accounts={accounts}
+          status={status}
           view={view}
           onView={(value) => {
             setView(value);
             void fetchSaved();
           }}
           onStatus={onStatus}
-        />
-      </section>
-    </div>
-  );
-}
-function AccountSettings({
-  account,
-  view,
-  onView,
-  onStatus,
-}: {
-  account: Account;
-  view: AccountView | null;
-  onView: (value: AccountView) => void;
-  onStatus: (value: AccountStatus) => void;
-}) {
-  const t = useCopy(),
-    [password, setPassword] = useState(""),
-    [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
-  async function reconnect() {
-    setBusy(true);
-    setError("");
-    const entered = password;
-    setPassword("");
-    try {
-      onStatus(await reconnectAccount(account.id, entered || undefined));
-    } catch {
-      setError(
-        t(
-          "Connection could not start. Check the app password and retry.",
-          "Die Verbindung konnte nicht starten. Prüfe das App-Passwort und versuche es erneut.",
-        ),
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <div className="page-stack">
-      <section className="panel">
-        <div className="section-heading">
-          <div>
-            <h2>{t("Account connection", "Kontoverbindung")}</h2>
-            <p className="muted">
-              {account.login} ·{" "}
-              {account.provider === "gmail" ? "Gmail" : "mailbox.org"}
-            </p>
-          </div>
-          <span
-            className={`badge ${account.connection === "failed" ? "warning" : ""}`}
-          >
-            {account.connection === "observed"
-              ? t("Connection verified", "Verbindung geprüft")
-              : account.connection === "failed"
-                ? t("Reconnect needed", "Erneute Verbindung nötig")
-                : t("Not yet verified", "Noch nicht geprüft")}
-          </span>
-        </div>
-        <form
-          className="settings-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void reconnect();
+          onRefresh={() => {
+            onRefresh();
+            void fetchSaved();
           }}
-        >
-          <label className="field">
-            {t("Replacement app password", "Neues App-Passwort")}
-            <input
-              type="password"
-              autoComplete="off"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={t(
-                "Leave empty to retry saved password",
-                "Leer lassen, um gespeichertes Passwort zu verwenden",
-              )}
-            />
-          </label>
-          <Action primary type="submit" disabled={busy}>
-            {t("Reconnect", "Erneut verbinden")}
-          </Action>
-        </form>
-        {error && <Notice error>{error}</Notice>}
-      </section>
-      <section className="panel">
-        <h2>{t("Your addresses", "Deine Adressen")}</h2>
-        <p className="muted">
-          {t(
-            "Confirm only addresses you own. Recipient observations can include other people.",
-            "Bestätige nur Adressen, die dir gehören. Empfängerbeobachtungen können andere Personen enthalten.",
-          )}
-        </p>
-        <Details
-          title={`${t("Review address candidates", "Adresskandidaten prüfen")} · ${view?.addresses.length ?? 0}`}
-        >
-          <div className="address-list">
-            {view?.addresses.map((address) => (
-              <div className="address-row" key={address.address}>
-                <span>{address.address}</span>
-                <Action
-                  disabled={busy}
-                  onClick={() => {
-                    setBusy(true);
-                    void confirmAccount(
-                      account.id,
-                      address.address,
-                      !address.confirmed,
-                    )
-                      .then(onView)
-                      .catch(() =>
-                        setError(
-                          t(
-                            "Address confirmation failed. Try again.",
-                            "Adressbestätigung fehlgeschlagen. Versuche es erneut.",
-                          ),
-                        ),
-                      )
-                      .finally(() => setBusy(false));
-                  }}
-                >
-                  {address.confirmed ? (
-                    <>
-                      <CheckCircle2 size={15} />
-                      {t("Confirmed · undo", "Bestätigt · zurücknehmen")}
-                    </>
-                  ) : (
-                    t("Confirm ownership", "Eigentum bestätigen")
-                  )}
-                </Action>
-              </div>
-            ))}
-          </div>
-        </Details>
-      </section>
-      <section className="panel advanced-link">
-        <div>
-          <h2>{t("Advanced tools", "Erweiterte Werkzeuge")}</h2>
-          <p className="muted">
-            {t(
-              "Invoices, subscriptions, recovery, provider diagnostics, and detailed rule tools.",
-              "Rechnungen, Abonnements, Wiederherstellung, Anbieterdiagnose und detaillierte Regelwerkzeuge.",
-            )}
-          </p>
-        </div>
-        <a className="button" href="/advanced.html">
-          {t("Open advanced tools", "Erweiterte Werkzeuge öffnen")}
-          <ArrowUpRight size={16} />
-        </a>
-      </section>
-      <section className="panel">
-        <h2>{t("About this workspace", "Über diesen Arbeitsbereich")}</h2>
-        <p className="muted">
-          {t(
-            "Accounts and saved mail headers are stored locally. Programs running under your Mac user can access the open local session. Other websites cannot.",
-            "Konten und gespeicherte Kopfzeilen liegen lokal. Programme unter deinem Mac-Benutzer können auf die offene lokale Sitzung zugreifen. Andere Websites können das nicht.",
-          )}
-        </p>
-        <p className="help">
-          {t(
-            "Provider changes stay disabled. Local rule saves never deploy rules, send mail, unsubscribe, or move messages.",
-            "Änderungen beim Anbieter bleiben deaktiviert. Lokales Speichern aktiviert keine Regeln, sendet keine Nachrichten, meldet keine Abonnements ab und verschiebt keine Nachrichten.",
-          )}
-        </p>
+        />
       </section>
     </div>
   );

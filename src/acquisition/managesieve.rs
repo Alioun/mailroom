@@ -16,6 +16,11 @@ const POLL: Duration = Duration::from_millis(5);
 
 pub(crate) use crate::census::sieve::Failure as Error;
 
+pub(super) const LIVE_EPOCH: &str = "live-mailbox-org/v1";
+pub(super) const MAILBOX_ORG_SIEVE_HOST: &str = "sieve.mailbox.org";
+pub(super) const MAILBOX_ORG_SIEVE_PORT: u16 = 4190;
+
+#[derive(Clone)]
 pub(super) struct InstalledSource {
     pub address: SocketAddr,
     pub tls_name: String,
@@ -25,35 +30,89 @@ pub(super) struct InstalledSource {
     pub attempt_timeout: Duration,
 }
 impl InstalledSource {
+    pub(super) fn live_mailbox_org_identity() -> String {
+        use sha2::{Digest, Sha256};
+        let identity = serde_json::to_vec(&(
+            "live-mailbox-org-starttls/v1",
+            MAILBOX_ORG_SIEVE_HOST,
+            LIVE_EPOCH,
+        ))
+        .expect("live source identity");
+        data_encoding::HEXLOWER.encode(&Sha256::digest(identity))
+    }
+    pub(super) fn is_live(&self) -> bool {
+        self.epoch == LIVE_EPOCH
+            && self.tls_name == MAILBOX_ORG_SIEVE_HOST
+            && self.root.is_empty()
+            && !self.address.ip().is_loopback()
+    }
+    pub(super) fn real_mailbox_org() -> Result<Self, Error> {
+        use std::net::ToSocketAddrs;
+        let address = (MAILBOX_ORG_SIEVE_HOST, MAILBOX_ORG_SIEVE_PORT)
+            .to_socket_addrs()
+            .map_err(|_| Error::Connect)?
+            .find(|a| !a.ip().is_loopback())
+            .ok_or(Error::Connect)?;
+        Ok(Self {
+            address,
+            tls_name: MAILBOX_ORG_SIEVE_HOST.to_owned(),
+            root: Vec::new(),
+            epoch: LIVE_EPOCH.to_owned(),
+            command_timeout: Duration::from_secs(15),
+            attempt_timeout: Duration::from_secs(60),
+        })
+    }
     pub(super) fn identity(&self) -> String {
         use sha2::{Digest, Sha256};
-        let identity = serde_json::to_vec(&(&self.epoch, self.address, &self.tls_name, &self.root))
-            .expect("installed source identity");
+        let identity = if self.is_live() {
+            serde_json::to_vec(&("live-mailbox-org-starttls/v1", &self.tls_name, &self.epoch))
+                .expect("live source identity")
+        } else {
+            serde_json::to_vec(&(&self.epoch, self.address, &self.tls_name, &self.root))
+                .expect("installed source identity")
+        };
         data_encoding::HEXLOWER.encode(&Sha256::digest(identity))
     }
     pub(super) fn permit(&self) -> Result<SieveReadPermit<'_>, Error> {
-        if !self.address.ip().is_loopback() || self.epoch.is_empty() {
+        if self.is_live() {
+            return Ok(SieveReadPermit(self));
+        }
+        if !self.address.ip().is_loopback() || self.epoch.is_empty() || self.root.is_empty() {
             return Err(Error::Unsupported);
         }
         Ok(SieveReadPermit(self))
     }
 }
+#[derive(Clone)]
 pub(super) struct FixtureOwnership {
     pub account: crate::census::AccountId,
     pub target: String,
     pub epoch: String,
     pub source_identity: String,
 }
-pub(super) struct SieveWritePermit<'a> {
-    source: &'a InstalledSource,
-    pub ownership: &'a FixtureOwnership,
+impl FixtureOwnership {
+    pub(super) fn real_mailbox_org(
+        account: crate::census::AccountId,
+        source_identity: String,
+    ) -> Self {
+        Self {
+            account,
+            target: "Open-Xchange".to_owned(),
+            epoch: LIVE_EPOCH.to_owned(),
+            source_identity,
+        }
+    }
+}
+pub(super) struct SieveWritePermit {
+    source: InstalledSource,
+    pub ownership: FixtureOwnership,
 }
 impl InstalledSource {
-    pub(super) fn write_permit<'a>(
-        &'a self,
-        ownership: &'a FixtureOwnership,
+    pub(super) fn write_permit(
+        &self,
+        ownership: &FixtureOwnership,
         account: &crate::census::AccountId,
-    ) -> Result<SieveWritePermit<'a>, Error> {
+    ) -> Result<SieveWritePermit, Error> {
         self.permit()?;
         if ownership.account != *account
             || ownership.epoch.is_empty()
@@ -63,8 +122,8 @@ impl InstalledSource {
             return Err(Error::Unsupported);
         }
         Ok(SieveWritePermit {
-            source: self,
-            ownership,
+            source: self.clone(),
+            ownership: ownership.clone(),
         })
     }
 }
@@ -195,9 +254,14 @@ impl Session {
         {
             return Err(Error::Unsupported);
         }
+        let connect_timeout = if source.is_live() {
+            Duration::from_secs(10)
+        } else {
+            Duration::from_millis(250)
+        };
         let tcp = TcpStream::connect_timeout(
             &source.address,
-            Duration::from_millis(250).min(end.saturating_duration_since(Instant::now())),
+            connect_timeout.min(end.saturating_duration_since(Instant::now())),
         )
         .map_err(|_error| {
             #[cfg(test)]
@@ -231,10 +295,12 @@ impl Session {
         session.begin(RESPONSE);
         let mut builder = TlsConnector::builder();
         builder.min_protocol_version(Some(native_tls::Protocol::Tlsv12));
-        builder.disable_built_in_roots(true);
-        builder.add_root_certificate(
-            native_tls::Certificate::from_der(&source.root).map_err(|_| Error::Tls)?,
-        );
+        if !source.is_live() {
+            builder.disable_built_in_roots(true);
+            builder.add_root_certificate(
+                native_tls::Certificate::from_der(&source.root).map_err(|_| Error::Tls)?,
+            );
+        }
         let connector = builder.build().map_err(|_| Error::Tls)?;
         let Stream::Plain(tcp) = session.stream else {
             unreachable!()
@@ -690,7 +756,7 @@ impl Session {
         self.status_only()?;
         Ok(bytes)
     }
-    fn write_authorized(&self, permit: &SieveWritePermit<'_>) -> Result<(), Error> {
+    fn write_authorized(&self, permit: &SieveWritePermit) -> Result<(), Error> {
         if self.source_identity != permit.source.identity() {
             return Err(Error::Unsupported);
         }
@@ -698,7 +764,7 @@ impl Session {
     }
     pub(super) fn check_script(
         &mut self,
-        permit: &SieveWritePermit<'_>,
+        permit: &SieveWritePermit,
         bytes: &[u8],
     ) -> Result<(), Error> {
         self.write_authorized(permit)?;
@@ -721,7 +787,7 @@ impl Session {
     }
     pub(super) fn have_space(
         &mut self,
-        permit: &SieveWritePermit<'_>,
+        permit: &SieveWritePermit,
         name: &str,
         bytes: usize,
     ) -> Result<(), Error> {
@@ -735,7 +801,7 @@ impl Session {
     }
     pub(super) fn put_script(
         &mut self,
-        permit: &SieveWritePermit<'_>,
+        permit: &SieveWritePermit,
         name: &str,
         bytes: &[u8],
     ) -> Result<(), Error> {
@@ -762,7 +828,7 @@ impl Session {
     }
     pub(super) fn set_active(
         &mut self,
-        permit: &SieveWritePermit<'_>,
+        permit: &SieveWritePermit,
         enabled: bool,
     ) -> Result<(), Error> {
         self.write_authorized(permit)?;

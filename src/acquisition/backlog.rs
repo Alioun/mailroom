@@ -80,17 +80,27 @@ impl Accounts {
             s.authority == "fixture-message-move/v1"
                 && s.address.ip().is_loopback()
                 && id.is_none_or(|id| *id == s.account)
-        })
+        }) || self.live_transports
     }
-    fn backlog_source(&self, account: &Account) -> Result<&InstalledSource, AcquisitionError> {
-        let s = self.backlog_source.as_deref().ok_or_else(invalid)?;
-        if s.account != account.id
-            || s.login != account.login
-            || account.provider != super::Provider::MailboxOrg
-        {
-            return Err(invalid());
+    fn backlog_source(
+        &self,
+        account: &Account,
+    ) -> Result<std::borrow::Cow<'_, InstalledSource>, AcquisitionError> {
+        if let Some(s) = self.backlog_source.as_deref() {
+            if s.account != account.id
+                || s.login != account.login
+                || account.provider != super::Provider::MailboxOrg
+            {
+                return Err(invalid());
+            }
+            return Ok(std::borrow::Cow::Borrowed(s));
         }
-        Ok(s)
+        if self.live_transports && account.provider == super::Provider::MailboxOrg {
+            return InstalledSource::real_mailbox_org(account)
+                .map(std::borrow::Cow::Owned)
+                .map_err(failure);
+        }
+        Err(invalid())
     }
     fn backlog_binding(
         &self,
@@ -166,8 +176,11 @@ impl Accounts {
             Connection::connect(&permit, &password, cancel.clone()).map_err(failure)?;
         let before = connection.inventory().map_err(failure)?;
         let read = crate::policy::read_permit(account.provider)?;
-        let mut reader =
-            ReadOnlyImap::loopback(&permit, &read, &account.login, &password, cancel.clone())?;
+        let mut reader = if source.is_live() {
+            ReadOnlyImap::connect(&read, &account.login, &password, cancel.clone())?
+        } else {
+            ReadOnlyImap::loopback(&permit, &read, &account.login, &password, cancel.clone())?
+        };
         let folders = reader.folders()?;
         for folder in &folders {
             if !folder.selectable
@@ -547,6 +560,7 @@ impl Accounts {
         let permit = self
             .backlog_source(account)?
             .runtime_permit(&runtime)
+            .map(|p| p.into_owned())
             .map_err(failure)?;
         let mut connection =
             Connection::connect(&permit, &self.password(account)?, cancel).map_err(failure)?;
@@ -618,6 +632,7 @@ impl Accounts {
         let permit = self
             .backlog_source(account)?
             .runtime_permit(&runtime)
+            .map(|p| p.into_owned())
             .map_err(failure)?;
         let mut connection =
             Connection::connect(&permit, &self.password(account)?, cancel).map_err(failure)?;

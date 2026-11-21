@@ -38,7 +38,7 @@ pub(crate) const MAX_FILE: u64 = 2 * MAX_SNAPSHOT + 4096;
 /// save compacts them into a new base. A framed file then stays within 1.25
 /// times its base, recovery's resource limits see nearly the same size, and
 /// compaction stays amortized over the frames it replaces.
-const MIN_FRAME_BUDGET: u64 = 64 * 1024;
+const MIN_FRAME_BUDGET: u64 = 128 * 1024;
 /// Schema of new base snapshots. 19 adds Q27 undo retention to the backlog
 /// journals: `completed_at` on runs and compacted `summaries`. 20 adds each
 /// census folder's `highestmodseq`. 21 adds Gmail `label_provisioning` and

@@ -290,7 +290,11 @@ pub(in crate::server) async fn handle(
     };
     let permit =
         if super::unsubscribe::wired(&state) && !matches!(request.command, Action::Open { .. }) {
-            match state.accounts.writes.permit(Operation::Unsubscribe) {
+            match state
+                .accounts
+                .writes
+                .permit_with_mode(Operation::Unsubscribe, state.accounts.live_writes())
+            {
                 Ok(permit) => Some(permit),
                 Err(reason) => {
                     return (StatusCode::FORBIDDEN, Json(json!({"error":reason}))).into_response();

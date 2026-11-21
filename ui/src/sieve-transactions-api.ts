@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { localFetch } from './api'
 import { sieveFailure } from './sieve-diagnostics'
-const body = z.object({ name: z.string(), bytes: z.array(z.number().int().min(0).max(255)).max(65536), sha256: z.string() })
+const body = z.object({ name: z.string(), bytes: z.array(z.number().int().min(0).max(255)).max(131072), sha256: z.string() })
 const image = z.object({ capabilities: z.record(z.string(), z.string()), names: z.array(z.object({ name: z.string(), active: z.boolean() })).max(8), bodies: z.array(body).max(8) })
 const effect = z.enum(['upload', 'activate', 'disable', 'upload_owned'])
 const step = z.object({ effect, before: image, after: image, outcome: z.enum(['intent', 'acknowledged', 'observed', 'refused', 'uncertain', 'conflict', 'preimage']), acknowledgment: z.boolean(), failure: sieveFailure.nullable() })
@@ -21,7 +21,14 @@ export const transactionHistoryLimit = 64
 const journal = z.object({ history: z.array(transaction).max(transactionHistoryLimit) }).superRefine((journal, context) => {
   if (new Set(journal.history.map(transaction => transaction.id)).size !== journal.history.length) context.addIssue({ code: 'custom', message: 'Transaction history requires unique operation identities' })
 })
-const view = z.object({ installed: z.literal(true), recovery_hold: z.boolean(), placement: placement.nullable(), journal, limitations: z.string() })
+const recommendation = z.object({
+  recommended: z.enum(['block', 'include']),
+  include_supported: z.boolean(),
+  has_open_xchange: z.boolean(),
+  discovered: z.boolean(),
+  reason: z.string(),
+})
+const view = z.object({ installed: z.literal(true), live_writes: z.boolean().optional(), recovery_hold: z.boolean(), placement: placement.nullable(), recommendation: recommendation.optional(), journal, limitations: z.string() })
 const destination = z.discriminatedUnion('kind', [z.object({ kind: z.literal('inbox') }), z.object({ kind: z.literal('folder'), name: z.string() })])
 const existing = z.discriminatedUnion('kind', [z.object({ kind: z.literal('inbox') }), z.object({ kind: z.literal('folder'), name: z.string() }), z.object({ kind: z.literal('discard') }), z.object({ kind: z.literal('redirect') }), z.object({ kind: z.literal('reject') })])
 const precedence = z.object({ semantics: z.literal('mailroom-foreign-composition-v2'), placement, host: z.string(), foreign_rules: z.array(z.object({ index: z.number(), name: z.string(), line: z.number(), may_stop: z.boolean(), dispositions: z.array(existing) })), decisions: z.array(z.object({ id: z.string(), message_id_hash: z.string().nullable(), rule: z.string(), status: z.enum(['existing_rule_wins', 'undetermined']), existing: existing.nullable(), mailroom: destination, conflicting: z.boolean(), copies: z.number() })), copies: z.array(z.object({ id: z.string(), message_id_hash: z.string().nullable(), rule: z.string(), recipient: z.string(), status: z.enum(['copied', 'undetermined']), filed_by: z.enum(['mailroom', 'existing_rule', 'undetermined']) })), counts: currentCounts, pins: z.array(z.object({ message_id_hash: z.string(), status: z.string() })), gate: z.string(), warnings: z.array(z.string()) })

@@ -34,7 +34,7 @@ impl Profile {
 impl InstalledSource {
     pub(in crate::acquisition) fn profile(&self) -> Result<Profile, Error> {
         match self.authority.as_str() {
-            "fixture-message-move/v1" => Ok(Profile::Move),
+            "fixture-message-move/v1" | "live-message-move/v1" => Ok(Profile::Move),
             "fixture-message-copy/v1" => Ok(Profile::Copy),
             _ => Err(Error::Unsupported),
         }

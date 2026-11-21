@@ -29,7 +29,9 @@ pub(in crate::server) async fn handle(
     State(state): State<Arc<AppState>>,
     body: Result<Json<Request>, JsonRejection>,
 ) -> Response {
-    if !matches!(&state.accounts.source, AccountSource::Synthetic { accounts, .. } if accounts.folders_installed())
+    let is_vault = state.accounts.vault_live();
+    if !is_vault
+        && !matches!(&state.accounts.source, AccountSource::Synthetic { accounts, .. } if accounts.folders_installed())
     {
         return (StatusCode::FORBIDDEN, Json(json!({"error":"Folder creation requires a separately installed synthetic create source. Production and read-only installations deny before repository, credential, helper or network access."}))).into_response();
     }
@@ -37,9 +39,16 @@ pub(in crate::server) async fn handle(
         Ok(v) => v,
         Err(e) => return e,
     };
-    if !matches!(&state.accounts.source, AccountSource::Synthetic { accounts, .. } if accounts.folders_account(&request.account))
+    if !is_vault
+        && !matches!(&state.accounts.source, AccountSource::Synthetic { accounts, .. } if accounts.folders_account(&request.account))
     {
         return failure(AcquisitionError::InvalidInput);
+    }
+    if is_vault
+        && !state.accounts.live_writes()
+        && matches!(request.command, Action::Confirm { .. })
+    {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"Live provider writes are locked in Read-only mode. Enable Live writes in Settings to create IMAP folders."}))).into_response();
     }
     if matches!(request.command, Action::Cancel {}) {
         if let Some(job) = state

@@ -39,6 +39,8 @@ const ACCOUNT_ROUTES: &[&str] = &[
     "proof/download",
     "summary/review",
     "summary/export",
+    "write-mode",
+    "takeout",
 ];
 
 struct Fixture {
@@ -458,7 +460,7 @@ async fn browser_creates_the_vault_and_connects_corrects_and_reopens_dummy_accou
     let (code, view) = post(&app, "/api/accounts/open", json!({"account":first})).await;
     assert_eq!(code, StatusCode::OK);
     assert!(!view["census"]["folders"].as_object().unwrap().is_empty());
-    let (code, body) = post(
+    let (_code, body) = post(
         &app,
         "/api/accounts/ledger",
         json!({"account":first,"command":{"action":"open"}}),
@@ -476,14 +478,35 @@ async fn browser_creates_the_vault_and_connects_corrects_and_reopens_dummy_accou
     .await;
     assert_eq!(code, StatusCode::OK, "{body}");
 
-    let (code, _) = post(&app, "/api/accounts/lifecycle", json!({"action":"status"})).await;
-    assert_eq!(
-        code,
-        StatusCode::FORBIDDEN,
-        "generic lifecycle writes stay closed"
-    );
+    let (code, body) = post(&app, "/api/accounts/lifecycle", json!({"action":"status"})).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert_eq!(body["production_available"], true);
     let (code, _) = post(&app, "/api/operations", json!({"operation":"send_message"})).await;
     assert_eq!(code, StatusCode::FORBIDDEN);
+    let (code, body) = post(
+        &app,
+        "/api/accounts/write-mode",
+        json!({"live_writes":true,"confirmed":false}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(status_of(&app).await["live_writes"], false);
+    let (code, body) = post(
+        &app,
+        "/api/accounts/write-mode",
+        json!({"live_writes":true,"confirmed":true}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert_eq!(body["live_writes"], true);
+    let (code, body) = post(
+        &app,
+        "/api/accounts/write-mode",
+        json!({"live_writes":false}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert_eq!(body["live_writes"], false);
     for operation in [
         Operation::SendMessage,
         Operation::MoveMessages,
@@ -596,4 +619,140 @@ async fn native_and_synthetic_servers_keep_their_routes_closed() {
         }
         assert_eq!(app.accounts.repository_accesses.load(Ordering::SeqCst), 0);
     }
+}
+
+#[tokio::test]
+async fn vault_lifecycle_lock_password_change_takeout_recovery_and_assistant_config() {
+    let fixture = Fixture::new();
+    let app = fixture.start();
+    let (code, _) = post(
+        &app,
+        "/api/vault/create",
+        json!({"password":MASTER,"confirmation":MASTER}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    fixture.provider("normal");
+    let (code, _) = post(
+        &app,
+        "/api/accounts/connect",
+        json!({"provider":"gmail","login":"owner@example.test","password":CANARY}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(settled(&app).await["job"]["progress"]["state"], "complete");
+    let (_, accounts) = post(&app, "/api/accounts/list", json!({})).await;
+    let id = accounts[0]["id"].as_str().unwrap().to_owned();
+
+    // Assistant provider/model defaults and updates
+    let (code, cfg) = post(
+        &app,
+        "/api/accounts/assistant",
+        json!({"account":id,"command":{"action":"config_get"}}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(cfg["config"]["provider"], "codex_home_v2");
+    assert_eq!(cfg["config"]["model"], "gpt-6.1-sol");
+    let (code, cfg) = post(
+        &app,
+        "/api/accounts/assistant",
+        json!({"account":id,"command":{"action":"config_set","provider":"anthropic","model":"claude-opus"}}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(cfg["config"]["provider"], "anthropic");
+    assert_eq!(cfg["config"]["model"], "claude-opus");
+    let (code, _) = post(
+        &app,
+        "/api/accounts/assistant",
+        json!({"account":id,"command":{"action":"config_set","provider":"--bad","model":"x"}}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Takeout .mbox import
+    let mbox = fixture.base().join("export.mbox");
+    std::fs::write(
+        &mbox,
+        concat!(
+            "From 1@xxx Sat Nov 21 00:00:00 +0000 2026\n",
+            "X-Gmail-Labels: Inbox,Unread\n",
+            "From: Bank <info@dkb.de>\n",
+            "To: owner@example.test\n",
+            "Subject: Statement\n",
+            "Date: Sat, 21 Nov 2026 00:00:00 +0000\n",
+            "\n",
+            "PRIVATE-TAKEOUT-BODY-CANARY\n",
+        ),
+    )
+    .unwrap();
+    let (code, body) = post(
+        &app,
+        "/api/accounts/takeout",
+        json!({"account":id,"path":mbox.to_str().unwrap()}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert_eq!(body["summary"]["imported"], 1);
+
+    // Encrypted recovery backup with user passphrase
+    let rec_pass = "recovery backup passphrase 9876";
+    let (code, preview) = post(
+        &app,
+        "/api/accounts/recovery",
+        json!({"action":"selected_capture_preview","accounts":[id],"include_ledger":true,"passphrase":rec_pass}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{preview}");
+    let (code, captured) = post(
+        &app,
+        "/api/accounts/recovery",
+        json!({"action":"selected_capture","preview":preview["preview"],"receipt":preview["receipt"],"passphrase":rec_pass}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{captured}");
+    assert_eq!(captured["captured"], true);
+
+    // Live writes arm, then vault lock disarms live writes and locks routes
+    let (code, body) = post(
+        &app,
+        "/api/accounts/write-mode",
+        json!({"live_writes":true,"confirmed":true}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(body["live_writes"], true);
+    let (code, body) = post(&app, "/api/vault/lock", json!({})).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(body["vault"], "locked");
+    assert_eq!(body["live_writes"], false);
+    let (code, _) = post(&app, "/api/accounts/list", json!({})).await;
+    assert_eq!(code, StatusCode::LOCKED);
+
+    // Unlock and change master password
+    let (code, _) = post(&app, "/api/vault/unlock", json!({"password":MASTER})).await;
+    assert_eq!(code, StatusCode::OK);
+    let new_master = "brand new master password 8742";
+    let (code, body) = post(
+        &app,
+        "/api/vault/change-password",
+        json!({"current":"wrong current password","password":new_master,"confirmation":new_master}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let (code, body) = post(
+        &app,
+        "/api/vault/change-password",
+        json!({"current":MASTER,"password":new_master,"confirmation":new_master}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let (code, _) = post(&app, "/api/vault/lock", json!({})).await;
+    assert_eq!(code, StatusCode::OK);
+    let (code, _) = post(&app, "/api/vault/unlock", json!({"password":MASTER})).await;
+    assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+    let (code, body) = post(&app, "/api/vault/unlock", json!({"password":new_master})).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(body["vault"], "unlocked");
 }

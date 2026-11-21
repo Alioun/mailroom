@@ -157,17 +157,28 @@ impl Accounts {
         self.label_source
             .as_ref()
             .is_some_and(|s| s.installed() && id.is_none_or(|id| *id == s.account))
+            || self.live_transports
     }
-    fn label_source(&self, account: &Account) -> Result<&InstalledSource, AcquisitionError> {
-        let s = self.label_source.as_deref().ok_or_else(invalid)?;
-        if s.account != account.id
-            || s.login != account.login
-            || account.provider != super::Provider::Gmail
-            || !s.installed()
-        {
-            return Err(invalid());
+    fn label_source(
+        &self,
+        account: &Account,
+    ) -> Result<std::borrow::Cow<'_, InstalledSource>, AcquisitionError> {
+        if let Some(s) = self.label_source.as_deref() {
+            if s.account != account.id
+                || s.login != account.login
+                || account.provider != super::Provider::Gmail
+                || !s.installed()
+            {
+                return Err(invalid());
+            }
+            return Ok(std::borrow::Cow::Borrowed(s));
         }
-        Ok(s)
+        if self.live_transports && account.provider == super::Provider::Gmail {
+            return InstalledSource::real_gmail(account)
+                .map(std::borrow::Cow::Owned)
+                .map_err(failure);
+        }
+        Err(invalid())
     }
     fn gmail_binding(
         &self,
@@ -225,7 +236,7 @@ impl Accounts {
         &self,
         account: &Account,
         store: &EncryptedStore,
-    ) -> Result<LabelPermit<'_>, AcquisitionError> {
+    ) -> Result<LabelPermit<'static>, AcquisitionError> {
         let source = self.label_source(account)?;
         if store.recovery_pending() {
             return Err(AcquisitionError::LifecyclePending);
@@ -240,6 +251,7 @@ impl Accounts {
                 workspace: self.workspace_context(account, store)?.binding().into(),
                 topology: PROFILE.into(),
             })
+            .map(|p| p.into_owned())
             .map_err(failure)
     }
     fn gmail_connect(
@@ -248,10 +260,8 @@ impl Accounts {
         runtime: &RuntimeBinding,
         cancel: Cancellation,
     ) -> Result<Connection, AcquisitionError> {
-        let permit = self
-            .label_source(account)?
-            .runtime_permit(runtime)
-            .map_err(failure)?;
+        let source = self.label_source(account)?;
+        let permit = source.runtime_permit(runtime).map_err(failure)?;
         Connection::connect(&permit, &self.password(account)?, cancel).map_err(failure)
     }
     /// Reads All Mail once over the installed source. Other label mailboxes are
@@ -268,17 +278,14 @@ impl Accounts {
         let before = connection.inventory().map_err(failure)?;
         let all = all_mail(&before).map_err(failure)?.name.clone();
         let read = crate::policy::read_permit(account.provider)?;
-        let permit = self
-            .label_source(account)?
-            .runtime_permit(runtime)
-            .map_err(failure)?;
-        let mut reader = ReadOnlyImap::loopback_gmail(
-            &permit,
-            &read,
-            &account.login,
-            &self.password(account)?,
-            cancel.clone(),
-        )?;
+        let source = self.label_source(account)?;
+        let permit = source.runtime_permit(runtime).map_err(failure)?;
+        let password = self.password(account)?;
+        let mut reader = if source.is_live() {
+            ReadOnlyImap::connect(&read, &account.login, &password, cancel.clone())?
+        } else {
+            ReadOnlyImap::loopback_gmail(&permit, &read, &account.login, &password, cancel.clone())?
+        };
         let folders = reader.folders()?;
         if folders.len() != before.mailboxes.len() {
             return Err(invalid());

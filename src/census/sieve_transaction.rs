@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub const HISTORY: usize = 64;
 pub const JOURNAL_BYTES: usize = 4 * 1024 * 1024;
-pub const IMAGE_BYTES: usize = 64 * 1024;
+pub const IMAGE_BYTES: usize = 128 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

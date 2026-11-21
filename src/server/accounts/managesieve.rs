@@ -16,6 +16,7 @@ pub(in crate::server) struct Request {
 }
 fn installed(controller: &AccountController) -> bool {
     matches!(&controller.source, AccountSource::Synthetic { accounts, .. } if accounts.sieve_installed())
+        || controller.vault_live()
 }
 pub(in crate::server) async fn handle(
     State(state): State<Arc<AppState>>,
@@ -89,7 +90,8 @@ pub(in crate::server) async fn handle(
         let store = repo.store(&account)?;
         let saved = store.load_state()?;
         let context = repo.sieve_context(&account, &store)?;
-        Ok(json!({"installed":true,"current":saved.sieve.current(Some(&context), store.recovery_pending()),"recovery_hold":store.recovery_pending(),"facts":saved.sieve,"limits":{"script_bytes":1048576,"attempt_bytes":4194304,"names":256},"limitations":"Matching observations are not a server transaction and cannot exclude change-and-revert. Include dependencies remain uncaptured. Production access and deployment remain unavailable. Compiler trust is unchanged."}))
+        let recommendation = crate::acquisition::sieve_discovery::recommend_sieve_placement(&saved);
+        Ok(json!({"installed":true,"current":saved.sieve.current(Some(&context), store.recovery_pending()),"recovery_hold":store.recovery_pending(),"facts":saved.sieve,"recommendation":recommendation,"limits":{"script_bytes":1048576,"attempt_bytes":4194304,"names":256},"limitations":"Matching observations are not a server transaction and cannot exclude change-and-revert. Include dependencies remain uncaptured. Compiler trust is unchanged."}))
     }).await { Ok(Ok(v)) => Json(v).into_response(), Ok(Err(e)) => failure(e), Err(_) => failure(AcquisitionError::Storage) }
 }
 

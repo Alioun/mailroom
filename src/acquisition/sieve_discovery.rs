@@ -13,25 +13,86 @@ fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+pub(crate) fn recommend_sieve_placement(saved: &AccountState) -> serde_json::Value {
+    let Some(baseline) = &saved.sieve.last_successful else {
+        return serde_json::json!({
+            "recommended": "block",
+            "include_supported": false,
+            "has_open_xchange": false,
+            "discovered": false,
+            "reason": "Run ManageSieve discovery first to inspect server capabilities and Open-Xchange rules. Block mode is the safe default when capabilities are unknown."
+        });
+    };
+    let include_supported = baseline.capabilities.get("SIEVE").is_some_and(|exts| {
+        exts.split_whitespace()
+            .any(|ext| ext.eq_ignore_ascii_case("include"))
+    });
+    let has_open_xchange = baseline.names.iter().any(|n| n.name == "Open-Xchange")
+        || baseline.bodies.iter().any(|b| b.name == "Open-Xchange");
+    let recommended = if include_supported {
+        "include"
+    } else {
+        "block"
+    };
+    let reason = if include_supported {
+        "Server advertises the Sieve include extension; Include keeps Mailroom rules in a dedicated script referenced by one marked line in Open-Xchange. Block is also available if you prefer keeping rules inline in Open-Xchange."
+    } else {
+        "Server does not advertise the Sieve include extension; Block appends Mailroom rules inside a marked OX-compatible section after existing rules in Open-Xchange."
+    };
+    serde_json::json!({
+        "recommended": recommended,
+        "include_supported": include_supported,
+        "has_open_xchange": has_open_xchange,
+        "discovered": true,
+        "reason": reason
+    })
+}
+
 impl Accounts {
     pub(crate) fn sieve_installed(&self) -> bool {
-        self.sieve_source.is_some()
+        self.sieve_source.is_some() || self.live_transports
+    }
+    pub(super) fn resolve_sieve_source(
+        &self,
+        account: &super::Account,
+    ) -> Result<std::borrow::Cow<'_, super::managesieve::InstalledSource>, AcquisitionError> {
+        if let Some(source) = self.sieve_source.as_deref() {
+            return Ok(std::borrow::Cow::Borrowed(source));
+        }
+        if self.live_transports && account.provider == super::Provider::MailboxOrg {
+            return super::managesieve::InstalledSource::real_mailbox_org()
+                .map(std::borrow::Cow::Owned)
+                .map_err(|_| AcquisitionError::Protocol);
+        }
+        Err(AcquisitionError::InvalidInput)
     }
     pub(crate) fn sieve_context(
         &self,
         account: &super::Account,
         store: &EncryptedStore,
     ) -> Result<Context, AcquisitionError> {
-        let source = self
-            .sieve_source
-            .as_ref()
-            .ok_or(AcquisitionError::InvalidInput)?;
+        let (profile, source_epoch, tls_identity) = if let Some(source) = self.sieve_source.as_ref()
+        {
+            (
+                "installed-loopback-starttls-plain".into(),
+                source.identity(),
+                source.tls_name.clone(),
+            )
+        } else if self.live_transports && account.provider == super::Provider::MailboxOrg {
+            (
+                "live-mailbox-org-starttls-plain".into(),
+                super::managesieve::InstalledSource::live_mailbox_org_identity(),
+                super::managesieve::MAILBOX_ORG_SIEVE_HOST.to_owned(),
+            )
+        } else {
+            return Err(AcquisitionError::InvalidInput);
+        };
         Ok(Context {
             account: account.id.clone(),
             provider: account.provider,
-            profile: "installed-loopback-starttls-plain".into(),
-            source_epoch: source.identity(),
-            tls_identity: source.tls_name.clone(),
+            profile,
+            source_epoch,
+            tls_identity,
             authority: store.keys().binding_for(
                 b"mailroom/sieve-workspace-authority/v1",
                 &serde_json::to_vec(&(
@@ -48,14 +109,11 @@ impl Accounts {
         id: &AccountId,
         cancel: Cancellation,
     ) -> Result<(), AcquisitionError> {
-        let source = self
-            .sieve_source
-            .as_ref()
-            .ok_or(AcquisitionError::InvalidInput)?;
+        let account = self.load(id)?;
+        let source = self.resolve_sieve_source(&account)?;
         let permit = source
             .permit()
             .map_err(|_| AcquisitionError::InvalidInput)?;
-        let account = self.load(id)?;
         let store = self.store(&account)?;
         if store.recovery_pending() {
             return Err(AcquisitionError::LifecyclePending);

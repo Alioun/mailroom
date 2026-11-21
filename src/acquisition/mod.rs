@@ -7,9 +7,10 @@ pub(crate) mod gmail_backlog;
 mod imap;
 mod managesieve;
 mod scan;
-mod sieve_discovery;
+pub(crate) mod sieve_discovery;
 pub(crate) mod sieve_transaction;
 pub(crate) mod synthetic;
+pub(crate) mod takeout;
 pub(crate) mod workspace_authority;
 use crate::census::CensusError;
 #[cfg(target_os = "macos")]

@@ -33,13 +33,13 @@ The format is fixed by its version: Argon2id v0x13 with 64 MiB, 3 passes and 4 l
 
 One server owns the vault for its whole life. A second server stops with `status=vault_in_use` before it binds the port. Before changing credentials, Mailroom checks whether another program replaced the vault file. If so, it forgets the key and asks for the master password again. Reads use the unlocked copy in memory and do not detect replacement on their own.
 
-## Accounts
+## Accounts & safety mode
 
 The page adds an account from its provider, login and app password, saves it in the vault and runs a read-only IMAP folder listing. A refused sign-in, a network failure and a duplicate account each show their own message. The page offers to retry the connection or to replace the app password, which uses the existing transactional password replacement. An account setup interrupted by a crash shows a button that finishes or removes exactly that setup.
 
 Web accounts live in `~/.config/mailroom-web` and `~/Library/Application Support/mailroom-web`. Accounts of the native setup in `~/.config/mailroom` and the Keychain stay where they are, unread and unchanged. Nothing migrates between the two.
 
-Provider writes stay denied by the same policy as before. The web setup grants no generic lifecycle actions, no recovery bundles and no synthetic consent.
+Every server launch starts in **Read-only** mode (`live_writes: false`). Provider writes remain denied until you explicitly arm **Live writes** for the current session in Settings or the top bar, and every mutation still requires its own preview and confirmation. Locking the vault (from the top bar or Settings) or restarting the server immediately disarms live writes. Settings also provides master password change, local Google Takeout `.mbox` header-only import, configurable T3 provider/model, account key rotation/forgetting, and passphrase-encrypted recovery backup and restore.
 
 ## Limits
 

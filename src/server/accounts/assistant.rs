@@ -8,6 +8,11 @@ use crate::agent::{
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
     Status {},
+    ConfigGet {},
+    ConfigSet {
+        provider: String,
+        model: String,
+    },
     Prepare {
         summary: Summary,
         confirmed: bool,
@@ -84,6 +89,7 @@ fn spawn_launch(
     id: String,
     lock: crate::file_lock::ExclusiveFileLock,
     allow_create: bool,
+    config: t3::Config,
 ) {
     #[cfg(test)]
     let client = state
@@ -116,11 +122,12 @@ fn spawn_launch(
                 message,
                 uncertain: !allow_create,
             })?;
-            client.launch(
+            client.launch_with_config(
                 &folder,
                 &format!("Mailroom review {id}"),
                 &prompt,
                 allow_create,
+                &config,
             )
         })();
         record.launch = match result {
@@ -150,14 +157,30 @@ pub(in crate::server) async fn handle(
         let _admission = needs_census.then(|| state.accounts.admission.lock().expect("account admission"));
         let _operation = needs_census.then(|| state.accounts.operation.lock().expect("account operation"));
         let repo = state.accounts.repository().map_err(|e| e.to_string())?;
+        if matches!(request.command, Action::ConfigGet {}) {
+            let config = t3::load_config(&repo.paths.data);
+            return Ok(json!({"config": config}));
+        }
+        if let Action::ConfigSet { provider, model } = &request.command {
+            let saved = t3::save_config(
+                &repo.paths.data,
+                &t3::Config {
+                    provider: provider.trim().to_owned(),
+                    model: model.trim().to_owned(),
+                },
+            )?;
+            return Ok(json!({"config": saved}));
+        }
+        let config = t3::load_config(&repo.paths.data);
         let account = repo.load(&request.account).map_err(|e| e.to_string())?;
         let inbox = Inbox::open(&repo.paths.data, account.id.as_str())?;
         match request.command {
+            Action::ConfigGet {} | Action::ConfigSet { .. } => unreachable!(),
             Action::Status {} => {
                 for record in inbox.records()? {
                     if matches!(record.launch, Launch::Launching) {
                         if let Ok(lock) = inbox.launch_lock(&record.id) {
-                            spawn_launch(&state, Inbox::open(&repo.paths.data, account.id.as_str())?, record.id, lock, false);
+                            spawn_launch(&state, Inbox::open(&repo.paths.data, account.id.as_str())?, record.id, lock, false, config.clone());
                         }
                     }
                 }
@@ -173,18 +196,18 @@ pub(in crate::server) async fn handle(
                 let allow_create = match record.launch {
                     Launch::Prepared | Launch::Failed { uncertain: false, .. } => true,
                     Launch::Launching | Launch::Failed { uncertain: true, .. } => false,
-                    Launch::Launched { .. } => return Ok(json!({"requests": inbox.views()?})),
+                    Launch::Launched { .. } => return Ok(json!({"requests": inbox.views()?, "config": config})),
                 };
                 if allow_create { reviewed(&state, &repo, &account, &record.summary)?; }
                 if let Ok(lock) = inbox.launch_lock(&request_id) {
                     record.launch = Launch::Launching;
                     inbox.save(&record)?;
-                    spawn_launch(&state, Inbox::open(&repo.paths.data, account.id.as_str())?, request_id, lock, allow_create);
+                    spawn_launch(&state, Inbox::open(&repo.paths.data, account.id.as_str())?, request_id, lock, allow_create, config.clone());
                 }
             }
             Action::Dismiss { request_id, proposal_id } => inbox.dismiss(&request_id, &proposal_id)?,
         }
-        Ok(json!({"requests": inbox.views()?}))
+        Ok(json!({"requests": inbox.views()?, "config": config}))
     }).await {
         Ok(Ok(value)) => Json(value).into_response(),
         Ok(Err(error)) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error":error}))).into_response(),

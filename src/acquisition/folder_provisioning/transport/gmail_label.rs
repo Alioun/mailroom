@@ -9,6 +9,8 @@ use crate::{
 use std::collections::BTreeMap;
 
 pub(in crate::acquisition) const AUTHORITY: &str = "fixture-gmail-labels/v1";
+pub(in crate::acquisition) const LIVE_EPOCH: &str = "live-gmail-labels/v1";
+pub(in crate::acquisition) const LIVE_AUTHORITY: &str = "live-gmail-labels/v1";
 
 #[derive(Clone)]
 pub(in crate::acquisition) struct InstalledSource {
@@ -23,32 +25,79 @@ pub(in crate::acquisition) struct InstalledSource {
     pub operation_timeout: Duration,
 }
 
-pub(in crate::acquisition) struct LabelPermit<'a>(&'a InstalledSource);
+pub(in crate::acquisition) struct LabelPermit<'a>(std::borrow::Cow<'a, InstalledSource>);
 
 impl LabelPermit<'_> {
     pub(in crate::acquisition) fn source(&self) -> &InstalledSource {
-        self.0
+        &self.0
+    }
+    pub(in crate::acquisition) fn into_owned(self) -> LabelPermit<'static> {
+        LabelPermit(std::borrow::Cow::Owned(self.0.into_owned()))
     }
 }
 
 impl InstalledSource {
+    pub(in crate::acquisition) fn is_live(&self) -> bool {
+        self.epoch == LIVE_EPOCH
+            && self.authority == LIVE_AUTHORITY
+            && self.tls_name == "imap.gmail.com"
+            && self.root.is_empty()
+            && !self.address.ip().is_loopback()
+    }
+    pub(in crate::acquisition) fn real_gmail(
+        account: &super::super::super::Account,
+    ) -> Result<Self, Error> {
+        use std::net::ToSocketAddrs;
+        let host = "imap.gmail.com";
+        let address = (host, 993)
+            .to_socket_addrs()
+            .map_err(|_| Error::Connect)?
+            .find(|a| !a.ip().is_loopback())
+            .ok_or(Error::Connect)?;
+        Ok(Self {
+            account: account.id.clone(),
+            login: account.login.clone(),
+            address,
+            tls_name: host.to_owned(),
+            root: Vec::new(),
+            epoch: LIVE_EPOCH.to_owned(),
+            authority: LIVE_AUTHORITY.to_owned(),
+            command_timeout: Duration::from_secs(10),
+            operation_timeout: Duration::from_secs(60),
+        })
+    }
     pub(in crate::acquisition) fn identity(&self) -> String {
         use sha2::{Digest, Sha256};
-        let bytes = serde_json::to_vec(&(
-            "loopback-imap-gmail-labels/v1",
-            &self.account,
-            &self.login,
-            self.address,
-            &self.tls_name,
-            &self.root,
-            &self.epoch,
-            &self.authority,
-        ))
-        .expect("installed Gmail label source");
+        let bytes = if self.is_live() {
+            serde_json::to_vec(&(
+                "live-imap-gmail-labels/v1",
+                &self.account,
+                &self.login,
+                &self.tls_name,
+                &self.epoch,
+                &self.authority,
+            ))
+            .expect("live Gmail label source")
+        } else {
+            serde_json::to_vec(&(
+                "loopback-imap-gmail-labels/v1",
+                &self.account,
+                &self.login,
+                self.address,
+                &self.tls_name,
+                &self.root,
+                &self.epoch,
+                &self.authority,
+            ))
+            .expect("installed Gmail label source")
+        };
         data_encoding::HEXLOWER.encode(&Sha256::digest(bytes))
     }
 
     pub(in crate::acquisition) fn installed(&self) -> bool {
+        if self.is_live() {
+            return !self.login.is_empty();
+        }
         self.authority == AUTHORITY
             && !self.epoch.is_empty()
             && self.address.ip().is_loopback()
@@ -73,7 +122,7 @@ impl InstalledSource {
         {
             return Err(Error::Unsupported);
         }
-        Ok(LabelPermit(self))
+        Ok(LabelPermit(std::borrow::Cow::Borrowed(self)))
     }
 }
 
@@ -120,7 +169,7 @@ impl Connection {
         password: &SecretValue,
         cancel: Cancellation,
     ) -> Result<Self, Error> {
-        let source = permit.0;
+        let source = permit.source();
         let mut io = Session::open(
             Endpoint {
                 address: source.address,

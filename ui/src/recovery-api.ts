@@ -10,10 +10,10 @@ const ledger = z.discriminatedUnion('kind', [
 const manifest = z.object({ version: z.literal(2), captured_at: z.number(), accounts: z.array(accountManifest).min(1).max(8), excluded_accounts: z.array(z.string()), ledger, limitations: z.string() })
 const ledgerTarget = z.discriminatedUnion('kind', [z.object({ kind: z.literal('preserve_current'), version: z.string().nullable() }), z.object({ kind: z.literal('absent') }), z.object({ kind: z.literal('identical'), version: z.string() })])
 const restorePreview = z.object({ manifest, bundle: z.string(), target: z.string(), accounts_absent: z.literal(true), ledger_target: ledgerTarget, consequences: z.string() })
-const confirmation = z.object({ display: z.string(), synthetic: z.literal(true) })
+const confirmation = z.object({ display: z.string(), synthetic: z.boolean() })
 const captureOffer = z.object({ preview: manifest, receipt: z.string(), confirmation })
 const restoreOffer = z.object({ preview: restorePreview, receipt: z.string(), confirmation, authenticated: z.literal(true) })
-const status = z.object({ pending: z.array(z.string()), selected_pending: z.array(z.string()), restored: z.array(z.object({ account: z.string(), captured_at: z.number(), authenticated: z.boolean(), reconciliation_required: z.boolean(), bundle: z.string(), resources: z.array(inventory), key_material: z.array(keyMaterial) })), bundles: z.array(z.string()), production_available: z.literal(false), limitations: z.string() })
+const status = z.object({ pending: z.array(z.string()), selected_pending: z.array(z.string()), restored: z.array(z.object({ account: z.string(), captured_at: z.number(), authenticated: z.boolean(), reconciliation_required: z.boolean(), bundle: z.string(), resources: z.array(inventory), key_material: z.array(keyMaterial) })), bundles: z.array(z.string()), production_available: z.boolean(), limitations: z.string() })
 export type CaptureOffer = z.infer<typeof captureOffer>
 export type RestoreOffer = z.infer<typeof restoreOffer>
 export type RecoveryStatus = z.infer<typeof status>
@@ -24,9 +24,9 @@ async function post(body: unknown): Promise<unknown> {
   return data
 }
 export async function recoveryStatus() { return status.parse(await post({ action: 'status' })) }
-export async function previewCapture(accounts: string[], includeLedger: boolean) { return captureOffer.parse(await post({ action: 'selected_capture_preview', accounts, include_ledger: includeLedger })) }
-export async function capture(offer: CaptureOffer) { return z.object({ captured: z.literal(true), bundle: z.string() }).parse(await post({ action: 'selected_capture', preview: offer.preview, receipt: offer.receipt })) }
-export async function previewRestore(bundle: string, restoreLedger: boolean) { return restoreOffer.parse(await post({ action: 'selected_restore_preview', bundle, restore_ledger: restoreLedger })) }
-export async function restore(offer: RestoreOffer) { return post({ action: 'selected_restore', preview: offer.preview, receipt: offer.receipt }) }
-export async function resumeRestore() { return post({ action: 'selected_resume' }) }
-export async function resumeLegacyRestore(account: string) { return post({ action: 'resume', account }) }
+export async function previewCapture(accounts: string[], includeLedger: boolean, passphrase?: string) { return captureOffer.parse(await post({ action: 'selected_capture_preview', accounts, include_ledger: includeLedger, ...(passphrase ? { passphrase } : {}) })) }
+export async function capture(offer: CaptureOffer, passphrase?: string) { return z.object({ captured: z.literal(true), bundle: z.string() }).parse(await post({ action: 'selected_capture', preview: offer.preview, receipt: offer.receipt, ...(passphrase ? { passphrase } : {}) })) }
+export async function previewRestore(bundle: string, restoreLedger: boolean, passphrase?: string) { return restoreOffer.parse(await post({ action: 'selected_restore_preview', bundle, restore_ledger: restoreLedger, ...(passphrase ? { passphrase } : {}) })) }
+export async function restore(offer: RestoreOffer, passphrase?: string) { return post({ action: 'selected_restore', preview: offer.preview, receipt: offer.receipt, ...(passphrase ? { passphrase } : {}) }) }
+export async function resumeRestore(passphrase?: string) { return post({ action: 'selected_resume', ...(passphrase ? { passphrase } : {}) }) }
+export async function resumeLegacyRestore(account: string, passphrase?: string) { return post({ action: 'resume', account, ...(passphrase ? { passphrase } : {}) }) }

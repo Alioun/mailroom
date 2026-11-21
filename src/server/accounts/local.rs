@@ -405,9 +405,9 @@ mod tests {
         );
         let catalog = &opened["report"]["sender_catalog"];
         assert_eq!(catalog["license"], "CC0-1.0");
-        assert_eq!(catalog["rows"], 0);
-        assert_eq!(catalog["seed_complete"], false);
-        assert_eq!(catalog["missing_categories"].as_array().unwrap().len(), 6);
+        assert!(catalog["rows"].as_u64().unwrap() >= 120);
+        assert_eq!(catalog["seed_complete"], true);
+        assert_eq!(catalog["missing_categories"].as_array().unwrap().len(), 0);
         let change = json!({"kind":"settings","settings":{"winding_down":true,"comparisons":{}}});
         let (status, reviewed) = winddown(
             &app,

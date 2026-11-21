@@ -159,6 +159,7 @@ async fn serve(
     ) {
         return (StatusCode::FORBIDDEN, Json(json!({"error":"COPY workflow installation is held pending connected-runtime and interface acceptance."}))).into_response();
     }
+    let is_vault = state.accounts.vault_live();
     let status_only = matches!(
         &body,
         Ok(Json(Request {
@@ -167,6 +168,7 @@ async fn serve(
         }))
     );
     if !status_only
+        && !is_vault
         && !matches!(&state.accounts.source, AccountSource::Synthetic { accounts, .. } if kind.installed(accounts, None))
     {
         return (StatusCode::FORBIDDEN, Json(json!({"error":kind.denial()}))).into_response();
@@ -176,9 +178,24 @@ async fn serve(
         Err(e) => return e,
     };
     if !status_only
+        && !is_vault
         && !matches!(&state.accounts.source, AccountSource::Synthetic { accounts, .. } if kind.installed(accounts, Some(&request.account)))
     {
         return failure(AcquisitionError::InvalidInput);
+    }
+    if is_vault
+        && !state.accounts.live_writes()
+        && matches!(
+            request.command,
+            Action::Confirm { .. }
+                | Action::Resume { .. }
+                | Action::Undo { .. }
+                | Action::ResumeUndo { .. }
+                | Action::Close { .. }
+                | Action::LabelConfirm { .. }
+        )
+    {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"Live provider writes are locked in Read-only mode. Enable Live writes in Settings to move messages or update Gmail labels."}))).into_response();
     }
     if matches!(request.command, Action::Cancel {}) {
         return match tokio::task::spawn_blocking(move || {

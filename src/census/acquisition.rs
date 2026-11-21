@@ -107,7 +107,10 @@ impl Snapshot {
     fn validate(&self, account: &AccountId) -> Result<(), CensusError> {
         let text = |s: &str| s.len() <= 4096 && !s.chars().any(char::is_control);
         if self.version != 1
-            || !matches!(self.adapter.as_str(), ADAPTER | "mailroom/synthetic/v1")
+            || !matches!(
+                self.adapter.as_str(),
+                ADAPTER | "mailroom/synthetic/v1" | "mailroom/takeout-mbox/v1"
+            )
             || &self.account != account
             || self.attempt_id.len() != 32
             || self.folders.len() > MAX_FOLDERS
@@ -229,8 +232,10 @@ impl AcquisitionFacts {
     }
     pub(crate) fn validate(&self, account: &AccountId) -> Result<(), CensusError> {
         if let Some(a) = &self.latest {
-            if !matches!(a.adapter.as_str(), ADAPTER | "mailroom/synthetic/v1")
-                || a.id.len() != 32
+            if !matches!(
+                a.adapter.as_str(),
+                ADAPTER | "mailroom/synthetic/v1" | "mailroom/takeout-mbox/v1"
+            ) || a.id.len() != 32
                 || !a.id.bytes().all(|b| b.is_ascii_hexdigit())
             {
                 return Err(CensusError::InvalidCheckpoint);

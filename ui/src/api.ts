@@ -81,6 +81,7 @@ const account = z.object({ id: z.string(), provider: z.enum(['mailbox_org', 'gma
 const accountStatus = z.object({
   synthetic: z.boolean(),
   source: z.enum(['native', 'unavailable', 'installed', 'synthetic', 'vault']),
+  live_writes: z.boolean().default(false),
   vault: z.enum(['absent', 'locked', 'unlocked', 'unavailable']).nullable(),
   vault_problem: z.enum(['unsafe_file', 'damaged', 'unsupported_version']).nullable(),
   interrupted: z.array(z.string()),
@@ -112,7 +113,7 @@ export async function finishInterrupted(account: string): Promise<AccountStatus>
 export class VaultRefusal extends Error {
   constructor(readonly code: string) { super(code) }
 }
-async function vaultPost(action: 'create' | 'unlock', input: unknown): Promise<AccountStatus> {
+async function vaultPost(action: 'create' | 'unlock' | 'lock' | 'change-password', input: unknown): Promise<AccountStatus> {
   const response = await localFetch(`/api/vault/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) })
   const value: unknown = await response.json().catch(() => null)
   if (!response.ok) {
@@ -123,6 +124,12 @@ async function vaultPost(action: 'create' | 'unlock', input: unknown): Promise<A
 }
 export async function createVault(password: string, confirmation: string): Promise<AccountStatus> { return vaultPost('create', { password, confirmation }) }
 export async function unlockVault(password: string): Promise<AccountStatus> { return vaultPost('unlock', { password }) }
+export async function lockVault(): Promise<AccountStatus> { return vaultPost('lock', {}) }
+export async function changeVaultPassword(current: string, password: string, confirmation: string): Promise<AccountStatus> { return vaultPost('change-password', { current, password, confirmation }) }
+export async function setWriteMode(live_writes: boolean, confirmed = false): Promise<AccountStatus> { return accountStatus.parse(await accountPost('write-mode', { live_writes, confirmed })) }
+const takeoutSummary = z.object({ summary: z.object({ imported: z.number(), skipped: z.number(), folders: z.number(), labels: z.number(), folder: z.string() }) })
+export type TakeoutSummary = z.infer<typeof takeoutSummary>['summary']
+export async function importTakeout(account: string, path: string): Promise<TakeoutSummary> { return takeoutSummary.parse(await accountPost('takeout', { account, path })).summary }
 export async function syntheticAccount(gmail = false): Promise<AccountStatus> { return accountStatus.parse(await accountPost(gmail ? 'synthetic-gmail' : 'synthetic', {})) }
 export async function scanAccount(account: string): Promise<AccountStatus> { return accountStatus.parse(await accountPost('scan', { account })) }
 export async function cancelAccount(): Promise<AccountStatus> { return accountStatus.parse(await accountPost('cancel', {})) }
@@ -237,7 +244,7 @@ const unsubscribeMethod = z.enum(['one_click', 'browser_preparation', 'mail_app_
 const unsubscribeInput = z.object({ as_of: z.number(), selections: z.array(z.object({ subscription: z.string(), method: unsubscribeMethod })), folders: z.object({ personal: z.string(), business: z.string() }) })
 const unsubscribeRow = z.object({ id: z.string(), account: z.string(), sender: z.string(), domain: z.string().nullable(), recipient: z.string(), recipient_evidence: z.string(), list_id: z.string().nullable(), list_evidence: z.string(), class: z.string(), count_12_months: z.number(), read_share: z.number().nullable(), newest_dated_seen_message: z.number().nullable(), unread_volume: z.number(), rank: z.number(), recommended: z.boolean(), flags_known: z.boolean(), authentication: z.string(), original_header_survives: z.boolean(), relay_alias_initially_selected: z.literal(false), methods: z.array(unsubscribeMethod), role: z.string(), source: z.string(), header_digest: z.string(), source_ids: z.array(z.string()), straggler: z.string() })
 const unsubscribeEntry = z.object({ id: z.string(), subscription: z.string(), sender_key: z.string(), method: unsubscribeMethod, time: z.number(), status: z.string(), host: z.string().nullable(), payload_digest: z.string(), http_status: z.number().nullable(), success: z.string(), resolved: resolution.optional() })
-const unsubscribeView = z.object({ report: z.object({ version: z.string(), complete: z.boolean(), revision: z.number(), as_of: z.number(), last_completed_at: z.number().nullable(), census_age_seconds: z.number().nullable(), rows: z.array(unsubscribeRow), warnings: z.array(z.string()) }), history: z.array(unsubscribeEntry), mutes: z.record(z.string(), z.object({ subscription: z.string(), rule: z.object({ id: z.string() }) })), synthetic: z.boolean(), wired: z.boolean().default(false), production_available: z.literal(false), q20_scope: z.literal('separate_subscriptions') })
+const unsubscribeView = z.object({ report: z.object({ version: z.string(), complete: z.boolean(), revision: z.number(), as_of: z.number(), last_completed_at: z.number().nullable(), census_age_seconds: z.number().nullable(), rows: z.array(unsubscribeRow), warnings: z.array(z.string()) }), history: z.array(unsubscribeEntry), mutes: z.record(z.string(), z.object({ subscription: z.string(), rule: z.object({ id: z.string() }) })), synthetic: z.boolean(), wired: z.boolean().default(false), production_available: z.boolean().default(false), q20_scope: z.literal('separate_subscriptions') })
 const unsubscribePreview = z.object({ account: z.string(), state_revision: z.number(), workspace_revision: z.number().nullable(), semantics: z.string(), receipt: z.string().length(64), confirmation_action: z.string(), local_mail_confirmation: z.string().nullable(), scope: z.string(), confirmation: exactConfirmation.nullable(), proof: preview.nullable(), actions: z.array(z.object({ subscription: z.string(), account: z.string(), sender: z.string(), recipient: z.string(), list_id: z.string().nullable(), source: z.string(), header_digest: z.string(), method: unsubscribeMethod, host: z.string().nullable(), payload_digest: z.string(), role: z.string(), destination: z.string().nullable(), effect: z.string(), copy_card: z.object({ uri: z.string().nullable(), to: z.string().nullable(), from: z.string().nullable(), subject: z.string().nullable(), body: z.string().nullable() }).nullable() })) })
 type UnsubscribeView = z.infer<typeof unsubscribeView>
 export type UnsubscribeMethod = z.infer<typeof unsubscribeMethod>
@@ -257,7 +264,7 @@ export async function confirmSubscriptionReview(input: SubscriptionReviewInput, 
 const lifecycleResource = z.object({ path: z.string(), bytes: z.number(), digest: z.string() })
 const forgetPreview = z.object({ account: z.string(), revision: z.number(), generation: z.number(), resources: z.array(lifecycleResource), credential_references: z.array(z.string()), consequences: z.object({ en: z.string(), de: z.string() }), receipt: z.string().length(64) })
 const lifecycleRecovery = z.object({ account: z.string(), state: z.enum(['creating', 'replacing', 'forgetting', 'rotating', 'forgotten']) })
-const lifecycleStatus = z.object({ recovery: z.array(lifecycleRecovery), production_available: z.literal(false) })
+const lifecycleStatus = z.object({ recovery: z.array(lifecycleRecovery), production_available: z.boolean() })
 const lifecycleSaved = z.object({ saved: z.literal(true), recovery: z.array(lifecycleRecovery) })
 export type ForgetPreview = z.infer<typeof forgetPreview>
 export type LifecycleStatus = z.infer<typeof lifecycleStatus>

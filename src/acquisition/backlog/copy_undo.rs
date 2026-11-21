@@ -279,6 +279,7 @@ impl<'a> CopyUndoWorkflow<'a> {
         let permit = repo
             .backlog_source(self.account)?
             .runtime_permit(&runtime)
+            .map(|p| p.into_owned())
             .map_err(failure)?;
         let connection =
             Connection::connect(&permit, &repo.password(self.account)?, cancel).map_err(failure)?;

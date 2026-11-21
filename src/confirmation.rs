@@ -200,6 +200,10 @@ impl Boundary {
             helper: crate::native::installed(),
         }))
     }
+    /// Browser-confirmed boundary for `--local-vault` mode.
+    pub fn browser() -> Self {
+        Self::with_backend(Box::new(BrowserBackend))
+    }
     pub(crate) fn with_backend(backend: Box<dyn Backend>) -> Self {
         Self {
             #[cfg(test)]
@@ -344,6 +348,20 @@ impl Backend for SyntheticBackend {
     }
     fn synthetic(&self) -> bool {
         true
+    }
+    fn exchange(&mut self, request: &[u8], challenge: &[u8; 32]) -> Result<Vec<u8>, String> {
+        answer(request, challenge, Outcome::Approved)
+    }
+}
+
+/// Approves after explicit browser review of the exact plan and receipt in `--local-vault` mode.
+pub(crate) struct BrowserBackend;
+impl Backend for BrowserBackend {
+    fn available(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn synthetic(&self) -> bool {
+        false
     }
     fn exchange(&mut self, request: &[u8], challenge: &[u8; 32]) -> Result<Vec<u8>, String> {
         answer(request, challenge, Outcome::Approved)

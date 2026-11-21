@@ -206,6 +206,7 @@ pub struct Accounts {
     backend: Arc<dyn CredentialBackend>,
     pub(super) sieve_write: Option<Arc<super::managesieve::FixtureOwnership>>,
     pub(super) sieve_source: Option<Arc<super::managesieve::InstalledSource>>,
+    pub(crate) live_transports: bool,
     #[cfg(test)]
     pub(super) imap_factory: Option<super::imap::TestConnection>,
     /// Injected wall clock in seconds, for retention tests.
@@ -256,6 +257,7 @@ impl Accounts {
             workspace_authority: None,
             sieve_source: None,
             sieve_write: None,
+            live_transports: false,
             #[cfg(test)]
             imap_factory: None,
             #[cfg(test)]

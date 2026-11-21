@@ -38,6 +38,7 @@ pub(in crate::server) struct Request {
 }
 fn installed(controller: &AccountController) -> bool {
     matches!(&controller.source, AccountSource::Synthetic { accounts, .. } if accounts.sieve_write_installed())
+        || controller.vault_live()
 }
 pub(in crate::server) async fn handle(
     State(state): State<Arc<AppState>>,
@@ -50,9 +51,21 @@ pub(in crate::server) async fn handle(
         Ok(v) => v,
         Err(e) => return e,
     };
-    if !matches!(&state.accounts.source, AccountSource::Synthetic { accounts, .. } if accounts.sieve_write_account(&request.account))
+    if !state.accounts.vault_live()
+        && !matches!(&state.accounts.source, AccountSource::Synthetic { accounts, .. } if accounts.sieve_write_account(&request.account))
     {
         return failure(AcquisitionError::InvalidInput);
+    }
+    if state.accounts.vault_live()
+        && !state.accounts.live_writes()
+        && matches!(
+            request.command,
+            Action::Confirm { .. }
+                | Action::CompensationConfirm { .. }
+                | Action::RemovalConfirm { .. }
+        )
+    {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"Live provider writes are locked in Read-only mode. Enable Live writes in Settings to deploy or remove Sieve scripts."}))).into_response();
     }
     if matches!(request.command, Action::Cancel {}) {
         if let Some(job) = state
@@ -128,8 +141,9 @@ fn execute(
     let store = repo.store(&account)?;
     let mut saved = store.load_state()?;
     if matches!(request.command, Action::Status {}) {
+        let recommendation = crate::acquisition::sieve_discovery::recommend_sieve_placement(&saved);
         return Ok(
-            json!({"installed":true,"recovery_hold":store.recovery_pending(),"placement":saved.sieve_placement,"journal":saved.sieve_transactions,"limitations":acquisition::sieve_transaction::LIMITATIONS}),
+            json!({"installed":true,"live_writes":state.accounts.live_writes(),"recovery_hold":store.recovery_pending(),"placement":saved.sieve_placement,"recommendation":recommendation,"journal":saved.sieve_transactions,"limitations":acquisition::sieve_transaction::LIMITATIONS}),
         );
     }
     if store.recovery_pending() {

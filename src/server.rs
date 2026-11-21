@@ -144,8 +144,11 @@ struct OperationRequest {
     operation: Operation,
 }
 
-async fn operation(Json(input): Json<OperationRequest>) -> Response {
-    let availability = policy::authorize(input.operation);
+async fn operation(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<OperationRequest>,
+) -> Response {
+    let availability = policy::authorize_with_mode(input.operation, state.accounts.live_writes());
     if !availability.allowed || matches!(availability.effect, policy::Effect::AccountRead) {
         return (StatusCode::FORBIDDEN, Json(availability)).into_response();
     }
@@ -268,7 +271,13 @@ fn router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/api/availability",
-            get(|| async { Json(policy::OPERATIONS.map(policy::authorize)) }),
+            get({
+                let state = state.clone();
+                move || async move {
+                    let live = state.accounts.live_writes();
+                    Json(policy::OPERATIONS.map(|op| policy::authorize_with_mode(op, live)))
+                }
+            }),
         )
         .route("/api/accounts/backlog", post(accounts::backlog::handle))
         .route(
@@ -308,6 +317,16 @@ fn router(state: Arc<AppState>) -> Router {
             "/api/vault/unlock",
             post(accounts::web::unlock).layer(DefaultBodyLimit::max(VAULT_BODY_LIMIT)),
         )
+        .route(
+            "/api/vault/lock",
+            post(accounts::web::lock).layer(DefaultBodyLimit::max(VAULT_BODY_LIMIT)),
+        )
+        .route(
+            "/api/vault/change-password",
+            post(accounts::web::change_password).layer(DefaultBodyLimit::max(VAULT_BODY_LIMIT)),
+        )
+        .route("/api/accounts/write-mode", post(accounts::web::write_mode))
+        .route("/api/accounts/takeout", post(accounts::web::takeout))
         .route("/api/accounts/synthetic", post(accounts::synthetic))
         .route(
             "/api/accounts/synthetic-gmail",

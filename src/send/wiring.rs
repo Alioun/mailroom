@@ -66,8 +66,16 @@ impl Endpoints {
     /// Asks the policy for `operation`. Routes call this before any repository,
     /// credential or network access.
     pub(crate) fn permit(&self, operation: Operation) -> Result<WritePermit, &'static str> {
+        self.permit_with_mode(operation, false)
+    }
+
+    pub(crate) fn permit_with_mode(
+        &self,
+        operation: Operation,
+        live_writes: bool,
+    ) -> Result<WritePermit, &'static str> {
         match self {
-            Self::Real => policy::write_permit(operation),
+            Self::Real => policy::write_permit_with_mode(operation, live_writes),
             #[cfg(test)]
             Self::Fake(fake) => {
                 let mut endpoints = vec![fake.https];

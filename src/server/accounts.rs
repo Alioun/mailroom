@@ -51,6 +51,8 @@ pub(super) struct AccountController {
     confirmations: Mutex<crate::confirmation::Boundary>,
     /// The real send, one-click and mail-app adapters, each behind a write permit.
     writes: crate::send::wiring::Endpoints,
+    /// Session-only safety toggle. Always starts `false` (read-only) on every server launch.
+    live_writes: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     repository_accesses: std::sync::atomic::AtomicUsize,
 }
@@ -148,12 +150,13 @@ impl AccountController {
         Self {
             #[cfg(test)]
             assistant_cli: None,
-            confirmations: Mutex::new(if matches!(source, AccountSource::Synthetic { .. }) {
-                crate::confirmation::Boundary::synthetic()
-            } else {
-                crate::confirmation::Boundary::native()
+            confirmations: Mutex::new(match &source {
+                AccountSource::Synthetic { .. } => crate::confirmation::Boundary::synthetic(),
+                AccountSource::Vault { .. } => crate::confirmation::Boundary::browser(),
+                _ => crate::confirmation::Boundary::native(),
             }),
             writes: crate::send::wiring::Endpoints::Real,
+            live_writes: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             repository_accesses: std::sync::atomic::AtomicUsize::new(0),
             installed_ledger: ledger,
@@ -196,6 +199,16 @@ impl AccountController {
     }
     pub(super) fn vault_locked(&self) -> bool {
         self.vault().is_some_and(|vault| !vault.unlocked())
+    }
+    pub(super) fn live_writes(&self) -> bool {
+        self.live_writes.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub(super) fn set_live_writes(&self, enabled: bool) {
+        self.live_writes
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub(super) fn vault_live(&self) -> bool {
+        matches!(self.source, AccountSource::Vault { .. })
     }
     fn synthetic(&self) -> bool {
         matches!(self.source, AccountSource::Synthetic { .. })
@@ -291,6 +304,7 @@ pub(super) async fn status(State(state): State<Arc<AppState>>) -> Response {
     Json(json!({
         "synthetic": accounts.synthetic(),
         "source": source,
+        "live_writes": accounts.live_writes(),
         "vault": accounts.vault().map(|vault| vault.status()),
         "vault_problem": accounts.vault().and_then(|vault| vault.problem()),
         "interrupted": web::interrupted(accounts),

@@ -65,6 +65,16 @@ impl Accounts {
                 old => old.clone(),
             };
             engine.capabilities = a.capabilities.clone();
+        } else if self.live_transports && !store.recovery_pending() {
+            if let Ok(state) = store.load_state() {
+                if let Some(baseline) = &state.sieve.last_successful {
+                    if let Some(exts) = baseline.capabilities.get("SIEVE") {
+                        for ext in exts.split_whitespace() {
+                            engine.capabilities.insert(ext.to_ascii_lowercase());
+                        }
+                    }
+                }
+            }
         }
         let bytes = serde_json::to_vec(&(
             self.sieve_authority(account, store)?,

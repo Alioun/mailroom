@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "check": "tsc --noEmit && svelte-check --tsconfig ./tsconfig.json",
+    "check": "tsc --noEmit",
     "build": "vite build",
     "verify:census": "node scripts/verify-census.mjs",
     "verify:workbench": "node scripts/verify-workbench.mjs"

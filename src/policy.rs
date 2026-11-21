@@ -49,6 +49,10 @@ pub const OPERATIONS: [Operation; 12] = [
 ];
 
 pub fn authorize(operation: Operation) -> Availability {
+    authorize_with_mode(operation, false)
+}
+
+pub fn authorize_with_mode(operation: Operation, live_writes: bool) -> Availability {
     let effect = match operation {
         Operation::Preview | Operation::SyntheticCensus => Effect::SyntheticRead,
         Operation::Connect | Operation::Census => Effect::AccountRead,
@@ -64,6 +68,10 @@ pub fn authorize(operation: Operation) -> Availability {
     let (allowed, reason) = match effect {
         Effect::SyntheticRead => (true, "Bundled synthetic data only"),
         Effect::AccountRead => (true, "Owner-run TLS IMAP discovery and header reads only"),
+        Effect::AccountWrite if live_writes => (
+            true,
+            "Live provider writes armed for this session; exact preview and confirmation required",
+        ),
         Effect::AccountWrite => (
             false,
             "Denied: all real-account mutations are locked in this unit",
@@ -87,8 +95,16 @@ impl WritePermit {
     }
 }
 /// Issues a write permit only when `authorize` allows `operation` as an account write.
+#[cfg(test)]
 pub(crate) fn write_permit(operation: Operation) -> Result<WritePermit, &'static str> {
-    let availability = authorize(operation);
+    write_permit_with_mode(operation, false)
+}
+/// Issues a write permit when `live_writes` has been explicitly armed for the running session.
+pub(crate) fn write_permit_with_mode(
+    operation: Operation,
+    live_writes: bool,
+) -> Result<WritePermit, &'static str> {
+    let availability = authorize_with_mode(operation, live_writes);
     match availability.effect {
         Effect::AccountWrite if availability.allowed => Ok(WritePermit(operation)),
         Effect::AccountWrite => Err(availability.reason),

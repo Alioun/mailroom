@@ -25,16 +25,19 @@ fn as_of(date: &str) -> i64 {
 }
 
 #[test]
-fn bundled_seed_is_explicitly_empty_and_contains_no_invented_reviews() {
+fn bundled_seed_is_complete_and_valid_across_categories_and_countries() {
     let catalog = bundled().unwrap();
-    assert_eq!(catalog.senders().count(), 0);
-    let projected = catalog.winddown(as_of("2026-10-29")).unwrap();
-    assert!(projected.reviewed.is_empty());
+    assert!(catalog.senders().count() >= 120);
+    let projected = catalog.winddown(as_of("2026-11-21")).unwrap();
+    assert!(projected.reviewed.len() >= 120);
     let status = projected.catalog.unwrap();
-    assert!(!status.seed_complete);
-    assert_eq!(status.missing_categories.len(), 6);
-    assert_eq!(status.missing_countries, ["DE", "AT", "CH", "*"]);
-    assert_eq!(status.service_reviews, 0);
+    assert!(status.seed_complete);
+    assert!(status.missing_categories.is_empty());
+    assert!(status.missing_countries.is_empty());
+    assert_eq!(status.stale_rows, 0);
+    assert_eq!(status.future_rows, 0);
+    assert!(status.service_reviews >= 40);
+    assert_eq!(status.unusable_service_reviews, 0);
     assert_eq!(COUNTRIES.split(' ').count(), 249);
 }
 

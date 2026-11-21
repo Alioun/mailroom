@@ -81,7 +81,11 @@ pub(in crate::server) async fn handle(
         Action::Open | Action::Acquire { .. } => None,
         Action::Preview { mode: Some(_), .. }
         | Action::Send { mode: Some(_), .. }
-        | Action::Resolve { .. } => match state.accounts.writes.permit(Operation::SendMessage) {
+        | Action::Resolve { .. } => match state
+            .accounts
+            .writes
+            .permit_with_mode(Operation::SendMessage, state.accounts.live_writes())
+        {
             Ok(permit) => Some(permit),
             Err(reason) => return (StatusCode::FORBIDDEN, Json(json!({"error":reason, "native_status":crate::confirmation::native_status()}))).into_response(),
         },

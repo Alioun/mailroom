@@ -94,7 +94,7 @@ fn revalidate(
             folders: input.folders.clone(),
         };
         let wiring = Wired {
-            trusted_recipients: state.accounts.synthetic(),
+            trusted_recipients: state.accounts.synthetic() || state.accounts.vault_live(),
             authserv: state.accounts.writes.authserv(r.account.provider),
         };
         previews.push((
@@ -179,7 +179,7 @@ fn prepare(
             _ => None,
         };
         let wiring = Wired {
-            trusted_recipients: state.accounts.synthetic(),
+            trusted_recipients: state.accounts.synthetic() || state.accounts.vault_live(),
             authserv: state.accounts.writes.authserv(account.provider),
         };
         let single = ReviewInput {
@@ -226,6 +226,7 @@ fn view(state: &AppState, as_of: i64) -> Result<serde_json::Value, String> {
         .repository()
         .map_err(|_| "Account repository unavailable")?;
     let mut accounts = Vec::new();
+    let mut recovering_accounts = Vec::new();
     for account in repo.list().map_err(|_| "Accounts unavailable")? {
         let store = repo
             .store(&account)
@@ -234,9 +235,8 @@ fn view(state: &AppState, as_of: i64) -> Result<serde_json::Value, String> {
             continue;
         }
         if store.recovery_pending() {
-            return Err(
-                "Fresh provider evidence and reconciliation required after recovery".into(),
-            );
+            recovering_accounts.push(account.id.clone());
+            continue;
         }
         let mut saved = store.load_state().map_err(|_| "Census unavailable")?;
         let snapshot = state
@@ -264,7 +264,7 @@ fn view(state: &AppState, as_of: i64) -> Result<serde_json::Value, String> {
             _ => None,
         };
         let wiring = Wired {
-            trusted_recipients: state.accounts.synthetic(),
+            trusted_recipients: state.accounts.synthetic() || state.accounts.vault_live(),
             authserv: state.accounts.writes.authserv(account.provider),
         };
         let report = unsubscribe::report(
@@ -274,11 +274,22 @@ fn view(state: &AppState, as_of: i64) -> Result<serde_json::Value, String> {
             as_of,
             super::unsubscribe::pick(wired, &wiring, &installed),
         )?;
-        accounts.push(json!({"account":account.id,"report":report,"history":saved.unsubscribe.history,"mutes":saved.unsubscribe.mutes,"synthetic":installed.is_some(),"wired":wired,"production_available":false,"q20_scope":"separate_subscriptions"}));
+        accounts.push(json!({"account":account.id,"report":report,"history":saved.unsubscribe.history,"mutes":saved.unsubscribe.mutes,"synthetic":installed.is_some(),"wired":wired,"production_available":state.accounts.vault_live(),"q20_scope":"separate_subscriptions"}));
     }
-    Ok(
-        json!({"accounts":accounts,"synthetic":!wired,"review_available":!wired || state.accounts.writes.permit(Operation::Unsubscribe).is_ok(),"q20_scope":"separate_subscriptions"}),
-    )
+    let review_available = !wired
+        || state.accounts.vault_live()
+        || state
+            .accounts
+            .writes
+            .permit_with_mode(Operation::Unsubscribe, state.accounts.live_writes())
+            .is_ok();
+    Ok(json!({
+        "accounts": accounts,
+        "recovering_accounts": recovering_accounts,
+        "synthetic": !wired,
+        "review_available": review_available,
+        "q20_scope": "separate_subscriptions",
+    }))
 }
 pub(in crate::server) async fn handle(
     State(state): State<Arc<AppState>>,
@@ -288,21 +299,32 @@ pub(in crate::server) async fn handle(
         Ok(v) => v,
         Err(e) => return e,
     };
-    let permit =
-        if super::unsubscribe::wired(&state) && !matches!(request.command, Action::Open { .. }) {
-            match state
-                .accounts
-                .writes
-                .permit_with_mode(Operation::Unsubscribe, state.accounts.live_writes())
-            {
-                Ok(permit) => Some(permit),
-                Err(reason) => {
-                    return (StatusCode::FORBIDDEN, Json(json!({"error":reason}))).into_response();
-                }
-            }
-        } else {
-            None
+    let wired = super::unsubscribe::wired(&state);
+    let vault_local_only = state.accounts.vault_live()
+        && match &request.command {
+            Action::Preview { .. } => true,
+            Action::Confirm { input, .. } => !input.selections.iter().any(|s| {
+                matches!(
+                    s.method,
+                    Method::OneClick | Method::LocalMail | Method::MailAppPreparation
+                )
+            }),
+            Action::Open { .. } => true,
         };
+    let permit = if wired && !matches!(request.command, Action::Open { .. }) && !vault_local_only {
+        match state
+            .accounts
+            .writes
+            .permit_with_mode(Operation::Unsubscribe, state.accounts.live_writes())
+        {
+            Ok(permit) => Some(permit),
+            Err(reason) => {
+                return (StatusCode::FORBIDDEN, Json(json!({"error":reason}))).into_response();
+            }
+        }
+    } else {
+        None
+    };
     match tokio::task::spawn_blocking(move || {
         let _operation=state.accounts.operation.lock().expect("account operation");
         if state.accounts.job.lock().expect("account job").as_ref().is_some_and(|j|j.progress.state==ScanState::Running) {return Err("Wait for census completion".to_owned());}
@@ -337,8 +359,10 @@ pub(in crate::server) async fn handle(
                 unsubscribe::boundary("before");
                 let repo = state.accounts.repository().map_err(|_| "Account repository unavailable")?;
                 for ((r,ids),execution) in reviews.iter_mut().zip(intents).zip(executions) {
-                    if let Some(execution) = execution {
-                        execution.execute(&repo, &r.account, &r.store, &mut r.saved, &r.preview, &ids, input.as_of)?;
+                    if wired {
+                        if let Some(execution) = execution {
+                            execution.execute(&repo, &r.account, &r.store, &mut r.saved, &r.preview, &ids, input.as_of)?;
+                        }
                         continue;
                     }
                     for (id,action) in ids.iter().zip(&r.preview.actions) {
@@ -360,6 +384,7 @@ pub(in crate::server) async fn handle(
         view(&state,as_of)
     }).await {
         Ok(Ok(value))=>Json(value).into_response(),
-        _=>(StatusCode::UNPROCESSABLE_ENTITY,Json(json!({"error":"Separate subscription review rejected. Refresh the exact list. No additional subscription is authorized; reconcile uncertain intents without retry."}))).into_response(),
+        Ok(Err(reason))=>(StatusCode::UNPROCESSABLE_ENTITY,Json(json!({"error":reason}))).into_response(),
+        Err(_)=>(StatusCode::UNPROCESSABLE_ENTITY,Json(json!({"error":"Separate subscription review rejected. Refresh the exact list. No additional subscription is authorized; reconcile uncertain intents without retry."}))).into_response(),
     }
 }

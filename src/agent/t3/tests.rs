@@ -115,3 +115,35 @@ fn cli_unavailable_before_start_remains_retryable_and_output_is_bounded() {
     assert!(!root.path().join("starts").exists());
     assert!(capture(std::io::Cursor::new(vec![b'x'; OUTPUT_LIMIT + 1])).is_err());
 }
+
+#[test]
+fn deterministic_provider_or_model_rejection_in_stderr_stays_retryable() {
+    let root = tempfile::tempdir().unwrap();
+    let cli = root.path().join("t3-bad-model");
+    fs::write(
+        &cli,
+        r##"#!/bin/sh
+set -eu
+case "$1 $2" in
+  'thread list') printf '[]';;
+  'thread start') echo "Error: unknown model 'nope-99'" >&2; exit 2;;
+  *) exit 1;;
+esac
+"##,
+    )
+    .unwrap();
+    fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+    let client = Client {
+        executable: cli,
+        home: root.path().as_os_str().to_os_string(),
+    };
+    let err = match client.launch(root.path(), "Mailroom review fixture", "prompt", true) {
+        Err(e) => e,
+        Ok(_) => panic!("expected model rejection"),
+    };
+    assert!(
+        !err.uncertain,
+        "deterministic rejection must stay retryable"
+    );
+    assert!(err.message.contains("unknown model"), "{}", err.message);
+}

@@ -42,7 +42,7 @@ type Command =
   | { action: "config_get" }
   | { action: "config_set"; provider: string; model: string }
   | { action: "prepare"; summary: SummaryBinding; confirmed: true }
-  | { action: "launch"; request_id: string }
+  | { action: "launch"; request_id: string; force_new?: boolean }
   | { action: "dismiss"; request_id: string; proposal_id: string };
 export async function assistantAction(
   account: string,
@@ -60,18 +60,21 @@ export async function assistantAction(
   }
   return inbox.parse(value);
 }
-export async function getAssistantConfig(account: string): Promise<AssistantConfig> {
+export async function getAssistantConfig(account?: string): Promise<AssistantConfig> {
   const response = await localFetch("/api/accounts/assistant", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ account, command: { action: "config_get" } }),
+    body: JSON.stringify({
+      ...(account ? { account } : {}),
+      command: { action: "config_get" },
+    }),
   });
   const value: unknown = await response.json();
   if (!response.ok) throw new Error("Assistant config unavailable");
   return z.object({ config }).parse(value).config;
 }
 export async function saveAssistantConfig(
-  account: string,
+  account: string | undefined,
   provider: string,
   model: string,
 ): Promise<AssistantConfig> {
@@ -79,7 +82,7 @@ export async function saveAssistantConfig(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      account,
+      ...(account ? { account } : {}),
       command: { action: "config_set", provider, model },
     }),
   });

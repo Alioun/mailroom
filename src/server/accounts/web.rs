@@ -159,6 +159,7 @@ pub(in crate::server) async fn unlock(
         Ok(v) => v,
         Err(e) => return e,
     };
+    state.accounts.set_live_writes(false);
     transition(state, move |vault| vault.unlock(&request.password)).await
 }
 
@@ -228,6 +229,13 @@ pub(in crate::server) async fn write_mode(
         )
             .into_response();
     }
+    if state.accounts.vault_locked() {
+        return (
+            StatusCode::LOCKED,
+            Json(json!({"error": "Unlock the local vault before arming live provider writes.", "code": "vault_locked"})),
+        )
+            .into_response();
+    }
     if !state.accounts.vault_live() && !state.accounts.synthetic() {
         return (
             StatusCode::FORBIDDEN,
@@ -237,6 +245,75 @@ pub(in crate::server) async fn write_mode(
     }
     state.accounts.set_live_writes(true);
     status(State(state)).await
+}
+
+fn expand_takeout_path(raw: &str) -> Result<std::path::PathBuf, (&'static str, &'static str)> {
+    let mut trimmed = raw.trim();
+    if (trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2)
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2)
+    {
+        trimmed = trimmed[1..trimmed.len() - 1].trim();
+    }
+    if trimmed.is_empty() || trimmed.len() > 2048 || trimmed.contains('\0') {
+        return Err(("Enter a path to an extracted .mbox file.", "invalid_path"));
+    }
+    let resolved = if trimmed == "~" {
+        let Some(home) = std::env::var_os("HOME") else {
+            return Err((
+                "Could not resolve '~'. Enter the full absolute path to the .mbox file.",
+                "invalid_path",
+            ));
+        };
+        std::path::PathBuf::from(home)
+    } else if let Some(rest) = trimmed.strip_prefix("~/") {
+        let Some(home) = std::env::var_os("HOME") else {
+            return Err((
+                "Could not resolve '~/'. Enter the full absolute path to the .mbox file.",
+                "invalid_path",
+            ));
+        };
+        std::path::PathBuf::from(home).join(rest)
+    } else {
+        std::path::PathBuf::from(trimmed)
+    };
+    let lower = resolved
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if lower.ends_with(".zip") || lower.ends_with(".tgz") || lower.ends_with(".gz") {
+        return Err((
+            "That looks like a compressed archive (.zip/.gz). Extract it first and pass the .mbox file inside.",
+            "archive_file",
+        ));
+    }
+    match std::fs::symlink_metadata(&resolved) {
+        Ok(meta) if meta.file_type().is_symlink() => Err((
+            "Symlinks are not accepted for Takeout import. Pass the real .mbox file path.",
+            "symlink",
+        )),
+        Ok(meta) if meta.is_dir() => Err((
+            "That path is a folder, not an .mbox file. Pass the .mbox file inside it.",
+            "is_directory",
+        )),
+        Ok(meta) if !meta.is_file() => Err((
+            "That path is not a regular file. Pass an extracted .mbox file.",
+            "invalid_path",
+        )),
+        Ok(_) => Ok(resolved),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err((
+            "File not found at that path. Check the path and try again.",
+            "not_found",
+        )),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => Err((
+            "Mailroom does not have permission to read that file.",
+            "permission_denied",
+        )),
+        Err(_) => Err((
+            "Could not access that path. Check the path and try again.",
+            "not_found",
+        )),
+    }
 }
 
 #[derive(Deserialize)]
@@ -254,10 +331,16 @@ pub(in crate::server) async fn takeout(
         Ok(v) => v,
         Err(e) => return e,
     };
-    let trimmed = request.path.trim().to_owned();
-    if trimmed.is_empty() || trimmed.len() > 2048 || trimmed.contains('\0') {
-        return failure(AcquisitionError::InvalidInput);
-    }
+    let resolved = match expand_takeout_path(&request.path) {
+        Ok(path) => path,
+        Err((message, code)) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error": message, "code": code})),
+            )
+                .into_response();
+        }
+    };
     let worker = state.clone();
     match tokio::task::spawn_blocking(move || {
         let _admission = worker.accounts.admission.lock().expect("account admission");
@@ -269,16 +352,39 @@ pub(in crate::server) async fn takeout(
             .as_ref()
             .is_some_and(|j| j.progress.state == ScanState::Running)
         {
-            return Err(AcquisitionError::LifecyclePending);
+            return Err((
+                "Wait for the active scan or account operation to finish before importing Takeout.",
+                "scan_running",
+            ));
         }
         let _operation = worker.accounts.operation.lock().expect("account operation");
-        let repo = worker.accounts.repository()?;
-        repo.import_takeout(&request.account, std::path::Path::new(&trimmed))
+        let repo = worker
+            .accounts
+            .repository()
+            .map_err(|_| ("Account repository unavailable.", "storage"))?;
+        repo.import_takeout(&request.account, &resolved).map_err(|e| match e {
+            AcquisitionError::LifecyclePending => (
+                "Finish pending account recovery before importing Takeout.",
+                "recovery_pending",
+            ),
+            AcquisitionError::InvalidInput => (
+                "That file does not look like a valid .mbox export (no RFC 4155 'From ' message headers found).",
+                "not_mbox",
+            ),
+            _ => (
+                "Could not import that Takeout file. Check that the file is readable and try again.",
+                "storage",
+            ),
+        })
     })
     .await
     {
         Ok(Ok(summary)) => Json(json!({"summary": summary})).into_response(),
-        Ok(Err(e)) => failure(e),
+        Ok(Err((message, code))) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": message, "code": code})),
+        )
+            .into_response(),
         Err(_) => failure(AcquisitionError::Storage),
     }
 }

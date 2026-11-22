@@ -26,11 +26,13 @@ import {
   lockVault,
   readAccountStatus,
   scanAccount,
+  setWriteMode,
 } from "../api";
 import type { Account, AccountStatus } from "../api";
 import {
   LanguageContext,
   Action,
+  ArmLiveWritesModal,
   Busy,
   Choice,
   Empty,
@@ -42,7 +44,9 @@ import type { Language } from "./components";
 import { ConnectForm, VaultForm } from "./Setup";
 import { AccountArea } from "./AccountWorkspace";
 import type { Page } from "./AccountWorkspace";
+import { WorkspaceSettings } from "./Settings";
 import { NavigationDrawer } from "./NavigationDrawer";
+import { describeError } from "./status-labels";
 
 const pages: Page[] = [
   "overview",
@@ -55,6 +59,7 @@ const pages: Page[] = [
   "addresses",
   "settings",
 ];
+
 function stored(key: string) {
   try {
     return localStorage.getItem(key);
@@ -71,6 +76,10 @@ function initialPage(): Page {
   const value = new URLSearchParams(location.search).get("view");
   return pages.find((page) => page === value) ?? "overview";
 }
+function initialAccount(): string {
+  const fromUrl = new URLSearchParams(location.search).get("account");
+  return fromUrl ?? stored("mailroom.account") ?? "";
+}
 function pendingAutoScan() {
   try {
     return sessionStorage.getItem("mailroom.autoscan") === "waiting";
@@ -85,6 +94,7 @@ function autoScan(value: boolean) {
       : sessionStorage.removeItem("mailroom.autoscan");
   } catch {}
 }
+
 export function App() {
   const [language, setLanguage] = useState<Language>(
     stored("mailroom.language") === "de" ? "de" : "en",
@@ -99,6 +109,7 @@ export function App() {
     </LanguageContext>
   );
 }
+
 function Workbench({
   language,
   onLanguage,
@@ -109,10 +120,13 @@ function Workbench({
   const t = useCopy();
   const [status, setStatus] = useState<AccountStatus | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [selected, setSelected] = useState(stored("mailroom.account") ?? "");
+  const [selected, setSelected] = useState(initialAccount);
   const [page, setPage] = useState<Page>(initialPage);
   const [add, setAdd] = useState(false);
   const [menu, setMenu] = useState(false);
+  const [writeModal, setWriteModal] = useState(false);
+  const [writeBusy, setWriteBusy] = useState(false);
+  const [writeError, setWriteError] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [refresh, setRefresh] = useState(0);
@@ -161,6 +175,7 @@ function Workbench({
       if (
         pendingAutoScan() &&
         job?.progress.state === "complete" &&
+        (job.operation === "connect" || job.operation === "reconnect") &&
         job.account
       ) {
         autoScan(false);
@@ -168,8 +183,7 @@ function Workbench({
         setPage("overview");
         setStatus(await scanAccount(job.account.id));
         setRefresh((value) => value + 1);
-      } else if (pendingAutoScan() && job?.progress.state === "failed")
-        autoScan(false);
+      }
     },
     [loadAccounts],
   );
@@ -210,16 +224,42 @@ function Workbench({
   }, [selected]);
 
   useEffect(() => {
+    const syncFromUrl = () => {
+      const params = new URLSearchParams(location.search);
+      const v = params.get("view");
+      const nextPage = pages.find((p) => p === v) ?? "overview";
+      setPage(nextPage);
+      const acc = params.get("account");
+      if (acc) setSelected(acc);
+    };
+    window.addEventListener("popstate", syncFromUrl);
+    return () => window.removeEventListener("popstate", syncFromUrl);
+  }, []);
+
+  const pushUrl = useCallback((nextPage: Page, nextAccount: string) => {
     const query = new URLSearchParams(location.search);
-    query.set("view", page);
-    history.replaceState(null, "", `${location.pathname}?${query}`);
-  }, [page]);
+    const same =
+      query.get("view") === nextPage &&
+      (nextAccount ? query.get("account") === nextAccount : true);
+    query.set("view", nextPage);
+    if (nextAccount) query.set("account", nextAccount);
+    else query.delete("account");
+    const target = `${location.pathname}?${query}`;
+    if (!same) history.pushState(null, "", target);
+  }, []);
 
   function navigate(next: Page) {
     setPage(next);
     setMenu(false);
+    pushUrl(next, selected);
     requestAnimationFrame(() => heading.current?.focus());
     window.scrollTo({ top: 0 });
+  }
+
+  function selectAccount(nextId: string) {
+    setSelected(nextId);
+    setMenu(false);
+    pushUrl(page, nextId);
   }
 
   async function action(work: () => Promise<AccountStatus>) {
@@ -227,15 +267,39 @@ function Workbench({
     setNotice("");
     try {
       await applyStatus(await work());
-    } catch {
+    } catch (err) {
       setNotice(
-        t(
-          "The action could not start. Your saved work is retained. Try again.",
-          "Die Aktion konnte nicht starten. Deine gespeicherte Arbeit bleibt erhalten. Versuche es erneut.",
+        describeError(
+          err,
+          t(
+            "The action could not start. Your saved work is retained. Try again.",
+            "Die Aktion konnte nicht starten. Deine gespeicherte Arbeit bleibt erhalten. Versuche es erneut.",
+          ),
         ),
       );
     } finally {
       setPending(false);
+    }
+  }
+
+  async function handleWriteMode(enable: boolean) {
+    setWriteBusy(true);
+    setWriteError("");
+    try {
+      await applyStatus(await setWriteMode(enable, enable));
+      setWriteModal(false);
+    } catch (err) {
+      setWriteError(
+        describeError(
+          err,
+          t(
+            "Could not change safety mode.",
+            "Sicherheitsmodus konnte nicht geändert werden.",
+          ),
+        ),
+      );
+    } finally {
+      setWriteBusy(false);
     }
   }
 
@@ -331,13 +395,15 @@ function Workbench({
       status.vault === "locked" ||
       status.vault === "unavailable");
 
+  const runningJob = status?.job?.progress.state === "running";
+
   return (
     <>
       <a className="skip-link" href="#main-content">
         {t("Skip to content", "Zum Inhalt springen")}
       </a>
       <div
-        className={`workbench ${menu ? "menu-open" : ""} ${vaultGated ? "gated" : ""}`}
+        className={`workbench ${menu ? "menu-open" : ""} ${vaultGated ? "gated" : ""} ${status?.live_writes ? "live-armed" : ""}`}
       >
         {!vaultGated && (
           <NavigationDrawer
@@ -347,7 +413,7 @@ function Workbench({
           >
             <a href="/" className="brand">
               <span className="brand-icon">
-                <Mail size={21} />
+                <Mail size={20} />
               </span>
               mailroom<span className="brand-dot">.</span>
             </a>
@@ -359,10 +425,7 @@ function Workbench({
                 <Choice
                   label={t("Select account", "Konto auswählen")}
                   value={selected}
-                  onChange={(value) => {
-                    setSelected(value);
-                    setMenu(false);
-                  }}
+                  onChange={selectAccount}
                   options={accounts.map((value) => ({
                     value: value.id,
                     label: `${value.login} · ${value.provider === "gmail" ? "Gmail" : "mailbox.org"}`,
@@ -389,7 +452,7 @@ function Workbench({
                   aria-current={page === item.page ? "page" : undefined}
                   onClick={() => navigate(item.page)}
                 >
-                  <item.icon size={18} />
+                  <item.icon size={17} />
                   <span>{item.label}</span>
                   {item.page === "recommendations" &&
                     (counts[selected] ?? 0) > 0 && (
@@ -407,7 +470,7 @@ function Workbench({
                   aria-current={page === item.page ? "page" : undefined}
                   onClick={() => navigate(item.page)}
                 >
-                  <item.icon size={18} />
+                  <item.icon size={17} />
                   <span>{item.label}</span>
                 </button>
               ))}
@@ -415,10 +478,11 @@ function Workbench({
             <div className="sidebar-bottom">
               <button
                 className={`nav-item ${page === "settings" ? "active" : ""}`}
+                aria-current={page === "settings" ? "page" : undefined}
                 onClick={() => navigate("settings")}
               >
-                <Settings size={18} />
-                {t("Settings", "Einstellungen")}
+                <Settings size={17} />
+                <span>{t("Settings", "Einstellungen")}</span>
               </button>
               <div className="local-status">
                 <span className="status-dot" />
@@ -449,8 +513,10 @@ function Workbench({
             <div className="breadcrumb">
               {vaultGated ? (
                 <a href="/" className="brand compact">
-                  <Mail size={22} />
-                  mailroom.
+                  <span className="brand-icon">
+                    <Mail size={18} />
+                  </span>
+                  mailroom<span className="brand-dot">.</span>
                 </a>
               ) : (
                 <>
@@ -465,33 +531,53 @@ function Workbench({
                 <button
                   type="button"
                   className={`readonly-badge ${status?.live_writes ? "live" : ""}`}
-                  onClick={() => navigate("settings")}
-                  title={t(
-                    "Manage safety mode in Settings",
-                    "Sicherheitsmodus in den Einstellungen verwalten",
-                  )}
+                  onClick={() => {
+                    setWriteError("");
+                    setWriteModal(true);
+                  }}
+                  title={
+                    status?.live_writes
+                      ? t(
+                          "Live writes armed — click to return to read-only",
+                          "Live-Schreibzugriff aktiv — klicken für Nur-Lese-Modus",
+                        )
+                      : t(
+                          "Read-only mode — click to enable Live writes",
+                          "Nur-Lese-Modus — klicken für Live-Schreibzugriff",
+                        )
+                  }
                 >
                   {status?.live_writes ? (
                     <>
                       <ShieldAlert size={14} />
-                      {t("Live writes armed", "Live-Schreibzugriff aktiv")}
+                      <span className="badge-full">
+                        {t("Live writes armed", "Live-Schreibzugriff aktiv")}
+                      </span>
+                      <span className="badge-short">{t("Live", "Live")}</span>
                     </>
                   ) : (
                     <>
                       <ShieldCheck size={14} />
-                      {t("Provider read-only", "Anbieter nur lesbar")}
+                      <span className="badge-full">
+                        {t("Provider read-only", "Anbieter nur lesbar")}
+                      </span>
+                      <span className="badge-short">
+                        {t("Read-only", "Nur-Lese")}
+                      </span>
                     </>
                   )}
                 </button>
               )}
               {!vaultGated && status?.source === "vault" && (
                 <Action
+                  size="compact"
+                  className="lock-button"
                   disabled={pending}
                   onClick={() => void action(lockVault)}
                   aria-label={t("Lock vault", "Tresor sperren")}
                 >
                   <Lock size={14} />
-                  {t("Lock", "Sperren")}
+                  <span className="lock-label">{t("Lock", "Sperren")}</span>
                 </Action>
               )}
               <Choice
@@ -514,8 +600,9 @@ function Workbench({
           >
             {error && (
               <Notice error>
-                {error}
+                <span>{error}</span>
                 <Action
+                  size="compact"
                   onClick={() =>
                     void readAccountStatus()
                       .then(applyStatus)
@@ -546,7 +633,9 @@ function Workbench({
                 <div className="page-heading">
                   <div>
                     <span className="eyebrow">
-                      {account?.login ?? t("Your mailbox", "Dein Postfach")}
+                      {account
+                        ? `${account.login} · ${account.provider === "gmail" ? "Gmail" : "mailbox.org"}`
+                        : t("Your workspace", "Dein Arbeitsbereich")}
                     </span>
                     <h1 ref={heading} tabIndex={-1}>
                       {currentTitle}
@@ -556,9 +645,7 @@ function Workbench({
                   {account && page === "overview" && (
                     <Action
                       primary
-                      disabled={
-                        pending || status.job?.progress.state === "running"
-                      }
+                      disabled={pending || runningJob}
                       onClick={() => void action(() => scanAccount(account.id))}
                     >
                       <RefreshCw size={16} />
@@ -570,21 +657,32 @@ function Workbench({
                   )}
                 </div>
                 {notice && <Notice error>{notice}</Notice>}
-                {status.job?.progress.state === "running" && (
-                  <div className="activity-strip" role="status">
-                    <Busy>
-                      {status.job.operation === "connect"
-                        ? t("Connecting account…", "Konto wird verbunden…")
-                        : status.job.operation === "scan"
-                          ? t("Scanning mailbox…", "Postfach wird erfasst…")
-                          : t("Working…", "In Arbeit…")}
-                    </Busy>
+                {runningJob && status.job && (
+                  <div className="activity-strip">
+                    <span role="status">
+                      <Busy>
+                        {status.job.operation === "connect"
+                          ? t("Connecting account…", "Konto wird verbunden…")
+                          : status.job.operation === "scan"
+                            ? t("Scanning mailbox…", "Postfach wird erfasst…")
+                            : status.job.operation === "backlog"
+                              ? t("Sorting backlog…", "Bestand wird sortiert…")
+                              : status.job.operation === "folders"
+                                ? t("Creating folders…", "Ordner werden angelegt…")
+                                : status.job.operation === "sieve"
+                                  ? t("Running ManageSieve…", "ManageSieve läuft…")
+                                  : t("Working…", "In Arbeit…")}
+                      </Busy>
+                    </span>
                     <span>
-                      {status.job.account?.login} · {status.job.progress.saved}{" "}
+                      {status.job.account?.login} ·{" "}
+                      {status.job.progress.saved.toLocaleString()}{" "}
                       {t("headers saved", "Kopfzeilen gespeichert")} ·{" "}
-                      {status.job.progress.folders} {t("folders", "Ordner")}
+                      {status.job.progress.folders.toLocaleString()}{" "}
+                      {t("folders", "Ordner")}
                     </span>
                     <Action
+                      size="compact"
                       onClick={() => void action(cancelAccount)}
                       disabled={pending}
                     >
@@ -594,20 +692,23 @@ function Workbench({
                 )}
                 {status.job?.progress.state === "failed" && (
                   <Notice error>
-                    {status.job.operation === "connect"
-                      ? t(
-                          "Connection failed. Check the app password in Settings and reconnect.",
-                          "Verbindung fehlgeschlagen. Prüfe das App-Passwort in den Einstellungen und verbinde erneut.",
-                        )
-                      : t(
-                          "The scan was interrupted. Saved progress is retained. Resume the scan when the connection is available.",
-                          "Die Erfassung wurde unterbrochen. Gespeicherter Fortschritt bleibt erhalten. Setze die Erfassung fort, sobald die Verbindung verfügbar ist.",
-                        )}
+                    <span>
+                      {status.job.operation === "connect"
+                        ? t(
+                            "Connection failed. Check the app password in Settings and reconnect.",
+                            "Verbindung fehlgeschlagen. Prüfe das App-Passwort in den Einstellungen und verbinde erneut.",
+                          )
+                        : t(
+                            "The operation was interrupted. Saved progress is retained. Resume when ready.",
+                            "Die Aktion wurde unterbrochen. Gespeicherter Fortschritt bleibt erhalten. Setze sie bei Bedarf fort.",
+                          )}
+                    </span>
                     <Action
+                      size="compact"
                       onClick={() => {
                         const failedAccount = status.job?.account;
                         if (failedAccount) {
-                          setSelected(failedAccount.id);
+                          selectAccount(failedAccount.id);
                           navigate("settings");
                         } else setAdd(true);
                       }}
@@ -617,38 +718,66 @@ function Workbench({
                   </Notice>
                 )}
                 {status.interrupted.length > 0 && (
-                  <Notice>
-                    {t(
-                      "An account setup was interrupted.",
-                      "Eine Kontoeinrichtung wurde unterbrochen.",
-                    )}
-                    {status.interrupted.map((id) => (
-                      <Action
-                        key={id}
-                        onClick={() => void action(() => finishInterrupted(id))}
-                        disabled={pending}
-                      >
-                        {t("Finish setup", "Einrichtung abschließen")}
-                      </Action>
-                    ))}
+                  <Notice tone="warning">
+                    <span>
+                      {t(
+                        `Account setup was interrupted (${status.interrupted.join(", ")}). Clean up or finish it so you can reconnect cleanly.`,
+                        `Eine Kontoeinrichtung wurde unterbrochen (${status.interrupted.join(", ")}). Bereinige oder schließe sie ab, um sauber neu zu verbinden.`,
+                      )}
+                    </span>
+                    <div className="actions">
+                      {status.interrupted.map((id) => (
+                        <Action
+                          key={id}
+                          size="compact"
+                          onClick={() =>
+                            void action(() => finishInterrupted(id))
+                          }
+                          disabled={pending}
+                        >
+                          {t(`Clean up ${id.slice(0, 8)}`, `${id.slice(0, 8)} bereinigen`)}
+                        </Action>
+                      ))}
+                    </div>
                   </Notice>
                 )}
                 {accounts.length === 0 ? (
-                  <section className="panel first-account">
-                    <h2>
-                      {t(
-                        "Bring your mailbox into focus",
-                        "Verschaffe dir einen Überblick",
-                      )}
-                    </h2>
-                    <ConnectForm
-                      synthetic={status.synthetic}
-                      onConnected={(next) => {
-                        autoScan(true);
-                        void applyStatus(next);
+                  page === "settings" ? (
+                    <WorkspaceSettings
+                      accounts={accounts}
+                      status={status}
+                      onStatus={(next) => void applyStatus(next)}
+                      onRefresh={() => {
+                        void loadAccounts();
+                        setRefresh((v) => v + 1);
+                      }}
+                      onOpenWriteMode={() => {
+                        setWriteError("");
+                        setWriteModal(true);
                       }}
                     />
-                  </section>
+                  ) : (
+                    <section className="panel first-account">
+                      <h2>
+                        {t(
+                          "Bring your mailbox into focus",
+                          "Verschaffe dir einen Überblick",
+                        )}
+                      </h2>
+                      <ConnectForm
+                        synthetic={status.synthetic}
+                        onConnected={(next) => {
+                          autoScan(true);
+                          void applyStatus(next);
+                        }}
+                        onRestore={
+                          status.source === "vault" || status.synthetic
+                            ? () => navigate("settings")
+                            : undefined
+                        }
+                      />
+                    </section>
+                  )
                 ) : (
                   accounts.map((value) => (
                     <AccountArea
@@ -659,7 +788,7 @@ function Workbench({
                       hidden={value.id !== selected}
                       page={page}
                       refresh={refresh}
-                      running={status.job?.progress.state === "running"}
+                      running={runningJob}
                       onNavigate={navigate}
                       onCount={(count) =>
                         setCounts((previous) =>
@@ -673,6 +802,11 @@ function Workbench({
                         void loadAccounts();
                         setRefresh((v) => v + 1);
                       }}
+                      onOpenWriteMode={() => {
+                        setWriteError("");
+                        setWriteModal(true);
+                      }}
+                      onScan={() => void action(() => scanAccount(value.id))}
                     />
                   ))
                 )}
@@ -687,12 +821,12 @@ function Workbench({
                 <span>
                   {status?.live_writes
                     ? t(
-                        "Live writes armed for this session; every change still requires preview and confirmation.",
-                        "Live-Schreibzugriff für diese Sitzung aktiv; jede Änderung erfordert Vorschau und Bestätigung.",
+                        "Live writes armed for all accounts in this session; every change still requires preview and confirmation.",
+                        "Live-Schreibzugriff für alle Konten dieser Sitzung aktiv; jede Änderung erfordert Vorschau und Bestätigung.",
                       )
                     : t(
-                        "Read-only mode active. Enable Live writes in Settings when ready to deploy or sort.",
-                        "Nur-Lese-Modus aktiv. Aktiviere Live-Schreibzugriff in den Einstellungen zur Ausführung.",
+                        "Read-only mode active. Click the safety badge above when ready to deploy or sort.",
+                        "Nur-Lese-Modus aktiv. Klicke oben auf das Sicherheitssymbol, wenn du bereit zur Ausführung bist.",
                       )}
                 </span>
               </footer>
@@ -714,6 +848,15 @@ function Workbench({
           }}
         />
       </Modal>
+      <ArmLiveWritesModal
+        open={writeModal}
+        onOpenChange={setWriteModal}
+        liveWrites={Boolean(status?.live_writes)}
+        busy={writeBusy}
+        runningJob={runningJob}
+        error={writeError}
+        onConfirm={handleWriteMode}
+      />
     </>
   );
 }

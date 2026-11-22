@@ -173,12 +173,47 @@ pub(in crate::server) async fn handle(
             view["production_available"] = json!(!synthetic);
             view["limitations"] = json!(recovery::selected::SELECTED_LIMITATIONS);
             let directory = root.join("bundles");
+            view["bundles_dir"] = json!(directory.display().to_string());
             let mut bundles = vec![];
-            if directory.exists() { for entry in std::fs::read_dir(directory).map_err(|_| AcquisitionError::Storage)? {
-                let path = entry.map_err(|_| AcquisitionError::Storage)?.path();
-                if let Some(id) = path.file_stem().and_then(|s| s.to_str()).filter(|s| recovery::valid_digest(s)) { bundles.push(id.to_string()); }
-            } }
-            bundles.sort(); view["bundles"] = json!(bundles);
+            let mut bundle_info: Vec<(u64, String, String, u64)> = vec![];
+            if directory.exists() {
+                for entry in std::fs::read_dir(&directory).map_err(|_| AcquisitionError::Storage)? {
+                    let path = entry.map_err(|_| AcquisitionError::Storage)?.path();
+                    if let Some(id) = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .filter(|s| recovery::valid_digest(s))
+                    {
+                        bundles.push(id.to_string());
+                        let meta = std::fs::symlink_metadata(&path).ok();
+                        let modified_at = meta
+                            .as_ref()
+                            .and_then(|m| m.modified().ok())
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                        let filename = path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(id)
+                            .to_owned();
+                        bundle_info.push((modified_at, id.to_string(), filename, bytes));
+                    }
+                }
+            }
+            bundles.sort();
+            bundle_info.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            view["bundles"] = json!(bundles);
+            view["bundle_info"] = json!(bundle_info
+                .into_iter()
+                .map(|(modified_at, id, filename, bytes)| json!({
+                    "id": id,
+                    "filename": filename,
+                    "modified_at": modified_at,
+                    "bytes": bytes,
+                }))
+                .collect::<Vec<_>>());
             return Ok(view);
         }
         let secret = if synthetic {
@@ -257,8 +292,13 @@ pub(in crate::server) async fn handle(
         result => {
             #[cfg(test)]
             if let Ok(Err(error)) = &result { eprintln!("Synthetic recovery rejection: {error:?}"); }
-            let _ = result;
-            (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error":"Recovery rejected. Preserve bundle and separate secret. Refresh the exact preview or resume the interrupted restore. Fresh provider evidence is required; no remote retry or compensation is authorized."}))).into_response()
+            let message = match result {
+                Ok(Err(AcquisitionError::LifecyclePending)) => "Wait for the active scan or account operation to finish before running backup or restore.",
+                Ok(Err(AcquisitionError::Credentials | AcquisitionError::CredentialMissing)) => "Could not decrypt the recovery bundle. Check the recovery passphrase and try again.",
+                Ok(Err(AcquisitionError::InvalidInput)) => "Recovery request rejected. Check that the passphrase is at least 12 characters, the bundle exists, and target accounts do not already exist locally.",
+                _ => "Recovery rejected. Preserve bundle and separate secret. Refresh the exact preview or resume the interrupted restore. Fresh provider evidence is required; no remote retry or compensation is authorized.",
+            };
+            (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": message}))).into_response()
         },
     }
 }

@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  ArrowRight,
   CheckCircle2,
   Download,
   FolderPlus,
+  Pin as PinIcon,
   Play,
   Rocket,
   Scale,
   Settings2,
   SlidersHorizontal,
   Sparkles,
+  X,
 } from "lucide-react";
 import {
   confirmProposals,
@@ -21,7 +24,9 @@ import {
 } from "../api";
 import type {
   Account,
+  AccountStatus,
   AccountView,
+  Pin,
   ProofPreview,
   ProposalGeneration,
   ProposalReview,
@@ -29,6 +34,7 @@ import type {
 } from "../api";
 import { createLocalRules } from "./rules-workspace";
 import { FoldersPanel, PlacementPanel, SieveDeployPanel } from "./Deploy";
+import { describeError } from "./status-labels";
 import {
   Action,
   Busy,
@@ -36,8 +42,11 @@ import {
   Empty,
   Notice,
   Stat,
+  StatusBadge,
+  SubTabs,
   useCopy,
 } from "./components";
+import type { SubTabItem } from "./components";
 
 type Input = NonNullable<WorkspaceView["workspace"]>["input"];
 type RulesTab = "local" | "folders" | "deploy" | "placement";
@@ -47,17 +56,24 @@ export function Rules({
   view,
   workspace,
   liveWrites,
+  liveJob,
   onWorkspace,
-  onGoSettings,
+  onOpenWriteMode,
+  onGoBacklog,
+  onGoAddresses,
 }: {
   account: Account;
   view: AccountView | null;
   workspace: WorkspaceView | null;
   liveWrites: boolean;
+  liveJob: AccountStatus["job"];
   onWorkspace: (value: WorkspaceView) => void;
-  onGoSettings: () => void;
+  onOpenWriteMode: () => void;
+  onGoBacklog: () => void;
+  onGoAddresses: () => void;
 }) {
   const t = useCopy();
+  const isGmail = account.provider === "gmail";
   const [tab, setTab] = useState<RulesTab>("local");
   const [draft, setDraft] = useState<Input | null>(null);
   const [base, setBase] = useState("");
@@ -77,6 +93,12 @@ export function Rules({
   const [conflict, setConflict] = useState(false);
   const baseRevision = useRef<string | null>(null);
   const dirty = draft !== null && JSON.stringify(draft) !== base;
+
+  useEffect(() => {
+    if (isGmail && (tab === "folders" || tab === "deploy")) {
+      setTab("local");
+    }
+  }, [isGmail, tab]);
 
   useEffect(() => {
     setProof(null);
@@ -114,11 +136,14 @@ export function Rules({
           "Lokale Regeln angelegt. Prüfe ihre Wirkung auf gespeicherte Nachrichten.",
         ),
       );
-    } catch {
+    } catch (err) {
       setError(
-        t(
-          "Could not create local rules. Refresh saved state and try again.",
-          "Lokale Regeln ließen sich nicht anlegen. Aktualisiere den gespeicherten Stand und versuche es erneut.",
+        describeError(
+          err,
+          t(
+            "Could not create local rules. Refresh saved state and try again.",
+            "Lokale Regeln ließen sich nicht anlegen. Aktualisiere den gespeicherten Stand und versuche es erneut.",
+          ),
         ),
       );
     } finally {
@@ -132,11 +157,14 @@ export function Rules({
     try {
       setProof(await previewWorkspace(account.id));
       setDecisionPage(0);
-    } catch {
+    } catch (err) {
       setError(
-        t(
-          "The rules could not be checked. Refresh saved state and try again.",
-          "Die Regeln konnten nicht geprüft werden. Aktualisiere den gespeicherten Stand und versuche es erneut.",
+        describeError(
+          err,
+          t(
+            "The rules could not be checked. Refresh saved state and try again.",
+            "Die Regeln konnten nicht geprüft werden. Aktualisiere den gespeicherten Stand und versuche es erneut.",
+          ),
         ),
       );
     } finally {
@@ -150,11 +178,14 @@ export function Rules({
     try {
       setProposals(await openProposals(account.id));
       setProposalReview(null);
-    } catch {
+    } catch (err) {
       setError(
-        t(
-          "Could not load deterministic proposals. Save local rules and scan your mailbox first.",
-          "Deterministische Vorschläge konnten nicht geladen werden. Speichere lokale Regeln und erfasse das Postfach.",
+        describeError(
+          err,
+          t(
+            "Could not load deterministic proposals. Save local rules and scan your mailbox first.",
+            "Deterministische Vorschläge konnten nicht geladen werden. Speichere lokale Regeln und erfasse das Postfach.",
+          ),
         ),
       );
     } finally {
@@ -171,13 +202,17 @@ export function Rules({
       baseRevision.current = `${next.revision}/${next.workspace?.revision}`;
       setBase(JSON.stringify(draft));
       setConflict(false);
+      setProposalReview(null);
       onWorkspace(next);
       setMessage(t("Local rules saved.", "Lokale Regeln gespeichert."));
-    } catch {
+    } catch (err) {
       setError(
-        t(
-          "Save refused. The rules may be invalid or the saved revision changed. Your draft is retained.",
-          "Speichern abgelehnt. Die Regeln sind möglicherweise ungültig oder der gespeicherte Stand hat sich geändert. Dein Entwurf bleibt erhalten.",
+        describeError(
+          err,
+          t(
+            "Save refused. The rules may be invalid or the saved revision changed. Your draft is retained.",
+            "Speichern abgelehnt. Die Regeln sind möglicherweise ungültig oder der gespeicherte Stand hat sich geändert. Dein Entwurf bleibt erhalten.",
+          ),
         ),
       );
     } finally {
@@ -207,11 +242,14 @@ export function Rules({
           "Kompilierte rules.sieve heruntergeladen und als Basis gespeichert.",
         ),
       );
-    } catch {
+    } catch (err) {
       setError(
-        t(
-          "Download refused. Re-run Check saved rules and verify no pins are blocked.",
-          "Download abgelehnt. Prüfe die Regeln erneut und stelle sicher, dass kein Pin blockiert ist.",
+        describeError(
+          err,
+          t(
+            "Download refused. Re-run Check saved rules and verify no pins are blocked.",
+            "Download abgelehnt. Prüfe die Regeln erneut und stelle sicher, dass kein Pin blockiert ist.",
+          ),
         ),
       );
     } finally {
@@ -226,6 +264,7 @@ export function Rules({
         setDraft(value.workspace?.input ?? null);
         setBase(JSON.stringify(value.workspace?.input ?? null));
         setConflict(false);
+        setProposalReview(null);
         onWorkspace(value);
       })
       .catch(() =>
@@ -236,6 +275,40 @@ export function Rules({
           ),
         ),
       );
+  }
+
+  function addPin(messageIdHash: string, expected: Pin["expected"]) {
+    if (!draft) return;
+    if (draft.pins.some((p) => p.message_id_hash === messageIdHash)) return;
+    setDraft({
+      ...draft,
+      pins: [
+        ...draft.pins,
+        {
+          account: account.id,
+          message_id_hash: messageIdHash,
+          expected,
+        },
+      ],
+    });
+    setProof(null);
+    setProposalReview(null);
+    setMessage(
+      t(
+        "Pin added to draft. Save local rules to enforce this expectation in future checks.",
+        "Pin zum Entwurf hinzugefügt. Speichere lokale Regeln, um diese Erwartung künftig zu prüfen.",
+      ),
+    );
+  }
+
+  function removePin(messageIdHash: string) {
+    if (!draft) return;
+    setDraft({
+      ...draft,
+      pins: draft.pins.filter((p) => p.message_id_hash !== messageIdHash),
+    });
+    setProof(null);
+    setProposalReview(null);
   }
 
   const filteredDecisions = (proof?.proof.decisions ?? []).filter((d) => {
@@ -259,286 +332,206 @@ export function Rules({
     (decisionPage + 1) * perPage,
   );
 
-  return (
+  const localContent = (
     <div className="page-stack">
-      <div
-        className="subtabs"
-        role="tablist"
-        aria-label={t("Rules and deploy sections", "Bereiche für Regeln und Bereitstellung")}
-      >
-        <button
-          role="tab"
-          aria-selected={tab === "local"}
-          className={`subtab ${tab === "local" ? "active" : ""}`}
-          onClick={() => setTab("local")}
-        >
-          <SlidersHorizontal size={15} />
-          {t("Local rules & proof", "Lokale Regeln & Prüfung")}
-        </button>
-        <button
-          role="tab"
-          aria-selected={tab === "folders"}
-          className={`subtab ${tab === "folders" ? "active" : ""}`}
-          onClick={() => setTab("folders")}
-        >
-          <FolderPlus size={15} />
-          {t("Folders", "Ordner")}
-        </button>
-        <button
-          role="tab"
-          aria-selected={tab === "deploy"}
-          className={`subtab ${tab === "deploy" ? "active" : ""}`}
-          onClick={() => setTab("deploy")}
-        >
-          <Rocket size={15} />
-          {t("Sieve deploy", "Sieve-Bereitstellung")}
-        </button>
-        <button
-          role="tab"
-          aria-selected={tab === "placement"}
-          className={`subtab ${tab === "placement" ? "active" : ""}`}
-          onClick={() => setTab("placement")}
-        >
-          <Scale size={15} />
-          {t("Placement check", "Ablagevergleich")}
-        </button>
-      </div>
-
-      {tab === "folders" && (
-        <FoldersPanel
-          account={account}
-          liveWrites={liveWrites}
-          onGoSettings={onGoSettings}
-        />
-      )}
-
-      {tab === "deploy" && (
-        <SieveDeployPanel
-          account={account}
-          liveWrites={liveWrites}
-          onGoSettings={onGoSettings}
-        />
-      )}
-
-      {tab === "placement" && <PlacementPanel view={view} />}
-
-      {tab === "local" && (
-        <>
-          {error && <Notice error>{error}</Notice>}
-          {message && (
-            <Notice>
-              <CheckCircle2 size={18} />
-              {message}
-            </Notice>
-          )}
-          {conflict && (
-            <Notice>
-              {t(
-                "The saved analysis or rules changed while your draft was open. Your draft is retained. Copy it before loading saved rules.",
-                "Die gespeicherte Analyse oder die Regeln haben sich geändert, während dein Entwurf geöffnet war. Er bleibt erhalten. Kopiere ihn, bevor du gespeicherte Regeln lädst.",
-              )}
-            </Notice>
-          )}
-          <section className="panel">
-            <div className="section-heading">
-              <div>
-                <h2>{t("Your local rules", "Deine lokalen Regeln")}</h2>
-                <p className="muted">
-                  {t(
-                    "Check how rules would sort your saved mail before changing anything at your provider.",
-                    "Prüfe, wie Regeln gespeicherte Nachrichten sortieren würden, bevor beim Anbieter etwas geändert wird.",
-                  )}
-                </p>
-              </div>
-              <span className="badge subtle">
-                {t("Local only", "Nur lokal")}
-              </span>
-            </div>
-            {!workspace ? (
-              <Action onClick={reload}>
-                {t("Load local rules", "Lokale Regeln laden")}
-              </Action>
-            ) : !workspace.workspace ? (
-              <Empty
-                title={t(
-                  "Start with the Mailroom presets",
-                  "Mit Mailroom-Vorlagen beginnen",
-                )}
-                action={
-                  <Action
-                    primary
-                    onClick={() => void initialize()}
-                    disabled={busy}
-                  >
-                    {t("Create local rules", "Lokale Regeln anlegen")}
-                  </Action>
-                }
-              >
-                {t(
-                  "Create a local rule workspace. You can review and adjust it before any provider deployment.",
-                  "Lege einen lokalen Regelarbeitsstand an. Du kannst ihn vor jeder Aktivierung beim Anbieter prüfen und anpassen.",
-                )}
-              </Empty>
-            ) : (
-              <>
-                <div className="rules-status">
-                  <Settings2 size={22} />
-                  <div>
-                    <strong>
-                      {t(
-                        "Saved local workspace",
-                        "Gespeicherter lokaler Arbeitsstand",
-                      )}
-                    </strong>
-                    <p className="help">
-                      {t("Revision", "Revision")}{" "}
-                      {workspace.workspace.revision} ·{" "}
-                      {workspace.engine === "mailbox_sieve"
-                        ? "mailbox.org"
-                        : "Gmail"}
-                    </p>
-                  </div>
-                  <div className="actions">
-                    <Action
-                      onClick={() => void loadDeterministicProposals()}
-                      disabled={busy || dirty}
-                    >
-                      <Sparkles size={15} />
-                      {t("Rule proposals", "Regelvorschläge")}
-                    </Action>
-                    <Action
-                      primary
-                      onClick={() => void run()}
-                      disabled={busy || dirty}
-                    >
-                      {busy ? (
-                        <Busy>{t("Checking…", "Wird geprüft…")}</Busy>
-                      ) : (
-                        <>
-                          <Play size={15} />
-                          {t("Check saved rules", "Gespeicherte Regeln prüfen")}
-                        </>
-                      )}
-                    </Action>
-                  </div>
-                </div>
-                {dirty && (
-                  <p className="help">
-                    {t(
-                      "Save your draft to check its effect.",
-                      "Speichere deinen Entwurf, um seine Wirkung zu prüfen.",
-                    )}
-                  </p>
-                )}
-              </>
+      {isGmail && (
+        <Notice tone="info">
+          <span>
+            {t(
+              "Gmail does not support ManageSieve. Use these local rules to sort existing Gmail mail via labels in Backlog, and configure Gmail forwarding to mailbox.org in Addresses & wind-down.",
+              "Gmail unterstützt kein ManageSieve. Nutze diese lokalen Regeln für Gmail-Labels im Bereich Bestand sortieren und richte die Weiterleitung unter Adressen & Abbau ein.",
             )}
-          </section>
-
-          {proposals && (
-            <section className="panel">
-              <div className="section-heading">
-                <h2>
-                  {t(
-                    "Deterministic rule proposals",
-                    "Deterministische Regelvorschläge",
-                  )}
-                </h2>
-                <span className="badge">
-                  {proposals.candidates.length} {t("candidates", "Kandidaten")}
-                </span>
-              </div>
-              {proposals.candidates.length === 0 ? (
-                <p className="muted">
-                  {t(
-                    "No deterministic rule proposals for current unmatched senders.",
-                    "Keine deterministischen Regelvorschläge für aktuelle nicht zugeordnete Absender.",
-                  )}
-                </p>
-              ) : (
-                <div className="page-stack">
-                  {proposals.candidates.slice(0, 20).map((cand) => (
-                    <div className="proposal-card" key={cand.id}>
-                      <div>
-                        <strong>{cand.sender_claim}</strong>
-                        <p className="help">{cand.uncertainty}</p>
-                      </div>
-                      <div className="actions">
-                        <Action
-                          disabled={busy}
-                          onClick={async () => {
-                            setBusy(true);
-                            try {
-                              setProposalReview(
-                                await reviewProposals(
-                                  account.id,
-                                  {
-                                    account: account.id,
-                                    generation: proposals.generation,
-                                    candidates: [
-                                      { id: cand.id, change: cand.change },
-                                    ],
-                                  },
-                                  "accept",
-                                ),
-                              );
-                            } finally {
-                              setBusy(false);
-                            }
-                          }}
-                        >
-                          {t("Preview accept", "Annahme prüfen")}
-                        </Action>
-                        <Action
-                          disabled={busy}
-                          onClick={async () => {
-                            setBusy(true);
-                            try {
-                              const rev = await reviewProposals(
-                                account.id,
-                                {
-                                  account: account.id,
-                                  generation: proposals.generation,
-                                  candidates: [
-                                    { id: cand.id, change: cand.change },
-                                  ],
-                                },
-                                "reject",
-                              );
-                              setProposals(
-                                await confirmProposals(account.id, rev),
-                              );
-                            } finally {
-                              setBusy(false);
-                            }
-                          }}
-                        >
-                          {t("Reject", "Ablehnen")}
-                        </Action>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+          </span>
+          <div className="actions">
+            <Action size="compact" onClick={onGoBacklog}>
+              {t("Backlog", "Bestand sortieren")} <ArrowRight size={13} />
+            </Action>
+            <Action size="compact" onClick={onGoAddresses}>
+              {t("Gmail forwarding", "Gmail-Weiterleitung")}{" "}
+              <ArrowRight size={13} />
+            </Action>
+          </div>
+        </Notice>
+      )}
+      {error && <Notice error>{error}</Notice>}
+      {message && (
+        <Notice>
+          <CheckCircle2 size={18} />
+          <span>{message}</span>
+        </Notice>
+      )}
+      {conflict && (
+        <Notice tone="warning">
+          <span>
+            {t(
+              "The saved analysis or rules changed while your draft was open. Your draft is retained. Copy it before loading saved rules.",
+              "Die gespeicherte Analyse oder die Regeln haben sich geändert, während dein Entwurf geöffnet war. Er bleibt erhalten. Kopiere ihn, bevor du gespeicherte Regeln lädst.",
+            )}
+          </span>
+          <Action size="compact" onClick={reload}>
+            {t("Reload saved rules", "Gespeicherte Regeln laden")}
+          </Action>
+        </Notice>
+      )}
+      <section className="panel">
+        <div className="section-heading">
+          <div>
+            <h2>{t("Your local rules", "Deine lokalen Regeln")}</h2>
+            <p className="muted">
+              {t(
+                "Check how rules would sort your saved mail before changing anything at your provider.",
+                "Prüfe, wie Regeln gespeicherte Nachrichten sortieren würden, bevor beim Anbieter etwas geändert wird.",
               )}
-              {proposalReview && (
-                <div className="subpanel">
-                  <p>{proposalReview.effects}</p>
-                  <pre tabIndex={0}>{proposalReview.document_diff}</pre>
+            </p>
+          </div>
+          <span className="badge subtle">{t("Local only", "Nur lokal")}</span>
+        </div>
+        {!workspace ? (
+          <Action onClick={reload}>
+            {t("Load local rules", "Lokale Regeln laden")}
+          </Action>
+        ) : !workspace.workspace ? (
+          <Empty
+            title={t(
+              "Start with the Mailroom presets",
+              "Mit Mailroom-Vorlagen beginnen",
+            )}
+            action={
+              <Action
+                primary
+                onClick={() => void initialize()}
+                disabled={busy}
+              >
+                {t("Create local rules", "Lokale Regeln anlegen")}
+              </Action>
+            }
+          >
+            {t(
+              "Create a local rule workspace. You can review and adjust it before any provider deployment.",
+              "Lege einen lokalen Regelarbeitsstand an. Du kannst ihn vor jeder Aktivierung beim Anbieter prüfen und anpassen.",
+            )}
+          </Empty>
+        ) : (
+          <>
+            <div className="rules-status">
+              <Settings2 size={22} />
+              <div>
+                <strong>
+                  {t(
+                    "Saved local workspace",
+                    "Gespeicherter lokaler Arbeitsstand",
+                  )}
+                </strong>
+                <p className="help">
+                  {t("Revision", "Revision")} {workspace.workspace.revision} ·{" "}
+                  {workspace.engine === "mailbox_sieve"
+                    ? "mailbox.org"
+                    : "Gmail"}{" "}
+                  · {draft?.pins.length ?? 0} {t("pins", "Pins")}
+                </p>
+              </div>
+              <div className="actions">
+                <Action
+                  onClick={() => void loadDeterministicProposals()}
+                  disabled={busy || dirty}
+                >
+                  <Sparkles size={15} />
+                  {t("Rule proposals", "Regelvorschläge")}
+                </Action>
+                <Action
+                  primary
+                  onClick={() => void run()}
+                  disabled={busy || dirty}
+                >
+                  {busy ? (
+                    <Busy>{t("Checking…", "Wird geprüft…")}</Busy>
+                  ) : (
+                    <>
+                      <Play size={15} />
+                      {t("Check saved rules", "Gespeicherte Regeln prüfen")}
+                    </>
+                  )}
+                </Action>
+              </div>
+            </div>
+            {dirty && (
+              <Notice tone="info">
+                <span>
+                  {t(
+                    "You have unsaved draft edits. Save local rules to re-run simulation and proposals.",
+                    "Du hast ungespeicherte Entwurfsänderungen. Speichere lokale Regeln, um Simulation und Vorschläge neu zu prüfen.",
+                  )}
+                </span>
+                <Action
+                  primary
+                  size="compact"
+                  disabled={busy || conflict}
+                  onClick={() => void save()}
+                >
+                  {t("Save local rules", "Lokale Regeln speichern")}
+                </Action>
+              </Notice>
+            )}
+          </>
+        )}
+      </section>
+
+      {proposals && (
+        <section className="panel">
+          <div className="section-heading">
+            <h2>
+              {t(
+                "Deterministic rule proposals",
+                "Deterministische Regelvorschläge",
+              )}
+            </h2>
+            <span className="badge info">
+              {proposals.candidates.length} {t("candidates", "Kandidaten")}
+            </span>
+          </div>
+          {proposals.candidates.length === 0 ? (
+            <p className="muted">
+              {t(
+                "No deterministic rule proposals for current unmatched senders.",
+                "Keine deterministischen Regelvorschläge für aktuelle nicht zugeordnete Absender.",
+              )}
+            </p>
+          ) : (
+            <div className="page-stack">
+              {proposals.candidates.slice(0, 20).map((cand) => (
+                <div className="proposal-card" key={cand.id}>
+                  <div>
+                    <strong>{cand.sender_claim}</strong>
+                    <p className="help">{cand.uncertainty}</p>
+                  </div>
                   <div className="actions">
                     <Action
-                      primary
-                      disabled={!proposalReview.acceptance_available || busy}
+                      disabled={busy || dirty}
                       onClick={async () => {
                         setBusy(true);
+                        setError("");
                         try {
-                          setProposals(
-                            await confirmProposals(account.id, proposalReview),
+                          setProposalReview(
+                            await reviewProposals(
+                              account.id,
+                              {
+                                account: account.id,
+                                generation: proposals.generation,
+                                candidates: [
+                                  { id: cand.id, change: cand.change },
+                                ],
+                              },
+                              "accept",
+                            ),
                           );
-                          setProposalReview(null);
-                          reload();
-                          setMessage(
-                            t(
-                              "Proposal applied to local rules.",
-                              "Vorschlag in lokale Regeln übernommen.",
+                        } catch (err) {
+                          setError(
+                            describeError(
+                              err,
+                              t(
+                                "Could not preview this proposal. Refresh proposals and try again.",
+                                "Vorschlag konnte nicht geprüft werden. Lade die Vorschläge neu.",
+                              ),
                             ),
                           );
                         } finally {
@@ -546,267 +539,536 @@ export function Rules({
                         }
                       }}
                     >
-                      {t("Apply proposal", "Vorschlag anwenden")}
+                      {t("Preview accept", "Annahme prüfen")}
                     </Action>
-                    <Action onClick={() => setProposalReview(null)}>
-                      {t("Cancel", "Abbrechen")}
+                    <Action
+                      tone="danger-outline"
+                      disabled={busy || dirty}
+                      onClick={async () => {
+                        setBusy(true);
+                        setError("");
+                        try {
+                          const rev = await reviewProposals(
+                            account.id,
+                            {
+                              account: account.id,
+                              generation: proposals.generation,
+                              candidates: [
+                                { id: cand.id, change: cand.change },
+                              ],
+                            },
+                            "reject",
+                          );
+                          setProposals(await confirmProposals(account.id, rev));
+                          setMessage(
+                            t(
+                              "Proposal rejected.",
+                              "Regelvorschlag abgelehnt.",
+                            ),
+                          );
+                        } catch (err) {
+                          setError(
+                            describeError(
+                              err,
+                              t(
+                                "Could not reject this proposal. Refresh proposals and try again.",
+                                "Vorschlag konnte nicht abgelehnt werden. Lade die Vorschläge neu.",
+                              ),
+                            ),
+                          );
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                    >
+                      {t("Reject", "Ablehnen")}
                     </Action>
                   </div>
                 </div>
-              )}
-            </section>
+              ))}
+            </div>
           )}
+          {proposalReview && (
+            <div className="subpanel">
+              <p>{proposalReview.effects}</p>
+              <pre tabIndex={0}>{proposalReview.document_diff}</pre>
+              <div className="actions">
+                <Action onClick={() => setProposalReview(null)}>
+                  {t("Cancel", "Abbrechen")}
+                </Action>
+                <Action
+                  primary
+                  disabled={
+                    !proposalReview.acceptance_available || busy || dirty
+                  }
+                  onClick={async () => {
+                    setBusy(true);
+                    setError("");
+                    try {
+                      setProposals(
+                        await confirmProposals(account.id, proposalReview),
+                      );
+                      setProposalReview(null);
+                      reload();
+                      setMessage(
+                        t(
+                          "Proposal applied to local rules.",
+                          "Vorschlag in lokale Regeln übernommen.",
+                        ),
+                      );
+                    } catch (err) {
+                      setError(
+                        describeError(
+                          err,
+                          t(
+                            "Could not apply proposal. Reload rules and retry.",
+                            "Vorschlag konnte nicht angewendet werden. Lade Regeln neu.",
+                          ),
+                        ),
+                      );
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  {t("Apply proposal", "Vorschlag anwenden")}
+                </Action>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
 
-          {proof && (
-            <section className="panel">
-              <div className="section-heading">
-                <h2>
-                  {t(
-                    "Simulation on saved mail",
-                    "Simulation mit gespeicherten Nachrichten",
-                  )}
-                </h2>
-                <div className="actions">
-                  <span className="badge">
-                    {t("No mail changed", "Keine Nachrichten verändert")}
-                  </span>
-                  {proof.download_available && (
-                    <Action onClick={() => void exportSieve()} disabled={busy}>
-                      <Download size={15} />
-                      {t("Download rules.sieve", "rules.sieve herunterladen")}
-                    </Action>
-                  )}
-                </div>
-              </div>
-              <div className="stats compact">
-                <Stat
-                  label={t("Messages checked", "Geprüfte Nachrichten")}
-                  value={proof.proof.counts.messages}
-                />
-                <Stat
-                  label={t("Would be filed", "Würden abgelegt")}
-                  value={proof.proof.counts.filed}
-                />
-                <Stat
-                  label={t("Kept in Inbox", "Bleiben im Posteingang")}
-                  value={proof.proof.counts.inbox}
-                />
-                <Stat
-                  label={t("Need review", "Benötigen Prüfung")}
-                  value={proof.proof.counts.review}
-                />
-              </div>
+      {proof && (
+        <section className="panel">
+          <div className="section-heading">
+            <h2>
+              {t(
+                "Simulation on saved mail",
+                "Simulation mit gespeicherten Nachrichten",
+              )}
+            </h2>
+            <div className="actions">
+              <StatusBadge status={proof.proof.gate} />
+              <span className="badge subtle">
+                {t("No mail changed", "Keine Nachrichten verändert")}
+              </span>
+              {proof.download_available && (
+                <Action onClick={() => void exportSieve()} disabled={busy}>
+                  <Download size={15} />
+                  {t("Download rules.sieve", "rules.sieve herunterladen")}
+                </Action>
+              )}
+            </div>
+          </div>
+          <div className="stats compact">
+            <Stat
+              label={t("Messages checked", "Geprüfte Nachrichten")}
+              value={proof.proof.counts.messages.toLocaleString()}
+            />
+            <Stat
+              label={t("Would be filed", "Würden abgelegt")}
+              value={proof.proof.counts.filed.toLocaleString()}
+            />
+            <Stat
+              label={t("Kept in Inbox", "Bleiben im Posteingang")}
+              value={proof.proof.counts.inbox.toLocaleString()}
+            />
+            <Stat
+              label={t("Need review", "Benötigen Prüfung")}
+              value={proof.proof.counts.review.toLocaleString()}
+            />
+          </div>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>{t("Rule", "Regel")}</th>
+                  <th className="numeric">{t("Matches", "Treffer")}</th>
+                  <th>{t("Status", "Status")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {proof.proof.rules.map((rule) => (
+                  <tr key={rule.id}>
+                    <th>{rule.id}</th>
+                    <td className="numeric">{rule.matched.toLocaleString()}</td>
+                    <td>
+                      {rule.fully_shadowed ? (
+                        <StatusBadge
+                          status="warning"
+                          label={t(
+                            "Covered by earlier rules",
+                            "Von früheren Regeln abgedeckt",
+                          )}
+                        />
+                      ) : rule.zero_match ? (
+                        <StatusBadge
+                          status="subtle"
+                          tone="subtle"
+                          label={t(
+                            "No saved matches",
+                            "Keine gespeicherten Treffer",
+                          )}
+                        />
+                      ) : (
+                        <StatusBadge
+                          status="pass"
+                          label={t(
+                            "Matches saved mail",
+                            "Passt auf gespeicherte Nachrichten",
+                          )}
+                        />
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {draft && draft.pins.length > 0 && (
+            <Details
+              title={`${t("Pinned destination expectations", "Fixierte Zielerwartungen")} · ${draft.pins.length}`}
+            >
               <div className="table-scroll">
                 <table>
                   <thead>
                     <tr>
-                      <th>{t("Rule", "Regel")}</th>
-                      <th className="numeric">{t("Matches", "Treffer")}</th>
+                      <th>{t("Message hash", "Nachrichten-Hash")}</th>
+                      <th>{t("Expected", "Erwartet")}</th>
                       <th>{t("Status", "Status")}</th>
+                      <th>{t("Action", "Aktion")}</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {proof.proof.rules.map((rule) => (
-                      <tr key={rule.id}>
-                        <th>{rule.id}</th>
-                        <td className="numeric">{rule.matched}</td>
-                        <td>
-                          {rule.fully_shadowed
-                            ? t(
-                                "Covered by earlier rules",
-                                "Von früheren Regeln abgedeckt",
-                              )
-                            : rule.zero_match
-                              ? t(
-                                  "No saved matches",
-                                  "Keine gespeicherten Treffer",
-                                )
-                              : t(
-                                  "Matches saved mail",
-                                  "Passt auf gespeicherte Nachrichten",
-                                )}
-                        </td>
-                      </tr>
-                    ))}
+                    {draft.pins.map((pin) => {
+                      const evaluated = proof.proof.pins.find(
+                        (p) => p.message_id_hash === pin.message_id_hash,
+                      );
+                      return (
+                        <tr key={pin.message_id_hash}>
+                          <td>
+                            <code>{pin.message_id_hash.slice(0, 12)}</code>
+                          </td>
+                          <td>
+                            {pin.expected.kind === "folder"
+                              ? pin.expected.name
+                              : "INBOX"}
+                          </td>
+                          <td>
+                            <StatusBadge
+                              status={evaluated?.status ?? "pending"}
+                            />
+                          </td>
+                          <td>
+                            <div className="cell-actions">
+                              <Action
+                                size="compact"
+                                onClick={() => removePin(pin.message_id_hash)}
+                              >
+                                <X size={13} />
+                                {t("Remove", "Entfernen")}
+                              </Action>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
-              <Details
-                title={`${t("Inspect message decisions", "Nachrichtenentscheidungen prüfen")} · ${proof.proof.decisions.length}`}
-              >
-                <div className="toolbar">
-                  <input
-                    type="search"
-                    value={decisionSearch}
-                    onChange={(e) => {
-                      setDecisionSearch(e.target.value);
-                      setDecisionPage(0);
-                    }}
-                    placeholder={t(
-                      "Filter subject, sender, destination…",
-                      "Betreff, Absender, Ziel filtern…",
-                    )}
-                  />
-                  <div className="actions">
-                    {(["all", "inbox", "review", "copies"] as const).map(
-                      (f) => (
-                        <Action
-                          key={f}
-                          primary={decisionFilter === f}
-                          onClick={() => {
-                            setDecisionFilter(f);
-                            setDecisionPage(0);
-                          }}
-                        >
-                          {f === "all"
-                            ? t("All", "Alle")
-                            : f === "inbox"
-                              ? t("Inbox", "Posteingang")
-                              : f === "review"
-                                ? t("Review", "Prüfung")
-                                : t("Copies", "Kopien")}
-                        </Action>
-                      ),
-                    )}
-                  </div>
-                </div>
-                <div className="table-scroll">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>{t("From", "Absender")}</th>
-                        <th>{t("Subject", "Betreff")}</th>
-                        <th>{t("Destination", "Ziel")}</th>
-                        <th>{t("Rule", "Regel")}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pageDecisions.map((d) => (
-                        <tr key={d.id}>
-                          <td>{d.from}</td>
-                          <td>{d.subject}</td>
-                          <td>
-                            {d.destination.kind === "folder"
-                              ? d.destination.name
-                              : "INBOX"}
-                          </td>
-                          <td>{d.matched_rule ?? "—"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                {filteredDecisions.length > perPage && (
-                  <div className="actions">
-                    <Action
-                      disabled={decisionPage === 0}
-                      onClick={() =>
-                        setDecisionPage((p) => Math.max(0, p - 1))
-                      }
-                    >
-                      {t("Previous", "Zurück")}
-                    </Action>
-                    <span className="help">
-                      {decisionPage * perPage + 1}–
-                      {Math.min(
-                        (decisionPage + 1) * perPage,
-                        filteredDecisions.length,
-                      )}{" "}
-                      / {filteredDecisions.length}
-                    </span>
-                    <Action
-                      disabled={
-                        (decisionPage + 1) * perPage >= filteredDecisions.length
-                      }
-                      onClick={() => setDecisionPage((p) => p + 1)}
-                    >
-                      {t("Next", "Weiter")}
-                    </Action>
-                  </div>
-                )}
-              </Details>
-              <Details title={t("Validation details", "Prüfdetails")}>
-                <p>
-                  {t("Validation status", "Prüfstatus")} · {proof.proof.gate}
-                </p>
-                <ul>
-                  {proof.proof.artifact.omissions.map((item, i) => (
-                    <li key={i}>
-                      {item.rule} · {item.reason}
-                    </li>
-                  ))}
-                </ul>
-              </Details>
-            </section>
-          )}
-
-          {draft && (
-            <Details
-              title={t(
-                "Edit exact rule documents",
-                "Genaue Regeldokumente bearbeiten",
-              )}
-            >
-              <p className="help">
-                {t(
-                  "Advanced editing. Invalid or stale documents cannot be saved. Saving affects local rules only.",
-                  "Erweiterte Bearbeitung. Ungültige oder veraltete Dokumente lassen sich nicht speichern. Speichern ändert nur lokale Regeln.",
-                )}
-              </p>
-              <label className="field">
-                {t("Preset YAML", "Vorlagen-YAML")}
-                <textarea
-                  aria-label={t("Preset YAML", "Vorlagen-YAML")}
-                  spellCheck={false}
-                  rows={12}
-                  value={draft.documents.preset_yaml}
-                  onChange={(e) => {
-                    setDraft({
-                      ...draft,
-                      documents: {
-                        ...draft.documents,
-                        preset_yaml: e.target.value,
-                      },
-                    });
-                    setProof(null);
-                  }}
-                />
-              </label>
-              <label className="field">
-                {t("Override YAML", "Anpassungs-YAML")}
-                <textarea
-                  aria-label={t("Override YAML", "Anpassungs-YAML")}
-                  spellCheck={false}
-                  rows={10}
-                  value={draft.documents.override_yaml}
-                  onChange={(e) => {
-                    setDraft({
-                      ...draft,
-                      documents: {
-                        ...draft.documents,
-                        override_yaml: e.target.value,
-                      },
-                    });
-                    setProof(null);
-                  }}
-                />
-              </label>
-              <div className="actions">
-                <Action
-                  primary
-                  disabled={busy || !dirty || conflict}
-                  onClick={() => void save()}
-                >
-                  {t("Save local rules", "Lokale Regeln speichern")}
-                </Action>
-                <Action disabled={busy} onClick={reload}>
-                  {t("Load saved rules", "Gespeicherte Regeln laden")}
-                </Action>
-              </div>
             </Details>
           )}
-        </>
+          <Details
+            title={`${t("Inspect message decisions", "Nachrichtenentscheidungen prüfen")} · ${proof.proof.decisions.length.toLocaleString()}`}
+          >
+            <div className="toolbar">
+              <input
+                type="search"
+                aria-label={t(
+                  "Filter message decisions",
+                  "Nachrichtenentscheidungen filtern",
+                )}
+                value={decisionSearch}
+                onChange={(e) => {
+                  setDecisionSearch(e.target.value);
+                  setDecisionPage(0);
+                }}
+                placeholder={t(
+                  "Filter subject, sender, destination…",
+                  "Betreff, Absender, Ziel filtern…",
+                )}
+              />
+              <div
+                className="actions"
+                role="group"
+                aria-label={t("Decision filter", "Entscheidungsfilter")}
+              >
+                {(["all", "inbox", "review", "copies"] as const).map((f) => (
+                  <Action
+                    key={f}
+                    size="compact"
+                    primary={decisionFilter === f}
+                    aria-pressed={decisionFilter === f}
+                    onClick={() => {
+                      setDecisionFilter(f);
+                      setDecisionPage(0);
+                    }}
+                  >
+                    {f === "all"
+                      ? t("All", "Alle")
+                      : f === "inbox"
+                        ? t("Inbox", "Posteingang")
+                        : f === "review"
+                          ? t("Review", "Prüfung")
+                          : t("Copies", "Kopien")}
+                  </Action>
+                ))}
+              </div>
+            </div>
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t("From", "Absender")}</th>
+                    <th>{t("Subject", "Betreff")}</th>
+                    <th>{t("Destination", "Ziel")}</th>
+                    <th>{t("Rule", "Regel")}</th>
+                    <th>{t("Pin", "Pin")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pageDecisions.map((d) => {
+                    const alreadyPinned = Boolean(
+                      d.message_id_hash &&
+                        draft?.pins.some(
+                          (p) => p.message_id_hash === d.message_id_hash,
+                        ),
+                    );
+                    return (
+                      <tr key={d.id}>
+                        <td>{d.from}</td>
+                        <td>{d.subject}</td>
+                        <td>
+                          {d.destination.kind === "folder"
+                            ? d.destination.name
+                            : "INBOX"}
+                        </td>
+                        <td>{d.matched_rule ?? "—"}</td>
+                        <td>
+                          {d.message_id_hash ? (
+                            <div className="cell-actions">
+                              <Action
+                                size="compact"
+                                disabled={alreadyPinned}
+                                onClick={() =>
+                                  addPin(d.message_id_hash!, d.destination)
+                                }
+                              >
+                                <PinIcon size={13} />
+                                {alreadyPinned
+                                  ? t("Pinned", "Fixiert")
+                                  : t("Pin", "Fixieren")}
+                              </Action>
+                            </div>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {filteredDecisions.length > perPage && (
+              <div className="pagination">
+                <span className="muted">
+                  {decisionPage * perPage + 1}–
+                  {Math.min(
+                    (decisionPage + 1) * perPage,
+                    filteredDecisions.length,
+                  )}{" "}
+                  / {filteredDecisions.length}
+                </span>
+                <div>
+                  <Action
+                    size="compact"
+                    disabled={decisionPage === 0}
+                    onClick={() => setDecisionPage((p) => Math.max(0, p - 1))}
+                  >
+                    {t("Previous", "Zurück")}
+                  </Action>
+                  <Action
+                    size="compact"
+                    disabled={
+                      (decisionPage + 1) * perPage >= filteredDecisions.length
+                    }
+                    onClick={() => setDecisionPage((p) => p + 1)}
+                  >
+                    {t("Next", "Weiter")}
+                  </Action>
+                </div>
+              </div>
+            )}
+          </Details>
+          <Details title={t("Validation details", "Prüfdetails")}>
+            <p>
+              {t("Validation status", "Prüfstatus")}:{" "}
+              <StatusBadge status={proof.proof.gate} />
+            </p>
+            {proof.proof.warnings.length > 0 && (
+              <ul className="evidence-list">
+                {proof.proof.warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+            )}
+            {proof.proof.artifact.omissions.length > 0 && (
+              <ul className="evidence-list">
+                {proof.proof.artifact.omissions.map((item, i) => (
+                  <li key={i}>
+                    <code>{item.rule}</code> · {item.reason}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Details>
+        </section>
+      )}
+
+      {draft && (
+        <Details
+          title={t(
+            "Edit exact rule documents",
+            "Genaue Regeldokumente bearbeiten",
+          )}
+        >
+          <p className="help">
+            {t(
+              "Advanced editing. Invalid or stale documents cannot be saved. Saving affects local rules only.",
+              "Erweiterte Bearbeitung. Ungültige oder veraltete Dokumente lassen sich nicht speichern. Speichern ändert nur lokale Regeln.",
+            )}
+          </p>
+          <label className="field">
+            {t("Preset YAML", "Vorlagen-YAML")}
+            <textarea
+              className="code-editor"
+              wrap="off"
+              aria-label={t("Preset YAML", "Vorlagen-YAML")}
+              spellCheck={false}
+              rows={12}
+              value={draft.documents.preset_yaml}
+              onChange={(e) => {
+                setDraft({
+                  ...draft,
+                  documents: {
+                    ...draft.documents,
+                    preset_yaml: e.target.value,
+                  },
+                });
+                setProof(null);
+                setProposalReview(null);
+              }}
+            />
+          </label>
+          <label className="field">
+            {t("Override YAML", "Anpassungs-YAML")}
+            <textarea
+              className="code-editor"
+              wrap="off"
+              aria-label={t("Override YAML", "Anpassungs-YAML")}
+              spellCheck={false}
+              rows={10}
+              value={draft.documents.override_yaml}
+              onChange={(e) => {
+                setDraft({
+                  ...draft,
+                  documents: {
+                    ...draft.documents,
+                    override_yaml: e.target.value,
+                  },
+                });
+                setProof(null);
+                setProposalReview(null);
+              }}
+            />
+          </label>
+          <div className="actions">
+            <Action
+              primary
+              disabled={busy || !dirty || conflict}
+              onClick={() => void save()}
+            >
+              {t("Save local rules", "Lokale Regeln speichern")}
+            </Action>
+            <Action disabled={busy || !dirty} onClick={reload}>
+              {t("Discard draft", "Entwurf verwerfen")}
+            </Action>
+          </div>
+        </Details>
       )}
     </div>
+  );
+
+  const items: SubTabItem<RulesTab>[] = [
+    {
+      value: "local",
+      label: t("Local rules & proof", "Lokale Regeln & Prüfung"),
+      icon: <SlidersHorizontal size={15} />,
+      content: localContent,
+      keepMounted: true,
+    },
+    ...(!isGmail
+      ? ([
+          {
+            value: "folders",
+            label: t("Folders", "Ordner"),
+            icon: <FolderPlus size={15} />,
+            content: (
+              <FoldersPanel
+                account={account}
+                liveWrites={liveWrites}
+                liveJob={liveJob}
+                onOpenWriteMode={onOpenWriteMode}
+              />
+            ),
+            keepMounted: true,
+          },
+          {
+            value: "deploy",
+            label: t("Sieve deploy", "Sieve-Bereitstellung"),
+            icon: <Rocket size={15} />,
+            content: (
+              <SieveDeployPanel
+                account={account}
+                liveWrites={liveWrites}
+                liveJob={liveJob}
+                onOpenWriteMode={onOpenWriteMode}
+              />
+            ),
+            keepMounted: true,
+          },
+        ] satisfies SubTabItem<RulesTab>[])
+      : []),
+    {
+      value: "placement",
+      label: t("Placement check", "Ablagevergleich"),
+      icon: <Scale size={15} />,
+      content: <PlacementPanel view={view} />,
+      keepMounted: true,
+    },
+  ];
+
+  return (
+    <SubTabs
+      value={tab}
+      onChange={setTab}
+      label={t(
+        "Rules and deploy sections",
+        "Bereiche für Regeln und Bereitstellung",
+      )}
+      items={items}
+    />
   );
 }

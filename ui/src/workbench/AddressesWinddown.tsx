@@ -1,12 +1,16 @@
-import { useCallback, useContext, useEffect, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useState } from "react";
 import {
   BookUser,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Download,
   ExternalLink,
   Forward,
   Plus,
   RefreshCw,
+  Search,
+  ShieldAlert,
   TrendingDown,
 } from "lucide-react";
 import type { Account } from "../api";
@@ -26,6 +30,11 @@ import type {
   WinddownView,
 } from "../winddown-api";
 import {
+  describeError,
+  winddownBlockerText,
+  winddownGroupText,
+} from "./status-labels";
+import {
   Action,
   Busy,
   CheckField,
@@ -33,10 +42,14 @@ import {
   Details,
   Empty,
   LanguageContext,
+  Modal,
   Notice,
   Stat,
+  StatusBadge,
+  SubTabs,
   useCopy,
 } from "./components";
+import type { SubTabItem } from "./components";
 
 type Tab = "ledger" | "forwarding" | "winddown";
 
@@ -44,41 +57,37 @@ export function AddressesWinddown({ account }: { account: Account }) {
   const t = useCopy();
   const [tab, setTab] = useState<Tab>("ledger");
 
+  const items: SubTabItem<Tab>[] = [
+    {
+      value: "ledger",
+      label: t("Address ledger", "Adressverzeichnis"),
+      icon: <BookUser size={15} />,
+      content: <LedgerPanel account={account} />,
+      keepMounted: true,
+    },
+    {
+      value: "forwarding",
+      label: t("Gmail forwarding", "Gmail-Weiterleitung"),
+      icon: <Forward size={15} />,
+      content: <GmailForwardingPanel />,
+      keepMounted: true,
+    },
+    {
+      value: "winddown",
+      label: t("Gmail wind-down", "Gmail-Abbau"),
+      icon: <TrendingDown size={15} />,
+      content: <WinddownPanel account={account} />,
+      keepMounted: true,
+    },
+  ];
+
   return (
-    <div className="page-stack">
-      <div className="subtabs" role="tablist" aria-label={t("Sections", "Bereiche")}>
-        <button
-          role="tab"
-          aria-selected={tab === "ledger"}
-          className={`subtab ${tab === "ledger" ? "active" : ""}`}
-          onClick={() => setTab("ledger")}
-        >
-          <BookUser size={15} />
-          {t("Address ledger", "Adressverzeichnis")}
-        </button>
-        <button
-          role="tab"
-          aria-selected={tab === "forwarding"}
-          className={`subtab ${tab === "forwarding" ? "active" : ""}`}
-          onClick={() => setTab("forwarding")}
-        >
-          <Forward size={15} />
-          {t("Gmail forwarding", "Gmail-Weiterleitung")}
-        </button>
-        <button
-          role="tab"
-          aria-selected={tab === "winddown"}
-          className={`subtab ${tab === "winddown" ? "active" : ""}`}
-          onClick={() => setTab("winddown")}
-        >
-          <TrendingDown size={15} />
-          {t("Gmail wind-down", "Gmail-Abbau")}
-        </button>
-      </div>
-      {tab === "ledger" && <LedgerPanel account={account} />}
-      {tab === "forwarding" && <GmailForwardingPanel />}
-      {tab === "winddown" && <WinddownPanel account={account} />}
-    </div>
+    <SubTabs
+      value={tab}
+      onChange={setTab}
+      label={t("Addresses and wind-down sections", "Adress- und Abbaubereiche")}
+      items={items}
+    />
   );
 }
 
@@ -93,6 +102,7 @@ function LedgerPanel({ account }: { account: Account }) {
   const [newCategory, setNewCategory] =
     useState<LedgerEntry["category"]>("contracts");
   const [newInvoice, setNewInvoice] = useState(false);
+  const [formError, setFormError] = useState("");
   const [review, setReview] = useState<LedgerReview | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -121,10 +131,40 @@ function LedgerPanel({ account }: { account: Account }) {
   }, [load]);
 
   function addEntry() {
+    setFormError("");
     const addr = newAddress.trim().toLowerCase();
     const svc = newService.trim();
     const folder = newFolder.trim();
-    if (!addr.includes("@") || !svc || !folder) return;
+    if (!addr || !addr.includes("@") || addr.startsWith("@") || addr.endsWith("@")) {
+      setFormError(
+        t(
+          "Enter a valid service email address (e.g. shop@example.de).",
+          "Gib eine gültige Dienst-E-Mail-Adresse ein (z. B. shop@example.de).",
+        ),
+      );
+      return;
+    }
+    if (!svc) {
+      setFormError(
+        t("Enter a service name.", "Gib einen Dienstnamen ein."),
+      );
+      return;
+    }
+    if (!folder) {
+      setFormError(
+        t("Enter a target folder path.", "Gib einen Zielordner ein."),
+      );
+      return;
+    }
+    if (entries.some((e) => e.address.toLowerCase() === addr)) {
+      setFormError(
+        t(
+          "That address is already in the ledger.",
+          "Diese Adresse ist bereits im Verzeichnis eingetragen.",
+        ),
+      );
+      return;
+    }
     const today = new Date().toISOString().slice(0, 10);
     setEntries((prev) => [
       ...prev,
@@ -159,11 +199,14 @@ function LedgerPanel({ account }: { account: Account }) {
           entries,
         }),
       );
-    } catch {
+    } catch (err) {
       setError(
-        t(
-          "Ledger batch rejected. Check addresses, folder paths, and reload if needed.",
-          "Adressverzeichnis-Änderung abgelehnt. Prüfe Adressen und Ordnerpfade und lade bei Bedarf neu.",
+        describeError(
+          err,
+          t(
+            "Ledger batch rejected. Check addresses, folder paths, and reload if needed.",
+            "Adressverzeichnis-Änderung abgelehnt. Prüfe Adressen und Ordnerpfade und lade bei Bedarf neu.",
+          ),
         ),
       );
     } finally {
@@ -188,11 +231,14 @@ function LedgerPanel({ account }: { account: Account }) {
           "Privates Adressverzeichnis gespeichert und in lokale Regeln projiziert.",
         ),
       );
-    } catch {
+    } catch (err) {
       setError(
-        t(
-          "Could not save address ledger. Reload and review again.",
-          "Adressverzeichnis konnte nicht gespeichert werden. Lade neu und prüfe erneut.",
+        describeError(
+          err,
+          t(
+            "Could not save address ledger. Reload and review again.",
+            "Adressverzeichnis konnte nicht gespeichert werden. Lade neu und prüfe erneut.",
+          ),
         ),
       );
     } finally {
@@ -206,13 +252,18 @@ function LedgerPanel({ account }: { account: Account }) {
       {message && (
         <Notice>
           <CheckCircle2 size={16} />
-          {message}
+          <span>{message}</span>
         </Notice>
       )}
       <section className="panel">
         <div className="section-heading">
           <div>
-            <h2>{t("Private address policy & ledger", "Adressrichtlinie & Verzeichnis")}</h2>
+            <h2>
+              {t(
+                "Private address policy & ledger",
+                "Adressrichtlinie & Verzeichnis",
+              )}
+            </h2>
             <p className="muted">
               {t(
                 "Track one dedicated email address per service, detect leaks when unexpected senders write to a service address, and project routing rules automatically.",
@@ -231,15 +282,15 @@ function LedgerPanel({ account }: { account: Account }) {
             <div className="stats compact">
               <Stat
                 label={t("Recorded addresses", "Erfasste Adressen")}
-                value={entries.length}
+                value={entries.length.toLocaleString()}
               />
               <Stat
                 label={t("Discovery hints", "Entdeckungshinweise")}
-                value={view.proposals.length}
+                value={view.proposals.length.toLocaleString()}
               />
               <Stat
                 label={t("Leak alerts", "Leak-Hinweise")}
-                value={view.leaks.length}
+                value={view.leaks.length.toLocaleString()}
               />
             </div>
 
@@ -256,12 +307,63 @@ function LedgerPanel({ account }: { account: Account }) {
               )}
             </CheckField>
 
+            {view.proposals.length > 0 && (
+              <Details
+                title={`${t("Observed address discovery hints", "Entdeckte Dienstadressen")} · ${view.proposals.length}`}
+              >
+                <div className="table-scroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{t("Address", "Adresse")}</th>
+                        <th>{t("Observed senders", "Beobachtete Absender")}</th>
+                        <th>{t("Action", "Aktion")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {view.proposals.slice(0, 20).map((p, i) => (
+                        <tr key={`${p.address}-${i}`}>
+                          <td>
+                            <code>{p.address}</code>
+                          </td>
+                          <td>
+                            {p.service ?? p.role} ({p.evidence.length})
+                          </td>
+                          <td>
+                            <div className="cell-actions">
+                              <Action
+                                size="compact"
+                                onClick={() => {
+                                  setNewAddress(p.address);
+                                  setNewService(
+                                    p.service ??
+                                      p.address.split("@")[0] ??
+                                      "Service",
+                                  );
+                                  setFormError("");
+                                }}
+                              >
+                                {t("Pre-fill", "Übernehmen")}
+                              </Action>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Details>
+            )}
+
             <div className="settings-form">
               <label className="field">
                 {t("Service email address", "Dienst-E-Mail-Adresse")}
                 <input
                   value={newAddress}
-                  onChange={(e) => setNewAddress(e.target.value)}
+                  onChange={(e) => {
+                    setNewAddress(e.target.value);
+                    setFormError("");
+                  }}
                   placeholder="shop@example.de"
                 />
               </label>
@@ -269,7 +371,10 @@ function LedgerPanel({ account }: { account: Account }) {
                 {t("Service name", "Dienstname")}
                 <input
                   value={newService}
-                  onChange={(e) => setNewService(e.target.value)}
+                  onChange={(e) => {
+                    setNewService(e.target.value);
+                    setFormError("");
+                  }}
                   placeholder="Example Shop"
                 />
               </label>
@@ -277,10 +382,14 @@ function LedgerPanel({ account }: { account: Account }) {
                 {t("Target folder", "Zielordner")}
                 <input
                   value={newFolder}
-                  onChange={(e) => setNewFolder(e.target.value)}
+                  onChange={(e) => {
+                    setNewFolder(e.target.value);
+                    setFormError("");
+                  }}
                 />
               </label>
               <Choice
+                fieldLabel={t("Category", "Kategorie")}
                 label={t("Category", "Kategorie")}
                 value={newCategory}
                 onChange={(v) => setNewCategory(v as LedgerEntry["category"])}
@@ -296,6 +405,7 @@ function LedgerPanel({ account }: { account: Account }) {
               <CheckField checked={newInvoice} onChange={setNewInvoice}>
                 {t("Invoice address", "Rechnungsadresse")}
               </CheckField>
+              {formError && <Notice error>{formError}</Notice>}
               <Action onClick={addEntry}>
                 <Plus size={15} />
                 {t("Add entry", "Eintrag hinzufügen")}
@@ -303,70 +413,83 @@ function LedgerPanel({ account }: { account: Account }) {
             </div>
 
             {entries.length > 0 && (
-              <div className="table-scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>{t("Address", "Adresse")}</th>
-                      <th>{t("Service", "Dienst")}</th>
-                      <th>{t("Folder", "Ordner")}</th>
-                      <th>{t("Status", "Status")}</th>
-                      <th>{t("Actions", "Aktionen")}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {entries.map((entry, idx) => (
-                      <tr key={`${entry.address}-${idx}`}>
-                        <td>
-                          <code>{entry.address}</code>
-                        </td>
-                        <td>{entry.service}</td>
-                        <td>{entry.folder}</td>
-                        <td>
-                          <span className="badge">{entry.status}</span>
-                        </td>
-                        <td className="actions">
-                          <Action
-                            onClick={() => {
-                              setEntries((prev) =>
-                                prev.map((e, i) =>
-                                  i === idx
-                                    ? {
-                                        ...e,
-                                        status:
-                                          e.status === "active"
-                                            ? "retired"
-                                            : "active",
-                                      }
-                                    : e,
-                                ),
-                              );
-                              setReview(null);
-                            }}
-                          >
-                            {entry.status === "active"
-                              ? t("Retire", "Stilllegen")
-                              : t("Reactivate", "Reaktivieren")}
-                          </Action>
-                          <Action
-                            onClick={() => {
-                              setEntries((prev) =>
-                                prev.filter((_, i) => i !== idx),
-                              );
-                              setReview(null);
-                            }}
-                          >
-                            {t("Remove", "Entfernen")}
-                          </Action>
-                        </td>
+              <>
+                <p className="help" style={{ marginTop: 12 }}>
+                  {t(
+                    "Note: Retiring an address marks it retired in your local ledger only — it does not disable aliases at your mail provider.",
+                    "Hinweis: Stilllegen markiert eine Adresse nur lokal im Verzeichnis — Aliase beim Anbieter werden nicht automatisch deaktiviert.",
+                  )}
+                </p>
+                <div className="table-scroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{t("Address", "Adresse")}</th>
+                        <th>{t("Service", "Dienst")}</th>
+                        <th>{t("Folder", "Ordner")}</th>
+                        <th>{t("Status", "Status")}</th>
+                        <th>{t("Actions", "Aktionen")}</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {entries.map((entry, idx) => (
+                        <tr key={`${entry.address}-${idx}`}>
+                          <td>
+                            <code>{entry.address}</code>
+                          </td>
+                          <td>{entry.service}</td>
+                          <td>{entry.folder}</td>
+                          <td>
+                            <StatusBadge status={entry.status} />
+                          </td>
+                          <td>
+                            <div className="cell-actions">
+                              <Action
+                                size="compact"
+                                onClick={() => {
+                                  setEntries((prev) =>
+                                    prev.map((e, i) =>
+                                      i === idx
+                                        ? {
+                                            ...e,
+                                            status:
+                                              e.status === "active"
+                                                ? "retired"
+                                                : "active",
+                                          }
+                                        : e,
+                                    ),
+                                  );
+                                  setReview(null);
+                                }}
+                              >
+                                {entry.status === "active"
+                                  ? t("Retire", "Stilllegen")
+                                  : t("Reactivate", "Reaktivieren")}
+                              </Action>
+                              <Action
+                                size="compact"
+                                tone="danger-outline"
+                                onClick={() => {
+                                  setEntries((prev) =>
+                                    prev.filter((_, i) => i !== idx),
+                                  );
+                                  setReview(null);
+                                }}
+                              >
+                                {t("Remove", "Entfernen")}
+                              </Action>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
             )}
 
-            <div className="actions">
+            <div className="actions" style={{ marginTop: 16 }}>
               <Action primary onClick={() => void runPreview()} disabled={busy}>
                 {busy ? (
                   <Busy>{t("Reviewing…", "Wird geprüft…")}</Busy>
@@ -375,45 +498,6 @@ function LedgerPanel({ account }: { account: Account }) {
                 )}
               </Action>
             </div>
-
-            {review && (
-              <div className="subpanel">
-                <h3>{t("Ledger projection review", "Vorschau der Verzeichnis-Projektion")}</h3>
-                <p className="muted">{review.effects}</p>
-                <div className="stats compact">
-                  <Stat
-                    label={t("Would file", "Würden abgelegt")}
-                    value={review.proof.proof.counts.filed}
-                  />
-                  <Stat
-                    label={t("Kept in Inbox", "Im Posteingang")}
-                    value={review.proof.proof.counts.inbox}
-                  />
-                  <Stat
-                    label={t("Validation gate", "Prüfstatus")}
-                    value={review.proof.proof.gate}
-                  />
-                </div>
-                <CheckField checked={confirmed} onChange={setConfirmed}>
-                  {t(
-                    "Save this exact private address ledger locally.",
-                    "Dieses genaue private Adressverzeichnis lokal speichern.",
-                  )}
-                </CheckField>
-                <div className="actions">
-                  <Action
-                    primary
-                    disabled={!confirmed || busy}
-                    onClick={() => void runConfirm()}
-                  >
-                    {t("Save ledger", "Verzeichnis speichern")}
-                  </Action>
-                  <Action onClick={() => setReview(null)} disabled={busy}>
-                    {t("Cancel", "Abbrechen")}
-                  </Action>
-                </div>
-              </div>
-            )}
 
             {view.leaks.length > 0 && (
               <Details
@@ -439,6 +523,60 @@ function LedgerPanel({ account }: { account: Account }) {
           />
         )}
       </section>
+
+      <Modal
+        open={review !== null}
+        onOpenChange={(open) => {
+          if (!busy && !open) setReview(null);
+        }}
+        title={t(
+          "Confirm address ledger changes",
+          "Änderungen am Adressverzeichnis bestätigen",
+        )}
+        wide
+      >
+        {review && (
+          <div className="page-stack">
+            <p className="muted">{review.effects}</p>
+            <div className="stats compact">
+              <Stat
+                label={t("Would file", "Würden abgelegt")}
+                value={review.proof.proof.counts.filed.toLocaleString()}
+              />
+              <Stat
+                label={t("Kept in Inbox", "Im Posteingang")}
+                value={review.proof.proof.counts.inbox.toLocaleString()}
+              />
+              <Stat
+                label={t("Validation", "Prüfung")}
+                value={review.proof.proof.gate}
+              />
+            </div>
+            <CheckField checked={confirmed} onChange={setConfirmed}>
+              {t(
+                "Save this exact private address ledger locally and update local rule projection.",
+                "Dieses genaue private Adressverzeichnis lokal speichern und die lokale Regelprojektion aktualisieren.",
+              )}
+            </CheckField>
+            <div className="dialog-actions">
+              <Action onClick={() => setReview(null)} disabled={busy}>
+                {t("Cancel", "Abbrechen")}
+              </Action>
+              <Action
+                primary
+                disabled={!confirmed || busy}
+                onClick={() => void runConfirm()}
+              >
+                {busy ? (
+                  <Busy>{t("Saving…", "Wird gespeichert…")}</Busy>
+                ) : (
+                  t("Save ledger", "Verzeichnis speichern")
+                )}
+              </Action>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
@@ -471,16 +609,35 @@ function GmailForwardingPanel() {
           {t("Download plan", "Plan herunterladen")}
         </Action>
       </div>
-      <Notice>{copy.boundary}</Notice>
+      <Notice tone="warning">
+        <ShieldAlert size={16} />
+        <span>{copy.boundary}</span>
+      </Notice>
+      <p className="help">{copy.private}</p>
       <ol className="guide-steps">
         {gmailRoutePlan.stages.map((stage, i) => (
           <li key={i}>
-            <strong>{stage[language].title}</strong>
-            <p className="muted">{stage[language].body}</p>
+            <div>
+              <strong>{stage[language].title}</strong>
+              <p className="muted">{stage[language].body}</p>
+            </div>
           </li>
         ))}
       </ol>
       <p className="help">{copy.next}</p>
+      {gmailRoutePlan.sources.length > 0 && (
+        <Details title={t("Official references", "Offizielle Quellen")}>
+          <ul className="evidence-list">
+            {gmailRoutePlan.sources.map((src) => (
+              <li key={src.url}>
+                <a href={src.url} target="_blank" rel="noreferrer">
+                  {src.label} <ExternalLink size={12} />
+                </a>
+              </li>
+            ))}
+          </ul>
+        </Details>
+      )}
     </section>
   );
 }
@@ -488,6 +645,9 @@ function GmailForwardingPanel() {
 function WinddownPanel({ account }: { account: Account }) {
   const t = useCopy();
   const [view, setView] = useState<WinddownView | null>(null);
+  const [comparisons, setComparisons] = useState<Record<string, boolean>>({});
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(0);
   const [review, setReview] = useState<WinddownReview | null>(null);
   const [exportPreview, setExportPreview] = useState<WinddownExport | null>(
     null,
@@ -499,12 +659,23 @@ function WinddownPanel({ account }: { account: Account }) {
   const load = useCallback(async () => {
     setError("");
     try {
-      setView(await openWinddown(account.id, Math.floor(Date.now() / 1000)));
-    } catch {
+      const next = await openWinddown(account.id, Math.floor(Date.now() / 1000));
+      setView(next);
+      const selected: Record<string, boolean> = {};
+      for (const acc of next.available) {
+        selected[acc.account] = Boolean(
+          next.report.settings.comparisons[acc.account],
+        );
+      }
+      setComparisons(selected);
+    } catch (err) {
       setError(
-        t(
-          "Could not load wind-down report. Scan your mailbox and save local rules first.",
-          "Abbau-Bericht konnte nicht geladen werden. Erfasse zuerst das Postfach und speichere lokale Regeln.",
+        describeError(
+          err,
+          t(
+            "Could not load wind-down report. Scan your mailbox and save local rules first.",
+            "Abbau-Bericht konnte nicht geladen werden. Erfasse zuerst das Postfach und speichere lokale Regeln.",
+          ),
         ),
       );
     }
@@ -514,25 +685,38 @@ function WinddownPanel({ account }: { account: Account }) {
     void load();
   }, [load]);
 
-  async function toggleWindingDown() {
+  function buildComparisonMap() {
+    const map: Record<string, string[]> = {};
+    for (const acc of view?.available ?? []) {
+      if (comparisons[acc.account]) {
+        map[acc.account] = acc.owned_addresses;
+      }
+    }
+    return map;
+  }
+
+  async function previewSettingsChange(nextWindingDown: boolean) {
     if (!view) return;
     setBusy(true);
     setError("");
     try {
       const nextSettings = {
-        ...view.report.settings,
-        winding_down: !view.report.settings.winding_down,
+        winding_down: nextWindingDown,
+        comparisons: buildComparisonMap(),
       };
       const rev = await reviewWinddown(account.id, view.report, {
         kind: "settings",
         settings: nextSettings,
       });
       setReview(rev);
-    } catch {
+    } catch (err) {
       setError(
-        t(
-          "Could not preview wind-down setting change.",
-          "Einstellungsänderung konnte nicht geprüft werden.",
+        describeError(
+          err,
+          t(
+            "Could not preview wind-down setting change.",
+            "Einstellungsänderung konnte nicht geprüft werden.",
+          ),
         ),
       );
     } finally {
@@ -552,9 +736,15 @@ function WinddownPanel({ account }: { account: Account }) {
       });
       await confirmWinddown(account.id, rev);
       await load();
-    } catch {
+    } catch (err) {
       setError(
-        t("Could not update dismissal.", "Ausblendung konnte nicht gespeichert werden."),
+        describeError(
+          err,
+          t(
+            "Could not update dismissal.",
+            "Ausblendung konnte nicht gespeichert werden.",
+          ),
+        ),
       );
     } finally {
       setBusy(false);
@@ -572,8 +762,13 @@ function WinddownPanel({ account }: { account: Account }) {
         disclosure,
       );
       setExportPreview(prev);
-    } catch {
-      setError(t("Could not preview report export.", "Exportvorschau fehlgeschlagen."));
+    } catch (err) {
+      setError(
+        describeError(
+          err,
+          t("Could not preview report export.", "Exportvorschau fehlgeschlagen."),
+        ),
+      );
     } finally {
       setBusy(false);
     }
@@ -582,6 +777,7 @@ function WinddownPanel({ account }: { account: Account }) {
   async function downloadExport() {
     if (!view || !exportPreview) return;
     setBusy(true);
+    setError("");
     try {
       const done = await exportWinddown(account.id, view.report, exportPreview);
       const blob = new Blob([done.text], { type: "text/markdown;charset=utf-8" });
@@ -593,12 +789,43 @@ function WinddownPanel({ account }: { account: Account }) {
       URL.revokeObjectURL(url);
       setExportPreview(null);
       setMessage(t("Wind-down report exported.", "Abbau-Bericht exportiert."));
+    } catch (err) {
+      setError(
+        describeError(
+          err,
+          t("Could not export wind-down report.", "Export fehlgeschlagen."),
+        ),
+      );
     } finally {
       setBusy(false);
     }
   }
 
   const catalog = view?.report.sender_catalog;
+  const filteredRows = useMemo(() => {
+    const rows = view?.report.rows ?? [];
+    const q = query.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter((r) =>
+      `${r.sender ?? ""} ${r.domain ?? ""} ${r.group} ${r.status}`
+        .toLowerCase()
+        .includes(q),
+    );
+  }, [view, query]);
+
+  const perPage = 25;
+  const pages = Math.max(1, Math.ceil(filteredRows.length / perPage));
+  const currentPage = Math.min(page, pages - 1);
+  const visibleRows = filteredRows.slice(
+    currentPage * perPage,
+    (currentPage + 1) * perPage,
+  );
+
+  const waitingCount = view?.report.counts.waiting ?? 0;
+  const movedCount = view?.report.counts.moved ?? 0;
+  const trackedTotal = waitingCount + movedCount;
+  const movedPct =
+    trackedTotal > 0 ? Math.round((movedCount / trackedTotal) * 100) : 0;
 
   return (
     <div className="page-stack">
@@ -606,7 +833,7 @@ function WinddownPanel({ account }: { account: Account }) {
       {message && (
         <Notice>
           <CheckCircle2 size={16} />
-          {message}
+          <span>{message}</span>
         </Notice>
       )}
       <section className="panel">
@@ -615,8 +842,8 @@ function WinddownPanel({ account }: { account: Account }) {
             <h2>{t("Account wind-down report", "Konto-Abbau-Bericht")}</h2>
             <p className="muted">
               {t(
-                "Track which services and people still write to this account so you can update your email address systematically.",
-                "Sieh, welche Dienste und Kontakte noch an dieses Konto schreiben, um deine Adresse Schritt für Schritt umzustellen.",
+                "Track which services and people still write to this account and verify when they start arriving at your destination account.",
+                "Sieh, welche Dienste und Kontakte noch an dieses Konto schreiben, und prüfe, wann sie im Zielkonto ankommen.",
               )}
             </p>
           </div>
@@ -628,12 +855,20 @@ function WinddownPanel({ account }: { account: Account }) {
             {view && (
               <Action
                 primary
-                onClick={() => void toggleWindingDown()}
+                onClick={() =>
+                  void previewSettingsChange(!view.report.settings.winding_down)
+                }
                 disabled={busy}
               >
                 {view.report.settings.winding_down
-                  ? t("Disable wind-down tracking", "Abbau-Tracking deaktivieren")
-                  : t("Mark account as winding down", "Konto als abzubauen markieren")}
+                  ? t(
+                      "Disable wind-down tracking",
+                      "Abbau-Tracking deaktivieren",
+                    )
+                  : t(
+                      "Mark account as winding down",
+                      "Konto als abzubauen markieren",
+                    )}
               </Action>
             )}
           </div>
@@ -641,18 +876,66 @@ function WinddownPanel({ account }: { account: Account }) {
 
         {view && (
           <>
+            <div
+              className="actions"
+              style={{ alignItems: "center", marginBottom: 12 }}
+            >
+              <strong>{t("Readiness verdict", "Status")}:</strong>
+              <StatusBadge status={view.report.verdict} />
+            </div>
+
+            {view.report.blockers.length > 0 && (
+              <Notice tone="warning">
+                <div>
+                  <strong>
+                    {t(
+                      "Blockers preventing ready verdict:",
+                      "Gründe, warum der Abbau noch nicht abgeschlossen ist:",
+                    )}
+                  </strong>
+                  <ul className="evidence-list" style={{ margin: "6px 0 0" }}>
+                    {view.report.blockers.map((b) => (
+                      <li key={b}>{winddownBlockerText(b, t)}</li>
+                    ))}
+                  </ul>
+                </div>
+              </Notice>
+            )}
+
+            {trackedTotal > 0 && (
+              <div className="readiness-bar">
+                <div className="actions" style={{ justifyContent: "space-between" }}>
+                  <span className="help">
+                    {t(
+                      `${movedCount} of ${trackedTotal} active senders moved (${movedPct}%)`,
+                      `${movedCount} von ${trackedTotal} aktiven Absendern umgezogen (${movedPct} %)`,
+                    )}
+                  </span>
+                </div>
+                <div className="readiness-track">
+                  <div
+                    className="readiness-fill"
+                    style={{ width: `${movedPct}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
             <div className="stats compact">
               <Stat
-                label={t("Verdict", "Status")}
-                value={view.report.verdict}
-              />
-              <Stat
-                label={t("Waiting senders", "Offene Absender")}
-                value={view.report.counts.waiting ?? 0}
+                label={t("Still writing here", "Schreiben noch hier")}
+                value={waitingCount.toLocaleString()}
               />
               <Stat
                 label={t("Moved", "Umgezogen")}
-                value={view.report.counts.moved ?? 0}
+                value={movedCount.toLocaleString()}
+              />
+              <Stat
+                label={t("Quiet / dismissed", "Ruhig / ausgeblendet")}
+                value={(
+                  (view.report.counts.quiet ?? 0) +
+                  (view.report.counts.dismissed ?? 0)
+                ).toLocaleString()}
               />
               {catalog && (
                 <Stat
@@ -662,49 +945,88 @@ function WinddownPanel({ account }: { account: Account }) {
               )}
             </div>
 
-            {review && (
+            {view.available.length > 0 && (
               <div className="subpanel">
-                <p>{review.consequences}</p>
+                <h3>
+                  {t(
+                    "Destination comparison accounts",
+                    "Zielkonten für den Abbau-Vergleich",
+                  )}
+                </h3>
+                <p className="help">
+                  {t(
+                    "Select the account(s) you are migrating to (for example, your mailbox.org account) so Mailroom can detect when senders move over.",
+                    "Wähle die Konten, zu denen du umziehst (z. B. dein mailbox.org-Konto), damit Mailroom erkennt, wann Absender umgezogen sind.",
+                  )}
+                </p>
+                <div className="domain-options">
+                  {view.available.map((acc) => (
+                    <CheckField
+                      key={acc.account}
+                      checked={Boolean(comparisons[acc.account])}
+                      onChange={(checked) =>
+                        setComparisons((prev) => ({
+                          ...prev,
+                          [acc.account]: checked,
+                        }))
+                      }
+                    >
+                      {acc.login}
+                    </CheckField>
+                  ))}
+                </div>
                 <div className="actions">
                   <Action
-                    primary
                     disabled={busy}
-                    onClick={async () => {
-                      setBusy(true);
-                      try {
-                        await confirmWinddown(account.id, review);
-                        setReview(null);
-                        await load();
-                      } finally {
-                        setBusy(false);
-                      }
-                    }}
+                    onClick={() =>
+                      void previewSettingsChange(
+                        view.report.settings.winding_down,
+                      )
+                    }
                   >
-                    {t("Confirm setting change", "Änderung bestätigen")}
-                  </Action>
-                  <Action onClick={() => setReview(null)} disabled={busy}>
-                    {t("Cancel", "Abbrechen")}
+                    {t(
+                      "Save comparison accounts",
+                      "Vergleichskonten speichern",
+                    )}
                   </Action>
                 </div>
               </div>
             )}
 
-            <div className="actions">
+            <div className="toolbar">
+              <label className="search">
+                <Search size={16} />
+                <input
+                  type="search"
+                  aria-label={t("Search wind-down senders", "Absender suchen")}
+                  placeholder={t(
+                    "Filter sender, domain, or status…",
+                    "Absender, Domain oder Status filtern…",
+                  )}
+                  value={query}
+                  onChange={(e) => {
+                    setQuery(e.target.value);
+                    setPage(0);
+                  }}
+                />
+              </label>
               <Action
+                size="compact"
                 onClick={() => void runExport("local_file")}
                 disabled={busy}
               >
-                <Download size={15} />
-                {t("Export full local report", "Lokalen Bericht exportieren")}
+                <Download size={14} />
+                {t("Export full report", "Vollständigen Bericht exportieren")}
               </Action>
               <Action
+                size="compact"
                 onClick={() => void runExport("agent_summary")}
                 disabled={busy}
               >
-                <Download size={15} />
+                <Download size={14} />
                 {t(
                   "Export masked summary",
-                  "Maskierte Zusammenfassung exportieren",
+                  "Maskierte Zusammenfassung",
                 )}
               </Action>
             </div>
@@ -713,6 +1035,9 @@ function WinddownPanel({ account }: { account: Account }) {
               <div className="subpanel">
                 <pre tabIndex={0}>{exportPreview.text.slice(0, 1500)}</pre>
                 <div className="actions">
+                  <Action onClick={() => setExportPreview(null)}>
+                    {t("Cancel", "Abbrechen")}
+                  </Action>
                   <Action
                     primary
                     onClick={() => void downloadExport()}
@@ -721,67 +1046,106 @@ function WinddownPanel({ account }: { account: Account }) {
                     <Download size={15} />
                     {t("Download", "Herunterladen")} ({exportPreview.filename})
                   </Action>
-                  <Action onClick={() => setExportPreview(null)}>
-                    {t("Cancel", "Abbrechen")}
-                  </Action>
                 </div>
               </div>
             )}
 
-            {view.report.rows.length > 0 ? (
-              <div className="table-scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>{t("Sender / Domain", "Absender / Domain")}</th>
-                      <th>{t("Group", "Gruppe")}</th>
-                      <th>{t("Status", "Status")}</th>
-                      <th className="numeric">{t("Recent", "Aktuell")}</th>
-                      <th>{t("Actions", "Aktionen")}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {view.report.rows.slice(0, 100).map((row) => (
-                      <tr key={row.id}>
-                        <td>
-                          <strong>{row.sender ?? row.domain ?? row.id}</strong>
-                        </td>
-                        <td>{row.group}</td>
-                        <td>
-                          <span className="badge">{row.status}</span>
-                        </td>
-                        <td className="numeric">{row.recent}</td>
-                        <td className="actions">
-                          {row.settings_link && (
-                            <a
-                              className="button"
-                              href={row.settings_link}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              <ExternalLink size={13} />
-                              {t("Account settings", "Kontoeinstellungen")}
-                            </a>
-                          )}
-                          <Action
-                            disabled={busy}
-                            onClick={() =>
-                              void toggleDismiss(
-                                row.id,
-                                row.status !== "dismissed",
-                              )
-                            }
-                          >
-                            {row.status === "dismissed"
-                              ? t("Restore", "Wiederherstellen")
-                              : t("Dismiss", "Ausblenden")}
-                          </Action>
-                        </td>
+            {filteredRows.length > 0 ? (
+              <>
+                <div className="table-scroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{t("Sender / Domain", "Absender / Domain")}</th>
+                        <th>{t("Group", "Gruppe")}</th>
+                        <th>{t("Status", "Status")}</th>
+                        <th className="numeric">{t("Recent", "Aktuell")}</th>
+                        <th>{t("Actions", "Aktionen")}</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {visibleRows.map((row) => (
+                        <tr key={row.id}>
+                          <td>
+                            <strong>
+                              {row.sender ?? row.domain ?? row.id}
+                            </strong>
+                          </td>
+                          <td>{winddownGroupText(row.group, t)}</td>
+                          <td>
+                            <StatusBadge status={row.status} />
+                          </td>
+                          <td className="numeric">
+                            {row.recent.toLocaleString()}
+                          </td>
+                          <td>
+                            <div className="cell-actions">
+                              {row.settings_link && (
+                                <a
+                                  className="button compact"
+                                  href={row.settings_link}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  <ExternalLink size={13} />
+                                  {t("Account settings", "Kontoeinstellungen")}
+                                </a>
+                              )}
+                              <Action
+                                size="compact"
+                                disabled={busy}
+                                onClick={() =>
+                                  void toggleDismiss(
+                                    row.id,
+                                    row.status !== "dismissed",
+                                  )
+                                }
+                              >
+                                {row.status === "dismissed"
+                                  ? t("Restore", "Wiederherstellen")
+                                  : t("Dismiss", "Ausblenden")}
+                              </Action>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {filteredRows.length > perPage && (
+                  <div className="pagination">
+                    <span className="muted">
+                      {currentPage * perPage + 1}–
+                      {Math.min(
+                        (currentPage + 1) * perPage,
+                        filteredRows.length,
+                      )}{" "}
+                      / {filteredRows.length}
+                    </span>
+                    <div>
+                      <Action
+                        size="compact"
+                        aria-label={t("Previous page", "Vorherige Seite")}
+                        disabled={currentPage === 0}
+                        onClick={() => setPage(currentPage - 1)}
+                      >
+                        <ChevronLeft size={16} />
+                      </Action>
+                      <span>
+                        {currentPage + 1} / {pages}
+                      </span>
+                      <Action
+                        size="compact"
+                        aria-label={t("Next page", "Nächste Seite")}
+                        disabled={currentPage + 1 >= pages}
+                        onClick={() => setPage(currentPage + 1)}
+                      >
+                        <ChevronRight size={16} />
+                      </Action>
+                    </div>
+                  </div>
+                )}
+              </>
             ) : (
               <Empty
                 title={t(
@@ -793,6 +1157,61 @@ function WinddownPanel({ account }: { account: Account }) {
           </>
         )}
       </section>
+
+      <Modal
+        open={review !== null}
+        onOpenChange={(open) => {
+          if (!busy && !open) setReview(null);
+        }}
+        title={t(
+          "Confirm wind-down settings",
+          "Abbau-Einstellungen bestätigen",
+        )}
+      >
+        {review && (
+          <div className="page-stack">
+            <p className="muted">{review.consequences}</p>
+            <div className="dialog-actions">
+              <Action onClick={() => setReview(null)} disabled={busy}>
+                {t("Cancel", "Abbrechen")}
+              </Action>
+              <Action
+                primary
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  setError("");
+                  try {
+                    await confirmWinddown(account.id, review);
+                    setReview(null);
+                    setMessage(
+                      t(
+                        "Wind-down settings updated.",
+                        "Abbau-Einstellungen gespeichert.",
+                      ),
+                    );
+                    await load();
+                  } catch (err) {
+                    setError(
+                      describeError(
+                        err,
+                        t(
+                          "Could not save wind-down settings.",
+                          "Einstellungen konnten nicht gespeichert werden.",
+                        ),
+                      ),
+                    );
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                {t("Confirm change", "Änderung bestätigen")}
+              </Action>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

@@ -755,4 +755,160 @@ async fn vault_lifecycle_lock_password_change_takeout_recovery_and_assistant_con
     let (code, body) = post(&app, "/api/vault/unlock", json!({"password":new_master})).await;
     assert_eq!(code, StatusCode::OK);
     assert_eq!(body["vault"], "unlocked");
+    assert_eq!(body["live_writes"], false);
+}
+
+#[tokio::test]
+async fn council_track1_zero_account_config_bundle_info_takeout_errors_and_readonly_preview() {
+    let fixture = Fixture::new();
+    let app = fixture.start();
+    let (code, _) = post(
+        &app,
+        "/api/vault/create",
+        json!({"password":MASTER,"confirmation":MASTER}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+
+    // 0-account assistant config_get & config_set work without an account id
+    let (code, cfg) = post(
+        &app,
+        "/api/accounts/assistant",
+        json!({"command":{"action":"config_get"}}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{cfg}");
+    assert_eq!(cfg["config"]["provider"], "codex_home_v2");
+    let (code, cfg) = post(
+        &app,
+        "/api/accounts/assistant",
+        json!({"command":{"action":"config_set","provider":"anthropic","model":"claude-opus"}}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{cfg}");
+    assert_eq!(cfg["config"]["model"], "claude-opus");
+
+    // 0-account recovery status includes bundles_dir and bundle_info
+    let (code, rec) = post(&app, "/api/accounts/recovery", json!({"action":"status"})).await;
+    assert_eq!(code, StatusCode::OK, "{rec}");
+    assert!(rec["bundles_dir"].as_str().unwrap().ends_with("/bundles"));
+    assert_eq!(rec["bundle_info"], json!([]));
+
+    // Connect a dummy account & verify takeout error classification + quoted paths
+    fixture.provider("normal");
+    let (code, _) = post(
+        &app,
+        "/api/accounts/connect",
+        json!({"provider":"gmail","login":"owner@example.test","password":CANARY}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(settled(&app).await["job"]["progress"]["state"], "complete");
+    let (_, accounts) = post(&app, "/api/accounts/list", json!({})).await;
+    let id = accounts[0]["id"].as_str().unwrap().to_owned();
+
+    let (code, body) = post(
+        &app,
+        "/api/accounts/takeout",
+        json!({"account":id,"path":"/nonexistent/path/takeout.zip"}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["code"], "archive_file");
+
+    let (code, body) = post(
+        &app,
+        "/api/accounts/takeout",
+        json!({"account":id,"path":"/nonexistent/path/missing.mbox"}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["code"], "not_found");
+
+    // Quoted .mbox path succeeds and returns truncated: false
+    let mbox = fixture.base().join("quoted.mbox");
+    std::fs::write(
+        &mbox,
+        concat!(
+            "From 1@xxx Sat Nov 21 00:00:00 +0000 2026\n",
+            "X-Gmail-Labels: Inbox,Unread\n",
+            "From: News <news@shop.example>\n",
+            "To: owner@example.test\n",
+            "Delivered-To: owner@example.test\n",
+            "List-Unsubscribe: <https://shop.example/unsub>, <mailto:unsub@shop.example?subject=unsubscribe>\n",
+            "Subject: Weekly digest\n",
+            "Date: Sat, 21 Nov 2026 00:00:00 +0000\n",
+            "\n",
+            "body\n",
+        ),
+    )
+    .unwrap();
+    let quoted = format!("\"{}\"", mbox.display());
+    let (code, body) = post(
+        &app,
+        "/api/accounts/takeout",
+        json!({"account":id,"path":quoted}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert_eq!(body["summary"]["imported"], 1);
+    assert_eq!(body["summary"]["truncated"], false);
+
+    // Subscriptions review is available in vault read-only mode & trusts Delivered-To
+    let (code, sub_view) = post(
+        &app,
+        "/api/accounts/subscription-review",
+        json!({"command":{"action":"open","as_of":1795219200}}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{sub_view}");
+    assert_eq!(sub_view["review_available"], true);
+    let rows = sub_view["accounts"][0]["report"]["rows"]
+        .as_array()
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["recipient_evidence"], "provider_delivered_to");
+    let methods: Vec<&str> = rows[0]["methods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(methods.contains(&"local_mail"), "{methods:?}");
+    assert!(methods.contains(&"browser_preparation"), "{methods:?}");
+    let sub_id = rows[0]["id"].as_str().unwrap().to_owned();
+
+    // Preview works in read-only mode
+    let (code, prev) = post(
+        &app,
+        "/api/accounts/subscription-review",
+        json!({"command":{"action":"preview","input":{"as_of":1795219200,"selections":[{"account":id,"subscription":sub_id,"method":"browser_preparation"}],"folders":{"personal":"Muted","business":"Quiet"}}}}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{prev}");
+
+    // Local-only Confirm (browser_preparation) works in read-only mode
+    let (code, confirmed) = post(
+        &app,
+        "/api/accounts/subscription-review",
+        json!({"command":{"action":"confirm","input":{"as_of":1795219200,"selections":[{"account":id,"subscription":sub_id,"method":"browser_preparation"}],"folders":{"personal":"Muted","business":"Quiet"}},"receipt":prev["receipt"],"confirmation_action":prev["confirmation_action"],"mail_confirmation_action":null}}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{confirmed}");
+
+    // External Confirm (local_mail) is STILL forbidden in read-only mode!
+    let (code, prev_mail) = post(
+        &app,
+        "/api/accounts/subscription-review",
+        json!({"command":{"action":"preview","input":{"as_of":1795219200,"selections":[{"account":id,"subscription":sub_id,"method":"local_mail"}],"folders":{"personal":"Muted","business":"Quiet"}}}}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{prev_mail}");
+    let (code, _) = post(
+        &app,
+        "/api/accounts/subscription-review",
+        json!({"command":{"action":"confirm","input":{"as_of":1795219200,"selections":[{"account":id,"subscription":sub_id,"method":"local_mail"}],"folders":{"personal":"Muted","business":"Quiet"}},"receipt":prev_mail["receipt"],"confirmation_action":prev_mail["confirmation_action"],"mail_confirmation_action":prev_mail["local_mail_confirmation"]}}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::FORBIDDEN);
 }

@@ -35,6 +35,7 @@ pub(crate) struct ImportSummary {
     pub folders: usize,
     pub labels: usize,
     pub folder: String,
+    pub truncated: bool,
 }
 
 fn now_secs() -> i64 {
@@ -187,7 +188,7 @@ fn flush_header_block(
 fn parse_mbox_headers(
     path: &Path,
     is_gmail: bool,
-) -> Result<(Vec<MessageRecord>, usize), AcquisitionError> {
+) -> Result<(Vec<MessageRecord>, usize, bool), AcquisitionError> {
     let meta = std::fs::symlink_metadata(path).map_err(|_| AcquisitionError::InvalidInput)?;
     if !meta.is_file() || meta.file_type().is_symlink() {
         return Err(AcquisitionError::InvalidInput);
@@ -196,6 +197,7 @@ fn parse_mbox_headers(
     let mut reader = BufReader::with_capacity(64 * 1024, file);
     let mut records = Vec::new();
     let mut skipped = 0usize;
+    let mut truncated = false;
     let mut saw_any_message = false;
 
     let mut in_headers = false;
@@ -239,6 +241,7 @@ fn parse_mbox_headers(
                 }
             }
             if records.len() >= MAX_MESSAGES {
+                truncated = true;
                 break;
             }
             saw_any_message = true;
@@ -298,7 +301,7 @@ fn parse_mbox_headers(
     if !saw_any_message {
         return Err(AcquisitionError::InvalidInput);
     }
-    Ok((records, skipped))
+    Ok((records, skipped, truncated))
 }
 
 impl Accounts {
@@ -315,7 +318,7 @@ impl Accounts {
             return Err(AcquisitionError::LifecyclePending);
         }
         let is_gmail = account.provider == Provider::Gmail;
-        let (records, skipped) = parse_mbox_headers(mbox_path, is_gmail)?;
+        let (records, skipped, truncated) = parse_mbox_headers(mbox_path, is_gmail)?;
         let mut saved = store.load_state()?;
         let folder_name = if is_gmail {
             "[Gmail]/All Mail".to_owned()
@@ -411,6 +414,7 @@ impl Accounts {
             folders: saved.census.folders.len(),
             labels: all_labels.len(),
             folder: folder_name,
+            truncated,
         })
     }
 }

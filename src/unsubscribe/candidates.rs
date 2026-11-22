@@ -448,7 +448,11 @@ pub(crate) fn report<A: Adapters + ?Sized>(
             domain: classification.domain.clone(),
             recipient,
             recipient_evidence: if recipient_known {
-                "synthetic_delivered_to"
+                if installed.is_some_and(|a| a.wired()) {
+                    "provider_delivered_to"
+                } else {
+                    "synthetic_delivered_to"
+                }
             } else {
                 "unknown_or_header_claim"
             }

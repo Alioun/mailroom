@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { RefreshCw, Upload } from "lucide-react";
 import { openAccount, openWorkspace, readReport } from "../api";
 import type {
   Account,
@@ -40,6 +41,8 @@ export function AccountArea({
   onCount,
   onStatus,
   onRefresh,
+  onOpenWriteMode,
+  onScan,
 }: {
   account: Account;
   accounts: Account[];
@@ -52,6 +55,8 @@ export function AccountArea({
   onCount: (count: number) => void;
   onStatus: (value: AccountStatus) => void;
   onRefresh: () => void;
+  onOpenWriteMode: () => void;
+  onScan: () => void;
 }) {
   const t = useCopy();
   const [report, setReport] = useState<CensusReport | null>(null);
@@ -96,8 +101,12 @@ export function AccountArea({
     <div hidden={hidden}>
       {error && (
         <Notice error>
-          {error}
-          <Action disabled={running} onClick={() => void fetchSaved()}>
+          <span>{error}</span>
+          <Action
+            size="compact"
+            disabled={running}
+            onClick={() => void fetchSaved()}
+          >
             {t("Retry", "Erneut versuchen")}
           </Action>
         </Notice>
@@ -115,14 +124,35 @@ export function AccountArea({
             />
           ) : (
             <Empty
-              title={t(
-                "Ready to understand your mailbox",
-                "Bereit für einen Überblick",
-              )}
+              title={
+                running
+                  ? t("Scanning your mailbox…", "Dein Postfach wird erfasst…")
+                  : report.complete
+                    ? t(
+                        "Scan complete — 0 messages found",
+                        "Erfassung abgeschlossen — 0 Nachrichten gefunden",
+                      )
+                    : t(
+                        "Ready to understand your mailbox",
+                        "Bereit für einen Überblick",
+                      )
+              }
+              action={
+                <div className="actions" style={{ justifyContent: "center" }}>
+                  <Action primary disabled={running} onClick={onScan}>
+                    <RefreshCw size={15} />
+                    {t("Scan mailbox", "Postfach erfassen")}
+                  </Action>
+                  <Action onClick={() => onNavigate("settings")}>
+                    <Upload size={15} />
+                    {t("Import Takeout (.mbox)", "Takeout (.mbox) importieren")}
+                  </Action>
+                </div>
+              }
             >
               {t(
-                "Start a scan above or import a Google Takeout .mbox file in Settings. Your saved findings will appear here automatically.",
-                "Starte oben eine Erfassung oder importiere eine Google-Takeout-.mbox-Datei in den Einstellungen. Deine Ergebnisse erscheinen hier automatisch.",
+                "Start a read-only mailbox scan or import a Google Takeout .mbox file in Settings. Your saved findings will appear here automatically.",
+                "Starte eine schreibgeschützte Postfacherfassung oder importiere eine Google-Takeout-.mbox-Datei in den Einstellungen.",
               )}
             </Empty>
           )
@@ -136,6 +166,14 @@ export function AccountArea({
                   )
                 : t("No findings yet", "Noch keine Ergebnisse")
             }
+            action={
+              !loading ? (
+                <Action primary disabled={running} onClick={onScan}>
+                  <RefreshCw size={15} />
+                  {t("Scan mailbox", "Postfach erfassen")}
+                </Action>
+              ) : undefined
+            }
           >
             {t(
               "Run a mailbox scan to get started.",
@@ -148,7 +186,7 @@ export function AccountArea({
         hidden={page !== "senders"}
         aria-label={t("Senders", "Absender")}
       >
-        {report ? (
+        {report && report.canonical_messages > 0 ? (
           <Senders
             report={report}
             onRecommend={() => onNavigate("recommendations")}
@@ -156,7 +194,18 @@ export function AccountArea({
         ) : (
           <Empty
             title={t("Scan your mailbox first", "Erfasse zuerst dein Postfach")}
-          />
+            action={
+              <Action primary disabled={running} onClick={onScan}>
+                <RefreshCw size={15} />
+                {t("Scan mailbox", "Postfach erfassen")}
+              </Action>
+            }
+          >
+            {t(
+              "Senders and bulk volume appear here after your first scan or Takeout import.",
+              "Absender und Volumen erscheinen hier nach der ersten Erfassung oder dem Takeout-Import.",
+            )}
+          </Empty>
         )}
       </section>
       <section
@@ -169,6 +218,8 @@ export function AccountArea({
           workspace={workspace}
           onWorkspace={setWorkspace}
           onInbox={onCount}
+          onGoSettings={() => onNavigate("settings")}
+          onGoRules={() => onNavigate("rules")}
         />
       </section>
       <section
@@ -180,8 +231,11 @@ export function AccountArea({
           view={view}
           workspace={workspace}
           liveWrites={status.live_writes}
+          liveJob={status.job}
           onWorkspace={setWorkspace}
-          onGoSettings={() => onNavigate("settings")}
+          onOpenWriteMode={onOpenWriteMode}
+          onGoBacklog={() => onNavigate("backlog")}
+          onGoAddresses={() => onNavigate("addresses")}
         />
       </section>
       <section
@@ -192,7 +246,8 @@ export function AccountArea({
           <Backlog
             account={account}
             liveWrites={status.live_writes}
-            onGoSettings={() => onNavigate("settings")}
+            liveJob={status.job}
+            onOpenWriteMode={onOpenWriteMode}
           />
         )}
       </section>
@@ -204,7 +259,7 @@ export function AccountArea({
           <Invoices
             account={account}
             liveWrites={status.live_writes}
-            onGoSettings={() => onNavigate("settings")}
+            onOpenWriteMode={onOpenWriteMode}
           />
         )}
       </section>
@@ -215,8 +270,9 @@ export function AccountArea({
         {page === "subscriptions" && (
           <Subscriptions
             account={account}
+            accounts={accounts}
             liveWrites={status.live_writes}
-            onGoSettings={() => onNavigate("settings")}
+            onOpenWriteMode={onOpenWriteMode}
           />
         )}
       </section>
@@ -244,6 +300,7 @@ export function AccountArea({
             onRefresh();
             void fetchSaved();
           }}
+          onOpenWriteMode={onOpenWriteMode}
         />
       </section>
     </div>

@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  ArrowRight,
   ArrowUpRight,
+  Ban,
   CheckCircle2,
   Sparkles,
   Send,
+  Settings,
   ShieldCheck,
   RefreshCw,
 } from "lucide-react";
@@ -18,6 +21,7 @@ import type { AgentProposal } from "../agent-exchange";
 import { createLocalRules } from "./rules-workspace";
 import { assistantAction } from "./assistant-api";
 import type { AssistantInbox, AssistantRequest } from "./assistant-api";
+import { describeError } from "./status-labels";
 import {
   Action,
   Busy,
@@ -27,6 +31,7 @@ import {
   Modal,
   Notice,
   Stat,
+  StatusBadge,
   useCopy,
 } from "./components";
 
@@ -35,34 +40,44 @@ type SelectedProposal = {
   id: string;
   proposal: AgentProposal;
 };
+
 export function Assistant({
   account,
   report,
   workspace,
   onWorkspace,
   onInbox,
+  onGoSettings,
+  onGoRules,
 }: {
   account: string;
   report: CensusReport | null;
   workspace: WorkspaceView | null;
   onWorkspace: (value: WorkspaceView) => void;
   onInbox: (count: number) => void;
+  onGoSettings: () => void;
+  onGoRules: () => void;
 }) {
-  const t = useCopy(),
-    [inbox, setInbox] = useState<AssistantInbox>({ requests: [] }),
-    [sharing, setSharing] = useState(false),
-    [approved, setApproved] = useState<string[]>([]);
-  const [summary, setSummary] = useState<SummaryPreview | null>(null),
-    [busy, setBusy] = useState(false),
-    [error, setError] = useState(""),
-    [message, setMessage] = useState("");
-  const [selection, setSelection] = useState<SelectedProposal | null>(null),
-    [review, setReview] = useState<AgentEditReview | null>(null),
-    [reviewBusy, setReviewBusy] = useState(false),
-    [reviewError, setReviewError] = useState("");
+  const t = useCopy();
+  const [inbox, setInbox] = useState<AssistantInbox>({ requests: [] });
+  const [sharing, setSharing] = useState(false);
+  const [approved, setApproved] = useState<string[]>([]);
+  const [summary, setSummary] = useState<SummaryPreview | null>(null);
+  const [summaryUpdating, setSummaryUpdating] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [pollError, setPollError] = useState("");
+  const [message, setMessage] = useState("");
+  const [savedRulesNotice, setSavedRulesNotice] = useState(false);
+  const [selection, setSelection] = useState<SelectedProposal | null>(null);
+  const [review, setReview] = useState<AgentEditReview | null>(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewError, setReviewError] = useState("");
   const reviewHeading = useRef<HTMLHeadingElement>(null);
+
   const receive = (value: AssistantInbox) => {
     setInbox(value);
+    setPollError("");
     onInbox(
       value.requests.reduce(
         (count, r) => count + r.proposals.filter((p) => !p.dismissed).length,
@@ -70,6 +85,7 @@ export function Assistant({
       ),
     );
   };
+
   useEffect(() => {
     let active = true;
     const refresh = () =>
@@ -79,7 +95,7 @@ export function Assistant({
         })
         .catch(() => {
           if (active)
-            setError(
+            setPollError(
               t(
                 "Recommendations could not refresh. Retry below.",
                 "Vorschläge konnten nicht aktualisiert werden. Versuche es unten erneut.",
@@ -93,10 +109,11 @@ export function Assistant({
       clearInterval(timer);
     };
   }, [account]);
+
   useEffect(() => {
     if (!sharing || !report) return;
     let active = true;
-    setSummary(null);
+    setSummaryUpdating(true);
     setError("");
     void reviewSummary(account, report, approved)
       .then((value) => {
@@ -110,11 +127,15 @@ export function Assistant({
               "Die gespeicherte Analyse hat sich geändert. Schließe die Vorschau und aktualisiere die Ergebnisse.",
             ),
           );
+      })
+      .finally(() => {
+        if (active) setSummaryUpdating(false);
       });
     return () => {
       active = false;
     };
   }, [sharing, report, approved, account]);
+
   useEffect(() => {
     if (selection && review) {
       setReview(null);
@@ -126,7 +147,8 @@ export function Assistant({
       );
     }
   }, [report]);
-  async function launch(request: AssistantRequest) {
+
+  async function launch(request: AssistantRequest, forceNew = false) {
     setBusy(true);
     setError("");
     try {
@@ -134,19 +156,24 @@ export function Assistant({
         await assistantAction(account, {
           action: "launch",
           request_id: request.id,
+          ...(forceNew ? { force_new: true } : {}),
         }),
       );
-    } catch {
+    } catch (err) {
       setError(
-        t(
-          "T3 could not start. Your request is saved. Retry the request below.",
-          "T3 konnte nicht starten. Deine Anfrage ist gespeichert. Wiederhole sie unten.",
+        describeError(
+          err,
+          t(
+            "T3 could not start. Your request is saved. Retry the request below.",
+            "T3 konnte nicht starten. Deine Anfrage ist gespeichert. Wiederhole sie unten.",
+          ),
         ),
       );
     } finally {
       setBusy(false);
     }
   }
+
   async function share() {
     if (!summary || !report) return;
     setBusy(true);
@@ -170,17 +197,21 @@ export function Assistant({
       if (!prepared) throw new Error("Request unavailable");
       setSharing(false);
       await launch(prepared);
-    } catch {
+    } catch (err) {
       setError(
-        t(
-          "Could not share this summary. Your mailbox is unchanged. Refresh the analysis and retry.",
-          "Diese Zusammenfassung konnte nicht geteilt werden. Dein Postfach ist unverändert. Aktualisiere die Analyse und versuche es erneut.",
+        describeError(
+          err,
+          t(
+            "Could not share this summary. Your mailbox is unchanged. Refresh the analysis and retry.",
+            "Diese Zusammenfassung konnte nicht geteilt werden. Dein Postfach ist unverändert. Aktualisiere die Analyse und versuche es erneut.",
+          ),
         ),
       );
     } finally {
       setBusy(false);
     }
   }
+
   async function dismiss(selected: SelectedProposal) {
     setBusy(true);
     setError("");
@@ -205,11 +236,13 @@ export function Assistant({
       setBusy(false);
     }
   }
+
   async function inspect(selected: SelectedProposal) {
     setSelection(selected);
     setReview(null);
     setReviewError("");
     setMessage("");
+    setSavedRulesNotice(false);
     if (!selected.proposal.rule_edits || !workspace?.workspace) return;
     setReviewBusy(true);
     try {
@@ -221,17 +254,21 @@ export function Assistant({
         ),
       );
       requestAnimationFrame(() => reviewHeading.current?.focus());
-    } catch {
+    } catch (err) {
       setReviewError(
-        t(
-          "These edits cannot be saved against the current analysis and local rules. Keep this proposal for reference, or request fresh recommendations.",
-          "Diese Änderungen passen nicht zum aktuellen Stand der Analyse und lokalen Regeln. Bewahre den Vorschlag als Referenz auf oder fordere neue Vorschläge an.",
+        describeError(
+          err,
+          t(
+            "These edits cannot be saved against the current analysis and local rules. Keep this proposal for reference, or request fresh recommendations.",
+            "Diese Änderungen passen nicht zum aktuellen Stand der Analyse und lokalen Regeln. Bewahre den Vorschlag als Referenz auf oder fordere neue Vorschläge an.",
+          ),
         ),
       );
     } finally {
       setReviewBusy(false);
     }
   }
+
   async function initializeForReview() {
     if (!workspace || !selection) return;
     setReviewBusy(true);
@@ -257,8 +294,12 @@ export function Assistant({
       setReviewBusy(false);
     }
   }
-  async function save() {
-    if (!selection || !review?.accept_receipt) return;
+
+  async function decide(disposition: "accept" | "reject") {
+    if (!selection || !review) return;
+    const receipt =
+      disposition === "accept" ? review.accept_receipt : review.reject_receipt;
+    if (!receipt) return;
     setReviewBusy(true);
     setReviewError("");
     try {
@@ -266,18 +307,29 @@ export function Assistant({
         account,
         selection.request.summary,
         selection.proposal,
-        "accept",
-        review.accept_receipt,
+        disposition,
+        receipt,
       );
       onWorkspace(saved.workspace);
       setReview(null);
       setSelection(null);
-      setMessage(
-        t(
-          "Local rules saved. Their updated simulation is available in Local rules.",
-          "Lokale Regeln gespeichert. Die aktualisierte Simulation steht unter Lokale Regeln.",
-        ),
-      );
+      if (disposition === "accept") {
+        setSavedRulesNotice(true);
+        setMessage(
+          t(
+            "Local rules saved. Open Rules & deploy to inspect simulation or deploy.",
+            "Lokale Regeln gespeichert. Öffne Regeln & Bereitstellung, um Simulation oder Bereitstellung zu prüfen.",
+          ),
+        );
+      } else {
+        setSavedRulesNotice(false);
+        setMessage(
+          t(
+            "Rule edits permanently rejected and recorded in rejection history.",
+            "Regeländerungen dauerhaft abgelehnt und im Ablehnungsverlauf vermerkt.",
+          ),
+        );
+      }
       await assistantAction(account, {
         action: "dismiss",
         request_id: selection.request.id,
@@ -287,16 +339,19 @@ export function Assistant({
         .catch(() =>
           setError(
             t(
-              "Local rules were saved, but the proposal could not be marked complete. Refresh the inbox to retry dismissal.",
-              "Lokale Regeln wurden gespeichert, aber der Vorschlag konnte nicht abgeschlossen werden. Aktualisiere den Eingang, um ihn erneut auszublenden.",
+              "Your decision was saved, but the proposal could not be marked complete. Refresh to retry dismissal.",
+              "Deine Entscheidung wurde gespeichert, aber der Vorschlag konnte nicht abgeschlossen werden. Aktualisiere den Eingang.",
             ),
           ),
         );
-    } catch {
+    } catch (err) {
       setReviewError(
-        t(
-          "The saved state changed. Reopen the proposal to check it again. Your proposal is retained.",
-          "Der gespeicherte Stand hat sich geändert. Öffne den Vorschlag erneut zur Prüfung. Er bleibt erhalten.",
+        describeError(
+          err,
+          t(
+            "The saved state changed. Reopen the proposal to check it again. Your proposal is retained.",
+            "Der gespeicherte Stand hat sich geändert. Öffne den Vorschlag erneut zur Prüfung. Er bleibt erhalten.",
+          ),
         ),
       );
       setReview(null);
@@ -304,40 +359,38 @@ export function Assistant({
       setReviewBusy(false);
     }
   }
-  const phaseLabel = (phase: AssistantRequest["phase"]) =>
-    ({
-      prepared: t("Ready to send", "Bereit zum Senden"),
-      launching: t("Starting T3…", "T3 startet…"),
-      launched: t(
-        "T3 started · waiting for summary read",
-        "T3 gestartet · wartet auf Abruf",
-      ),
-      connected: t(
-        "Summary read · preparing recommendations",
-        "Zusammenfassung gelesen · Vorschläge werden erstellt",
-      ),
-      proposal_ready: t("Recommendations received", "Vorschläge eingegangen"),
-      failed: t("T3 needs attention", "T3 benötigt Aufmerksamkeit"),
-    })[phase];
+
   const requests = inbox.requests;
+  const activeConfig = inbox.config;
+  const canShare = Boolean(report && report.canonical_messages > 0);
+  const candidateTotal = report?.clear_candidates.length ?? 0;
+
   return (
     <div className="page-stack">
       {message && (
         <Notice>
           <CheckCircle2 size={18} />
-          {message}
+          <span>{message}</span>
+          {savedRulesNotice && (
+            <Action size="compact" onClick={onGoRules}>
+              {t("Open Rules & deploy", "Regeln & Bereitstellung")}
+              <ArrowRight size={14} />
+            </Action>
+          )}
         </Notice>
       )}
-      {error && (
+      {(error || pollError) && (
         <Notice error>
-          {error}
+          <span>{error || pollError}</span>
           <Action
+            size="compact"
             onClick={() => {
               setError("");
+              setPollError("");
               void assistantAction(account, { action: "status" })
                 .then(receive)
                 .catch(() =>
-                  setError(
+                  setPollError(
                     t(
                       "Still unavailable. Try again shortly.",
                       "Weiterhin nicht verfügbar. Versuche es gleich erneut.",
@@ -369,17 +422,34 @@ export function Assistant({
           </p>
           <div className="inline-note">
             <ShieldCheck size={16} />
-            {t(
-              "You choose what to share. Your mailbox stays read-only.",
-              "Du bestimmst, was geteilt wird. Dein Postfach bleibt schreibgeschützt.",
-            )}
+            <span>
+              {t(
+                "You choose what to share. Raw mail and passwords never leave Mailroom.",
+                "Du bestimmst, was geteilt wird. Unveränderte Mails und Passwörter verlassen Mailroom nie.",
+              )}
+            </span>
           </div>
+          {activeConfig && (
+            <div className="inline-note" style={{ marginTop: 8 }}>
+              <span>
+                {t("Active T3 model", "Aktives T3-Modell")}:{" "}
+                <code>
+                  {activeConfig.provider} / {activeConfig.model}
+                </code>
+              </span>
+              <Action size="compact" onClick={onGoSettings}>
+                <Settings size={13} />
+                {t("Change in Settings", "In Einstellungen ändern")}
+              </Action>
+            </div>
+          )}
         </div>
         <Action
           primary
-          disabled={!report || busy}
+          disabled={!canShare || busy}
           onClick={() => {
             setApproved([]);
+            setSummary(null);
             setSharing(true);
             setMessage("");
           }}
@@ -388,11 +458,11 @@ export function Assistant({
           {t("Get recommendations", "Vorschläge erhalten")}
         </Action>
       </section>
-      {!report && (
-        <Notice>
+      {!canShare && (
+        <Notice tone="info">
           {t(
-            "Scan your mailbox first to create a summary.",
-            "Erfasse zuerst dein Postfach, um eine Zusammenfassung zu erstellen.",
+            "Scan your mailbox or import a Google Takeout .mbox file first so there is a saved summary to review.",
+            "Erfasse zuerst dein Postfach oder importiere eine Google-Takeout-.mbox-Datei, damit eine Zusammenfassung erstellt werden kann.",
           )}
         </Notice>
       )}
@@ -413,20 +483,16 @@ export function Assistant({
           <section className="panel request" key={request.id}>
             <div className="section-heading">
               <div>
-                <span
-                  className={`badge ${request.phase === "failed" ? "warning" : ""}`}
-                >
-                  {phaseLabel(request.phase)}
-                </span>
+                <StatusBadge status={request.phase} />
                 <h2>{t("Mailbox recommendations", "Postfachvorschläge")}</h2>
                 <p className="help">
                   {new Date(request.summary.as_of * 1000).toLocaleString()} ·{" "}
                   {request.summary.approved.length
                     ? t(
-                        "Selected domains shared",
-                        "Ausgewählte Domains geteilt",
+                        `${request.summary.approved.length} selected domains shared`,
+                        `${request.summary.approved.length} ausgewählte Domains geteilt`,
                       )
-                    : t("Masked identifiers", "Maskierte Kennungen")}
+                    : t("Masked identifiers only", "Nur maskierte Kennungen")}
                 </p>
               </div>
               {request.thread_link &&
@@ -439,20 +505,26 @@ export function Assistant({
             </div>
             {request.error && (
               <Notice error>
-                {t(
-                  "T3 did not complete the handoff. The request is saved; retry uses the same request.",
-                  "T3 hat die Übergabe nicht abgeschlossen. Die Anfrage ist gespeichert; ein erneuter Versuch verwendet dieselbe Anfrage.",
-                )}
-                <Details title={t("Diagnostic", "Diagnose")}>
-                  <code>{request.error}</code>
-                </Details>
+                <span>{request.error}</span>
               </Notice>
             )}
             {(request.phase === "prepared" || request.phase === "failed") && (
-              <Action disabled={busy} onClick={() => void launch(request)}>
-                <RefreshCw size={16} />
-                {t("Retry in T3", "In T3 erneut versuchen")}
-              </Action>
+              <div className="actions">
+                <Action disabled={busy} onClick={() => void launch(request)}>
+                  <RefreshCw size={15} />
+                  {t("Retry / check existing thread", "Erneut prüfen / starten")}
+                </Action>
+                {request.phase === "failed" && (
+                  <Action
+                    disabled={busy}
+                    tone="warning"
+                    onClick={() => void launch(request, true)}
+                  >
+                    <Send size={15} />
+                    {t("Start fresh T3 thread", "Neuen T3-Thread starten")}
+                  </Action>
+                )}
+              </div>
             )}
             {(request.phase === "launched" ||
               request.phase === "connected") && (
@@ -480,7 +552,12 @@ export function Assistant({
                 key={proposal.id}
               >
                 <div>
-                  <strong>{proposal.proposal.recommendations[0]?.title}</strong>
+                  <div className="actions" style={{ marginBottom: 4 }}>
+                    <strong>
+                      {proposal.proposal.recommendations[0]?.title}
+                    </strong>
+                    {proposal.dismissed && <StatusBadge status="dismissed" />}
+                  </div>
                   <p className="muted">
                     {proposal.proposal.recommendations.length}{" "}
                     {t("recommendations", "Vorschläge")}
@@ -522,36 +599,51 @@ export function Assistant({
         )}
         wide
       >
-        <Details
-          title={t(
-            "Optionally reveal selected organization domains",
-            "Optional ausgewählte Organisationsdomains offenlegen",
-          )}
-        >
-          <p className="help">
-            {t(
-              "Personal identifiers stay masked. Select only organization domains you want T3 to see.",
-              "Persönliche Kennungen bleiben maskiert. Wähle nur Organisationsdomains, die T3 sehen soll.",
-            )}
+        {activeConfig && (
+          <p className="help" style={{ marginBottom: 12 }}>
+            {t("Will launch with", "Startet mit")}:{" "}
+            <code>
+              {activeConfig.provider} / {activeConfig.model}
+            </code>
           </p>
-          <div className="domain-options">
-            {report?.clear_candidates.map((candidate) => (
-              <CheckField
-                key={candidate.id}
-                checked={approved.includes(candidate.id)}
-                onChange={(checked) =>
-                  setApproved((values) =>
-                    checked
-                      ? [...values, candidate.id]
-                      : values.filter((value) => value !== candidate.id),
-                  )
-                }
-              >
-                {candidate.domain}
-              </CheckField>
-            ))}
-          </div>
-        </Details>
+        )}
+        {candidateTotal > 0 && (
+          <Details
+            title={t(
+              `Optionally reveal selected organization domains (${approved.length} of ${candidateTotal} selected)`,
+              `Optional ausgewählte Organisationsdomains offenlegen (${approved.length} von ${candidateTotal} gewählt)`,
+            )}
+          >
+            <p className="help">
+              {t(
+                "Personal identifiers stay masked. Select only organization domains you want T3 to see.",
+                "Persönliche Kennungen bleiben maskiert. Wähle nur Organisationsdomains, die T3 sehen soll.",
+              )}
+            </p>
+            <div className="domain-options">
+              {report?.clear_candidates.map((candidate) => (
+                <CheckField
+                  key={candidate.id}
+                  checked={approved.includes(candidate.id)}
+                  onChange={(checked) =>
+                    setApproved((values) =>
+                      checked
+                        ? [...values, candidate.id]
+                        : values.filter((value) => value !== candidate.id),
+                    )
+                  }
+                >
+                  {candidate.domain}
+                </CheckField>
+              ))}
+            </div>
+          </Details>
+        )}
+        {summaryUpdating && summary && (
+          <p className="help" style={{ marginTop: 10 }}>
+            <Busy>{t("Updating preview…", "Vorschau wird aktualisiert…")}</Busy>
+          </p>
+        )}
         {summary ? (
           <pre
             className="summary-preview"
@@ -575,7 +667,7 @@ export function Assistant({
           </Action>
           <Action
             primary
-            disabled={busy || !summary}
+            disabled={busy || summaryUpdating || !summary}
             onClick={() => void share()}
           >
             <Send size={16} />
@@ -620,13 +712,13 @@ export function Assistant({
               </p>
             )}
             {selection.proposal.rule_edits && !workspace?.workspace && (
-              <Notice>
-                <p>
+              <Notice tone="info">
+                <span>
                   {t(
                     "Create local rules once to check and save this proposal. The proposal stays open.",
                     "Lege lokale Regeln einmalig an, um diesen Vorschlag zu prüfen und zu speichern. Der Vorschlag bleibt geöffnet.",
                   )}
-                </p>
+                </span>
                 <Action
                   primary
                   disabled={reviewBusy || !workspace}
@@ -670,6 +762,10 @@ export function Assistant({
                     label={t("Needs review", "Prüfung erforderlich")}
                     value={review.resulting.proof.counts.review}
                   />
+                  <Stat
+                    label={t("Destination changes", "Zieländerungen")}
+                    value={review.resulting.proof.diff.length}
+                  />
                 </div>
                 <ul className="evidence-list">
                   {review.edits.map((edit) => (
@@ -681,51 +777,94 @@ export function Assistant({
                     </li>
                   ))}
                 </ul>
+                {review.resulting.proof.diff.length > 0 && (
+                  <Details
+                    defaultOpen
+                    title={t(
+                      `Changed message destinations (${review.resulting.proof.diff.length})`,
+                      `Geänderte Nachrichtenziele (${review.resulting.proof.diff.length})`,
+                    )}
+                  >
+                    <div className="table-scroll">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>{t("Before", "Vorher")}</th>
+                            <th>{t("After", "Nachher")}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {review.resulting.proof.diff.slice(0, 25).map((d) => (
+                            <tr key={d.id}>
+                              <td>{d.before.join(", ") || "INBOX"}</td>
+                              <td>{d.after}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </Details>
+                )}
                 {!review.accept_receipt && (
-                  <Notice>
+                  <Notice tone="warning">
                     {t(
-                      "The local simulation blocks saving these changes. You can dismiss the proposal or ask for revised recommendations.",
-                      "Die lokale Simulation sperrt das Speichern dieser Änderungen. Du kannst den Vorschlag ausblenden oder überarbeitete Vorschläge anfordern.",
+                      "The local simulation blocks saving these changes. You can reject or dismiss the proposal or ask for revised recommendations.",
+                      "Die lokale Simulation sperrt das Speichern dieser Änderungen. Du kannst den Vorschlag ablehnen, ausblenden oder überarbeitete Vorschläge anfordern.",
                     )}
                   </Notice>
                 )}
                 <Details
+                  defaultOpen
                   title={t(
-                    "Exact rule documents and validation",
-                    "Genaue Regeldokumente und Prüfung",
+                    "Exact rule diff and validation",
+                    "Genaue Regeländerungen und Prüfung",
                   )}
                 >
-                  <h4>{t("Current rules", "Aktuelle Regeln")}</h4>
-                  <pre tabIndex={0}>
-                    {review.original_documents.override_yaml}
-                  </pre>
-                  <h4>{t("Proposed rules", "Vorgeschlagene Regeln")}</h4>
-                  <pre tabIndex={0}>
-                    {review.resulting_documents.override_yaml}
-                  </pre>
                   <h4>{t("Changes", "Änderungen")}</h4>
                   <pre tabIndex={0}>{review.document_diff}</pre>
                   <p>
-                    {t("Validation status", "Prüfstatus")} ·{" "}
-                    {review.resulting.proof.gate}
+                    {t("Validation status", "Prüfstatus")}:{" "}
+                    <StatusBadge status={review.resulting.proof.gate} />
                   </p>
+                  <Details
+                    title={t("Full YAML documents", "Vollständige YAML-Dokumente")}
+                  >
+                    <h4>{t("Current rules", "Aktuelle Regeln")}</h4>
+                    <pre tabIndex={0}>
+                      {review.original_documents.override_yaml}
+                    </pre>
+                    <h4>{t("Proposed rules", "Vorgeschlagene Regeln")}</h4>
+                    <pre tabIndex={0}>
+                      {review.resulting_documents.override_yaml}
+                    </pre>
+                  </Details>
                 </Details>
               </>
             )}
             <div className="dialog-actions">
+              <Action onClick={() => setSelection(null)} disabled={reviewBusy}>
+                {t("Later", "Später")}
+              </Action>
               <Action
                 disabled={busy || reviewBusy}
                 onClick={() => void dismiss(selection)}
               >
-                {t("Dismiss proposal", "Vorschlag ausblenden")}
+                {t("Dismiss", "Ausblenden")}
               </Action>
-              <Action onClick={() => setSelection(null)} disabled={reviewBusy}>
-                {t("Later", "Später")}
-              </Action>
+              {selection.proposal.rule_edits && review?.reject_receipt && (
+                <Action
+                  tone="danger-outline"
+                  disabled={busy || reviewBusy}
+                  onClick={() => void decide("reject")}
+                >
+                  <Ban size={15} />
+                  {t("Reject edits", "Änderungen ablehnen")}
+                </Action>
+              )}
               {selection.proposal.rule_edits && (
                 <Action
                   primary
-                  onClick={() => void save()}
+                  onClick={() => void decide("accept")}
                   disabled={busy || reviewBusy || !review?.accept_receipt}
                 >
                   {t("Save local rules", "Lokale Regeln speichern")}

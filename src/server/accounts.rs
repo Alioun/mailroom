@@ -926,7 +926,8 @@ fn ledger_fresh(
     guard: Option<&crate::ledger::file::LockedLedger<'_>>,
 ) -> Result<(), String> {
     if let Some(guard) = guard {
-        if guard.read()?.content_version != saved.ledger.source_version {
+        if saved.workspace.is_some() && guard.read()?.content_version != saved.ledger.source_version
+        {
             return Err("Ledger changed while proving. Review fresh proof".into());
         }
     }

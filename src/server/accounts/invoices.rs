@@ -77,8 +77,15 @@ pub(in crate::server) async fn handle(
     };
     // Every wired action asks the write policy first, before any repository,
     // credential, confirmation or network access.
+    // In local vault mode, read-only Preview and local bookkeeping Resolve do not
+    // transmit anything externally; only Send requires armed live_writes.
     let permit = match &request.command {
         Action::Open | Action::Acquire { .. } => None,
+        Action::Preview { mode: Some(_), .. } | Action::Resolve { .. }
+            if state.accounts.vault_live() =>
+        {
+            None
+        }
         Action::Preview { mode: Some(_), .. }
         | Action::Send { mode: Some(_), .. }
         | Action::Resolve { .. } => match state
@@ -174,6 +181,7 @@ pub(in crate::server) async fn handle(
         Ok::<_, String>(json!({"report":report,"sends":saved.invoices.sends,"synthetic":synthetic,"sent_evidence":invoice::sent_evidence(&saved),"received":transport.as_ref().map(|t| t.received()),"targets":targets(&saved)}))
     }).await {
         Ok(Ok(v)) => Json(v).into_response(),
-        _ => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error":"Invoice action rejected. Reload the report and exact preview. Uncertain submissions require reconciliation, never blind retry."}))).into_response(),
+        Ok(Err(reason)) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": reason}))).into_response(),
+        Err(_) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error":"Invoice action rejected. Reload the report and exact preview. Uncertain submissions require reconciliation, never blind retry."}))).into_response(),
     }
 }

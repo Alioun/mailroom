@@ -162,21 +162,41 @@ try {
     .waitFor();
   const master = "invented browser vault password 902a";
   await page.getByLabel("Master password", { exact: true }).fill(master);
-  await page.getByLabel("Repeat password", { exact: true }).fill(master + "x");
+  await page
+    .getByLabel("Repeat master password", { exact: true })
+    .fill(master + "x");
   await page.getByRole("checkbox").check();
   await page.getByRole("button", { name: "Create vault", exact: true }).click();
   await page
     .getByRole("alert")
     .getByText("The passwords do not match.")
     .waitFor();
-  await page.getByLabel("Repeat password", { exact: true }).fill(master);
+  await page.getByLabel("Master password", { exact: true }).fill(master);
+  await page.getByLabel("Repeat master password", { exact: true }).fill(master);
   await page.getByRole("button", { name: "Create vault", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Connect and scan", exact: true })
+    .waitFor();
+  // Verify 0-account Settings & Recovery Restore are reachable (UX Council P0 fix)
+  await page
+    .getByRole("button", { name: "Restore recovery bundle", exact: true })
+    .click();
+  await page
+    .getByRole("heading", {
+      name: "Encrypted recovery backup & restore",
+      exact: true,
+    })
+    .waitFor();
+  await page
+    .getByRole("heading", { name: "T3 assistant settings", exact: true })
+    .waitFor();
+  await navigate("Overview");
   await page
     .getByRole("button", { name: "Connect and scan", exact: true })
     .waitFor();
   assert.ok(!(await page.content()).includes(master));
   check(
-    "browser creates an encrypted vault, associates mismatch feedback, and clears credentials",
+    "browser creates an encrypted vault, reaches 0-account Settings/Recovery, associates mismatch feedback, and clears credentials",
   );
   await stop();
   server = await start("--local-vault");
@@ -191,7 +211,7 @@ try {
     .getByRole("button", { name: "Unlock Mailroom", exact: true })
     .click();
   await page
-    .getByText("That password did not open the vault. Try again.", {
+    .getByText("That master password did not open the vault. Try again.", {
       exact: true,
     })
     .waitFor();
@@ -290,9 +310,20 @@ try {
   );
   await shortSettings.click();
   await page.getByRole("heading", { name: "Settings", exact: true }).waitFor();
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.locator("aside.sidebar").waitFor();
+  const laptopSettings = page
+    .locator("aside.sidebar")
+    .getByRole("button", { name: "Settings", exact: true });
+  await laptopSettings.scrollIntoViewIfNeeded();
+  const laptopBox = await laptopSettings.boundingBox();
+  assert.ok(
+    laptopBox && laptopBox.y >= 0 && laptopBox.y + laptopBox.height <= 720,
+    "Settings remains reachable on 1280x720 laptop desktop sidebar",
+  );
   await page.setViewportSize({ width: 1440, height: 1000 });
   await navigate("Overview");
-  check("short landscape navigation scrolls to Settings");
+  check("short landscape drawer and 1280x720 desktop sidebar scroll cleanly to Settings");
   await page.screenshot({
     path: join(artifacts, "overview-desktop.png"),
     fullPage: true,
@@ -448,11 +479,12 @@ try {
   assert.equal(
     await page
       .getByRole("button", { name: "Save local rules", exact: true })
+      .first()
       .isEnabled(),
     true,
   );
   await page
-    .getByRole("button", { name: "Load saved rules", exact: true })
+    .getByRole("button", { name: "Discard draft", exact: true })
     .click();
   check(
     "local rule creation and simulation work, and navigation preserves unsaved drafts",
@@ -462,7 +494,7 @@ try {
     .click();
   await page.getByRole("option", { name: /Gmail/ }).click();
   await navigate("Overview");
-  await page.getByRole("button", { name: "Scan mailbox", exact: true }).click();
+  await page.getByRole("button", { name: "Scan mailbox", exact: true }).first().click();
   await page
     .getByText("Scan complete", { exact: true })
     .filter({ visible: true })
@@ -528,7 +560,10 @@ try {
     .getByText("Review what T3 will receive", { exact: true })
     .waitFor();
   await page.locator(".summary-preview").waitFor();
-  assert.equal(await page.locator(".domain-options [data-checked]").count(), 0);
+  assert.equal(
+    await page.getByRole("dialog").locator(".domain-options [data-checked]").count(),
+    0,
+  );
   const launchResponse = page.waitForResponse(
     (response) =>
       response.url().endsWith("/api/accounts/assistant") &&
@@ -538,7 +573,7 @@ try {
     .getByRole("button", { name: "Share and open T3", exact: true })
     .click();
   await launchResponse;
-  await page.getByText("Ready to send", { exact: true }).waitFor();
+  await page.getByText("Prepared", { exact: true }).waitFor();
   assert.equal(launchRequests, 1);
   await page.unrouteAll({ behavior: "wait" });
   const exchanges = await findExchanges(temp);
@@ -584,7 +619,7 @@ try {
     .click();
   await page
     .getByText(
-      "Local rules saved. Their updated simulation is available in Local rules.",
+      "Local rules saved. Open Rules & deploy to inspect simulation or deploy.",
       { exact: true },
     )
     .waitFor();
@@ -595,12 +630,36 @@ try {
       await page.getByLabel("Override YAML", { exact: true }).inputValue()
     ).includes("TravelReview"),
   );
-  // Check Rules & deploy sub-tabs
+  // Gmail hides Sieve deploy tab; switch to mailbox.org to verify all 4 Base UI sub-tabs + arrow-key nav
+  assert.equal(
+    await page.getByRole("tab", { name: "Sieve deploy", exact: true }).count(),
+    0,
+    "Gmail must not show Sieve deploy tab",
+  );
+  await page
+    .getByRole("combobox", { name: "Select account", exact: true })
+    .click();
+  await page
+    .getByRole("option", {
+      name: `${firstAccount.login} · mailbox.org`,
+      exact: true,
+    })
+    .click();
   for (const sub of ["Folders", "Sieve deploy", "Placement check", "Local rules & proof"]) {
     await page.getByRole("tab", { name: sub, exact: true }).click();
   }
+  await page.getByRole("tab", { name: "Local rules & proof", exact: true }).focus();
+  await page.keyboard.press("ArrowRight");
+  await page.waitForFunction(
+    () => document.activeElement?.textContent?.includes("Folders"),
+  );
+  // Switch back to Gmail account where the saved proposal lives
+  await page
+    .getByRole("combobox", { name: "Select account", exact: true })
+    .click();
+  await page.getByRole("option", { name: /Gmail/ }).click();
   check(
-    "browser shares the exact masked summary, real MCP read/submit arrives automatically, retries deduplicate, saving updates local rules, and all Rules & deploy sub-tabs render",
+    "browser shares masked summary, real MCP read/submit arrives automatically, Gmail hides Sieve deploy, and Base UI sub-tabs support arrow-key navigation",
   );
   // Exercise unified Organize views (Backlog, Invoices, Subscriptions, Addresses & wind-down)
   await navigate("Backlog");
@@ -617,9 +676,10 @@ try {
     await page.getByRole("tab", { name: sub, exact: true }).click();
   }
   check("unified Backlog, Invoices, Subscriptions, and Addresses & wind-down views render cleanly");
-  // Exercise Settings: Safety Mode toggle, Takeout .mbox import, T3 provider/model config
+  // Exercise Settings: Safety Mode toggle (shared in-place modal), Takeout .mbox import, T3 config
   await navigate("Settings");
-  await page
+  const settingsRegion = page.getByRole("region", { name: "Settings" });
+  await settingsRegion
     .getByRole("button", { name: "Enable live writes for this session", exact: true })
     .click();
   await page
@@ -630,13 +690,19 @@ try {
     .getByRole("dialog")
     .getByRole("button", { name: "Enable live writes", exact: true })
     .click();
-  await page
+  await page.getByRole("dialog").waitFor({ state: "hidden" });
+  await settingsRegion
     .getByRole("button", { name: "Return to read-only", exact: true })
     .waitFor();
-  await page
+  await settingsRegion
     .getByRole("button", { name: "Return to read-only", exact: true })
     .click();
   await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Return to read-only", exact: true })
+    .click();
+  await page.getByRole("dialog").waitFor({ state: "hidden" });
+  await settingsRegion
     .getByRole("button", { name: "Enable live writes for this session", exact: true })
     .waitFor();
   const mboxPath = join(temp, "sample-takeout.mbox");
@@ -654,20 +720,28 @@ try {
       "",
     ].join("\n"),
   );
-  await page
+  await settingsRegion
     .getByLabel("Local .mbox file path", { exact: true })
     .fill(mboxPath);
-  await page
+  await settingsRegion
     .getByRole("button", { name: "Import .mbox headers", exact: true })
     .click();
-  await page.getByText(/Last import: 1 imported/).waitFor();
-  await page.getByLabel("T3 provider", { exact: true }).fill("anthropic");
-  await page.getByLabel("T3 model", { exact: true }).fill("claude-opus");
-  await page.getByRole("button", { name: "Save T3 settings", exact: true }).click();
-  await page.getByText("T3 assistant configuration saved.", { exact: true }).waitFor();
-  await page.getByRole("button", { name: "Reset defaults", exact: true }).click();
-  await page.getByRole("button", { name: "Save T3 settings", exact: true }).click();
-  check("Settings Safety Mode toggle, local Takeout .mbox import, and T3 provider/model config work end-to-end");
+  await settingsRegion.getByText(/Last import: 1 imported/).waitFor();
+  await settingsRegion.getByLabel("T3 provider", { exact: true }).fill("anthropic");
+  await settingsRegion.getByLabel("T3 model", { exact: true }).fill("claude-opus");
+  await settingsRegion
+    .getByRole("button", { name: "Save T3 settings", exact: true })
+    .click();
+  await settingsRegion
+    .getByText("T3 assistant configuration saved for all accounts.", { exact: true })
+    .waitFor();
+  await settingsRegion
+    .getByRole("button", { name: "Reset & save defaults", exact: true })
+    .click();
+  await settingsRegion
+    .getByText("T3 assistant configuration saved for all accounts.", { exact: true })
+    .waitFor();
+  check("Settings Safety Mode modal, local Takeout .mbox import, and T3 provider/model config work end-to-end");
   await page.setViewportSize({ width: 320, height: 900 });
   await page
     .getByRole("button", { name: "Open navigation", exact: true })

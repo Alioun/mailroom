@@ -87,8 +87,48 @@ pub(crate) struct Client {
 }
 
 pub(crate) struct Failure {
-    pub message: &'static str,
+    pub message: String,
     pub uncertain: bool,
+}
+
+enum CommandError {
+    SpawnFailed,
+    TimedOut,
+    Exited { stderr: String },
+    Io,
+}
+
+fn sanitize_stderr(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let cleaned: String = line.chars().filter(|c| !c.is_control()).take(220).collect();
+    cleaned
+}
+
+fn deterministic_start_rejection(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    [
+        "unknown provider",
+        "unknown model",
+        "invalid provider",
+        "invalid model",
+        "unsupported model",
+        "unsupported provider",
+        "unknown option",
+        "unrecognized option",
+        "command not found",
+        "connection refused",
+        "econnrefused",
+        "not running",
+        "server unavailable",
+        "unauthorized",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 pub(crate) struct Thread {
@@ -127,7 +167,7 @@ impl Client {
         })
     }
 
-    fn command(&self, cwd: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>, ()> {
+    fn command(&self, cwd: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>, CommandError> {
         use std::os::unix::process::CommandExt;
         let mut command = Command::new(&self.executable);
         command
@@ -140,12 +180,12 @@ impl Client {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        let mut child = command.spawn().map_err(|_| ())?;
-        let stdout = child.stdout.take().ok_or(())?;
-        let stderr = child.stderr.take().ok_or(())?;
+        let mut child = command.spawn().map_err(|_| CommandError::SpawnFailed)?;
+        let stdout = child.stdout.take().ok_or(CommandError::Io)?;
+        let stderr = child.stderr.take().ok_or(CommandError::Io)?;
         let output = std::thread::spawn(move || capture(stdout));
         let errors = std::thread::spawn(move || capture(stderr));
-        let mut stdin = child.stdin.take().ok_or(())?;
+        let mut stdin = child.stdin.take().ok_or(CommandError::Io)?;
         let input = input.to_vec();
         let writer = std::thread::spawn(move || stdin.write_all(&input));
         let started = Instant::now();
@@ -166,15 +206,24 @@ impl Client {
             let _ = child.kill();
         }
         let _ = child.wait();
-        let written = writer.join().map_err(|_| ())?.map_err(|_| ());
-        let output = output.join().map_err(|_| ())?;
-        let errors = errors.join().map_err(|_| ())?;
-        written?;
-        errors?;
+        let written = writer
+            .join()
+            .map_err(|_| CommandError::Io)?
+            .map_err(|_| CommandError::Io);
+        let output = output.join().map_err(|_| CommandError::Io)?;
+        let errors = errors.join().map_err(|_| CommandError::Io)?;
+        if status.is_none() {
+            return Err(CommandError::TimedOut);
+        }
+        let stderr_text = errors.as_deref().map(sanitize_stderr).unwrap_or_default();
         if status.is_some_and(|status| status.success()) {
-            output
+            written?;
+            errors.map_err(|_| CommandError::Io)?;
+            output.map_err(|_| CommandError::Io)
         } else {
-            Err(())
+            Err(CommandError::Exited {
+                stderr: stderr_text,
+            })
         }
     }
 
@@ -198,11 +247,11 @@ impl Client {
         config: &Config,
     ) -> Result<Thread, Failure> {
         config.validate().map_err(|_| Failure {
-            message: "Invalid T3 assistant provider or model configuration",
+            message: "Invalid T3 assistant provider or model configuration".into(),
             uncertain: false,
         })?;
         let folder_text = folder.to_str().ok_or(Failure {
-            message: "Assistant folder unavailable",
+            message: "Assistant folder unavailable".into(),
             uncertain: !allow_create,
         })?;
         let listed = self.command(
@@ -212,7 +261,7 @@ impl Client {
         );
         let listed = match listed {
             Ok(bytes) => Ok(bytes),
-            Err(()) if allow_create => {
+            Err(_) if allow_create => {
                 let _ = self.command(folder, &["project", "add", folder_text], b"");
                 self.command(
                     folder,
@@ -220,14 +269,24 @@ impl Client {
                     b"",
                 )
             }
-            Err(()) => Err(()),
+            Err(err) => Err(err),
         }
-        .map_err(|_| Failure {
-            message: "T3 is unavailable. Open T3 Code and retry",
-            uncertain: !allow_create,
+        .map_err(|err| {
+            let detail = match err {
+                CommandError::Exited { stderr } if !stderr.is_empty() => format!(": {stderr}"),
+                CommandError::SpawnFailed => {
+                    ": T3 CLI was not found at /opt/homebrew/bin/t3".into()
+                }
+                CommandError::TimedOut => ": T3 timed out".into(),
+                _ => String::new(),
+            };
+            Failure {
+                message: format!("T3 is unavailable. Open T3 Code and retry{detail}"),
+                uncertain: !allow_create,
+            }
         })?;
         let threads: Vec<Value> = serde_json::from_slice(&listed).map_err(|_| Failure {
-            message: "T3 returned an unreadable thread list",
+            message: "T3 returned an unreadable thread list".into(),
             uncertain: !allow_create,
         })?;
         let matching: Vec<_> = threads
@@ -240,7 +299,7 @@ impl Client {
                 .filter(|s| valid_thread_id(s))
                 .map(str::to_owned)
                 .ok_or(Failure {
-                    message: "T3 returned an invalid thread",
+                    message: "T3 returned an invalid thread".into(),
                     uncertain: true,
                 })?,
             [] if allow_create => {
@@ -262,12 +321,27 @@ impl Client {
                         ],
                         prompt.as_bytes(),
                     )
-                    .map_err(|_| Failure {
-                        message: "T3 launch outcome is unknown. Retry checks for the existing thread",
-                        uncertain: true,
+                    .map_err(|err| match err {
+                        CommandError::SpawnFailed => Failure {
+                            message: "T3 CLI was not found. Install or open T3 Code and retry.".into(),
+                            uncertain: false,
+                        },
+                        CommandError::Exited { stderr } if deterministic_start_rejection(&stderr) => Failure {
+                            message: format!("T3 rejected the launch ({stderr}). Update provider/model in Settings and retry."),
+                            uncertain: false,
+                        },
+                        CommandError::Exited { stderr } if !stderr.is_empty() => Failure {
+                            message: format!("T3 launch outcome is unknown ({stderr}). Retry checks for the existing thread."),
+                            uncertain: true,
+                        },
+                        _ => Failure {
+                            message: "T3 launch outcome is unknown. Retry checks for the existing thread".into(),
+                            uncertain: true,
+                        },
                     })?;
                 let result: Value = serde_json::from_slice(&bytes).map_err(|_| Failure {
-                    message: "T3 launch outcome is unknown. Retry checks for the existing thread",
+                    message: "T3 launch outcome is unknown. Retry checks for the existing thread"
+                        .into(),
                     uncertain: true,
                 })?;
                 result["threadId"]
@@ -275,19 +349,21 @@ impl Client {
                     .filter(|s| valid_thread_id(s))
                     .map(str::to_owned)
                     .ok_or(Failure {
-                        message: "T3 launch outcome is unknown. Retry checks for the existing thread",
+                        message:
+                            "T3 launch outcome is unknown. Retry checks for the existing thread"
+                                .into(),
                         uncertain: true,
                     })?
             }
             [] => {
                 return Err(Failure {
-                    message: "No matching T3 thread found after an interrupted launch. No duplicate was started",
+                    message: "No matching T3 thread found after an interrupted launch. No duplicate was started".into(),
                     uncertain: true,
                 });
             }
             _ => {
                 return Err(Failure {
-                    message: "Multiple matching T3 threads found. No duplicate was started",
+                    message: "Multiple matching T3 threads found. No duplicate was started".into(),
                     uncertain: true,
                 });
             }

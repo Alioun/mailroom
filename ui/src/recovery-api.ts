@@ -13,14 +13,19 @@ const restorePreview = z.object({ manifest, bundle: z.string(), target: z.string
 const confirmation = z.object({ display: z.string(), synthetic: z.boolean() })
 const captureOffer = z.object({ preview: manifest, receipt: z.string(), confirmation })
 const restoreOffer = z.object({ preview: restorePreview, receipt: z.string(), confirmation, authenticated: z.literal(true) })
-const status = z.object({ pending: z.array(z.string()), selected_pending: z.array(z.string()), restored: z.array(z.object({ account: z.string(), captured_at: z.number(), authenticated: z.boolean(), reconciliation_required: z.boolean(), bundle: z.string(), resources: z.array(inventory), key_material: z.array(keyMaterial) })), bundles: z.array(z.string()), production_available: z.boolean(), limitations: z.string() })
+const bundleInfo = z.object({ id: z.string(), filename: z.string(), modified_at: z.number(), bytes: z.number() })
+const status = z.object({ pending: z.array(z.string()), selected_pending: z.array(z.string()), restored: z.array(z.object({ account: z.string(), captured_at: z.number(), authenticated: z.boolean(), reconciliation_required: z.boolean(), bundle: z.string(), resources: z.array(inventory), key_material: z.array(keyMaterial) })), bundles: z.array(z.string()), bundles_dir: z.string().optional(), bundle_info: z.array(bundleInfo).default([]), production_available: z.boolean(), limitations: z.string() })
+export type BundleInfo = z.infer<typeof bundleInfo>
 export type CaptureOffer = z.infer<typeof captureOffer>
 export type RestoreOffer = z.infer<typeof restoreOffer>
 export type RecoveryStatus = z.infer<typeof status>
 async function post(body: unknown): Promise<unknown> {
   const response = await localFetch('/api/accounts/recovery', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-  const data: unknown = await response.json()
-  if (!response.ok) throw Error('Recovery rejected. Preserve existing files and the separate secret.')
+  const data: unknown = await response.json().catch(() => null)
+  if (!response.ok) {
+    const parsed = z.object({ error: z.string() }).safeParse(data)
+    throw Error(parsed.success ? parsed.data.error : 'Recovery rejected. Preserve existing files and the separate secret.')
+  }
   return data
 }
 export async function recoveryStatus() { return status.parse(await post({ action: 'status' })) }

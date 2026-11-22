@@ -14,7 +14,9 @@ import {
   Details,
   Empty,
   Modal,
+  Notice,
   Stat,
+  StatusBadge,
   useCopy,
 } from "./components";
 
@@ -39,8 +41,8 @@ export function Overview({
   onSenders: () => void;
   onRecommend: () => void;
 }) {
-  const t = useCopy(),
-    classLabel = useClassLabel();
+  const t = useCopy();
+  const classLabel = useClassLabel();
   const top = [...report.senders]
     .sort((a, b) => b.counts.messages - a.counts.messages)
     .slice(0, 5);
@@ -80,12 +82,12 @@ export function Overview({
         </span>
       </div>
       {historical && (
-        <p className="notice">
+        <Notice tone="warning">
           {t(
             "These saved results have no refreshed provider observations. Scan your mailbox to update them.",
             "Für diese gespeicherten Ergebnisse fehlen erneuerte Anbieterbeobachtungen. Erfasse dein Postfach, um sie zu aktualisieren.",
           )}
-        </p>
+        </Notice>
       )}
       <div className="stats">
         <Stat
@@ -133,34 +135,64 @@ export function Overview({
           </div>
           {monthly.length ? (
             <>
-              <div
-                className="chart"
-                role="img"
-                aria-label={t(
-                  "Monthly received message volume. Exact counts are in the table below.",
-                  "Empfangene Nachrichten pro Monat. Genaue Zahlen stehen in der Tabelle darunter.",
-                )}
-              >
-                {monthly.map(([month, count]) => (
-                  <div className="chart-column" key={month}>
-                    <span className="chart-value">{count}</span>
-                    <div className="chart-track">
-                      <div
-                        className="chart-bar"
-                        style={{
-                          height: `${Math.max(2, (count / max) * 100)}%`,
-                        }}
-                      />
+              {monthly.length < 4 ? (
+                <div
+                  className="compact-months"
+                  role="img"
+                  aria-label={t(
+                    "Monthly received message volume. Exact counts are in the table below.",
+                    "Empfangene Nachrichten pro Monat. Genaue Zahlen stehen in der Tabelle darunter.",
+                  )}
+                >
+                  {monthly.map(([month, count]) => (
+                    <div className="compact-month-row" key={month}>
+                      <span>{month}</span>
+                      <div className="compact-month-track">
+                        <div
+                          className="compact-month-bar"
+                          style={{
+                            width: `${Math.max(4, (count / max) * 100)}%`,
+                          }}
+                        />
+                      </div>
+                      <strong className="numeric">
+                        {count.toLocaleString()}
+                      </strong>
                     </div>
-                    <span className="chart-month">
-                      {new Date(`${month}-01T12:00:00`).toLocaleString(
-                        undefined,
-                        { month: "short" },
-                      )}
-                    </span>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              ) : (
+                <div
+                  className="chart"
+                  role="img"
+                  aria-label={t(
+                    "Monthly received message volume. Exact counts are in the table below.",
+                    "Empfangene Nachrichten pro Monat. Genaue Zahlen stehen in der Tabelle darunter.",
+                  )}
+                >
+                  {monthly.map(([month, count]) => (
+                    <div className="chart-column" key={month}>
+                      <span className="chart-value">
+                        {count.toLocaleString()}
+                      </span>
+                      <div className="chart-track">
+                        <div
+                          className="chart-bar"
+                          style={{
+                            height: `${Math.max(2, (count / max) * 100)}%`,
+                          }}
+                        />
+                      </div>
+                      <span className="chart-month">
+                        {new Date(`${month}-01T12:00:00`).toLocaleString(
+                          undefined,
+                          { month: "short" },
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
               <p className="help">
                 {t(
                   "Uses message dates, which senders can set. Read counts use current flags.",
@@ -170,22 +202,24 @@ export function Overview({
               <Details
                 title={t("View monthly counts", "Monatszahlen anzeigen")}
               >
-                <table>
-                  <thead>
-                    <tr>
-                      <th>{t("Month", "Monat")}</th>
-                      <th>{t("Received", "Empfangen")}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {monthly.map(([month, count]) => (
-                      <tr key={month}>
-                        <th>{month}</th>
-                        <td>{count}</td>
+                <div className="table-scroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{t("Month", "Monat")}</th>
+                        <th className="numeric">{t("Received", "Empfangen")}</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {monthly.map(([month, count]) => (
+                        <tr key={month}>
+                          <th>{month}</th>
+                          <td className="numeric">{count.toLocaleString()}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </Details>
             </>
           ) : (
@@ -226,7 +260,9 @@ export function Overview({
                   </strong>
                   <small className="muted">{classLabel(sender.class)}</small>
                 </div>
-                <strong>{sender.counts.messages.toLocaleString()}</strong>
+                <strong className="numeric">
+                  {sender.counts.messages.toLocaleString()}
+                </strong>
               </div>
             ))}
           </div>
@@ -280,29 +316,35 @@ export function Overview({
         <p className="help">
           {t("Current Spam count", "Aktuelle Spam-Anzahl")} ·{" "}
           {report.acquisition.spam.kind === "observed"
-            ? report.acquisition.spam.messages
+            ? report.acquisition.spam.messages.toLocaleString()
             : t("Unknown", "Unbekannt")}
         </p>
-        <table>
-          <thead>
-            <tr>
-              <th>{t("Folder", "Ordner")}</th>
-              <th>{t("Saved", "Gespeichert")}</th>
-              <th>{t("Inventory", "Bestand")}</th>
-              <th>{t("State", "Status")}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {report.folders.map((folder) => (
-              <tr key={folder.folder}>
-                <th>{folder.folder}</th>
-                <td>{folder.saved}</td>
-                <td>{folder.inventory}</td>
-                <td>{folder.state}</td>
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>{t("Folder", "Ordner")}</th>
+                <th className="numeric">{t("Saved", "Gespeichert")}</th>
+                <th className="numeric">{t("Inventory", "Bestand")}</th>
+                <th>{t("State", "Status")}</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {report.folders.map((folder) => (
+                <tr key={folder.folder}>
+                  <th>{folder.folder}</th>
+                  <td className="numeric">{folder.saved.toLocaleString()}</td>
+                  <td className="numeric">
+                    {folder.inventory.toLocaleString()}
+                  </td>
+                  <td>
+                    <StatusBadge status={folder.state} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
         <p className="help">
           {t(
             "Header observations do not authenticate senders. Current folder coverage does not prove historical Spam coverage.",
@@ -321,13 +363,13 @@ export function Senders({
   report: CensusReport;
   onRecommend: () => void;
 }) {
-  const t = useCopy(),
-    classLabel = useClassLabel();
-  const [query, setQuery] = useState(""),
-    [filter, setFilter] = useState("all"),
-    [sort, setSort] = useState("volume"),
-    [page, setPage] = useState(0),
-    [selected, setSelected] = useState<Sender | null>(null);
+  const t = useCopy();
+  const classLabel = useClassLabel();
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState("all");
+  const [sort, setSort] = useState("volume");
+  const [page, setPage] = useState(0);
+  const [selected, setSelected] = useState<Sender | null>(null);
   const results = useMemo(
     () =>
       report.senders
@@ -349,9 +391,9 @@ export function Senders({
         ),
     [report, query, filter, sort],
   );
-  const pages = Math.max(1, Math.ceil(results.length / 20)),
-    current = Math.min(page, pages - 1),
-    visible = results.slice(current * 20, current * 20 + 20);
+  const pages = Math.max(1, Math.ceil(results.length / 20));
+  const current = Math.min(page, pages - 1);
+  const visible = results.slice(current * 20, current * 20 + 20);
   return (
     <div className="page-stack">
       <div className="toolbar">
@@ -411,7 +453,7 @@ export function Senders({
         <div className="section-heading">
           <h2>
             {t("Senders", "Absender")}{" "}
-            <span className="count">{results.length}</span>
+            <span className="count">{results.length.toLocaleString()}</span>
           </h2>
           <span className="help">
             {t(
@@ -463,7 +505,8 @@ export function Senders({
                         className="numeric"
                         data-label={t("Read / total", "Gelesen / gesamt")}
                       >
-                        {sender.counts.seen} / {sender.counts.messages}
+                        {sender.counts.seen.toLocaleString()} /{" "}
+                        {sender.counts.messages.toLocaleString()}
                       </td>
                       <td>
                         <Action
@@ -531,12 +574,15 @@ export function Senders({
             <div className="stats compact">
               <Stat
                 label={t("Messages", "Nachrichten")}
-                value={selected.counts.messages}
+                value={selected.counts.messages.toLocaleString()}
               />
-              <Stat label={t("Read", "Gelesen")} value={selected.counts.seen} />
+              <Stat
+                label={t("Read", "Gelesen")}
+                value={selected.counts.seen.toLocaleString()}
+              />
               <Stat
                 label={t("Answered", "Beantwortet")}
-                value={selected.counts.answered}
+                value={selected.counts.answered.toLocaleString()}
               />
             </div>
             <h3>{t("What we observed", "Unsere Beobachtungen")}</h3>
@@ -553,14 +599,14 @@ export function Senders({
                     )}
               </li>
               <li>
-                {selected.one_click_pair}{" "}
+                {selected.one_click_pair.toLocaleString()}{" "}
                 {t(
                   "messages include a complete one-click unsubscribe pair.",
                   "Nachrichten enthalten ein vollständiges Ein-Klick-Abmeldepaar.",
                 )}
               </li>
               <li>
-                {selected.list_unsubscribe}{" "}
+                {selected.list_unsubscribe.toLocaleString()}{" "}
                 {t(
                   "messages include an unsubscribe header.",
                   "Nachrichten enthalten einen Abmelde-Header.",
@@ -594,15 +640,20 @@ export function Senders({
                 ))}
               </ul>
             </Details>
-            <Action
-              primary
-              onClick={() => {
-                setSelected(null);
-                onRecommend();
-              }}
-            >
-              {t("Ask for recommendations", "Vorschläge anfordern")}
-            </Action>
+            <div className="dialog-actions">
+              <Action onClick={() => setSelected(null)}>
+                {t("Close", "Schließen")}
+              </Action>
+              <Action
+                primary
+                onClick={() => {
+                  setSelected(null);
+                  onRecommend();
+                }}
+              >
+                {t("Ask for recommendations", "Vorschläge anfordern")}
+              </Action>
+            </div>
           </>
         )}
       </Modal>

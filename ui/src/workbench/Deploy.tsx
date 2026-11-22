@@ -9,7 +9,7 @@ import {
   Trash2,
   Undo2,
 } from "lucide-react";
-import type { Account, AccountView } from "../api";
+import type { Account, AccountStatus, AccountView } from "../api";
 import {
   folderCommand,
   folderPreview,
@@ -37,6 +37,7 @@ import type {
   TransactionPreview,
   TransactionView,
 } from "../sieve-transactions-api";
+import { describeError, sieveRefusalText } from "./status-labels";
 import {
   Action,
   Busy,
@@ -46,17 +47,20 @@ import {
   Empty,
   Notice,
   Stat,
+  StatusBadge,
   useCopy,
 } from "./components";
 
 export function FoldersPanel({
   account,
   liveWrites,
-  onGoSettings,
+  liveJob,
+  onOpenWriteMode,
 }: {
   account: Account;
   liveWrites: boolean;
-  onGoSettings: () => void;
+  liveJob: AccountStatus["job"];
+  onOpenWriteMode: () => void;
 }) {
   const t = useCopy();
   const [view, setView] = useState<FolderView | null>(null);
@@ -67,20 +71,28 @@ export function FoldersPanel({
   const [unavailable, setUnavailable] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const jobRunning = liveJob?.progress.state === "running";
 
   const load = useCallback(async () => {
     setError("");
-    setUnavailable(false);
     try {
-      setView(await folderStatus(account.id));
+      const next = await folderStatus(account.id);
+      setView(next);
+      setUnavailable(false);
     } catch {
-      setUnavailable(true);
+      if (!jobRunning) setUnavailable((prev) => (view ? prev : true));
     }
-  }, [account.id]);
+  }, [account.id, jobRunning]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (!jobRunning) return;
+    const timer = setInterval(() => void load(), 2000);
+    return () => clearInterval(timer);
+  }, [jobRunning, load]);
 
   async function runPreview() {
     setBusy(true);
@@ -89,11 +101,14 @@ export function FoldersPanel({
     setConfirmed(false);
     try {
       setPreview(await folderPreview(account.id, intent));
-    } catch {
+    } catch (err) {
       setError(
-        t(
-          "Could not preview folders. Make sure local rules are saved and pass validation, and the server is reachable.",
-          "Ordnervorschau fehlgeschlagen. Prüfe, ob lokale Regeln gespeichert und gültig sind und der Server erreichbar ist.",
+        describeError(
+          err,
+          t(
+            "Could not preview folders. Make sure local rules are saved and pass validation, and the server is reachable.",
+            "Ordnervorschau fehlgeschlagen. Prüfe, ob lokale Regeln gespeichert und gültig sind und der Server erreichbar ist.",
+          ),
         ),
       );
     } finally {
@@ -117,21 +132,24 @@ export function FoldersPanel({
       setConfirmed(false);
       setMessage(
         t(
-          "Folder creation started. Refresh status to inspect verified results.",
-          "Ordnererstellung gestartet. Aktualisiere den Stand, um geprüfte Ergebnisse zu sehen.",
+          "Folder creation started. Status refreshes automatically as folders are verified.",
+          "Ordnererstellung gestartet. Der Status aktualisiert sich automatisch nach der Prüfung.",
         ),
       );
       setTimeout(() => void load(), 1200);
-    } catch {
+    } catch (err) {
       setError(
         liveWrites
-          ? t(
-              "Folder creation was refused or interrupted. Refresh status before retrying.",
-              "Ordnererstellung wurde abgelehnt oder unterbrochen. Aktualisiere den Stand vor einem neuen Versuch.",
+          ? describeError(
+              err,
+              t(
+                "Folder creation was refused or interrupted. Refresh status before retrying.",
+                "Ordnererstellung wurde abgelehnt oder unterbrochen. Aktualisiere den Stand vor einem neuen Versuch.",
+              ),
             )
           : t(
-              "Live provider writes are locked in Read-only mode. Enable Live writes in Settings first.",
-              "Änderungen beim Anbieter sind im Nur-Lese-Modus gesperrt. Aktiviere zuerst Live-Schreibzugriff in den Einstellungen.",
+              "Live provider writes are locked in Read-only mode. Enable Live writes first.",
+              "Änderungen beim Anbieter sind im Nur-Lese-Modus gesperrt. Aktiviere zuerst Live-Schreibzugriff.",
             ),
       );
     } finally {
@@ -139,7 +157,7 @@ export function FoldersPanel({
     }
   }
 
-  if (unavailable) {
+  if (unavailable && !view) {
     return (
       <Empty
         title={t(
@@ -148,8 +166,8 @@ export function FoldersPanel({
         )}
       >
         {t(
-          "Connect a vault account or run with an installed folder fixture to preview and create IMAP folders.",
-          "Verbinde ein Tresor-Konto, um IMAP-Ordner vorzuschauen und anzulegen.",
+          "Connect a mailbox.org vault account to preview and create IMAP folders.",
+          "Verbinde ein mailbox.org-Tresorkonto, um IMAP-Ordner vorzuschauen und anzulegen.",
         )}
       </Empty>
     );
@@ -161,16 +179,16 @@ export function FoldersPanel({
   return (
     <div className="page-stack">
       {!liveWrites && (
-        <Notice>
+        <Notice tone="info">
           <ShieldAlert size={16} />
           <span>
             {t(
-              "Read-only mode is active. You can preview missing folders, but creating them requires enabling Live writes in Settings.",
-              "Der Nur-Lese-Modus ist aktiv. Du kannst fehlende Ordner prüfen, aber zum Anlegen musst du Live-Schreibzugriff in den Einstellungen aktivieren.",
+              "Read-only mode is active. You can preview missing folders now; creating them requires enabling Live writes.",
+              "Der Nur-Lese-Modus ist aktiv. Du kannst fehlende Ordner sofort prüfen; zum Anlegen aktiviere Live-Schreibzugriff.",
             )}
           </span>
-          <Action onClick={onGoSettings}>
-            {t("Open Settings", "Einstellungen öffnen")}
+          <Action size="compact" tone="warning" onClick={onOpenWriteMode}>
+            {t("Enable live writes", "Live-Schreibzugriff aktivieren")}
           </Action>
         </Notice>
       )}
@@ -178,7 +196,7 @@ export function FoldersPanel({
       {message && (
         <Notice>
           <CheckCircle2 size={16} />
-          {message}
+          <span>{message}</span>
         </Notice>
       )}
       <section className="panel">
@@ -202,8 +220,10 @@ export function FoldersPanel({
             label={t("Folder intent", "Ordnerzweck")}
             value={intent}
             onChange={(value) => {
-              if (value === "sort" || value === "archive_unmatched")
+              if (value === "sort" || value === "archive_unmatched") {
                 setIntent(value);
+                setPreview(null);
+              }
             }}
             options={[
               {
@@ -219,7 +239,11 @@ export function FoldersPanel({
               },
             ]}
           />
-          <Action primary onClick={() => void runPreview()} disabled={busy}>
+          <Action
+            primary
+            onClick={() => void runPreview()}
+            disabled={busy || jobRunning}
+          >
             {busy ? (
               <Busy>{t("Inspecting IMAP…", "IMAP wird geprüft…")}</Busy>
             ) : (
@@ -264,17 +288,24 @@ export function FoldersPanel({
                   )}
                 </CheckField>
                 <div className="actions">
-                  <Action
-                    primary
-                    disabled={!confirmed || !liveWrites || busy}
-                    onClick={() => void confirmCreate()}
-                  >
-                    <FolderPlus size={15} />
-                    {t("Create folders", "Ordner anlegen")}
-                  </Action>
                   <Action onClick={() => setPreview(null)} disabled={busy}>
                     {t("Cancel", "Abbrechen")}
                   </Action>
+                  {!liveWrites ? (
+                    <Action tone="warning" onClick={onOpenWriteMode}>
+                      <ShieldAlert size={15} />
+                      {t("Enable live writes to create", "Live-Schreibzugriff aktivieren")}
+                    </Action>
+                  ) : (
+                    <Action
+                      primary
+                      disabled={!confirmed || busy}
+                      onClick={() => void confirmCreate()}
+                    >
+                      <FolderPlus size={15} />
+                      {t("Create folders", "Ordner anlegen")}
+                    </Action>
+                  )}
                 </div>
               </>
             )}
@@ -290,7 +321,7 @@ export function FoldersPanel({
                 <tr>
                   <th>{t("Operation", "Vorgang")}</th>
                   <th>{t("Status", "Status")}</th>
-                  <th>{t("Folders", "Ordner")}</th>
+                  <th className="numeric">{t("Folders", "Ordner")}</th>
                   <th>{t("Action", "Aktion")}</th>
                 </tr>
               </thead>
@@ -301,26 +332,48 @@ export function FoldersPanel({
                       <code>{op.id.slice(0, 12)}</code>
                     </td>
                     <td>
-                      <span className="badge">{op.status}</span>
+                      <StatusBadge status={op.status} />
                     </td>
-                    <td>{op.plan.entries.length}</td>
+                    <td className="numeric">{op.plan.entries.length}</td>
                     <td>
-                      {(op.status === "uncertain" ||
-                        op.status === "stopped") && (
-                        <Action
-                          disabled={busy}
-                          onClick={async () => {
-                            setBusy(true);
-                            try {
-                              setView(await folderReconcile(account.id, op.id));
-                            } finally {
-                              setBusy(false);
-                            }
-                          }}
-                        >
-                          {t("Reconcile", "Abgleichen")}
-                        </Action>
-                      )}
+                      <div className="cell-actions">
+                        {(op.status === "uncertain" ||
+                          op.status === "stopped") && (
+                          <Action
+                            size="compact"
+                            disabled={busy}
+                            onClick={async () => {
+                              setBusy(true);
+                              setError("");
+                              try {
+                                setView(
+                                  await folderReconcile(account.id, op.id),
+                                );
+                                setMessage(
+                                  t(
+                                    "Folder operation reconciled against live server.",
+                                    "Ordnervorgang mit dem Server abgeglichen.",
+                                  ),
+                                );
+                              } catch (err) {
+                                setError(
+                                  describeError(
+                                    err,
+                                    t(
+                                      "Reconciliation failed. Check connectivity and try again.",
+                                      "Abgleich fehlgeschlagen. Prüfe die Verbindung und versuche es erneut.",
+                                    ),
+                                  ),
+                                );
+                              } finally {
+                                setBusy(false);
+                              }
+                            }}
+                          >
+                            {t("Reconcile", "Abgleichen")}
+                          </Action>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -336,11 +389,13 @@ export function FoldersPanel({
 export function SieveDeployPanel({
   account,
   liveWrites,
-  onGoSettings,
+  liveJob,
+  onOpenWriteMode,
 }: {
   account: Account;
   liveWrites: boolean;
-  onGoSettings: () => void;
+  liveJob: AccountStatus["job"];
+  onOpenWriteMode: () => void;
 }) {
   const t = useCopy();
   const [discovery, setDiscovery] = useState<SieveView | null>(null);
@@ -359,20 +414,27 @@ export function SieveDeployPanel({
   const [unavailable, setUnavailable] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const jobRunning = liveJob?.progress.state === "running";
 
   const load = useCallback(async () => {
     if (account.provider !== "mailbox_org") return;
     setError("");
-    setUnavailable(false);
-    try {
-      const [sieve, status, tx] = await Promise.all([
-        openSieve(account.id),
-        sieveStatus(account.id),
-        transactionStatus(account.id),
-      ]);
-      setDiscovery(sieve);
-      setRunning(status.running);
+    const [sieveRes, statusRes, txRes] = await Promise.allSettled([
+      openSieve(account.id),
+      sieveStatus(account.id),
+      transactionStatus(account.id),
+    ]);
+    if (statusRes.status === "fulfilled") {
+      setRunning(statusRes.value.running);
+    }
+    if (sieveRes.status === "fulfilled") {
+      setDiscovery(sieveRes.value);
+      setUnavailable(false);
+    }
+    if (txRes.status === "fulfilled") {
+      const tx = txRes.value;
       setTxView(tx);
+      setUnavailable(false);
       if (tx.placement) {
         setPlacementKind(tx.placement.kind);
         if (tx.placement.kind === "include")
@@ -380,14 +442,28 @@ export function SieveDeployPanel({
       } else if (tx.recommendation?.recommended) {
         setPlacementKind(tx.recommendation.recommended);
       }
-    } catch {
+    }
+    if (
+      sieveRes.status === "rejected" &&
+      txRes.status === "rejected" &&
+      !running &&
+      !jobRunning &&
+      !discovery &&
+      !txView
+    ) {
       setUnavailable(true);
     }
-  }, [account.id, account.provider]);
+  }, [account.id, account.provider, running, jobRunning]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (!running && !jobRunning) return;
+    const timer = setInterval(() => void load(), 1800);
+    return () => clearInterval(timer);
+  }, [running, jobRunning, load]);
 
   if (account.provider !== "mailbox_org") {
     return (
@@ -405,7 +481,7 @@ export function SieveDeployPanel({
     );
   }
 
-  if (unavailable) {
+  if (unavailable && !discovery && !txView) {
     return (
       <Empty
         title={t(
@@ -430,16 +506,18 @@ export function SieveDeployPanel({
       setRunning(true);
       setMessage(
         t(
-          "ManageSieve discovery started (read-only). Click Refresh shortly to inspect capabilities and Open-Xchange rules.",
-          "ManageSieve-Prüfung gestartet (nur lesend). Klicke gleich auf Aktualisieren, um Fähigkeiten und Open-Xchange-Regeln zu sehen.",
+          "ManageSieve discovery started (read-only). Results will appear automatically.",
+          "ManageSieve-Prüfung gestartet (nur lesend). Ergebnisse erscheinen automatisch.",
         ),
       );
-      setTimeout(() => void load(), 1500);
-    } catch {
+    } catch (err) {
       setError(
-        t(
-          "Could not start ManageSieve discovery. Check connectivity and credentials.",
-          "ManageSieve-Prüfung konnte nicht starten. Prüfe Verbindung und Zugangsdaten.",
+        describeError(
+          err,
+          t(
+            "Could not start ManageSieve discovery. Check connectivity and credentials.",
+            "ManageSieve-Prüfung konnte nicht starten. Prüfe Verbindung und Zugangsdaten.",
+          ),
         ),
       );
     } finally {
@@ -465,11 +543,14 @@ export function SieveDeployPanel({
           "Koexistenz-Strategie gespeichert.",
         ),
       );
-    } catch {
+    } catch (err) {
       setError(
-        t(
-          "Could not save placement choice. Check the included script name.",
-          "Koexistenz-Strategie konnte nicht gespeichert werden. Prüfe den Skriptnamen.",
+        describeError(
+          err,
+          t(
+            "Could not save placement choice. Check the included script name.",
+            "Koexistenz-Strategie konnte nicht gespeichert werden. Prüfe den Skriptnamen.",
+          ),
         ),
       );
     } finally {
@@ -487,11 +568,14 @@ export function SieveDeployPanel({
     setPreviewKind(kind);
     try {
       setPreview(await transactionPreview(account.id, kind));
-    } catch {
+    } catch (err) {
       setError(
-        t(
-          "Could not preview Sieve transaction. Save valid local rules, choose a placement strategy, and check connectivity.",
-          "Sieve-Vorschau fehlgeschlagen. Speichere gültige lokale Regeln, wähle eine Platzierung und prüfe die Verbindung.",
+        describeError(
+          err,
+          t(
+            "Could not preview Sieve transaction. Save valid local rules, choose a placement strategy, and check connectivity.",
+            "Sieve-Vorschau fehlgeschlagen. Speichere gültige lokale Regeln, wähle eine Platzierung und prüfe die Verbindung.",
+          ),
         ),
       );
     } finally {
@@ -529,21 +613,24 @@ export function SieveDeployPanel({
       setConfirmed(false);
       setMessage(
         t(
-          "ManageSieve transaction started. Refresh to confirm final observed server state.",
-          "ManageSieve-Transaktion gestartet. Aktualisiere den Stand zur Bestätigung.",
+          "ManageSieve transaction started. Status refreshes automatically to confirm observed server state.",
+          "ManageSieve-Transaktion gestartet. Der Status aktualisiert sich automatisch zur Bestätigung.",
         ),
       );
-      setTimeout(() => void load(), 1500);
-    } catch {
+      setTimeout(() => void load(), 1200);
+    } catch (err) {
       setError(
         liveWrites
-          ? t(
-              "Transaction was refused or interrupted. Refresh and reconcile before retrying.",
-              "Transaktion wurde abgelehnt oder unterbrochen. Aktualisiere und gleiche den Stand vor einem neuen Versuch ab.",
+          ? describeError(
+              err,
+              t(
+                "Transaction was refused or interrupted. Refresh and reconcile before retrying.",
+                "Transaktion wurde abgelehnt oder unterbrochen. Aktualisiere und gleiche den Stand vor einem neuen Versuch ab.",
+              ),
             )
           : t(
-              "Live provider writes are locked in Read-only mode. Enable Live writes in Settings first.",
-              "Änderungen beim Anbieter sind im Nur-Lese-Modus gesperrt. Aktiviere zuerst Live-Schreibzugriff in den Einstellungen.",
+              "Live provider writes are locked in Read-only mode. Enable Live writes first.",
+              "Änderungen beim Anbieter sind im Nur-Lese-Modus gesperrt. Aktiviere zuerst Live-Schreibzugriff.",
             ),
       );
     } finally {
@@ -557,16 +644,43 @@ export function SieveDeployPanel({
   return (
     <div className="page-stack">
       {!liveWrites && (
-        <Notice>
+        <Notice tone="info">
           <ShieldAlert size={16} />
           <span>
             {t(
-              "Read-only mode is active. Live ManageSieve discovery and deploy previews work right now; uploading or activating scripts requires enabling Live writes in Settings.",
-              "Der Nur-Lese-Modus ist aktiv. ManageSieve-Prüfung und Vorschau funktionieren sofort; zum Hochladen oder Aktivieren aktiviere Live-Schreibzugriff in den Einstellungen.",
+              "Read-only mode is active. Live ManageSieve discovery and deploy previews work right now; uploading or activating scripts requires enabling Live writes.",
+              "Der Nur-Lese-Modus ist aktiv. ManageSieve-Prüfung und Vorschau funktionieren sofort; zum Hochladen oder Aktivieren aktiviere Live-Schreibzugriff.",
             )}
           </span>
-          <Action onClick={onGoSettings}>
-            {t("Open Settings", "Einstellungen öffnen")}
+          <Action size="compact" tone="warning" onClick={onOpenWriteMode}>
+            {t("Enable live writes", "Live-Schreibzugriff aktivieren")}
+          </Action>
+        </Notice>
+      )}
+      {running && (
+        <Notice tone="info">
+          <Busy>
+            {t(
+              "ManageSieve discovery is running…",
+              "ManageSieve-Prüfung läuft…",
+            )}
+          </Busy>
+          <Action
+            size="compact"
+            onClick={() =>
+              void cancelSieve(account.id)
+                .then(load)
+                .catch(() =>
+                  setError(
+                    t(
+                      "Could not stop ManageSieve discovery.",
+                      "ManageSieve-Prüfung konnte nicht gestoppt werden.",
+                    ),
+                  ),
+                )
+            }
+          >
+            {t("Stop", "Stoppen")}
           </Action>
         </Notice>
       )}
@@ -574,7 +688,7 @@ export function SieveDeployPanel({
       {message && (
         <Notice>
           <CheckCircle2 size={16} />
-          {message}
+          <span>{message}</span>
         </Notice>
       )}
       <section className="panel">
@@ -598,15 +712,12 @@ export function SieveDeployPanel({
               <RefreshCw size={15} />
               {t("Refresh", "Aktualisieren")}
             </Action>
-            {running ? (
+            {!running && (
               <Action
-                onClick={() => void cancelSieve(account.id).then(load)}
-                disabled={busy}
+                primary
+                onClick={() => void runDiscovery()}
+                disabled={busy || jobRunning}
               >
-                {t("Stop", "Stoppen")}
-              </Action>
-            ) : (
-              <Action primary onClick={() => void runDiscovery()} disabled={busy}>
                 <Server size={15} />
                 {t("Inspect ManageSieve", "ManageSieve prüfen")}
               </Action>
@@ -649,7 +760,7 @@ export function SieveDeployPanel({
               {baseline.bodies.map((body) => (
                 <div key={body.name}>
                   <h4>
-                    {body.name} ({body.bytes.length} B)
+                    {body.name} ({body.bytes.length.toLocaleString()} B)
                   </h4>
                   <pre tabIndex={0}>{exactReview(body)}</pre>
                 </div>
@@ -683,7 +794,7 @@ export function SieveDeployPanel({
             </p>
           </div>
           {rec && (
-            <span className="badge">
+            <span className="badge info">
               {t("Recommended", "Empfohlen")}:{" "}
               {rec.recommended === "include"
                 ? t("Include script", "Include-Skript")
@@ -694,11 +805,14 @@ export function SieveDeployPanel({
         {rec && <p className="help">{rec.reason}</p>}
         <div className="settings-form">
           <Choice
+            fieldLabel={t("Placement mode", "Platzierungsmodus")}
             label={t("Placement mode", "Platzierungsmodus")}
             value={placementKind}
             onChange={(value) => {
-              if (value === "block" || value === "include")
+              if (value === "block" || value === "include") {
                 setPlacementKind(value);
+                setPreview(null);
+              }
             }}
             options={[
               {
@@ -722,7 +836,10 @@ export function SieveDeployPanel({
               {t("Included script name", "Name des eingebundenen Skripts")}
               <input
                 value={includeScript}
-                onChange={(e) => setIncludeScript(e.target.value)}
+                onChange={(e) => {
+                  setIncludeScript(e.target.value);
+                  setPreview(null);
+                }}
                 placeholder="mailroom"
               />
             </label>
@@ -744,8 +861,8 @@ export function SieveDeployPanel({
             </h2>
             <p className="muted">
               {t(
-                "Preview checks live Open-Xchange state, validates syntax via CHECKSCRIPT, and computes exact rule precedence before any upload.",
-                "Die Vorschau prüft den aktuellen Open-Xchange-Stand, validiert die Syntax per CHECKSCRIPT und zeigt die genaue Regelrangfolge vor jedem Upload.",
+                "Preview inspects live Open-Xchange state and computes exact rule precedence before any upload. During execution, Mailroom validates syntax via CHECKSCRIPT when supported and verifies live readback.",
+                "Die Vorschau prüft den aktuellen Open-Xchange-Stand und berechnet die genaue Regelrangfolge vor jedem Upload. Bei der Ausführung prüft Mailroom die Syntax per CHECKSCRIPT (falls unterstützt) und liest den Stand zurück.",
               )}
             </p>
           </div>
@@ -753,14 +870,15 @@ export function SieveDeployPanel({
             <Action
               primary
               onClick={() => void runPreview("deploy")}
-              disabled={busy || !txView?.placement}
+              disabled={busy || jobRunning || !txView?.placement}
             >
               <Rocket size={15} />
               {t("Preview deploy", "Bereitstellung prüfen")}
             </Action>
             <Action
+              tone="danger-outline"
               onClick={() => void runPreview("removal")}
-              disabled={busy}
+              disabled={busy || jobRunning}
             >
               <Trash2 size={15} />
               {t("Preview removal", "Entfernung prüfen")}
@@ -769,9 +887,24 @@ export function SieveDeployPanel({
         </div>
         {preview && preview.outcome === "refused" && (
           <Notice error>
-            {t("Deployment refused", "Bereitstellung abgelehnt")}:{" "}
-            <code>{preview.refusal.reason}</code>
-            {preview.refusal.detail ? ` — ${preview.refusal.detail}` : ""}
+            <div>
+              <strong>
+                {t("Deployment refused", "Bereitstellung abgelehnt")}
+              </strong>
+              <p>{sieveRefusalText(preview.refusal.reason, t)}</p>
+              {(preview.refusal.script ||
+                preview.refusal.rule ||
+                preview.refusal.detail) && (
+                <p className="help">
+                  {preview.refusal.script ? `${preview.refusal.script} ` : ""}
+                  {preview.refusal.rule ? `(${preview.refusal.rule}) ` : ""}
+                  {preview.refusal.line
+                    ? `${t("line", "Zeile")} ${preview.refusal.line} `
+                    : ""}
+                  {preview.refusal.detail ?? ""}
+                </p>
+              )}
+            </div>
           </Notice>
         )}
         {preview && preview.outcome === "ready" && (
@@ -781,43 +914,135 @@ export function SieveDeployPanel({
               {preview.effects.join(", ")}
             </h3>
             {preview.precedence && (
-              <div className="stats compact">
-                <Stat
-                  label={t("Mailroom files", "Mailroom legt ab")}
-                  value={preview.precedence.counts.mailroom}
-                />
-                <Stat
-                  label={t("Existing rules win", "Bestehende Regeln gewinnen")}
-                  value={preview.precedence.counts.existing_wins}
-                />
-                <Stat
-                  label={t("Conflicts", "Konflikte")}
-                  value={preview.precedence.counts.conflicting}
-                />
-                <Stat
-                  label={t("Accounting copies", "Rechnungskopien")}
-                  value={preview.precedence.counts.copies.copied}
-                />
-              </div>
+              <>
+                <div className="stats compact">
+                  <Stat
+                    label={t("Mailroom files", "Mailroom legt ab")}
+                    value={preview.precedence.counts.mailroom.toLocaleString()}
+                  />
+                  <Stat
+                    label={t(
+                      "Existing rules win",
+                      "Bestehende Regeln gewinnen",
+                    )}
+                    value={preview.precedence.counts.existing_wins.toLocaleString()}
+                  />
+                  <Stat
+                    label={t("Conflicts", "Konflikte")}
+                    value={preview.precedence.counts.conflicting.toLocaleString()}
+                  />
+                  <Stat
+                    label={t("Accounting copies", "Rechnungskopien")}
+                    value={preview.precedence.counts.copies.copied.toLocaleString()}
+                  />
+                </div>
+                {preview.precedence.warnings.length > 0 && (
+                  <Notice tone="warning">
+                    <ul className="evidence-list" style={{ margin: 0 }}>
+                      {preview.precedence.warnings.map((w, i) => (
+                        <li key={i}>{w}</li>
+                      ))}
+                    </ul>
+                  </Notice>
+                )}
+                {preview.precedence.decisions.length > 0 && (
+                  <Details
+                    defaultOpen={preview.precedence.counts.conflicting > 0}
+                    title={t(
+                      `Open-Xchange precedence details (${preview.precedence.decisions.length})`,
+                      `Open-Xchange-Rangfolgedetails (${preview.precedence.decisions.length})`,
+                    )}
+                  >
+                    <div className="table-scroll">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>{t("Rule", "Regel")}</th>
+                            <th>{t("Status", "Status")}</th>
+                            <th>{t("Mailroom target", "Mailroom-Ziel")}</th>
+                            <th>{t("Conflict", "Konflikt")}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {preview.precedence.decisions
+                            .slice(0, 50)
+                            .map((d, i) => (
+                              <tr key={`${d.id}-${i}`}>
+                                <td>
+                                  <code>{d.rule}</code>
+                                </td>
+                                <td>
+                                  <StatusBadge status={d.status} />
+                                </td>
+                                <td>
+                                  {d.mailroom.kind === "folder"
+                                    ? d.mailroom.name
+                                    : "INBOX"}
+                                </td>
+                                <td>
+                                  {d.conflicting ? (
+                                    <StatusBadge
+                                      status="conflict"
+                                      label={t("Yes", "Ja")}
+                                    />
+                                  ) : (
+                                    t("No", "Nein")
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </Details>
+                )}
+              </>
             )}
+            <Details
+              title={t(
+                `Target script contents (${preview.transaction.after.bodies.length})`,
+                `Ziel-Skriptinhalte (${preview.transaction.after.bodies.length})`,
+              )}
+            >
+              {preview.transaction.after.bodies.map((body) => (
+                <div key={body.name}>
+                  <h4>
+                    {body.name} ({body.bytes.length.toLocaleString()} B)
+                  </h4>
+                  <pre tabIndex={0}>{exactReview(body)}</pre>
+                </div>
+              ))}
+            </Details>
             <CheckField checked={confirmed} onChange={setConfirmed}>
               {t(
-                "I reviewed the exact precedence and effects above and confirm applying this ManageSieve transaction.",
-                "Ich habe Rangfolge und Auswirkungen oben geprüft und bestätige diese ManageSieve-Transaktion.",
+                "I reviewed the exact precedence, script contents, and effects above and confirm applying this ManageSieve transaction.",
+                "Ich habe Rangfolge, Skriptinhalte und Auswirkungen oben geprüft und bestätige diese ManageSieve-Transaktion.",
               )}
             </CheckField>
             <div className="actions">
-              <Action
-                primary
-                disabled={!confirmed || !liveWrites || busy}
-                onClick={() => void confirmTransaction()}
-              >
-                <Rocket size={15} />
-                {t("Apply transaction", "Transaktion ausführen")}
-              </Action>
               <Action onClick={() => setPreview(null)} disabled={busy}>
                 {t("Cancel", "Abbrechen")}
               </Action>
+              {!liveWrites ? (
+                <Action tone="warning" onClick={onOpenWriteMode}>
+                  <ShieldAlert size={15} />
+                  {t(
+                    "Enable live writes to apply",
+                    "Live-Schreibzugriff aktivieren",
+                  )}
+                </Action>
+              ) : (
+                <Action
+                  tone={previewKind === "removal" ? "danger" : "primary"}
+                  disabled={!confirmed || busy}
+                  onClick={() => void confirmTransaction()}
+                >
+                  <Rocket size={15} />
+                  {previewKind === "removal"
+                    ? t("Remove Mailroom rules", "Mailroom-Regeln entfernen")
+                    : t("Apply transaction", "Transaktion ausführen")}
+                </Action>
+              )}
             </div>
           </div>
         )}
@@ -843,38 +1068,62 @@ export function SieveDeployPanel({
                       </td>
                       <td>{tx.target}</td>
                       <td>
-                        <span className="badge">{tx.status}</span>
+                        <StatusBadge status={tx.status} />
                       </td>
-                      <td className="actions">
-                        {(tx.status === "uncertain" ||
-                          tx.status === "stopped") && (
-                          <Action
-                            disabled={busy}
-                            onClick={async () => {
-                              setBusy(true);
-                              try {
-                                setTxView(
-                                  await reconcileTransaction(account.id, tx.id),
-                                );
-                              } finally {
-                                setBusy(false);
+                      <td>
+                        <div className="cell-actions">
+                          {(tx.status === "uncertain" ||
+                            tx.status === "stopped") && (
+                            <Action
+                              size="compact"
+                              disabled={busy}
+                              onClick={async () => {
+                                setBusy(true);
+                                setError("");
+                                try {
+                                  setTxView(
+                                    await reconcileTransaction(
+                                      account.id,
+                                      tx.id,
+                                    ),
+                                  );
+                                  setMessage(
+                                    t(
+                                      "Transaction reconciled against server.",
+                                      "Transaktion mit dem Server abgeglichen.",
+                                    ),
+                                  );
+                                } catch (err) {
+                                  setError(
+                                    describeError(
+                                      err,
+                                      t(
+                                        "Reconciliation failed. Check connectivity and retry.",
+                                        "Abgleich fehlgeschlagen. Prüfe die Verbindung.",
+                                      ),
+                                    ),
+                                  );
+                                } finally {
+                                  setBusy(false);
+                                }
+                              }}
+                            >
+                              {t("Reconcile", "Abgleichen")}
+                            </Action>
+                          )}
+                          {tx.status === "complete" && !tx.compensates && (
+                            <Action
+                              size="compact"
+                              disabled={busy}
+                              onClick={() =>
+                                void runPreview({ compensates: tx.id })
                               }
-                            }}
-                          >
-                            {t("Reconcile", "Abgleichen")}
-                          </Action>
-                        )}
-                        {tx.status === "complete" && !tx.compensates && (
-                          <Action
-                            disabled={busy}
-                            onClick={() =>
-                              void runPreview({ compensates: tx.id })
-                            }
-                          >
-                            <Undo2 size={14} />
-                            {t("Preview rollback", "Rücknahme prüfen")}
-                          </Action>
-                        )}
+                            >
+                              <Undo2 size={14} />
+                              {t("Preview rollback", "Rücknahme prüfen")}
+                            </Action>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -933,23 +1182,23 @@ export function PlacementPanel({ view }: { view: AccountView | null }) {
         <div className="stats compact">
           <Stat
             label={t("Matched", "Übereinstimmend")}
-            value={landing.counts.matches}
+            value={landing.counts.matches.toLocaleString()}
           />
           <Stat
             label={t("Elsewhere", "Woanders")}
-            value={landing.counts.elsewhere}
+            value={landing.counts.elsewhere.toLocaleString()}
           />
           <Stat
             label={t("Additional folders", "Zusätzliche Ordner")}
-            value={landing.counts.additional_folders}
+            value={landing.counts.additional_folders.toLocaleString()}
           />
           <Stat
             label={t("Uncheckable", "Nicht prüfbar")}
-            value={landing.counts.uncheckable}
+            value={landing.counts.uncheckable.toLocaleString()}
           />
           <Stat
             label={t("Total messages", "Nachrichten gesamt")}
-            value={rows.length}
+            value={rows.length.toLocaleString()}
           />
         </div>
         <div className="table-scroll">
@@ -982,7 +1231,7 @@ export function PlacementPanel({ view }: { view: AccountView | null }) {
                     <td>{predicted}</td>
                     <td>{row.observed.join(", ") || "—"}</td>
                     <td>
-                      <span className="badge">{status}</span>
+                      <StatusBadge status={status} />
                     </td>
                   </tr>
                 );
@@ -991,23 +1240,27 @@ export function PlacementPanel({ view }: { view: AccountView | null }) {
           </table>
         </div>
         {rows.length > perPage && (
-          <div className="actions">
-            <Action
-              disabled={page === 0}
-              onClick={() => setPage((p) => Math.max(0, p - 1))}
-            >
-              {t("Previous", "Zurück")}
-            </Action>
-            <span className="help">
+          <div className="pagination">
+            <span className="muted">
               {page * perPage + 1}–{Math.min((page + 1) * perPage, rows.length)}{" "}
               / {rows.length}
             </span>
-            <Action
-              disabled={(page + 1) * perPage >= rows.length}
-              onClick={() => setPage((p) => p + 1)}
-            >
-              {t("Next", "Weiter")}
-            </Action>
+            <div>
+              <Action
+                size="compact"
+                disabled={page === 0}
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+              >
+                {t("Previous", "Zurück")}
+              </Action>
+              <Action
+                size="compact"
+                disabled={(page + 1) * perPage >= rows.length}
+                onClick={() => setPage((p) => p + 1)}
+              >
+                {t("Next", "Weiter")}
+              </Action>
+            </div>
           </div>
         )}
       </section>

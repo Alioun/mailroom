@@ -127,7 +127,7 @@ export async function unlockVault(password: string): Promise<AccountStatus> { re
 export async function lockVault(): Promise<AccountStatus> { return vaultPost('lock', {}) }
 export async function changeVaultPassword(current: string, password: string, confirmation: string): Promise<AccountStatus> { return vaultPost('change-password', { current, password, confirmation }) }
 export async function setWriteMode(live_writes: boolean, confirmed = false): Promise<AccountStatus> { return accountStatus.parse(await accountPost('write-mode', { live_writes, confirmed })) }
-const takeoutSummary = z.object({ summary: z.object({ imported: z.number(), skipped: z.number(), folders: z.number(), labels: z.number(), folder: z.string() }) })
+const takeoutSummary = z.object({ summary: z.object({ imported: z.number(), skipped: z.number(), folders: z.number(), labels: z.number(), folder: z.string(), truncated: z.boolean().default(false) }) })
 export type TakeoutSummary = z.infer<typeof takeoutSummary>['summary']
 export async function importTakeout(account: string, path: string): Promise<TakeoutSummary> { return takeoutSummary.parse(await accountPost('takeout', { account, path })).summary }
 export async function syntheticAccount(gmail = false): Promise<AccountStatus> { return accountStatus.parse(await accountPost(gmail ? 'synthetic-gmail' : 'synthetic', {})) }
@@ -252,7 +252,7 @@ export async function recoverUnsubscribe(account: string, entry: string, as_of: 
 export async function resolveUnsubscribe(account: string, entry: string, outcome: Resolution, as_of: number): Promise<UnsubscribeView> { return unsubscribeView.parse(await accountPost('unsubscribe', { account, command: { action: 'resolve', entry, resolution: outcome, as_of } })) }
 
 const subscriptionReviewInput = unsubscribeInput.extend({ selections: z.array(z.object({ account: z.string(), subscription: z.string(), method: unsubscribeMethod })) })
-const subscriptionReviewView = z.object({ accounts: z.array(unsubscribeView.extend({ account: z.string() })), synthetic: z.boolean(), review_available: z.boolean(), q20_scope: z.literal('separate_subscriptions') })
+const subscriptionReviewView = z.object({ accounts: z.array(unsubscribeView.extend({ account: z.string() })), recovering_accounts: z.array(z.string()).default([]), synthetic: z.boolean(), review_available: z.boolean(), q20_scope: z.literal('separate_subscriptions') })
 const subscriptionReviewPreview = z.object({ confirmation: exactConfirmation, previews: z.array(unsubscribePreview), receipt: z.string().length(64), confirmation_action: z.string(), local_mail_confirmation: z.string().nullable() })
 export type SubscriptionReviewInput = z.infer<typeof subscriptionReviewInput>
 export type SubscriptionReviewView = z.infer<typeof subscriptionReviewView>

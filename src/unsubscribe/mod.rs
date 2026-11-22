@@ -530,8 +530,8 @@ pub(crate) fn observe(
     Ok(())
 }
 
-/// Records the owner's finding for an uncertain local unsubscribe message. Nothing
-/// is sent again; a message recorded as not sent needs a fresh review.
+/// Records the owner's finding for an uncertain or interrupted unsubscribe action.
+/// Nothing is sent again; an action recorded as not sent needs a fresh review.
 pub(crate) fn resolve(
     state: &mut AccountState,
     id: &str,
@@ -543,11 +543,16 @@ pub(crate) fn resolve(
         .iter_mut()
         .find(|e| e.id == id)
         .ok_or("Unknown unsubscribe action")?;
-    if entry.status != Status::Uncertain || entry.method != Method::LocalMail {
-        return Err("Only an uncertain unsubscribe message can be resolved".into());
+    if !matches!(entry.status, Status::Uncertain | Status::Intent)
+        || !matches!(entry.method, Method::LocalMail | Method::OneClick)
+    {
+        return Err("Only an uncertain or interrupted unsubscribe action can be resolved".into());
     }
     entry.status = match resolution {
-        crate::send::Resolution::Sent => Status::Submitted,
+        crate::send::Resolution::Sent => match entry.method {
+            Method::OneClick => Status::HttpObserved,
+            _ => Status::Submitted,
+        },
         crate::send::Resolution::NotSent => Status::NotSent,
     };
     entry.resolved = Some(resolution);

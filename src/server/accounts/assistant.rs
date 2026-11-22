@@ -19,6 +19,8 @@ enum Action {
     },
     Launch {
         request_id: String,
+        #[serde(default)]
+        force_new: bool,
     },
     Dismiss {
         request_id: String,
@@ -29,7 +31,8 @@ enum Action {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::server) struct Request {
-    account: AccountId,
+    #[serde(default)]
+    account: Option<AccountId>,
     command: Action,
 }
 
@@ -111,15 +114,15 @@ fn spawn_launch(
         let folder = inbox.exchange_path(&id);
         let result = (|| {
             let executable = std::env::current_exe().map_err(|_| t3::Failure {
-                message: "Assistant executable unavailable",
+                message: "Assistant executable unavailable".into(),
                 uncertain: !allow_create,
             })?;
             let prompt = t3::prompt(&executable, &folder).map_err(|message| t3::Failure {
-                message,
+                message: message.into(),
                 uncertain: !allow_create,
             })?;
             let client = client.map_err(|message| t3::Failure {
-                message,
+                message: message.into(),
                 uncertain: !allow_create,
             })?;
             client.launch_with_config(
@@ -136,7 +139,7 @@ fn spawn_launch(
                 thread_link: thread.link,
             },
             Err(failure) => Launch::Failed {
-                error: failure.message.into(),
+                error: failure.message,
                 uncertain: failure.uncertain,
             },
         };
@@ -172,7 +175,8 @@ pub(in crate::server) async fn handle(
             return Ok(json!({"config": saved}));
         }
         let config = t3::load_config(&repo.paths.data);
-        let account = repo.load(&request.account).map_err(|e| e.to_string())?;
+        let account_id = request.account.ok_or_else(|| "Account is required".to_owned())?;
+        let account = repo.load(&account_id).map_err(|e| e.to_string())?;
         let inbox = Inbox::open(&repo.paths.data, account.id.as_str())?;
         match request.command {
             Action::ConfigGet {} | Action::ConfigSet { .. } => unreachable!(),
@@ -191,10 +195,11 @@ pub(in crate::server) async fn handle(
                 let executable = std::env::current_exe().map_err(|_| "Assistant executable unavailable")?;
                 inbox.prepare(summary, &text, &executable)?;
             }
-            Action::Launch { request_id } => {
+            Action::Launch { request_id, force_new } => {
                 let mut record = inbox.record(&request_id)?;
                 let allow_create = match record.launch {
                     Launch::Prepared | Launch::Failed { uncertain: false, .. } => true,
+                    Launch::Failed { uncertain: true, .. } if force_new => true,
                     Launch::Launching | Launch::Failed { uncertain: true, .. } => false,
                     Launch::Launched { .. } => return Ok(json!({"requests": inbox.views()?, "config": config})),
                 };

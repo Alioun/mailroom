@@ -48,13 +48,11 @@ impl AppState {
     }
 }
 
-/// While the vault is locked, every account route but status answers 423 before its handler.
+/// While the vault is locked, every account route but status and events answers 423 before its handler.
 async fn vault_gate(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
     let path = request.uri().path();
-    if path.starts_with("/api/accounts/")
-        && path != "/api/accounts/status"
-        && state.accounts.vault_locked()
-    {
+    let passive = path == "/api/accounts/status" || path == "/api/accounts/events";
+    if path.starts_with("/api/accounts/") && !passive && state.accounts.vault_locked() {
         return (
             StatusCode::LOCKED,
             Json(json!({
@@ -63,6 +61,9 @@ async fn vault_gate(State(state): State<Arc<AppState>>, request: Request, next: 
             })),
         )
             .into_response();
+    }
+    if path.starts_with("/api/") && !passive && path != "/api/session" {
+        state.accounts.touch_activity();
     }
     next.run(request).await
 }
@@ -300,9 +301,16 @@ fn router(state: Arc<AppState>) -> Router {
             post(accounts::subscription_review::handle),
         )
         .route("/api/accounts/status", get(accounts::status))
+        .route("/api/accounts/events", get(accounts::events::handle))
+        .route("/api/accounts/overview", post(accounts::overview::handle))
         .route("/api/accounts/list", post(accounts::list))
         .route("/api/accounts/lifecycle", post(accounts::lifecycle::handle))
         .route("/api/accounts/recovery", post(accounts::recovery::handle))
+        .route(
+            "/api/accounts/recovery/import",
+            post(accounts::recovery::import_bundle)
+                .layer(DefaultBodyLimit::max(RECOVERY_IMPORT_BODY_LIMIT)),
+        )
         .route("/api/accounts/connect", post(accounts::connect))
         .route("/api/accounts/reconnect", post(accounts::web::reconnect))
         .route(
@@ -326,6 +334,11 @@ fn router(state: Arc<AppState>) -> Router {
             post(accounts::web::change_password).layer(DefaultBodyLimit::max(VAULT_BODY_LIMIT)),
         )
         .route("/api/accounts/write-mode", post(accounts::web::write_mode))
+        .route(
+            "/api/accounts/safety-settings",
+            post(accounts::web::safety_settings),
+        )
+        .route("/api/accounts/pick-file", post(accounts::web::pick_file))
         .route("/api/accounts/takeout", post(accounts::web::takeout))
         .route("/api/accounts/synthetic", post(accounts::synthetic))
         .route(
@@ -394,6 +407,7 @@ fn router(state: Arc<AppState>) -> Router {
 }
 
 const VAULT_BODY_LIMIT: usize = 16 * 1024;
+const RECOVERY_IMPORT_BODY_LIMIT: usize = 18 * 1024 * 1024;
 
 pub async fn run() -> std::io::Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -415,7 +429,16 @@ pub async fn run() -> std::io::Result<()> {
     } else {
         AppState::new(synthetic)
     };
+    let shared = Arc::new(state);
+    let sweeper = shared.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            sweeper.accounts.enforce_timeouts();
+        }
+    });
     let listener = tokio::net::TcpListener::bind(ADDRESS).await?;
     println!("mailroom local interface: {ORIGIN}");
-    axum::serve(listener, router(Arc::new(state))).await
+    axum::serve(listener, router(shared)).await
 }

@@ -512,17 +512,24 @@ try {
       exact: true,
     })
     .click();
-  await page.route("**/api/accounts/status", async (route) => {
-    const response = await route.fetch();
-    const failedStatus = await response.json();
-    failedStatus.job = {
+  let mockedDelivered = false;
+  await page.route("**/api/accounts/events*", async (route) => {
+    if (mockedDelivered) {
+      await route.continue();
+      return;
+    }
+    mockedDelivered = true;
+    const response = await route.fetch({ url: `${origin}/api/accounts/events` });
+    const payload = await response.json();
+    payload.status.job = {
       operation: "connect",
       account: secondAccount,
       progress: { state: "failed", saved: 0, folders: 0 },
       error: "invented failure",
     };
-    await route.fulfill({ json: failedStatus });
+    await route.fulfill({ json: payload });
   });
+  await api("write-mode", { live_writes: false });
   await page
     .getByRole("button", { name: "Connection settings", exact: true })
     .click();
@@ -661,7 +668,7 @@ try {
   check(
     "browser shares masked summary, real MCP read/submit arrives automatically, Gmail hides Sieve deploy, and Base UI sub-tabs support arrow-key navigation",
   );
-  // Exercise unified Organize views (Backlog, Invoices, Subscriptions, Addresses & wind-down)
+  // Exercise unified Organize views (Backlog, Invoices, Subscriptions, Addresses & wind-down, Activity & undo)
   await navigate("Backlog");
   await page.getByRole("heading", { name: "Backlog", exact: true }).waitFor();
   await navigate("Invoices");
@@ -672,11 +679,84 @@ try {
   await page
     .getByRole("heading", { name: "Addresses & wind-down", exact: true })
     .waitFor();
-  for (const sub of ["Gmail forwarding", "Gmail wind-down", "Address ledger"]) {
+  for (const sub of ["Gmail forwarding", "Account wind-down", "Address ledger"]) {
     await page.getByRole("tab", { name: sub, exact: true }).click();
   }
-  check("unified Backlog, Invoices, Subscriptions, and Addresses & wind-down views render cleanly");
-  // Exercise Settings: Safety Mode toggle (shared in-place modal), Takeout .mbox import, T3 config
+  await navigate("Activity & undo");
+  await page
+    .getByRole("heading", { name: "Activity & undo", exact: true })
+    .waitFor();
+  await page.getByText("Account health", { exact: true }).waitFor();
+  await page.getByText("Recent actions & undo trail", { exact: true }).waitFor();
+  check("unified Backlog, Invoices, Subscriptions, Addresses & wind-down, and Activity & undo views render cleanly");
+  // Exercise Overview cross-account health strip (2 accounts connected)
+  await navigate("Overview");
+  await page.getByText("All connected accounts", { exact: true }).waitFor();
+  check("Overview shows cross-account health strip when multiple accounts are connected");
+  // Exercise Dark Mode toggle + automated WCAG AA contrast audit in both Light and Dark modes
+  async function auditThemeContrast(expectedTheme) {
+    await page.waitForTimeout(250);
+    const result = await page.evaluate((theme) => {
+      function parseRgb(str) {
+        const m = str && str.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([0-9.]+))?\)/);
+        if (!m) return null;
+        return [Number(m[1]), Number(m[2]), Number(m[3]), m[4] === undefined ? 1 : Number(m[4])];
+      }
+      function lum([r, g, b]) {
+        const s = [r, g, b].map((v) => {
+          const c = v / 255;
+          return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+        });
+        return 0.2126 * s[0] + 0.7152 * s[1] + 0.0722 * s[2];
+      }
+      function contrast(a, b) {
+        const la = lum(a);
+        const lb = lum(b);
+        return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+      }
+      function effectiveBg(el) {
+        let cur = el;
+        while (cur && cur !== document.documentElement) {
+          const bg = parseRgb(getComputedStyle(cur).backgroundColor);
+          if (bg && bg[3] > 0.2) return bg;
+          cur = cur.parentElement;
+        }
+        return parseRgb(getComputedStyle(document.documentElement).backgroundColor) || [255, 255, 255, 1];
+      }
+      const actualTheme = document.documentElement.dataset.theme;
+      const samples = [];
+      for (const sel of ["h1", ".muted", ".nav-item.active", ".readonly-badge", ".workbench-footer"]) {
+        const el = document.querySelector(sel);
+        if (!el) continue;
+        const fg = parseRgb(getComputedStyle(el).color);
+        const bg = effectiveBg(el);
+        if (fg && bg) samples.push({ sel, ratio: Number(contrast(fg, bg).toFixed(2)) });
+      }
+      return { actualTheme, expectedTheme: theme, samples };
+    }, expectedTheme);
+    assert.equal(result.actualTheme, expectedTheme);
+    for (const sample of result.samples) {
+      assert.ok(
+        sample.ratio >= 4.5,
+        `WCAG AA contrast failed in ${expectedTheme} mode for ${sample.sel}: ${sample.ratio}:1`,
+      );
+    }
+  }
+  // Cycle Auto -> Light -> Dark
+  await page.locator(".theme-toggle").click();
+  await auditThemeContrast("light");
+  await page.locator(".theme-toggle").click();
+  await auditThemeContrast("dark");
+  await page.screenshot({
+    path: join(artifacts, "overview-dark.png"),
+    fullPage: true,
+  });
+  // Return to Light mode for remaining checks
+  await page.locator(".theme-toggle").click();
+  await page.locator(".theme-toggle").click();
+  await auditThemeContrast("light");
+  check("Dark and Light modes pass WCAG 2.1 AA contrast checks (>= 4.5:1) across key text and chrome");
+  // Exercise Settings: Safety Mode modal + countdown + timers, Recovery bundle upload, Takeout .mbox import, T3 config
   await navigate("Settings");
   const settingsRegion = page.getByRole("region", { name: "Settings" });
   await settingsRegion
@@ -691,11 +771,12 @@ try {
     .getByRole("button", { name: "Enable live writes", exact: true })
     .click();
   await page.getByRole("dialog").waitFor({ state: "hidden" });
+  await page.locator(".badge-countdown").waitFor();
   await settingsRegion
-    .getByRole("button", { name: "Return to read-only", exact: true })
+    .getByRole("button", { name: "Manage / return to read-only", exact: true })
     .waitFor();
   await settingsRegion
-    .getByRole("button", { name: "Return to read-only", exact: true })
+    .getByRole("button", { name: "Manage / return to read-only", exact: true })
     .click();
   await page
     .getByRole("dialog")
@@ -704,6 +785,16 @@ try {
   await page.getByRole("dialog").waitFor({ state: "hidden" });
   await settingsRegion
     .getByRole("button", { name: "Enable live writes for this session", exact: true })
+    .waitFor();
+  // Upload a recovery bundle file via the Settings dropzone file input
+  const sampleBundleId = "a".repeat(64);
+  const sampleBundlePath = join(temp, `${sampleBundleId}.bundle`);
+  await writeFile(sampleBundlePath, "synthetic-encrypted-bundle-payload");
+  await settingsRegion
+    .locator('input[type="file"][accept=".bundle,.jwe"]')
+    .setInputFiles(sampleBundlePath);
+  await settingsRegion
+    .getByText(new RegExp(`Imported recovery bundle ${sampleBundleId}\\.bundle`))
     .waitFor();
   const mboxPath = join(temp, "sample-takeout.mbox");
   await writeFile(
@@ -741,7 +832,53 @@ try {
   await settingsRegion
     .getByText("T3 assistant configuration saved for all accounts.", { exact: true })
     .waitFor();
-  check("Settings Safety Mode modal, local Takeout .mbox import, and T3 provider/model config work end-to-end");
+  check("Settings Safety Mode countdown, recovery bundle upload, Takeout .mbox import, and T3 config work end-to-end");
+  // Automated DOM accessibility audit across all views (single h1, accessible names, landmarks, tablist ARIA)
+  async function auditAccessibility(contextName) {
+    const issues = await page.evaluate(() => {
+      const problems = [];
+      const visible = (el) => {
+        if (!el || el.closest('[hidden], [aria-hidden="true"]')) return false;
+        const st = getComputedStyle(el);
+        return st.display !== "none" && st.visibility !== "hidden" && el.getBoundingClientRect().width > 0;
+      };
+      const h1s = [...document.querySelectorAll("h1")].filter(visible);
+      if (h1s.length !== 1) problems.push(`expected 1 visible h1, found ${h1s.length}`);
+      for (const btn of [...document.querySelectorAll("button")].filter(visible)) {
+        const name = (btn.getAttribute("aria-label") || btn.textContent || "").trim();
+        if (!name) problems.push(`unlabeled button: ${btn.outerHTML.slice(0, 80)}`);
+      }
+      for (const inp of [...document.querySelectorAll("input:not([type=hidden]):not([type=file]), textarea")].filter(visible)) {
+        const labelled =
+          Boolean(inp.getAttribute("aria-label")) ||
+          Boolean(inp.getAttribute("aria-labelledby")) ||
+          Boolean(inp.closest("label")) ||
+          (inp.id && Boolean(document.querySelector(`label[for="${inp.id}"]`)));
+        if (!labelled) problems.push(`unlabeled input: ${inp.outerHTML.slice(0, 80)}`);
+      }
+      for (const tab of [...document.querySelectorAll('[role="tab"]')].filter(visible)) {
+        if (!tab.hasAttribute("aria-selected")) problems.push(`tab missing aria-selected`);
+      }
+      return problems;
+    });
+    assert.deepEqual(issues, [], `A11y issues on ${contextName}: ${issues.join("; ")}`);
+  }
+  for (const name of [
+    "Overview",
+    "Senders",
+    "Recommendations",
+    "Rules & deploy",
+    "Backlog",
+    "Invoices",
+    "Subscriptions",
+    "Addresses & wind-down",
+    "Activity & undo",
+    "Settings",
+  ]) {
+    await navigate(name);
+    await auditAccessibility(name);
+  }
+  check("automated accessibility audit passes across all 10 workbench views");
   await page.setViewportSize({ width: 320, height: 900 });
   await page
     .getByRole("button", { name: "Open navigation", exact: true })
@@ -799,6 +936,7 @@ try {
       "Invoices",
       "Subscriptions",
       "Addresses & wind-down",
+      "Activity & undo",
       "Settings",
     ]) {
       await navigate(name);

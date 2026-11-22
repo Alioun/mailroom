@@ -1,0 +1,382 @@
+/* WCAG 2.1 AA Dark Theme — supports explicit [data-theme="dark"] and OS prefers-color-scheme */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  color: #e6f0ee;
+  background: #0d1413;
+  --accent: #38c7b3;
+  --accent-strong: #27a996;
+  --accent-soft: #13312d;
+  --ink: #e6f0ee;
+  --muted: #a1b8b3;
+  --border: #263a37;
+  --line: #263a37;
+  --control-border: #486460;
+  --surface: #141f1e;
+  --canvas: #0d1413;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    color: #e6f0ee;
+    background: #0d1413;
+    --accent: #38c7b3;
+    --accent-strong: #27a996;
+    --accent-soft: #13312d;
+    --ink: #e6f0ee;
+    --muted: #a1b8b3;
+    --border: #263a37;
+    --line: #263a37;
+    --control-border: #486460;
+    --surface: #141f1e;
+    --canvas: #0d1413;
+  }
+}
+
+/* Shared dark-mode surface & contrast rules */
+:root[data-theme="dark"] body,
+:root[data-theme="dark"] .workbench,
+:root[data-theme="dark"] .main-shell {
+  background: var(--canvas);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .sidebar,
+:root[data-theme="dark"] .topbar,
+:root[data-theme="dark"] .panel,
+:root[data-theme="dark"] .stat,
+:root[data-theme="dark"] .dialog,
+:root[data-theme="dark"] .select-popup,
+:root[data-theme="dark"] .setup-card,
+:root[data-theme="dark"] .account-health-card,
+:root[data-theme="dark"] .activity-row,
+:root[data-theme="dark"] .sticky-action-bar {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .topbar {
+  background: rgba(20, 31, 30, 0.94);
+}
+
+:root[data-theme="dark"] .workbench.live-armed .topbar {
+  background: #2c1e0c;
+  border-bottom-color: #7c4d14;
+}
+
+:root[data-theme="dark"] input,
+:root[data-theme="dark"] textarea,
+:root[data-theme="dark"] select,
+:root[data-theme="dark"] .select-trigger,
+:root[data-theme="dark"] .search-input,
+:root[data-theme="dark"] .code-editor {
+  background: #0f1918;
+  border-color: var(--control-border);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] input::placeholder,
+:root[data-theme="dark"] textarea::placeholder {
+  color: #84a09a;
+}
+
+:root[data-theme="dark"] .button {
+  background: #1a2927;
+  border-color: var(--control-border);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .button:hover:not(:disabled) {
+  background: #223533;
+  border-color: var(--accent);
+}
+
+:root[data-theme="dark"] .button.primary {
+  background: #147d70;
+  border-color: #147d70;
+  color: #ffffff;
+}
+
+:root[data-theme="dark"] .button.primary:hover:not(:disabled) {
+  background: #106659;
+  border-color: #106659;
+}
+
+:root[data-theme="dark"] .button.warning {
+  background: #b45309;
+  border-color: #b45309;
+  color: #ffffff;
+}
+
+:root[data-theme="dark"] .button.danger {
+  background: #b91c1c;
+  border-color: #b91c1c;
+  color: #ffffff;
+}
+
+:root[data-theme="dark"] .button.danger-outline {
+  background: #2a1414;
+  border-color: #b94a4a;
+  color: #fecaca;
+}
+
+:root[data-theme="dark"] .button.danger-outline:hover:not(:disabled) {
+  background: #3a1a1a;
+  border-color: #dc6868;
+}
+
+:root[data-theme="dark"] .nav-item {
+  color: #cfe0dd;
+}
+
+:root[data-theme="dark"] .nav-item:hover {
+  background: #1b2c2a;
+  color: #ffffff;
+}
+
+:root[data-theme="dark"] .nav-item.active {
+  background: #14332f;
+  color: #6ee7d4;
+}
+
+:root[data-theme="dark"] .nav-section-label,
+:root[data-theme="dark"] .eyebrow,
+:root[data-theme="dark"] .muted,
+:root[data-theme="dark"] .help,
+:root[data-theme="dark"] .breadcrumb,
+:root[data-theme="dark"] .workbench-footer,
+:root[data-theme="dark"] .local-status,
+:root[data-theme="dark"] .local-status small,
+:root[data-theme="dark"] th {
+  color: var(--muted);
+}
+
+:root[data-theme="dark"] .local-status {
+  background: #101b1a;
+  border-color: var(--border);
+}
+
+:root[data-theme="dark"] .readonly-badge {
+  background: #132c29;
+  border-color: #295c54;
+  color: #8ee5d8;
+}
+
+:root[data-theme="dark"] .readonly-badge.live {
+  background: #b45309;
+  border-color: #d97706;
+  color: #ffffff;
+}
+
+:root[data-theme="dark"] .badge {
+  background: #1c2e2c;
+  color: #d4e6e2;
+  border-color: #304945;
+}
+
+:root[data-theme="dark"] .badge.success {
+  background: #113026;
+  color: #86efac;
+  border-color: #1f5c47;
+}
+
+:root[data-theme="dark"] .badge.info {
+  background: #132840;
+  color: #93c5fd;
+  border-color: #254a73;
+}
+
+:root[data-theme="dark"] .badge.warning {
+  background: #38250b;
+  color: #fcd34d;
+  border-color: #7c4d14;
+}
+
+:root[data-theme="dark"] .badge.danger {
+  background: #3a1616;
+  color: #fca5a5;
+  border-color: #7f2a2a;
+}
+
+:root[data-theme="dark"] .badge.subtle {
+  background: #1a2625;
+  color: #b4c8c4;
+  border-color: #2c3f3d;
+}
+
+:root[data-theme="dark"] .notice {
+  background: #112d25;
+  border-color: #225949;
+  color: #d1fae5;
+}
+
+:root[data-theme="dark"] .notice.info {
+  background: #132438;
+  border-color: #26486e;
+  color: #dbeafe;
+}
+
+:root[data-theme="dark"] .notice.warning {
+  background: #33220c;
+  border-color: #7c4d14;
+  color: #fef3c7;
+}
+
+:root[data-theme="dark"] .notice.error {
+  background: #361414;
+  border-color: #7f2929;
+  color: #fee2e2;
+}
+
+:root[data-theme="dark"] .details {
+  background: #111c1b;
+  border-color: var(--border);
+}
+
+:root[data-theme="dark"] .details > summary {
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .details > summary:hover {
+  background: #192826;
+}
+
+:root[data-theme="dark"] .subtabs {
+  background: #101b1a;
+  border-color: var(--border);
+}
+
+:root[data-theme="dark"] .subtab {
+  color: var(--muted);
+}
+
+:root[data-theme="dark"] .subtab[aria-selected="true"],
+:root[data-theme="dark"] .subtab[data-active] {
+  background: #1b2f2d;
+  color: #e6f0ee;
+  border-color: #2f4b47;
+}
+
+:root[data-theme="dark"] table,
+:root[data-theme="dark"] td,
+:root[data-theme="dark"] th {
+  border-color: var(--border);
+}
+
+:root[data-theme="dark"] thead th {
+  background: #101a19;
+}
+
+:root[data-theme="dark"] tbody tr:hover {
+  background: #192726;
+}
+
+:root[data-theme="dark"] .select-item[data-highlighted] {
+  background: #1c322f;
+  color: #ffffff;
+}
+
+:root[data-theme="dark"] .checkbox {
+  background: #0f1918;
+  border-color: var(--control-border);
+}
+
+:root[data-theme="dark"] .checkbox[data-checked] {
+  background: #147d70;
+  border-color: #147d70;
+  color: #ffffff;
+}
+
+:root[data-theme="dark"] pre,
+:root[data-theme="dark"] code,
+:root[data-theme="dark"] .diff-block,
+:root[data-theme="dark"] .inline-note {
+  background: #0f1918;
+  border-color: var(--border);
+  color: #d7e8e4;
+}
+
+:root[data-theme="dark"] .activity-strip {
+  background: #132825;
+  border-color: #285750;
+  color: #e6f0ee;
+}
+
+:root[data-theme="dark"] .danger-zone {
+  background: #281313;
+  border-color: #7f2929;
+}
+
+:root[data-theme="dark"] .danger-zone h3 {
+  color: #fca5a5;
+}
+
+:root[data-theme="dark"] .vault-warning {
+  background: #33220c;
+  border-color: #7c4d14;
+  color: #fef3c7;
+}
+
+:root[data-theme="dark"] .guide-steps li {
+  background: #111c1b;
+  border-color: var(--border);
+}
+
+:root[data-theme="dark"] .empty-icon,
+:root[data-theme="dark"] .setup-icon,
+:root[data-theme="dark"] .sparkle-icon {
+  background: #16302c;
+  color: #6ee7d4;
+}
+
+:root[data-theme="dark"] .icon-button {
+  color: var(--muted);
+}
+
+:root[data-theme="dark"] .icon-button:hover {
+  background: #1e312f;
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .brand {
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .readiness-bar,
+:root[data-theme="dark"] .compact-bar-track,
+:root[data-theme="dark"] .bar-track {
+  background: #1e312f;
+}
+
+:root[data-theme="dark"] .dropzone {
+  background: #101b1a;
+  border-color: var(--control-border);
+}
+
+:root[data-theme="dark"] .dropzone.dragging {
+  background: #13312d;
+  border-color: var(--accent);
+}
+
+:root[data-theme="dark"] .filter-chip {
+  background: #172524;
+  border-color: var(--border);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .filter-chip.active {
+  background: #147d70;
+  border-color: #147d70;
+  color: #ffffff;
+}
+
+:root[data-theme="dark"] .domain-option,
+:root[data-theme="dark"] .card-item,
+:root[data-theme="dark"] .proposal-card,
+:root[data-theme="dark"] .run-card,
+:root[data-theme="dark"] .provider-card {
+  background: #111c1b;
+  border-color: var(--border);
+  color: var(--ink);
+}

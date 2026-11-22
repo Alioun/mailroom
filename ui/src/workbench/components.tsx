@@ -1,4 +1,11 @@
-import { createContext, useContext, useId, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useId,
+  useRef,
+  useState,
+} from "react";
 import type { ReactNode, ComponentProps } from "react";
 import { Button } from "@base-ui/react/button";
 import { Dialog } from "@base-ui/react/dialog";
@@ -21,7 +28,10 @@ export type Language = "en" | "de";
 export const LanguageContext = createContext<Language>("en");
 export function useCopy() {
   const language = useContext(LanguageContext);
-  return (en: string, de: string) => (language === "de" ? de : en);
+  return useCallback(
+    (en: string, de: string) => (language === "de" ? de : en),
+    [language],
+  );
 }
 export function Action({
   primary = false,
@@ -339,10 +349,23 @@ export function SubTabs<T extends string>({
   );
 }
 
+export function formatCountdown(totalSecs: number): string {
+  const clamped = Math.max(0, Math.floor(totalSecs));
+  const hours = Math.floor(clamped / 3600);
+  const mins = Math.floor((clamped % 3600) / 60);
+  const secs = clamped % 60;
+  if (hours > 0) {
+    return `${hours}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  }
+  return `${mins}:${String(secs).padStart(2, "0")}`;
+}
+
 export function ArmLiveWritesModal({
   open,
   onOpenChange,
   liveWrites,
+  expiresInSecs = null,
+  timeoutSecs = 900,
   busy,
   runningJob,
   error,
@@ -351,20 +374,32 @@ export function ArmLiveWritesModal({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   liveWrites: boolean;
+  expiresInSecs?: number | null;
+  timeoutSecs?: number;
   busy: boolean;
   runningJob?: boolean;
   error?: string;
-  onConfirm: (enable: boolean) => Promise<void>;
+  onConfirm: (enable: boolean, timeoutSecs?: number) => Promise<void>;
 }) {
   const t = useCopy();
   const [checked, setChecked] = useState(false);
+  const [duration, setDuration] = useState(String(timeoutSecs));
 
   function handleOpenChange(next: boolean) {
     if (!busy) {
+      if (next) setDuration(String(timeoutSecs));
       if (!next) setChecked(false);
       onOpenChange(next);
     }
   }
+
+  const durationOptions = [
+    { value: "300", label: t("5 minutes", "5 Minuten") },
+    { value: "900", label: t("15 minutes (recommended)", "15 Minuten (empfohlen)") },
+    { value: "1800", label: t("30 minutes", "30 Minuten") },
+    { value: "3600", label: t("60 minutes", "60 Minuten") },
+    { value: "0", label: t("Until locked or quit", "Bis Sperre oder Beenden") },
+  ];
 
   return (
     <Modal
@@ -372,24 +407,34 @@ export function ArmLiveWritesModal({
       onOpenChange={handleOpenChange}
       title={
         liveWrites
-          ? t("Return to read-only mode?", "Zurück in den Nur-Lese-Modus?")
+          ? t("Manage live writes mode", "Live-Schreibzugriff verwalten")
           : t("Enable live provider writes?", "Live-Schreibzugriff aktivieren?")
       }
       description={
         liveWrites
           ? t(
-              "Disarming immediately blocks new provider writes across all accounts. You can re-enable Live writes anytime.",
-              "Das Deaktivieren sperrt sofort neue Schreibzugriffe für alle Konten. Du kannst den Live-Schreibzugriff jederzeit wieder aktivieren.",
+              "Disarming immediately blocks new provider writes across all accounts. You can also extend the auto-disarm timer.",
+              "Das Deaktivieren sperrt sofort neue Schreibzugriffe für alle Konten. Du kannst den Auto-Deaktivierungs-Timer auch verlängern.",
             )
           : t(
-              "This unlocks live execution for ManageSieve deployment, IMAP folder creation, backlog moves/labels, SMTP invoice send-on, and external unsubscribe actions across all connected accounts until you lock the vault, return to read-only, or quit Mailroom.",
-              "Dies entsperrt Live-Ausführung für ManageSieve, IMAP-Ordneranlage, Bestandssortierung, SMTP-Rechnungsversand und externe Abmeldungen für alle verbundenen Konten, bis du den Tresor sperrst, auf Nur-Lese zurückstellst oder Mailroom beendest.",
+              "This unlocks live execution for ManageSieve deployment, IMAP folder creation, backlog moves/labels, SMTP invoice send-on, and external unsubscribe actions across all connected accounts until the timer expires, you lock the vault, or quit Mailroom.",
+              "Dies entsperrt Live-Ausführung für ManageSieve, IMAP-Ordneranlage, Bestandssortierung, SMTP-Rechnungsversand und externe Abmeldungen für alle verbundenen Konten, bis der Timer abläuft, der Tresor gesperrt oder Mailroom beendet wird.",
             )
       }
     >
       <div className="page-stack">
         {liveWrites ? (
           <>
+            {expiresInSecs !== null && (
+              <Notice tone="info">
+                <span>
+                  {t(
+                    `Auto-disarms in ${formatCountdown(expiresInSecs)} (paused while a job is running).`,
+                    `Automatische Deaktivierung in ${formatCountdown(expiresInSecs)} (pausiert während laufender Aktionen).`,
+                  )}
+                </span>
+              </Notice>
+            )}
             {runningJob && (
               <Notice tone="warning">
                 <ShieldAlert size={16} />
@@ -402,8 +447,21 @@ export function ArmLiveWritesModal({
             {error && <Notice error>{error}</Notice>}
             <div className="dialog-actions">
               <Action onClick={() => handleOpenChange(false)} disabled={busy}>
-                {t("Keep live writes armed", "Live-Schreibzugriff behalten")}
+                {t("Keep armed", "Aktiv lassen")}
               </Action>
+              {timeoutSecs > 0 && (
+                <Action
+                  disabled={busy}
+                  onClick={async () => {
+                    await onConfirm(true, timeoutSecs);
+                  }}
+                >
+                  {t(
+                    `Reset timer (${Math.round(timeoutSecs / 60)}m)`,
+                    `Timer zurücksetzen (${Math.round(timeoutSecs / 60)} Min.)`,
+                  )}
+                </Action>
+              )}
               <Action
                 primary
                 disabled={busy}
@@ -419,6 +477,20 @@ export function ArmLiveWritesModal({
           </>
         ) : (
           <>
+            <Choice
+              label={t("Auto-disarm timer", "Auto-Deaktivierung")}
+              fieldLabel={t(
+                "Automatically return to read-only after",
+                "Automatisch zurück zu Nur-Lese nach",
+              )}
+              value={
+                durationOptions.some((o) => o.value === duration)
+                  ? duration
+                  : "900"
+              }
+              onChange={setDuration}
+              options={durationOptions}
+            />
             <CheckField checked={checked} onChange={setChecked}>
               {t(
                 "I understand that confirmed actions can modify my connected mail accounts. Every write still requires its own preview and confirmation.",
@@ -434,7 +506,7 @@ export function ArmLiveWritesModal({
                 tone="warning"
                 disabled={!checked || busy}
                 onClick={async () => {
-                  await onConfirm(true);
+                  await onConfirm(true, Number(duration));
                   setChecked(false);
                 }}
               >

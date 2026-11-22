@@ -657,7 +657,7 @@ export function Subscriptions({
               {selections.length}{" "}
               {t("subscriptions selected", "Abonnements ausgewählt")}
             </strong>
-            <span className="help" style={{ marginLeft: 10 }}>
+            <span className="help ml-sm">
               {hasExternalSelection
                 ? t(
                     "Includes external unsubscribe action(s)",

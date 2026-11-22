@@ -430,7 +430,7 @@ export function Assistant({
             </span>
           </div>
           {activeConfig && (
-            <div className="inline-note" style={{ marginTop: 8 }}>
+            <div className="inline-note mt-xs">
               <span>
                 {t("Active T3 model", "Aktives T3-Modell")}:{" "}
                 <code>
@@ -552,7 +552,7 @@ export function Assistant({
                 key={proposal.id}
               >
                 <div>
-                  <div className="actions" style={{ marginBottom: 4 }}>
+                  <div className="actions mb-xs">
                     <strong>
                       {proposal.proposal.recommendations[0]?.title}
                     </strong>
@@ -600,7 +600,7 @@ export function Assistant({
         wide
       >
         {activeConfig && (
-          <p className="help" style={{ marginBottom: 12 }}>
+          <p className="help mb-sm">
             {t("Will launch with", "Startet mit")}:{" "}
             <code>
               {activeConfig.provider} / {activeConfig.model}
@@ -640,7 +640,7 @@ export function Assistant({
           </Details>
         )}
         {summaryUpdating && summary && (
-          <p className="help" style={{ marginTop: 10 }}>
+          <p className="help mt-sm">
             <Busy>{t("Updating preview…", "Vorschau wird aktualisiert…")}</Busy>
           </p>
         )}

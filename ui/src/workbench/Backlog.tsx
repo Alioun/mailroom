@@ -7,7 +7,6 @@ import {
   RefreshCw,
   ShieldAlert,
   Square,
-  Undo2,
 } from "lucide-react";
 import {
   confirmProtocolBacklog,
@@ -22,13 +21,8 @@ import {
   previewProtocolBacklog,
   previewProtocolUndo,
   protocolAction,
-  resumeBacklog,
-  resumeBacklogUndo,
   sortingPost,
   startBacklog,
-  stopBacklog,
-  undoBacklog,
-  previewBacklogUndo,
 } from "../api";
 import type {
   Account,
@@ -36,12 +30,9 @@ import type {
   BacklogOptions,
   BacklogPreview,
   BacklogView,
-  ClosePreview,
   GmailPreview,
-  GmailUndo,
   GmailView,
   ProtocolPreview,
-  ProtocolUndo,
   ProtocolView,
 } from "../api";
 import { labelPreviewFor } from "../folder-provisioning-api";
@@ -52,19 +43,14 @@ import {
   Busy,
   CheckField,
   Choice,
-  Details,
   Empty,
-  Modal,
   Notice,
   Stat,
-  StatusBadge,
   useCopy,
 } from "./components";
-
-type PendingRunModal =
-  | { kind: "undo"; runId: string; preview: ProtocolUndo | GmailUndo }
-  | { kind: "resume"; runId: string; mode: "resume" | "resume_undo" }
-  | { kind: "close"; runId: string; preview: ClosePreview };
+import { BacklogRunModal } from "./backlog/BacklogRunModal";
+import type { PendingRunModal } from "./backlog/BacklogRunModal";
+import { BacklogRunsSection } from "./backlog/BacklogRunsSection";
 
 export function Backlog({
   account,
@@ -625,7 +611,7 @@ export function Backlog({
                   "Einige Ziel-Labels existieren in Gmail noch nicht:",
                 )}
               </strong>
-              <ul className="evidence-list" style={{ margin: "6px 0 0" }}>
+              <ul className="evidence-list list-compact">
                 {gmailPreview.missing_labels.map((m) => (
                   <li key={m.name}>
                     <code>{m.name}</code> ({m.messages.toLocaleString()}{" "}
@@ -807,332 +793,28 @@ export function Backlog({
         )}
       </section>
 
-      {runs.length > 0 && (
-        <section className="panel">
-          <h2>{t("Backlog runs and undo", "Bestandsläufe & Rücknahme")}</h2>
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>{t("Run", "Lauf")}</th>
-                  <th>{t("Status", "Status")}</th>
-                  <th className="numeric">{t("Changes", "Änderungen")}</th>
-                  <th>{t("Undo window", "Rücknahmefrist")}</th>
-                  <th>{t("Actions", "Aktionen")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {runs.map((run) => {
-                  const dl = deadlines.get(run.id);
-                  const canClose = closable.has(run.id) && !run.closed;
-                  const canResumeUndo =
-                    run.status === "undo_running" ||
-                    ((run.status === "uncertain" || run.status === "stopped") &&
-                      Boolean(run.undo_receipt));
-                  return (
-                    <tr key={run.id}>
-                      <td>
-                        <code>{run.id.slice(0, 12)}</code>
-                      </td>
-                      <td>
-                        <StatusBadge status={run.status} />
-                      </td>
-                      <td className="numeric">
-                        {run.plan.filing.changes.length.toLocaleString()}
-                      </td>
-                      <td>
-                        {run.closed
-                          ? t("Closed", "Abgeschlossen")
-                          : dl?.undo_until
-                            ? new Date(dl.undo_until * 1000).toLocaleDateString()
-                            : "—"}
-                      </td>
-                      <td>
-                        <div className="cell-actions">
-                          {(run.status === "running" ||
-                            run.status === "undo_running") && (
-                            <Action
-                              size="compact"
-                              tone="warning"
-                              disabled={busy}
-                              onClick={() => void stopActiveRun()}
-                            >
-                              <Square size={13} />
-                              {t("Stop", "Stoppen")}
-                            </Action>
-                          )}
-                          {(run.status === "uncertain" ||
-                            run.status === "stopped" ||
-                            run.status === "conflict") && (
-                            <Action
-                              size="compact"
-                              disabled={busy}
-                              onClick={async () => {
-                                setBusy(true);
-                                setError("");
-                                try {
-                                  await sortingPost(backlogKind, account.id, {
-                                    action: "reconcile",
-                                    run: run.id,
-                                  });
-                                  setMessage(
-                                    t(
-                                      "Run reconciled against live server.",
-                                      "Lauf mit dem Server abgeglichen.",
-                                    ),
-                                  );
-                                  await load();
-                                } catch (err) {
-                                  setError(
-                                    describeError(
-                                      err,
-                                      t(
-                                        "Reconciliation failed. Check connectivity and retry.",
-                                        "Abgleich fehlgeschlagen.",
-                                      ),
-                                    ),
-                                  );
-                                } finally {
-                                  setBusy(false);
-                                }
-                              }}
-                            >
-                              {t("Reconcile", "Abgleichen")}
-                            </Action>
-                          )}
-                          {run.status === "stopped" && !run.undo_receipt && (
-                            <Action
-                              size="compact"
-                              disabled={busy}
-                              onClick={() => {
-                                setRunModalConfirmed(false);
-                                setRunModal({
-                                  kind: "resume",
-                                  runId: run.id,
-                                  mode: "resume",
-                                });
-                              }}
-                            >
-                              {t("Resume…", "Fortsetzen…")}
-                            </Action>
-                          )}
-                          {canResumeUndo && (
-                            <Action
-                              size="compact"
-                              disabled={busy}
-                              onClick={() => {
-                                setRunModalConfirmed(false);
-                                setRunModal({
-                                  kind: "resume",
-                                  runId: run.id,
-                                  mode: "resume_undo",
-                                });
-                              }}
-                            >
-                              <Undo2 size={13} />
-                              {t("Resume undo…", "Rücknahme fortsetzen…")}
-                            </Action>
-                          )}
-                          {(run.status === "complete" ||
-                            run.status === "stopped") &&
-                            !run.closed &&
-                            !run.undo_receipt && (
-                              <Action
-                                size="compact"
-                                disabled={busy}
-                                onClick={() => void openUndoModal(run.id)}
-                              >
-                                <Undo2 size={13} />
-                                {t("Preview undo", "Rücknahme prüfen")}
-                              </Action>
-                            )}
-                          {canClose && (
-                            <Action
-                              size="compact"
-                              disabled={busy}
-                              onClick={() => void openCloseModal(run.id)}
-                            >
-                              {t("Close run…", "Abschließen…")}
-                            </Action>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          {summaries.length > 0 && (
-            <Details
-              title={`${t("Closed & compacted run summaries", "Abgeschlossene Laufzusammenfassungen")} · ${summaries.length}`}
-            >
-              <div className="table-scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>{t("Run", "Lauf")}</th>
-                      <th>{t("Status", "Status")}</th>
-                      <th className="numeric">{t("Applied", "Angewendet")}</th>
-                      <th className="numeric">{t("Restored", "Zurückgelegt")}</th>
-                      <th>{t("Completed", "Abgeschlossen")}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {summaries.map((s) => (
-                      <tr key={s.id}>
-                        <td>
-                          <code>{s.id.slice(0, 12)}</code>
-                        </td>
-                        <td>
-                          <StatusBadge status={s.status} />
-                        </td>
-                        <td className="numeric">{s.applied.toLocaleString()}</td>
-                        <td className="numeric">
-                          {s.restored.toLocaleString()}
-                        </td>
-                        <td>
-                          {new Date(s.completed_at * 1000).toLocaleDateString()}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </Details>
-          )}
-        </section>
-      )}
-
-      {legacyView && legacyView.runs.length > 0 && (
-        <Details
-          title={`${t("Synthetic backlog runs", "Synthetische Bestandsläufe")} · ${legacyView.runs.length}`}
-        >
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>{t("Run", "Lauf")}</th>
-                  <th>{t("Status", "Status")}</th>
-                  <th>{t("Actions", "Aktionen")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {legacyView.runs.map((run) => (
-                  <tr key={run.id}>
-                    <td>
-                      <code>{run.id.slice(0, 12)}</code>
-                    </td>
-                    <td>
-                      <StatusBadge status={run.status} />
-                    </td>
-                    <td>
-                      <div className="cell-actions">
-                        {run.status === "running" && (
-                          <Action
-                            size="compact"
-                            onClick={async () => {
-                              try {
-                                setLegacyView(
-                                  await stopBacklog(account.id, run.id),
-                                );
-                              } catch (err) {
-                                setError(
-                                  describeError(
-                                    err,
-                                    t("Could not stop run.", "Stopp fehlgeschlagen."),
-                                  ),
-                                );
-                              }
-                            }}
-                          >
-                            {t("Stop", "Stoppen")}
-                          </Action>
-                        )}
-                        {run.status === "stopped" && (
-                          <Action
-                            size="compact"
-                            onClick={async () => {
-                              try {
-                                setLegacyView(
-                                  await resumeBacklog(account.id, run.id),
-                                );
-                              } catch (err) {
-                                setError(
-                                  describeError(
-                                    err,
-                                    t("Could not resume run.", "Fortsetzen fehlgeschlagen."),
-                                  ),
-                                );
-                              }
-                            }}
-                          >
-                            {t("Resume", "Fortsetzen")}
-                          </Action>
-                        )}
-                        {(run.status === "completed" ||
-                          run.status === "stopped") && (
-                          <Action
-                            size="compact"
-                            onClick={async () => {
-                              try {
-                                const undo = await previewBacklogUndo(
-                                  account.id,
-                                  run.id,
-                                );
-                                setLegacyView(
-                                  await undoBacklog(
-                                    account.id,
-                                    run.id,
-                                    undo.receipt,
-                                  ),
-                                );
-                              } catch (err) {
-                                setError(
-                                  describeError(
-                                    err,
-                                    t("Undo failed.", "Rücknahme fehlgeschlagen."),
-                                  ),
-                                );
-                              }
-                            }}
-                          >
-                            {t("Undo", "Rückgängig")}
-                          </Action>
-                        )}
-                        {run.undo_requested && run.status === "uncertain" && (
-                          <Action
-                            size="compact"
-                            onClick={async () => {
-                              try {
-                                setLegacyView(
-                                  await resumeBacklogUndo(account.id, run.id),
-                                );
-                              } catch (err) {
-                                setError(
-                                  describeError(
-                                    err,
-                                    t(
-                                      "Could not resume undo.",
-                                      "Rücknahme konnte nicht fortgesetzt werden.",
-                                    ),
-                                  ),
-                                );
-                              }
-                            }}
-                          >
-                            {t("Resume undo", "Rücknahme fortsetzen")}
-                          </Action>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Details>
-      )}
+      <BacklogRunsSection
+        account={account}
+        backlogKind={backlogKind}
+        runs={runs}
+        summaries={summaries}
+        deadlines={deadlines}
+        closable={closable}
+        legacyView={legacyView}
+        busy={busy}
+        onBusy={setBusy}
+        onError={setError}
+        onMessage={setMessage}
+        onReload={load}
+        onStopActiveRun={() => void stopActiveRun()}
+        onOpenUndoModal={(runId) => void openUndoModal(runId)}
+        onOpenCloseModal={(runId) => void openCloseModal(runId)}
+        onOpenResumeModal={(modal) => {
+          setRunModalConfirmed(false);
+          setRunModal(modal);
+        }}
+        onLegacyView={setLegacyView}
+      />
 
       {!protocolReady && !syntheticOnly && !hasRunningRun && (
         <Empty
@@ -1148,127 +830,20 @@ export function Backlog({
         </Empty>
       )}
 
-      <Modal
-        open={runModal !== null}
-        onOpenChange={(open) => {
-          if (!busy && !open) {
-            setRunModal(null);
-            setRunModalConfirmed(false);
-          }
+      <BacklogRunModal
+        runModal={runModal}
+        confirmed={runModalConfirmed}
+        busy={busy}
+        liveWrites={liveWrites}
+        syntheticOnly={syntheticOnly}
+        onConfirmedChange={setRunModalConfirmed}
+        onClose={() => {
+          setRunModal(null);
+          setRunModalConfirmed(false);
         }}
-        title={
-          runModal?.kind === "undo"
-            ? t("Confirm conditional undo", "Bedingte Rücknahme bestätigen")
-            : runModal?.kind === "close"
-              ? t("Close and compact backlog run", "Bestandslauf abschließen")
-              : runModal?.mode === "resume_undo"
-                ? t("Resume interrupted undo", "Unterbrochene Rücknahme fortsetzen")
-                : t("Resume stopped backlog run", "Angehaltenen Lauf fortsetzen")
-        }
-      >
-        {runModal && (
-          <div className="page-stack">
-            {runModal.kind === "undo" && (
-              <>
-                <div className="stats compact">
-                  <Stat
-                    label={t("Reverse batches", "Rücknahme-Stapel")}
-                    value={runModal.preview.reverse.length}
-                  />
-                  <Stat
-                    label={t("Conflicts skipped", "Übersprungene Konflikte")}
-                    value={runModal.preview.conflicts}
-                  />
-                </div>
-                <p className="help">{runModal.preview.limitations}</p>
-                <CheckField
-                  checked={runModalConfirmed}
-                  onChange={setRunModalConfirmed}
-                >
-                  {t(
-                    "Move unchanged messages from this run back to their recorded source folders/labels.",
-                    "Unveränderte Nachrichten dieses Laufs in ihre ursprünglichen Ordner/Labels zurückbewegen.",
-                  )}
-                </CheckField>
-              </>
-            )}
-            {runModal.kind === "resume" && (
-              <>
-                <p className="muted">
-                  {runModal.mode === "resume_undo"
-                    ? t(
-                        `Continue undoing remaining batches for run ${runModal.runId.slice(0, 12)}.`,
-                        `Verbleibende Rücknahme-Stapel für Lauf ${runModal.runId.slice(0, 12)} fortsetzen.`,
-                      )
-                    : t(
-                        `Continue sorting remaining batches for run ${runModal.runId.slice(0, 12)}.`,
-                        `Verbleibende Sortier-Stapel für Lauf ${runModal.runId.slice(0, 12)} fortsetzen.`,
-                      )}
-                </p>
-                <CheckField
-                  checked={runModalConfirmed}
-                  onChange={setRunModalConfirmed}
-                >
-                  {t(
-                    "I want to continue executing this journaled run on my mail account.",
-                    "Ich möchte diesen protokollierten Lauf auf meinem Mailkonto fortsetzen.",
-                  )}
-                </CheckField>
-              </>
-            )}
-            {runModal.kind === "close" && (
-              <>
-                <p className="muted">
-                  {t(
-                    "Closing compacts this run into a summary and ends its local undo journal.",
-                    "Abschließen verdichtet diesen Lauf zu einer Zusammenfassung und beendet das lokale Rücknahmeprotokoll.",
-                  )}
-                </p>
-                <p className="help">
-                  {t("Reason", "Grund")}:{" "}
-                  <StatusBadge status={runModal.preview.reason} />
-                </p>
-                <CheckField
-                  checked={runModalConfirmed}
-                  onChange={setRunModalConfirmed}
-                >
-                  {t(
-                    "Close this run and remove its detailed undo journal.",
-                    "Diesen Lauf abschließen und das detaillierte Rücknahmeprotokoll entfernen.",
-                  )}
-                </CheckField>
-              </>
-            )}
-            <div className="dialog-actions">
-              <Action onClick={() => setRunModal(null)} disabled={busy}>
-                {t("Cancel", "Abbrechen")}
-              </Action>
-              {!liveWrites && !syntheticOnly && runModal.kind !== "close" ? (
-                <Action tone="warning" onClick={onOpenWriteMode}>
-                  <ShieldAlert size={15} />
-                  {t("Enable live writes", "Live-Schreibzugriff aktivieren")}
-                </Action>
-              ) : (
-                <Action
-                  tone={runModal.kind === "close" ? "warning" : "primary"}
-                  disabled={!runModalConfirmed || busy}
-                  onClick={() => void executeRunModal()}
-                >
-                  {busy ? (
-                    <Busy>{t("Working…", "Wird ausgeführt…")}</Busy>
-                  ) : runModal.kind === "undo" ? (
-                    t("Start undo", "Rücknahme starten")
-                  ) : runModal.kind === "close" ? (
-                    t("Close run", "Lauf abschließen")
-                  ) : (
-                    t("Continue", "Fortsetzen")
-                  )}
-                </Action>
-              )}
-            </div>
-          </div>
-        )}
-      </Modal>
+        onOpenWriteMode={onOpenWriteMode}
+        onExecute={() => void executeRunModal()}
+      />
     </div>
   );
 }

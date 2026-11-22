@@ -114,7 +114,11 @@ async fn transition(
         return not_local_web();
     };
     match tokio::task::spawn_blocking(move || run(&vault)).await {
-        Ok(Ok(())) => status(State(state)).await,
+        Ok(Ok(())) => {
+            state.accounts.touch_activity();
+            state.accounts.notify_change();
+            status(State(state)).await
+        }
         Ok(Err(error)) => refused(error),
         Err(_) => refused(VaultError::Storage),
     }
@@ -208,6 +212,8 @@ pub(in crate::server) struct WriteModeRequest {
     live_writes: bool,
     #[serde(default)]
     confirmed: bool,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
 pub(in crate::server) async fn write_mode(
@@ -218,6 +224,15 @@ pub(in crate::server) async fn write_mode(
         Ok(v) => v,
         Err(e) => return e,
     };
+    if let Some(secs) = request.timeout_secs {
+        if !valid_timeout_secs(secs) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error": "Choose an auto-disarm timeout between 1 minute and 24 hours, or 0 to disable."})),
+            )
+                .into_response();
+        }
+    }
     if !request.live_writes {
         state.accounts.set_live_writes(false);
         return status(State(state)).await;
@@ -243,8 +258,99 @@ pub(in crate::server) async fn write_mode(
         )
             .into_response();
     }
-    state.accounts.set_live_writes(true);
+    state.accounts.arm_live_writes(true, request.timeout_secs);
     status(State(state)).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::server) struct SafetySettingsRequest {
+    #[serde(default)]
+    live_writes_timeout_secs: Option<u64>,
+    #[serde(default)]
+    vault_idle_timeout_secs: Option<u64>,
+}
+
+pub(in crate::server) async fn safety_settings(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<SafetySettingsRequest>, JsonRejection>,
+) -> Response {
+    let request = match input(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if request
+        .live_writes_timeout_secs
+        .is_some_and(|secs| !valid_timeout_secs(secs))
+        || request
+            .vault_idle_timeout_secs
+            .is_some_and(|secs| !valid_timeout_secs(secs))
+    {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "Timeouts must be 0 (off) or between 60 and 86400 seconds."})),
+        )
+            .into_response();
+    }
+    state.accounts.set_safety_timeouts(
+        request.live_writes_timeout_secs,
+        request.vault_idle_timeout_secs,
+    );
+    status(State(state)).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::server) struct PickFileRequest {
+    kind: String,
+}
+
+/// Opens the native macOS file picker for Takeout `.mbox` selection on explicit user click.
+pub(in crate::server) async fn pick_file(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<PickFileRequest>, JsonRejection>,
+) -> Response {
+    if !state.accounts.vault_live() && !state.accounts.synthetic() {
+        return not_local_web();
+    }
+    let request = match input(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if request.kind != "takeout_mbox" {
+        return failure(AcquisitionError::InvalidInput);
+    }
+    if std::env::var_os("MAILROOM_DISABLE_NATIVE_PICKER").is_some() {
+        return Json(json!({"supported": false, "path": null})).into_response();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        match tokio::task::spawn_blocking(|| {
+            std::process::Command::new("/usr/bin/osascript")
+                .arg("-e")
+                .arg("POSIX path of (choose file with prompt \"Select an extracted Google Takeout .mbox file\")")
+                .output()
+        })
+        .await
+        {
+            Ok(Ok(output)) if output.status.success() => {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                if path.is_empty() {
+                    Json(json!({"supported": true, "cancelled": true, "path": null})).into_response()
+                } else {
+                    Json(json!({"supported": true, "cancelled": false, "path": path})).into_response()
+                }
+            }
+            Ok(Ok(_)) => {
+                Json(json!({"supported": true, "cancelled": true, "path": null})).into_response()
+            }
+            _ => Json(json!({"supported": false, "path": null})).into_response(),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Json(json!({"supported": false, "path": null})).into_response()
+    }
 }
 
 fn expand_takeout_path(raw: &str) -> Result<std::path::PathBuf, (&'static str, &'static str)> {

@@ -2,13 +2,19 @@ pub(super) mod agent_edits;
 pub(super) mod assistant;
 pub(super) mod backlog;
 pub(super) mod backlog_protocol;
+pub(super) mod census_routes;
+mod controller;
 mod disclosure;
+pub(super) mod events;
+#[cfg(test)]
+mod fixtures_tests;
 pub(super) mod folder_provisioning;
 pub(super) mod invoices;
 pub(super) mod ledger;
 pub(super) mod lifecycle;
 mod local;
 pub(super) mod managesieve;
+pub(super) mod overview;
 pub(super) mod proposals;
 pub(super) mod recovery;
 pub(super) mod sieve_transactions;
@@ -18,11 +24,19 @@ pub(super) mod web;
 pub(super) mod winddown;
 #[cfg(test)]
 mod wiring_tests;
+pub(super) mod workspace_routes;
+
+pub(super) use census_routes::{confirm, export_summary, open, report, review_summary};
+pub(in crate::server) use controller::AccountController;
+use controller::{AccountSource, failure, input, mailbox_consent, valid_timeout_secs};
+use workspace_routes::{ledger_fresh, sync_ledger};
+pub(super) use workspace_routes::{proof_download, proof_preview, workspace_open, workspace_save};
+
 use super::{AppState, EmptyRequest};
 use crate::{
     acquisition::{
         self, Account, AccountPaths, Accounts, AcquisitionError, Cancellation, OsCredentials,
-        Provider, ScanProgress, SecretValue, vault::Vault,
+        Provider, ScanProgress, SecretValue,
     },
     census::{AccountId, Census, ScanState},
     policy::{self, Operation},
@@ -36,282 +50,14 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 
-pub(super) struct AccountController {
-    #[cfg(test)]
-    assistant_cli: Option<crate::agent::t3::Client>,
-    source: AccountSource,
-    job: Mutex<Option<Job>>,
-    operation: Mutex<()>,
-    admission: Mutex<()>,
-    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// Read only through `ledger()`, which refuses while the vault is locked.
-    installed_ledger: Option<crate::ledger::InstalledLedger>,
-    confirmations: Mutex<crate::confirmation::Boundary>,
-    /// The real send, one-click and mail-app adapters, each behind a write permit.
-    writes: crate::send::wiring::Endpoints,
-    /// Session-only safety toggle. Always starts `false` (read-only) on every server launch.
-    live_writes: std::sync::atomic::AtomicBool,
-    #[cfg(test)]
-    repository_accesses: std::sync::atomic::AtomicUsize,
-}
-enum AccountSource {
-    Os,
-    Unavailable,
-    Installed {
-        accounts: Arc<Accounts>,
-    },
-    Synthetic {
-        accounts: Arc<Accounts>,
-        _directory: tempfile::TempDir,
-        mailboxes: std::path::PathBuf,
-    },
-    /// The browser setup: its own roots, every credential in the vault.
-    Vault {
-        accounts: Arc<Accounts>,
-        vault: Arc<Vault>,
-    },
-}
-#[derive(Clone, Serialize)]
-struct Job {
-    operation: &'static str,
-    #[serde(skip)]
-    backlog_account: Option<AccountId>,
-    #[serde(skip)]
-    folder_account: Option<AccountId>,
-    #[serde(skip)]
-    sieve_account: Option<AccountId>,
-    account: Option<Account>,
-    progress: ScanProgress,
-    error: Option<AcquisitionError>,
-    #[serde(skip)]
-    cancel: Cancellation,
-}
-/// Asks a person through the confirmation boundary before a previewed mailbox change runs.
-/// The repository then recomputes the plan and requires this exact receipt.
-fn mailbox_consent(
-    state: &AppState,
-    account: &AccountId,
-    operation: &str,
-    receipt: &str,
-) -> Result<(), AcquisitionError> {
-    let plan = crate::confirmation::Plan {
-        actions: vec![crate::confirmation::ExactAction::MailboxChange {
-            account: account.as_str().into(),
-            operation: operation.into(),
-            plan_receipt: receipt.into(),
-        }],
-        exact_receipt: receipt.into(),
-    };
-    let mut boundary = state.accounts.confirmations.lock().expect("confirmations");
-    let (handle, _) = boundary
-        .offer(plan.clone())
-        .map_err(|_| AcquisitionError::InvalidInput)?;
-    boundary
-        .confirm(&handle, &plan, || Ok(plan.clone()))
-        .map(|_| ())
-        .map_err(|_| AcquisitionError::InvalidInput)
-}
-
-impl AccountController {
-    pub fn new(synthetic: bool) -> Self {
-        let mut installed_ledger = None;
-        let source = if synthetic {
-            let directory = tempfile::tempdir().expect("synthetic account directory");
-            AccountSource::Synthetic {
-                accounts: Arc::new(acquisition::synthetic::accounts(directory.path())),
-                mailboxes: directory.path().join("mailboxes"),
-                _directory: directory,
-            }
-        } else {
-            match local::installed() {
-                Ok(Some(local::Services { accounts, ledger })) => {
-                    installed_ledger = Some(ledger);
-                    AccountSource::Installed { accounts }
-                }
-                Ok(None) => AccountSource::Os,
-                Err(_) => AccountSource::Unavailable,
-            }
-        };
-        let ledger = match &source {
-            AccountSource::Synthetic { mailboxes, .. } => {
-                std::fs::create_dir_all(mailboxes).expect("synthetic mailbox directory");
-                Some(
-                    crate::ledger::InstalledLedger::install(mailboxes.join("ledger"))
-                        .expect("synthetic private ledger"),
-                )
-            }
-            _ => installed_ledger,
-        };
-        Self::assemble(source, ledger)
-    }
-    fn assemble(source: AccountSource, ledger: Option<crate::ledger::InstalledLedger>) -> Self {
-        Self {
-            #[cfg(test)]
-            assistant_cli: None,
-            confirmations: Mutex::new(match &source {
-                AccountSource::Synthetic { .. } => crate::confirmation::Boundary::synthetic(),
-                AccountSource::Vault { .. } => crate::confirmation::Boundary::browser(),
-                _ => crate::confirmation::Boundary::native(),
-            }),
-            writes: crate::send::wiring::Endpoints::Real,
-            live_writes: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(test)]
-            repository_accesses: std::sync::atomic::AtomicUsize::new(0),
-            installed_ledger: ledger,
-            source,
-            job: Mutex::new(None),
-            operation: Mutex::new(()),
-            admission: Mutex::new(()),
-            worker: Mutex::new(None),
-        }
-    }
-    fn repository(&self) -> Result<Arc<Accounts>, AcquisitionError> {
-        #[cfg(test)]
-        self.repository_accesses
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        match &self.source {
-            AccountSource::Unavailable => Err(AcquisitionError::Storage),
-            AccountSource::Os => Ok(Arc::new(Accounts::new(
-                AccountPaths::per_user()?,
-                Arc::new(OsCredentials),
-            ))),
-            AccountSource::Installed { accounts } | AccountSource::Synthetic { accounts, .. } => {
-                Ok(accounts.clone())
-            }
-            AccountSource::Vault { accounts, vault } if vault.unlocked() => Ok(accounts.clone()),
-            AccountSource::Vault { .. } => Err(AcquisitionError::VaultLocked),
-        }
-    }
-    /// The installed ledger, refused while the vault is locked like every account route.
-    fn ledger(&self) -> Result<Option<&crate::ledger::InstalledLedger>, AcquisitionError> {
-        if self.vault_locked() {
-            return Err(AcquisitionError::VaultLocked);
-        }
-        Ok(self.installed_ledger.as_ref())
-    }
-    fn vault(&self) -> Option<&Arc<Vault>> {
-        match &self.source {
-            AccountSource::Vault { vault, .. } => Some(vault),
-            _ => None,
-        }
-    }
-    pub(super) fn vault_locked(&self) -> bool {
-        self.vault().is_some_and(|vault| !vault.unlocked())
-    }
-    pub(super) fn live_writes(&self) -> bool {
-        self.live_writes.load(std::sync::atomic::Ordering::SeqCst)
-    }
-    pub(super) fn set_live_writes(&self, enabled: bool) {
-        self.live_writes
-            .store(enabled, std::sync::atomic::Ordering::SeqCst);
-    }
-    pub(super) fn vault_live(&self) -> bool {
-        matches!(self.source, AccountSource::Vault { .. })
-    }
-    fn synthetic(&self) -> bool {
-        matches!(self.source, AccountSource::Synthetic { .. })
-    }
-    fn local_bookkeeping(&self) -> bool {
-        self.installed_ledger.is_some()
-            && matches!(
-                self.source,
-                AccountSource::Installed { .. }
-                    | AccountSource::Synthetic { .. }
-                    | AccountSource::Vault { .. }
-            )
-    }
-    fn reserve(&self, operation: &'static str) -> Result<Cancellation, AcquisitionError> {
-        let mut job = self.job.lock().expect("account job");
-        if job
-            .as_ref()
-            .is_some_and(|j| j.progress.state == ScanState::Running)
-        {
-            return Err(AcquisitionError::InvalidInput);
-        }
-        let cancel = Cancellation::default();
-        *job = Some(Job {
-            operation,
-            backlog_account: None,
-            folder_account: None,
-            sieve_account: None,
-            account: None,
-            progress: ScanProgress {
-                state: ScanState::Running,
-                saved: 0,
-                folders: 0,
-            },
-            error: None,
-            cancel: cancel.clone(),
-        });
-        Ok(cancel)
-    }
-    fn finish(&self, result: Result<(), AcquisitionError>) {
-        let mut current = self.job.lock().expect("account job");
-        let job = current.as_mut().expect("reserved account job");
-        match result {
-            Ok(()) => job.progress.state = ScanState::Complete,
-            Err(error) => {
-                let error = if job.cancel.is_cancelled()
-                    && matches!(
-                        error,
-                        AcquisitionError::Protocol
-                            | AcquisitionError::Tls
-                            | AcquisitionError::Authentication
-                    ) {
-                    AcquisitionError::Cancelled
-                } else {
-                    error
-                };
-                job.progress.state = if error == AcquisitionError::Cancelled {
-                    ScanState::Cancelled
-                } else {
-                    ScanState::Failed
-                };
-                job.error = Some(error);
-            }
-        }
-    }
-}
-fn failure(error: AcquisitionError) -> Response {
-    (
-        StatusCode::UNPROCESSABLE_ENTITY,
-        Json(json!({"error": error.to_string()})),
-    )
-        .into_response()
-}
-fn input<T>(value: Result<Json<T>, JsonRejection>) -> Result<T, Response> {
-    match value {
-        Ok(Json(value)) => Ok(value),
-        Err(error) if error.status() == StatusCode::PAYLOAD_TOO_LARGE => Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(json!({"error":"Account request exceeds the body limit"})),
-        )
-            .into_response()),
-        Err(_) => Err(failure(AcquisitionError::InvalidInput)),
-    }
-}
 pub(super) async fn status(State(state): State<Arc<AppState>>) -> Response {
-    let accounts = &state.accounts;
-    let source = match &accounts.source {
-        AccountSource::Os => "native",
-        AccountSource::Unavailable => "unavailable",
-        AccountSource::Installed { .. } => "installed",
-        AccountSource::Synthetic { .. } => "synthetic",
-        AccountSource::Vault { .. } => "vault",
-    };
-    Json(json!({
-        "synthetic": accounts.synthetic(),
-        "source": source,
-        "live_writes": accounts.live_writes(),
-        "vault": accounts.vault().map(|vault| vault.status()),
-        "vault_problem": accounts.vault().and_then(|vault| vault.problem()),
-        "interrupted": web::interrupted(accounts),
-        "job": accounts.job.lock().expect("account job").clone(),
-    }))
-    .into_response()
+    Json(events::status_json(&state)).into_response()
 }
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ConnectRequest {
@@ -319,6 +65,7 @@ pub(super) struct ConnectRequest {
     login: String,
     password: SecretValue,
 }
+
 pub(super) async fn connect(
     State(state): State<Arc<AppState>>,
     body: Result<Json<ConnectRequest>, JsonRejection>,
@@ -343,6 +90,7 @@ pub(super) async fn connect(
     })
     .await
 }
+
 pub(super) async fn synthetic(
     State(state): State<Arc<AppState>>,
     body: Result<Json<EmptyRequest>, JsonRejection>,
@@ -355,6 +103,7 @@ pub(super) async fn synthetic(
     }
     synthetic_connection(state, Provider::MailboxOrg).await
 }
+
 pub(super) async fn synthetic_gmail(
     State(state): State<Arc<AppState>>,
     body: Result<Json<EmptyRequest>, JsonRejection>,
@@ -367,6 +116,7 @@ pub(super) async fn synthetic_gmail(
     }
     synthetic_connection(state, Provider::Gmail).await
 }
+
 async fn synthetic_connection(state: Arc<AppState>, provider: Provider) -> Response {
     launch_connection(state, move |repo| {
         repo.create(
@@ -377,6 +127,7 @@ async fn synthetic_connection(state: Arc<AppState>, provider: Provider) -> Respo
     })
     .await
 }
+
 /// Runs `establish` in the account worker, then probes the account it returns read-only and
 /// records whether the provider accepted the connection.
 async fn launch_connection(
@@ -405,6 +156,7 @@ async fn launch_connection(
                 .as_mut()
                 .expect("reserved account job")
                 .account = Some(account.clone());
+            worker.accounts.notify_change();
             let probe = if worker.accounts.synthetic() {
                 Ok(1)
             } else {
@@ -429,11 +181,13 @@ async fn launch_connection(
     drop(admission);
     status(State(state)).await
 }
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AccountRequest {
     account: AccountId,
 }
+
 pub(super) async fn scan(
     State(state): State<Arc<AppState>>,
     body: Result<Json<AccountRequest>, JsonRejection>,
@@ -467,6 +221,7 @@ pub(super) async fn scan(
                 .as_mut()
                 .expect("reserved account job")
                 .account = Some(account.clone());
+            worker.accounts.notify_change();
             let progress = |mut progress: ScanProgress| {
                 progress.state = ScanState::Running;
                 worker
@@ -476,7 +231,8 @@ pub(super) async fn scan(
                     .expect("account job")
                     .as_mut()
                     .expect("reserved account job")
-                    .progress = progress
+                    .progress = progress;
+                worker.accounts.notify_change();
             };
             if worker.accounts.synthetic() && !repo.installed_test_transport() {
                 acquisition::synthetic::scan(&repo, &account.id, cancel, progress)?;
@@ -491,6 +247,7 @@ pub(super) async fn scan(
     drop(admission);
     status(State(state)).await
 }
+
 pub(super) async fn cancel(
     State(state): State<Arc<AppState>>,
     body: Result<Json<EmptyRequest>, JsonRejection>,
@@ -501,8 +258,10 @@ pub(super) async fn cancel(
     if let Some(job) = state.accounts.job.lock().expect("account job").as_ref() {
         job.cancel.cancel();
     }
+    state.accounts.notify_change();
     status(State(state)).await
 }
+
 pub(super) async fn list(
     State(state): State<Arc<AppState>>,
     body: Result<Json<EmptyRequest>, JsonRejection>,
@@ -520,774 +279,4 @@ pub(super) async fn list(
         Ok(Err(e)) => failure(e),
         Err(_) => failure(AcquisitionError::Storage),
     }
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ConfirmRequest {
-    account: AccountId,
-    address: String,
-    confirmed: bool,
-}
-pub(super) async fn open(
-    State(state): State<Arc<AppState>>,
-    body: Result<Json<AccountRequest>, JsonRejection>,
-) -> Response {
-    let request = match input(body) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    census_action(state, request.account, None).await
-}
-pub(super) async fn confirm(
-    State(state): State<Arc<AppState>>,
-    body: Result<Json<ConfirmRequest>, JsonRejection>,
-) -> Response {
-    let request = match input(body) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    census_action(
-        state,
-        request.account,
-        Some((request.address, request.confirmed)),
-    )
-    .await
-}
-#[derive(Serialize)]
-struct CensusView {
-    census: Census,
-    evidence: crate::census::acquisition::EvidenceView,
-    addresses: Vec<crate::census::AddressCandidate>,
-    landing: crate::rules::landing::Report,
-}
-async fn census_action(
-    state: Arc<AppState>,
-    id: AccountId,
-    confirm: Option<(String, bool)>,
-) -> Response {
-    if state
-        .accounts
-        .job
-        .lock()
-        .expect("account job")
-        .as_ref()
-        .is_some_and(|j| j.progress.state == ScanState::Running)
-    {
-        return failure(AcquisitionError::InvalidInput);
-    }
-    match tokio::task::spawn_blocking(move || {
-        let _operation = state.accounts.operation.lock().expect("account operation");
-        let repo = state.accounts.repository()?;
-        let account = repo.load(&id)?;
-        let store = repo.store(&account)?;
-        if state.accounts.synthetic() && !repo.installed_test_transport() {
-            let mut saved = store.load_state()?;
-            if crate::invoice::initialize_synthetic(&mut saved) {
-                store.save_state(&mut saved)?;
-            }
-        }
-        let mut saved = store.load_state()?;
-        if let Some((address, confirmed)) = confirm {
-            saved.census.confirm_address(&address, confirmed)?;
-            store.save_state(&mut saved)?;
-        }
-        let historical = store.recovery_pending();
-        let landing = crate::rules::landing::compare(&saved, historical);
-        let census = saved.census.into_inner();
-        let mut evidence = census.acquisition.view(crate::census::acquisition::now());
-        if historical {
-            evidence.historical();
-        }
-        Ok::<_, AcquisitionError>(CensusView {
-            evidence,
-            landing,
-            addresses: census.own_address_candidates(),
-            census,
-        })
-    })
-    .await
-    {
-        Ok(Ok(view)) => Json(view).into_response(),
-        Ok(Err(e)) => failure(e),
-        Err(_) => failure(AcquisitionError::Storage),
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ReportRequest {
-    account: AccountId,
-    as_of: i64,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ReviewRequest {
-    account: AccountId,
-    as_of: i64,
-    version: String,
-    approved: std::collections::BTreeSet<String>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ExportRequest {
-    account: AccountId,
-    as_of: i64,
-    version: String,
-    approved: std::collections::BTreeSet<String>,
-    receipt: String,
-    confirmed: bool,
-}
-pub(super) async fn report(
-    State(state): State<Arc<AppState>>,
-    body: Result<Json<ReportRequest>, JsonRejection>,
-) -> Response {
-    let request = match input(body) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    report_action(state, request, None, None).await
-}
-pub(super) async fn review_summary(
-    State(state): State<Arc<AppState>>,
-    body: Result<Json<ReviewRequest>, JsonRejection>,
-) -> Response {
-    let request = match input(body) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    report_action(
-        state,
-        ReportRequest {
-            account: request.account.clone(),
-            as_of: request.as_of,
-        },
-        Some(request),
-        None,
-    )
-    .await
-}
-pub(super) async fn export_summary(
-    State(state): State<Arc<AppState>>,
-    body: Result<Json<ExportRequest>, JsonRejection>,
-) -> Response {
-    let request = match input(body) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    if !request.confirmed {
-        return failure(AcquisitionError::InvalidInput);
-    }
-    report_action(
-        state,
-        ReportRequest {
-            account: request.account.clone(),
-            as_of: request.as_of,
-        },
-        Some(ReviewRequest {
-            account: request.account,
-            as_of: request.as_of,
-            version: request.version,
-            approved: request.approved,
-        }),
-        Some(request.receipt),
-    )
-    .await
-}
-async fn report_action(
-    state: Arc<AppState>,
-    request: ReportRequest,
-    review: Option<ReviewRequest>,
-    receipt: Option<String>,
-) -> Response {
-    match tokio::task::spawn_blocking(move || {
-        let _operation = state.accounts.operation.lock().expect("account operation");
-        if state
-            .accounts
-            .job
-            .lock()
-            .expect("account job")
-            .as_ref()
-            .is_some_and(|j| j.progress.state == ScanState::Running)
-        {
-            return Err(AcquisitionError::InvalidInput);
-        }
-        let repo = state.accounts.repository()?;
-        let account = repo.load(&request.account)?;
-        let store = repo.store(&account)?;
-        let census = store.load()?;
-        let mut report = census.report(
-            store.keys(),
-            request.as_of,
-            account.provider == Provider::Gmail,
-        )?;
-        if store.recovery_pending() {
-            report.acquisition.historical();
-        }
-        if let Some(review) = review {
-            if report.version != review.version {
-                return Err(AcquisitionError::InvalidInput);
-            }
-            let preview = report.summary_preview(store.keys(), &review.approved)?;
-            if let Some(receipt) = receipt {
-                use subtle::ConstantTimeEq;
-                if !bool::from(preview.receipt.as_bytes().ct_eq(receipt.as_bytes())) {
-                    return Err(AcquisitionError::InvalidInput);
-                }
-                disclosure::confirm(
-                    &state,
-                    &account,
-                    &store,
-                    &report,
-                    &preview,
-                    &review.approved,
-                )?;
-                return Ok(json!({"summary": preview.summary, "filename": "census-summary.md"}));
-            }
-            return Ok(json!(preview));
-        }
-        Ok::<_, AcquisitionError>(json!(report))
-    })
-    .await
-    {
-        Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(e)) => failure(e),
-        Err(_) => failure(AcquisitionError::Storage),
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct WorkspaceSaveRequest {
-    account: AccountId,
-    revision: u64,
-    input: WorkspaceInput,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct DownloadRequest {
-    account: AccountId,
-    receipt: String,
-    confirmed: bool,
-}
-enum WorkspaceAction {
-    Open,
-    Save {
-        revision: u64,
-        input: WorkspaceInput,
-    },
-    Preview,
-    Download {
-        receipt: String,
-    },
-}
-pub(super) async fn workspace_open(
-    State(state): State<Arc<AppState>>,
-    body: Result<Json<AccountRequest>, JsonRejection>,
-) -> Response {
-    let request = match input(body) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    workspace_action(state, request.account, WorkspaceAction::Open).await
-}
-pub(super) async fn workspace_save(
-    State(state): State<Arc<AppState>>,
-    body: Result<Json<WorkspaceSaveRequest>, JsonRejection>,
-) -> Response {
-    let request = match input(body) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    workspace_action(
-        state,
-        request.account,
-        WorkspaceAction::Save {
-            revision: request.revision,
-            input: request.input,
-        },
-    )
-    .await
-}
-pub(super) async fn proof_preview(
-    State(state): State<Arc<AppState>>,
-    body: Result<Json<AccountRequest>, JsonRejection>,
-) -> Response {
-    let request = match input(body) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    workspace_action(state, request.account, WorkspaceAction::Preview).await
-}
-pub(super) async fn proof_download(
-    State(state): State<Arc<AppState>>,
-    body: Result<Json<DownloadRequest>, JsonRejection>,
-) -> Response {
-    let request = match input(body) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    if !request.confirmed {
-        return failure(AcquisitionError::InvalidInput);
-    }
-    workspace_action(
-        state,
-        request.account,
-        WorkspaceAction::Download {
-            receipt: request.receipt,
-        },
-    )
-    .await
-}
-async fn workspace_action(
-    state: Arc<AppState>,
-    id: AccountId,
-    action: WorkspaceAction,
-) -> Response {
-    match tokio::task::spawn_blocking(move || {
-        let _operation = state.accounts.operation.lock().expect("account operation");
-        if state
-            .accounts
-            .job
-            .lock()
-            .expect("account job")
-            .as_ref()
-            .is_some_and(|j| j.progress.state == ScanState::Running)
-        {
-            return Err(AcquisitionError::InvalidInput);
-        }
-        let repo = state.accounts.repository()?;
-        let account = repo.load(&id)?;
-        let store = repo.store(&account)?;
-        let mut saved = store.load_state()?;
-        let context = repo.workspace_context(&account, &store)?;
-        let ledger_guard = state
-            .accounts
-            .ledger()?
-            .map(|l| l.lock())
-            .transpose()
-            .map_err(|_| AcquisitionError::Storage)?;
-        sync_ledger(&mut saved, &store, &context, ledger_guard.as_ref())
-            .map_err(|_| AcquisitionError::InvalidInput)?;
-        match action {
-            WorkspaceAction::Open => Ok(json!(workspace::view(&saved, &context))),
-            WorkspaceAction::Save { revision, input } => {
-                if revision != saved.revision {
-                    return Err(AcquisitionError::InvalidInput);
-                }
-                crate::ledger::validate_workspace_edit(&saved, &input)
-                    .map_err(|_| AcquisitionError::InvalidInput)?;
-                workspace::validate(&input, &saved, &context)
-                    .map_err(|_| AcquisitionError::InvalidInput)?;
-                let revision = saved.workspace.as_ref().map_or(Ok(1), |w| {
-                    w.revision.checked_add(1).ok_or(AcquisitionError::Storage)
-                })?;
-                saved.workspace = Some(Workspace { revision, input });
-                if let Some(guard) = &ledger_guard {
-                    let snapshot = guard.read().map_err(|_| AcquisitionError::Storage)?;
-                    crate::ledger::reconcile(&mut saved, &snapshot, &context)
-                        .map_err(|_| AcquisitionError::InvalidInput)?;
-                }
-                store.save_state(&mut saved)?;
-                Ok(json!(workspace::view(&saved, &context)))
-            }
-            WorkspaceAction::Preview => {
-                let proof = workspace::preview(&saved, &context, store.keys())
-                    .map_err(|_| AcquisitionError::InvalidInput)?;
-                ledger_fresh(&saved, ledger_guard.as_ref())
-                    .map_err(|_| AcquisitionError::InvalidInput)?;
-                Ok(json!(proof))
-            }
-            WorkspaceAction::Download { receipt } => {
-                let preview =
-                    workspace::confirm_export(&mut saved, &context, store.keys(), &receipt)
-                        .map_err(|_| AcquisitionError::InvalidInput)?;
-                ledger_fresh(&saved, ledger_guard.as_ref())
-                    .map_err(|_| AcquisitionError::InvalidInput)?;
-                store.save_state(&mut saved)?;
-                Ok(json!({
-                    "filename": preview.filename,
-                    "sieve": preview.proof.artifact.executable(),
-                    "identity": preview.proof.artifact.identity(),
-                    "workspace": workspace::view(&saved, &context)
-                }))
-            }
-        }
-    })
-    .await
-    {
-        Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(e)) => failure(e),
-        Err(_) => failure(AcquisitionError::Storage),
-    }
-}
-
-fn ledger_fresh(
-    saved: &crate::census::AccountState,
-    guard: Option<&crate::ledger::file::LockedLedger<'_>>,
-) -> Result<(), String> {
-    if let Some(guard) = guard {
-        if saved.workspace.is_some() && guard.read()?.content_version != saved.ledger.source_version
-        {
-            return Err("Ledger changed while proving. Review fresh proof".into());
-        }
-    }
-    Ok(())
-}
-
-fn sync_ledger(
-    saved: &mut crate::census::AccountState,
-    store: &crate::census::EncryptedStore,
-    context: &workspace::WorkspaceContext,
-    guard: Option<&crate::ledger::file::LockedLedger<'_>>,
-) -> Result<(), String> {
-    if store.recovery_pending() {
-        return Ok(());
-    }
-    if let Some(guard) = guard {
-        let snapshot = guard.read()?;
-        if saved.workspace.is_some() && crate::ledger::reconcile(saved, &snapshot, context)? {
-            store.save_state(saved).map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn provider_evidence_server_fixture() {
-    let Some(root) = std::env::var_os("MAILROOM_PROVIDER_EVIDENCE_FIXTURE") else {
-        return;
-    };
-    let root = std::path::Path::new(&root);
-    let mut repo = acquisition::persistent_test_accounts(root);
-    acquisition::install_provider_fixture(&mut repo, root);
-    let mut state = AppState::new(true);
-    state.accounts.source = AccountSource::Synthetic {
-        accounts: Arc::new(repo),
-        _directory: tempfile::tempdir().unwrap(),
-        mailboxes: root.join("mailboxes"),
-    };
-    state.accounts.installed_ledger =
-        Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
-    let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
-    axum::serve(listener, super::router(Arc::new(state)))
-        .await
-        .unwrap();
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn durable_browser_server_fixture() {
-    let Some(root) = std::env::var_os("MAILROOM_DURABLE_BROWSER_FIXTURE") else {
-        return;
-    };
-    let installation =
-        std::env::var_os("MAILROOM_RECOVERY_INSTALLATION").unwrap_or_else(|| root.clone());
-    let mut state = AppState::new(true);
-    state.accounts.source = AccountSource::Synthetic {
-        accounts: Arc::new(acquisition::persistent_test_accounts(std::path::Path::new(
-            &installation,
-        ))),
-        _directory: tempfile::tempdir().unwrap(),
-        mailboxes: std::path::Path::new(&root).join("mailboxes"),
-    };
-    state.accounts.installed_ledger = Some(
-        crate::ledger::InstalledLedger::install(
-            std::env::var_os("MAILROOM_RECOVERY_LEDGER")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::path::Path::new(&root).join("ledger")),
-        )
-        .unwrap(),
-    );
-    let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
-    axum::serve(listener, super::router(Arc::new(state)))
-        .await
-        .unwrap();
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn production_consequential_routes_deny_before_repository_or_confirmation_access() {
-    use tower::ServiceExt;
-    let state = Arc::new(AppState::new(false));
-    let router = super::router(state.clone());
-    let input = json!({"as_of":1792886400_i64,"selections":[{"subscription":"synthetic-subscription","method":"local_mail"}],"folders":{"personal":"Muted","business":"Quiet"}});
-    let list_input = json!({"as_of":1792886400_i64,"selections":[{"account":"synthetic-account","subscription":"synthetic-subscription","method":"local_mail"}],"folders":{"personal":"Muted","business":"Quiet"}});
-    let cases = [
-        (
-            "invoices",
-            json!({"account":"synthetic-account","command":{"action":"preview","selection":"INBOX/1/1","target":"accounting"}}),
-        ),
-        (
-            "invoices",
-            json!({"account":"synthetic-account","command":{"action":"send","selection":"INBOX/1/1","target":"accounting","receipt":"a".repeat(64),"confirmation_action":"yes"}}),
-        ),
-        (
-            "invoices",
-            json!({"account":"synthetic-account","command":{"action":"preview","selection":"INBOX/1/1","target":"accounting","mode":"smtp"}}),
-        ),
-        (
-            "invoices",
-            json!({"account":"synthetic-account","command":{"action":"send","selection":"INBOX/1/1","target":"accounting","receipt":"a".repeat(64),"confirmation_action":"yes","mode":"smtp"}}),
-        ),
-        (
-            "invoices",
-            json!({"account":"synthetic-account","command":{"action":"resolve","send":"a".repeat(64),"resolution":"not_sent"}}),
-        ),
-        (
-            "invoices",
-            json!({"account":"synthetic-account","command":{"action":"recover","send":"a".repeat(64)}}),
-        ),
-        (
-            "unsubscribe",
-            json!({"account":"synthetic-account","command":{"action":"resolve","entry":"a".repeat(64),"resolution":"sent","as_of":1792886400_i64}}),
-        ),
-        (
-            "unsubscribe",
-            json!({"account":"synthetic-account","command":{"action":"recover","entry":"a".repeat(64),"as_of":1792886400_i64}}),
-        ),
-        (
-            "unsubscribe",
-            json!({"account":"synthetic-account","command":{"action":"preview","input":input}}),
-        ),
-        (
-            "unsubscribe",
-            json!({"account":"synthetic-account","command":{"action":"confirm","input":input,"receipt":"a".repeat(64),"confirmation_action":"yes","mail_confirmation_action":"yes"}}),
-        ),
-        (
-            "subscription-review",
-            json!({"command":{"action":"preview","input":list_input}}),
-        ),
-        (
-            "subscription-review",
-            json!({"command":{"action":"confirm","input":list_input,"receipt":"a".repeat(64),"confirmation_action":"yes","mail_confirmation_action":"yes"}}),
-        ),
-    ];
-    for (path, body) in cases {
-        let response = router
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(format!("/api/accounts/{path}"))
-                    .header("Host", super::ADDRESS)
-                    .header("Origin", super::ORIGIN)
-                    .header("Content-Type", "application/json")
-                    .header("X-Mailroom-Token", state.token.as_str())
-                    .body(axum::body::Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path} {body}");
-        let wired = body["command"]["mode"].is_string()
-            || body["command"]["action"] == "resolve"
-            || path == "subscription-review"
-            || (path == "unsubscribe" && body["command"]["action"] != "recover");
-        let answer: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(response.into_body(), 1 << 20)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        if wired {
-            assert_eq!(
-                answer["error"],
-                policy::authorize(Operation::SendMessage).reason,
-                "{path} {body}: the route reached the write policy, which denied it"
-            );
-        }
-        assert_eq!(
-            state
-                .accounts
-                .repository_accesses
-                .load(std::sync::atomic::Ordering::SeqCst),
-            0
-        );
-    }
-    let refused = router
-        .clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .method("POST")
-                .uri("/api/accounts/invoices")
-                .header("Host", super::ADDRESS)
-                .header("Origin", super::ORIGIN)
-                .header("Content-Type", "application/json")
-                .header("X-Mailroom-Token", state.token.as_str())
-                .body(axum::body::Body::from(
-                    json!({"account":"synthetic-account","command":{"action":"preview","selection":"INBOX/1/1","target":"accounting","mode":"mail_app"}}).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        refused.status(),
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "no invoice Mail handoff exists"
-    );
-    assert!(
-        state
-            .accounts
-            .confirmations
-            .lock()
-            .unwrap()
-            .offer(crate::confirmation::Plan {
-                actions: vec![],
-                exact_receipt: "a".repeat(64)
-            })
-            .is_err()
-    );
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn managesieve_server_fixture() {
-    let Some(root) = std::env::var_os("MAILROOM_SIEVE_FIXTURE") else {
-        return;
-    };
-    let root = std::path::Path::new(&root);
-    let fake = acquisition::SieveFake::start("normal", Some(root.join("sieve-mode")));
-    let mut repo = acquisition::persistent_test_accounts(root);
-    repo.install_sieve_fixture(&fake);
-    let mut state = AppState::new(true);
-    state.accounts.source = AccountSource::Synthetic {
-        accounts: Arc::new(repo),
-        _directory: tempfile::tempdir().unwrap(),
-        mailboxes: root.join("mailboxes"),
-    };
-    state.accounts.installed_ledger =
-        Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
-    let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
-    axum::serve(listener, super::router(Arc::new(state)))
-        .await
-        .unwrap();
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn managesieve_transactions_server_fixture() {
-    let Some(root) = std::env::var_os("MAILROOM_SIEVE_TRANSACTIONS_FIXTURE") else {
-        return;
-    };
-    let root = std::path::Path::new(&root);
-    let (mut repo, account, _fake) = acquisition::sieve_transaction::tests::install(root);
-    if let Ok(epoch) = std::fs::read_to_string(root.join("workspace-authority")) {
-        if !epoch.is_empty() {
-            repo.install_synthetic_workspace(&account, &epoch);
-        }
-    }
-    let mut state = AppState::new(true);
-    state.accounts.source = AccountSource::Synthetic {
-        accounts: Arc::new(repo),
-        _directory: tempfile::tempdir().unwrap(),
-        mailboxes: root.join("mailboxes"),
-    };
-    state.accounts.installed_ledger =
-        Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
-    let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
-    axum::serve(listener, super::router(Arc::new(state)))
-        .await
-        .unwrap();
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn folder_provisioning_server_fixture() {
-    let Some(root) = std::env::var_os("MAILROOM_FOLDERS_FIXTURE") else {
-        return;
-    };
-    let root = std::path::Path::new(&root);
-    let (mut repo, account, _fake) = acquisition::folder_provisioning::tests::install(root);
-    if let Ok(epoch) = std::fs::read_to_string(root.join("workspace-authority")) {
-        if !epoch.is_empty() {
-            repo.install_synthetic_workspace(&account, &epoch);
-        }
-    }
-    let mut state = AppState::new(true);
-    state.accounts.source = AccountSource::Synthetic {
-        accounts: Arc::new(repo),
-        _directory: tempfile::tempdir().unwrap(),
-        mailboxes: root.join("mailboxes"),
-    };
-    state.accounts.installed_ledger =
-        Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
-    let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
-    axum::serve(listener, super::router(Arc::new(state)))
-        .await
-        .unwrap();
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn envelope_keyword_server_fixture() {
-    let Some(root) = std::env::var_os("MAILROOM_ENVELOPE_FIXTURE") else {
-        return;
-    };
-    let root = std::path::Path::new(&root);
-    let (repo, _account, _folder, _sieve) =
-        acquisition::workspace_authority::envelope_tests::install(root);
-    let mut state = AppState::new(true);
-    state.accounts.source = AccountSource::Synthetic {
-        accounts: Arc::new(repo),
-        _directory: tempfile::tempdir().unwrap(),
-        mailboxes: root.join("mailboxes"),
-    };
-    state.accounts.installed_ledger =
-        Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
-    let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
-    axum::serve(listener, super::router(Arc::new(state)))
-        .await
-        .unwrap();
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn gmail_backlog_server_fixture() {
-    let Some(root) = std::env::var_os("MAILROOM_GMAIL_FIXTURE") else {
-        return;
-    };
-    let root = std::path::Path::new(&root);
-    let (mut repo, _account, _fake) = acquisition::gmail_backlog::fixture_install(root);
-    if let Some(installation) = std::env::var_os("MAILROOM_GMAIL_INSTALLATION") {
-        repo = acquisition::persistent_test_accounts(std::path::Path::new(&installation));
-    }
-    let mut state = AppState::new(true);
-    state.accounts.source = AccountSource::Synthetic {
-        accounts: Arc::new(repo),
-        _directory: tempfile::tempdir().unwrap(),
-        mailboxes: root.join("mailboxes"),
-    };
-    state.accounts.installed_ledger =
-        Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
-    let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
-    axum::serve(listener, super::router(Arc::new(state)))
-        .await
-        .unwrap();
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn backlog_protocol_server_fixture() {
-    let Some(root) = std::env::var_os("MAILROOM_MOVE_FIXTURE") else {
-        return;
-    };
-    let root = std::path::Path::new(&root);
-    let (mut repo, _account, _fake) = acquisition::backlog::fixture_install(root);
-    if let Some(installation) = std::env::var_os("MAILROOM_MOVE_INSTALLATION") {
-        repo = acquisition::persistent_test_accounts(std::path::Path::new(&installation));
-    }
-    let mut state = AppState::new(true);
-    state.accounts.source = AccountSource::Synthetic {
-        accounts: Arc::new(repo),
-        _directory: tempfile::tempdir().unwrap(),
-        mailboxes: root.join("mailboxes"),
-    };
-    state.accounts.installed_ledger =
-        Some(crate::ledger::InstalledLedger::install(root.join("ledger")).unwrap());
-    let listener = tokio::net::TcpListener::bind(super::ADDRESS).await.unwrap();
-    axum::serve(listener, super::router(Arc::new(state)))
-        .await
-        .unwrap();
 }

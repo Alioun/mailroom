@@ -303,6 +303,142 @@ pub(in crate::server) async fn handle(
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::server) struct ImportBundleRequest {
+    filename: String,
+    content_base64: String,
+}
+
+const MAX_IMPORT_BUNDLE_BYTES: usize = 12 * 1024 * 1024;
+
+/// Imports a user-selected encrypted recovery bundle into the local `recovery/bundles/` folder.
+pub(in crate::server) async fn import_bundle(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<ImportBundleRequest>, JsonRejection>,
+) -> Response {
+    let is_vault = state.accounts.vault_live();
+    if !state.accounts.synthetic() && !is_vault {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Recovery bundle import requires the local vault or synthetic mode."})),
+        )
+            .into_response();
+    }
+    let request = match input(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let clean_name = std::path::Path::new(request.filename.trim())
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    let Some((stem, ext)) = clean_name.rsplit_once('.') else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "Recovery bundle filename must be <64-hex-id>.bundle or <64-hex-id>.jwe."})),
+        )
+            .into_response();
+    };
+    if !recovery::valid_digest(stem) || (ext != "bundle" && ext != "jwe") {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "Recovery bundle filename must be a 64-character hex digest ending in .bundle or .jwe."})),
+        )
+            .into_response();
+    }
+    let bytes = match data_encoding::BASE64.decode(request.content_base64.trim().as_bytes()) {
+        Ok(b) if !b.is_empty() && b.len() <= MAX_IMPORT_BUNDLE_BYTES => b,
+        Ok(_) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error": "Recovery bundle is empty or exceeds the 12 MiB upload limit."})),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error": "Invalid base64 payload for recovery bundle."})),
+            )
+                .into_response();
+        }
+    };
+    let id = stem.to_owned();
+    let filename = format!("{stem}.{ext}");
+    match tokio::task::spawn_blocking(move || -> Result<serde_json::Value, (&'static str, StatusCode)> {
+        let _admission = state.accounts.admission.lock().expect("account admission");
+        if state.accounts.job_running() {
+            return Err((
+                "Wait for the active scan or account operation to finish before importing a bundle.",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ));
+        }
+        let _operation = state.accounts.operation.lock().expect("account operation");
+        let repo = state
+            .accounts
+            .repository()
+            .map_err(|_| ("Account repository unavailable.", StatusCode::UNPROCESSABLE_ENTITY))?;
+        let root = match &state.accounts.source {
+            AccountSource::Synthetic { mailboxes, .. } => mailboxes
+                .parent()
+                .ok_or(("Recovery storage unavailable.", StatusCode::UNPROCESSABLE_ENTITY))?
+                .join("synthetic-recovery"),
+            AccountSource::Vault { .. } => repo.paths.data.join("recovery"),
+            _ => return Err(("Recovery unavailable.", StatusCode::FORBIDDEN)),
+        };
+        let bundles_dir = root.join("bundles");
+        crate::private_fs::prepare(&bundles_dir)
+            .map_err(|_| ("Could not prepare recovery bundles folder.", StatusCode::UNPROCESSABLE_ENTITY))?;
+        let target = bundles_dir.join(&filename);
+        if target.exists() {
+            if let Ok(existing) = std::fs::read(&target) {
+                if existing == bytes {
+                    return Ok(json!({
+                        "imported": true,
+                        "already_present": true,
+                        "id": id,
+                        "filename": filename,
+                        "bytes": bytes.len(),
+                    }));
+                }
+            }
+            return Err((
+                "A different bundle with that same ID already exists locally. Mailroom did not overwrite it.",
+                StatusCode::CONFLICT,
+            ));
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        use std::io::Write;
+        options
+            .open(&target)
+            .and_then(|mut file| {
+                file.write_all(&bytes)?;
+                file.sync_all()
+            })
+            .map_err(|_| ("Could not save the recovery bundle.", StatusCode::UNPROCESSABLE_ENTITY))?;
+        Ok(json!({
+            "imported": true,
+            "already_present": false,
+            "id": id,
+            "filename": filename,
+            "bytes": bytes.len(),
+        }))
+    })
+    .await
+    {
+        Ok(Ok(val)) => Json(val).into_response(),
+        Ok(Err((msg, status))) => (status, Json(json!({"error": msg}))).into_response(),
+        Err(_) => failure(AcquisitionError::Storage),
+    }
+}
+
 #[cfg(test)]
 #[tokio::test]
 async fn production_recovery_denies_before_repository_access() {
@@ -383,4 +519,58 @@ async fn recovery_status_is_available_while_account_admission_is_closed() {
     .await;
     drop(admission);
     assert_eq!(response.unwrap().status(), StatusCode::OK);
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn import_bundle_validates_filename_and_saves_to_bundles_dir() {
+    use tower::ServiceExt;
+    let state = Arc::new(AppState::new(true));
+    let router = super::super::router(state.clone());
+    let valid_id = "a".repeat(64);
+    let payload = data_encoding::BASE64.encode(b"encrypted-bundle-bytes");
+
+    // Rejects invalid filename
+    let bad = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/accounts/recovery/import")
+                .header("host", super::super::ADDRESS)
+                .header("content-type", "application/json")
+                .header("x-mailroom-token", state.token.as_str())
+                .body(axum::body::Body::from(
+                    json!({"filename": "../evil.bundle", "content_base64": payload}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Accepts valid <64-hex>.bundle and reports it in status
+    let ok = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/accounts/recovery/import")
+                .header("host", super::super::ADDRESS)
+                .header("content-type", "application/json")
+                .header("x-mailroom-token", state.token.as_str())
+                .body(axum::body::Body::from(
+                    json!({"filename": format!("{valid_id}.bundle"), "content_base64": payload})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(ok.into_body(), 1 << 20).await.unwrap())
+            .unwrap();
+    assert_eq!(body["imported"], true);
+    assert_eq!(body["id"], valid_id);
 }

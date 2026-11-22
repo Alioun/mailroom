@@ -1,15 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import {
   BookUser,
   ChevronRight,
   FileText,
   FolderSync,
+  History,
   LayoutDashboard,
   Lock,
   LockKeyhole,
   Mail,
   MailX,
   Menu,
+  Monitor,
+  Moon,
   Plus,
   RefreshCw,
   Settings,
@@ -17,6 +20,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
+  Sun,
   Users,
 } from "lucide-react";
 import {
@@ -24,6 +28,7 @@ import {
   finishInterrupted,
   listAccounts,
   lockVault,
+  pollAccountEvents,
   readAccountStatus,
   scanAccount,
   setWriteMode,
@@ -38,15 +43,24 @@ import {
   Empty,
   Modal,
   Notice,
+  formatCountdown,
   useCopy,
 } from "./components";
 import type { Language } from "./components";
 import { ConnectForm, VaultForm } from "./Setup";
 import { AccountArea } from "./AccountWorkspace";
 import type { Page } from "./AccountWorkspace";
-import { WorkspaceSettings } from "./Settings";
 import { NavigationDrawer } from "./NavigationDrawer";
 import { describeError } from "./status-labels";
+
+const WorkspaceSettings = lazy(() =>
+  import("./Settings").then((m) => ({ default: m.WorkspaceSettings })),
+);
+const ActivityOverview = lazy(() =>
+  import("./ActivityOverview").then((m) => ({ default: m.ActivityOverview })),
+);
+
+type ThemePreference = "system" | "light" | "dark";
 
 const pages: Page[] = [
   "overview",
@@ -57,20 +71,30 @@ const pages: Page[] = [
   "invoices",
   "subscriptions",
   "addresses",
+  "activity",
   "settings",
 ];
 
-function stored(key: string) {
+function safeStorageGet(storage: Storage, key: string): string | null {
   try {
-    return localStorage.getItem(key);
+    return storage.getItem(key);
   } catch {
     return null;
   }
 }
-function remember(key: string, value: string) {
+function safeStorageSet(storage: Storage, key: string, value: string | null) {
   try {
-    localStorage.setItem(key, value);
-  } catch {}
+    if (value === null) storage.removeItem(key);
+    else storage.setItem(key, value);
+  } catch {
+    // Private browsing or disabled web storage: keep working in-memory.
+  }
+}
+function stored(key: string) {
+  return safeStorageGet(localStorage, key);
+}
+function remember(key: string, value: string) {
+  safeStorageSet(localStorage, key, value);
 }
 function initialPage(): Page {
   const value = new URLSearchParams(location.search).get("view");
@@ -80,32 +104,51 @@ function initialAccount(): string {
   const fromUrl = new URLSearchParams(location.search).get("account");
   return fromUrl ?? stored("mailroom.account") ?? "";
 }
+function initialTheme(): ThemePreference {
+  const value = stored("mailroom.theme");
+  return value === "light" || value === "dark" || value === "system"
+    ? value
+    : "system";
+}
 function pendingAutoScan() {
-  try {
-    return sessionStorage.getItem("mailroom.autoscan") === "waiting";
-  } catch {
-    return false;
-  }
+  return safeStorageGet(sessionStorage, "mailroom.autoscan") === "waiting";
 }
 function autoScan(value: boolean) {
-  try {
-    value
-      ? sessionStorage.setItem("mailroom.autoscan", "waiting")
-      : sessionStorage.removeItem("mailroom.autoscan");
-  } catch {}
+  safeStorageSet(sessionStorage, "mailroom.autoscan", value ? "waiting" : null);
 }
 
 export function App() {
   const [language, setLanguage] = useState<Language>(
     stored("mailroom.language") === "de" ? "de" : "en",
   );
+  const [theme, setTheme] = useState<ThemePreference>(initialTheme);
+
   useEffect(() => {
     document.documentElement.lang = language;
     remember("mailroom.language", language);
   }, [language]);
+
+  useEffect(() => {
+    remember("mailroom.theme", theme);
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      const resolved =
+        theme === "system" ? (mq.matches ? "dark" : "light") : theme;
+      document.documentElement.dataset.theme = resolved;
+    };
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, [theme]);
+
   return (
     <LanguageContext value={language}>
-      <Workbench language={language} onLanguage={setLanguage} />
+      <Workbench
+        language={language}
+        onLanguage={setLanguage}
+        theme={theme}
+        onTheme={setTheme}
+      />
     </LanguageContext>
   );
 }
@@ -113,9 +156,13 @@ export function App() {
 function Workbench({
   language,
   onLanguage,
+  theme,
+  onTheme,
 }: {
   language: Language;
   onLanguage: (value: Language) => void;
+  theme: ThemePreference;
+  onTheme: (value: ThemePreference) => void;
 }) {
   const t = useCopy();
   const [status, setStatus] = useState<AccountStatus | null>(null);
@@ -132,9 +179,10 @@ function Workbench({
   const [refresh, setRefresh] = useState(0);
   const [pending, setPending] = useState(false);
   const [counts, setCounts] = useState<Record<string, number>>({});
+  const [liveCountdown, setLiveCountdown] = useState<number | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
-  const polling = useRef(false);
   const lastJob = useRef<string | null>(null);
+  const eventSeq = useRef<number | undefined>(undefined);
   const wasUsable = useRef(false);
   const menuTrigger = useRef<HTMLButtonElement>(null);
   const account = accounts.find((value) => value.id === selected);
@@ -153,6 +201,9 @@ function Workbench({
   const applyStatus = useCallback(
     async (next: AccountStatus) => {
       setStatus(next);
+      setLiveCountdown(
+        next.live_writes ? (next.live_writes_expires_in_secs ?? null) : null,
+      );
       const job = next.job;
       const signature = job
         ? `${job.account?.id}-${job.progress.state}-${job.operation ?? ""}`
@@ -188,36 +239,57 @@ function Workbench({
     [loadAccounts],
   );
 
+  // Instant push updates via /api/accounts/events long-poll loop with backoff on disconnect.
   useEffect(() => {
     let active = true;
-    const poll = async () => {
-      if (polling.current) return;
-      polling.current = true;
-      try {
-        const next = await readAccountStatus();
-        if (active) {
-          await applyStatus(next);
+    let controller = new AbortController();
+
+    const loop = async () => {
+      while (active) {
+        controller = new AbortController();
+        try {
+          const event = await pollAccountEvents(
+            eventSeq.current,
+            controller.signal,
+          );
+          if (!active) break;
+          eventSeq.current = event.seq;
+          await applyStatus(event.status);
           setError("");
-        }
-      } catch {
-        if (active)
+        } catch (err) {
+          if (!active) break;
+          if (err instanceof DOMException && err.name === "AbortError") break;
           setError(
             t(
               "Mailroom is not responding. Check that the app is running, then retry.",
               "Mailroom antwortet nicht. Prüfe, ob die App läuft, und versuche es erneut.",
             ),
           );
-      } finally {
-        polling.current = false;
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
       }
     };
-    void poll();
-    const timer = setInterval(() => void poll(), 1800);
+    void loop();
     return () => {
       active = false;
-      clearInterval(timer);
+      controller.abort();
     };
-  }, [applyStatus]);
+  }, [applyStatus, t]);
+
+  // Smooth local 1-second tick for live_writes auto-disarm countdown (paused while job runs).
+  useEffect(() => {
+    if (
+      !status?.live_writes ||
+      liveCountdown === null ||
+      status.job?.progress.state === "running"
+    ) {
+      return;
+    }
+    const timer = setInterval(() => {
+      setLiveCountdown((prev) => (prev !== null && prev > 0 ? prev - 1 : prev));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [status?.live_writes, status?.job?.progress.state, liveCountdown !== null]);
 
   useEffect(() => {
     if (selected) remember("mailroom.account", selected);
@@ -262,6 +334,21 @@ function Workbench({
     pushUrl(page, nextId);
   }
 
+  function selectAccountAndPage(nextId: string, nextPage: Page) {
+    setSelected(nextId);
+    setPage(nextPage);
+    setMenu(false);
+    pushUrl(nextPage, nextId);
+    requestAnimationFrame(() => heading.current?.focus());
+    window.scrollTo({ top: 0 });
+  }
+
+  function cycleTheme() {
+    const order: ThemePreference[] = ["system", "light", "dark"];
+    const next = order[(order.indexOf(theme) + 1) % order.length];
+    onTheme(next);
+  }
+
   async function action(work: () => Promise<AccountStatus>) {
     setPending(true);
     setNotice("");
@@ -282,11 +369,11 @@ function Workbench({
     }
   }
 
-  async function handleWriteMode(enable: boolean) {
+  async function handleWriteMode(enable: boolean, timeoutSecs?: number) {
     setWriteBusy(true);
     setWriteError("");
     try {
-      await applyStatus(await setWriteMode(enable, enable));
+      await applyStatus(await setWriteMode(enable, enable, timeoutSecs));
       setWriteModal(false);
     } catch (err) {
       setWriteError(
@@ -343,6 +430,11 @@ function Workbench({
       label: t("Addresses & wind-down", "Adressen & Abbau"),
       icon: BookUser,
     },
+    {
+      page: "activity",
+      label: t("Activity & undo", "Aktivität & Rücknahme"),
+      icon: History,
+    },
   ] satisfies { page: Page; label: string; icon: typeof Mail }[];
 
   const allNav = [...mailboxNav, ...organizeNav];
@@ -383,9 +475,13 @@ function Workbench({
       "Manage per-service addresses, Gmail forwarding, and account wind-down.",
       "Verwalte Dienstadressen, Gmail-Weiterleitung und den Konto-Abbau.",
     ),
+    activity: t(
+      "Cross-account health, active 90-day undo windows, and persisted action history.",
+      "Kontostatus, aktive 90-Tage-Rücknahmefenster und gespeichertes Aktionsprotokoll.",
+    ),
     settings: t(
-      "Safety mode, account connections, Takeout import, T3 config, and vault backup.",
-      "Sicherheitsmodus, Konten, Takeout-Import, T3-Konfiguration und Tresor-Sicherung.",
+      "Safety timers, account connections, Takeout import, T3 config, and vault backup.",
+      "Sicherheitstimer, Konten, Takeout-Import, T3-Konfiguration und Tresor-Sicherung.",
     ),
   };
 
@@ -396,6 +492,13 @@ function Workbench({
       status.vault === "unavailable");
 
   const runningJob = status?.job?.progress.state === "running";
+
+  const themeLabel =
+    theme === "dark"
+      ? t("Dark", "Dunkel")
+      : theme === "light"
+        ? t("Light", "Hell")
+        : t("Auto", "Auto");
 
   return (
     <>
@@ -538,8 +641,8 @@ function Workbench({
                   title={
                     status?.live_writes
                       ? t(
-                          "Live writes armed — click to return to read-only",
-                          "Live-Schreibzugriff aktiv — klicken für Nur-Lese-Modus",
+                          "Live writes armed — click to manage or return to read-only",
+                          "Live-Schreibzugriff aktiv — klicken zum Verwalten oder Deaktivieren",
                         )
                       : t(
                           "Read-only mode — click to enable Live writes",
@@ -554,6 +657,11 @@ function Workbench({
                         {t("Live writes armed", "Live-Schreibzugriff aktiv")}
                       </span>
                       <span className="badge-short">{t("Live", "Live")}</span>
+                      {liveCountdown !== null && (
+                        <span className="badge-countdown">
+                          {formatCountdown(liveCountdown)}
+                        </span>
+                      )}
                     </>
                   ) : (
                     <>
@@ -580,6 +688,28 @@ function Workbench({
                   <span className="lock-label">{t("Lock", "Sperren")}</span>
                 </Action>
               )}
+              <button
+                type="button"
+                className="theme-toggle"
+                onClick={cycleTheme}
+                aria-label={t(
+                  `Theme: ${themeLabel} (click to switch)`,
+                  `Darstellung: ${themeLabel} (klicken zum Wechseln)`,
+                )}
+                title={t(
+                  `Theme: ${themeLabel}`,
+                  `Darstellung: ${themeLabel}`,
+                )}
+              >
+                {theme === "dark" ? (
+                  <Moon size={14} />
+                ) : theme === "light" ? (
+                  <Sun size={14} />
+                ) : (
+                  <Monitor size={14} />
+                )}
+                <span className="lock-label">{themeLabel}</span>
+              </button>
               <Choice
                 label={t("Language", "Sprache")}
                 value={language}
@@ -606,7 +736,17 @@ function Workbench({
                   onClick={() =>
                     void readAccountStatus()
                       .then(applyStatus)
-                      .catch(() => {})
+                      .catch((err) =>
+                        setError(
+                          describeError(
+                            err,
+                            t(
+                              "Still unable to reach Mailroom.",
+                              "Mailroom ist weiterhin nicht erreichbar.",
+                            ),
+                          ),
+                        ),
+                      )
                   }
                 >
                   {t("Retry", "Erneut versuchen")}
@@ -633,7 +773,7 @@ function Workbench({
                 <div className="page-heading">
                   <div>
                     <span className="eyebrow">
-                      {account
+                      {account && page !== "activity"
                         ? `${account.login} · ${account.provider === "gmail" ? "Gmail" : "mailbox.org"}`
                         : t("Your workspace", "Dein Arbeitsbereich")}
                     </span>
@@ -741,21 +881,43 @@ function Workbench({
                     </div>
                   </Notice>
                 )}
-                {accounts.length === 0 ? (
-                  page === "settings" ? (
-                    <WorkspaceSettings
-                      accounts={accounts}
-                      status={status}
-                      onStatus={(next) => void applyStatus(next)}
-                      onRefresh={() => {
-                        void loadAccounts();
-                        setRefresh((v) => v + 1);
-                      }}
-                      onOpenWriteMode={() => {
-                        setWriteError("");
-                        setWriteModal(true);
-                      }}
+                {page === "activity" ? (
+                  <Suspense
+                    fallback={
+                      <div className="lazy-fallback">
+                        <Busy>{t("Loading activity…", "Aktivität wird geladen…")}</Busy>
+                      </div>
+                    }
+                  >
+                    <ActivityOverview
+                      selectedAccount={selected}
+                      refresh={refresh}
+                      onSelectAccountPage={selectAccountAndPage}
                     />
+                  </Suspense>
+                ) : accounts.length === 0 ? (
+                  page === "settings" ? (
+                    <Suspense
+                      fallback={
+                        <div className="lazy-fallback">
+                          <Busy>{t("Loading settings…", "Einstellungen werden geladen…")}</Busy>
+                        </div>
+                      }
+                    >
+                      <WorkspaceSettings
+                        accounts={accounts}
+                        status={status}
+                        onStatus={(next) => void applyStatus(next)}
+                        onRefresh={() => {
+                          void loadAccounts();
+                          setRefresh((v) => v + 1);
+                        }}
+                        onOpenWriteMode={() => {
+                          setWriteError("");
+                          setWriteModal(true);
+                        }}
+                      />
+                    </Suspense>
                   ) : (
                     <section className="panel first-account">
                       <h2>
@@ -790,6 +952,7 @@ function Workbench({
                       refresh={refresh}
                       running={runningJob}
                       onNavigate={navigate}
+                      onSelectAccountPage={selectAccountAndPage}
                       onCount={(count) =>
                         setCounts((previous) =>
                           previous[value.id] === count
@@ -852,6 +1015,8 @@ function Workbench({
         open={writeModal}
         onOpenChange={setWriteModal}
         liveWrites={Boolean(status?.live_writes)}
+        expiresInSecs={liveCountdown}
+        timeoutSecs={status?.live_writes_timeout_secs ?? 900}
         busy={writeBusy}
         runningJob={runningJob}
         error={writeError}

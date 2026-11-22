@@ -82,6 +82,10 @@ const accountStatus = z.object({
   synthetic: z.boolean(),
   source: z.enum(['native', 'unavailable', 'installed', 'synthetic', 'vault']),
   live_writes: z.boolean().default(false),
+  live_writes_expires_in_secs: z.number().nullable().optional().default(null),
+  live_writes_timeout_secs: z.number().optional().default(900),
+  vault_idle_timeout_secs: z.number().optional().default(0),
+  vault_locks_in_secs: z.number().nullable().optional().default(null),
   vault: z.enum(['absent', 'locked', 'unlocked', 'unavailable']).nullable(),
   vault_problem: z.enum(['unsafe_file', 'damaged', 'unsupported_version']).nullable(),
   interrupted: z.array(z.string()),
@@ -126,7 +130,58 @@ export async function createVault(password: string, confirmation: string): Promi
 export async function unlockVault(password: string): Promise<AccountStatus> { return vaultPost('unlock', { password }) }
 export async function lockVault(): Promise<AccountStatus> { return vaultPost('lock', {}) }
 export async function changeVaultPassword(current: string, password: string, confirmation: string): Promise<AccountStatus> { return vaultPost('change-password', { current, password, confirmation }) }
-export async function setWriteMode(live_writes: boolean, confirmed = false): Promise<AccountStatus> { return accountStatus.parse(await accountPost('write-mode', { live_writes, confirmed })) }
+export async function setWriteMode(live_writes: boolean, confirmed = false, timeout_secs?: number): Promise<AccountStatus> {
+  return accountStatus.parse(await accountPost('write-mode', timeout_secs === undefined ? { live_writes, confirmed } : { live_writes, confirmed, timeout_secs }))
+}
+export async function setSafetySettings(input: { live_writes_timeout_secs?: number; vault_idle_timeout_secs?: number }): Promise<AccountStatus> {
+  return accountStatus.parse(await accountPost('safety-settings', input))
+}
+const pickFileResult = z.object({ supported: z.boolean(), cancelled: z.boolean().optional(), path: z.string().nullable() })
+export async function pickTakeoutFile(): Promise<z.infer<typeof pickFileResult>> {
+  return pickFileResult.parse(await accountPost('pick-file', { kind: 'takeout_mbox' }))
+}
+const accountEvents = z.object({ seq: z.number(), status: accountStatus })
+export async function pollAccountEvents(since?: number, signal?: AbortSignal): Promise<{ seq: number; status: AccountStatus }> {
+  const qs = since === undefined ? '' : `?since=${encodeURIComponent(String(since))}`
+  return accountEvents.parse(await responseJson(await localFetch(`/api/accounts/events${qs}`, { signal })))
+}
+const accountOverviewRow = z.object({
+  id: z.string(),
+  provider: account.shape.provider,
+  login: z.string(),
+  connection: z.string(),
+  scan_state: censusStatus.shape.state,
+  saved_messages: z.number(),
+  folders: z.number(),
+  recovery_pending: z.boolean(),
+  active_undo_windows: z.number(),
+  nearest_undo_until: z.number().nullable(),
+  uncertain_actions: z.number(),
+  sieve_deployed: z.boolean(),
+  pending_backlog_runs: z.number(),
+})
+const recentAction = z.object({
+  id: z.string(),
+  account: z.string(),
+  account_login: z.string(),
+  kind: z.enum(['backlog', 'sieve', 'invoice', 'unsubscribe', 'folders']),
+  status: z.string(),
+  summary: z.string(),
+  timestamp: z.number(),
+  undo_open: z.boolean(),
+  undo_until: z.number().nullable(),
+  page: z.enum(['backlog', 'rules', 'invoices', 'subscriptions']),
+})
+const accountsOverview = z.object({
+  accounts: z.array(accountOverviewRow),
+  recent_actions: z.array(recentAction),
+})
+export type AccountOverviewRow = z.infer<typeof accountOverviewRow>
+export type RecentAction = z.infer<typeof recentAction>
+export type AccountsOverview = z.infer<typeof accountsOverview>
+export async function readAccountsOverview(): Promise<AccountsOverview> {
+  return accountsOverview.parse(await accountPost('overview', {}))
+}
 const takeoutSummary = z.object({ summary: z.object({ imported: z.number(), skipped: z.number(), folders: z.number(), labels: z.number(), folder: z.string(), truncated: z.boolean().default(false) }) })
 export type TakeoutSummary = z.infer<typeof takeoutSummary>['summary']
 export async function importTakeout(account: string, path: string): Promise<TakeoutSummary> { return takeoutSummary.parse(await accountPost('takeout', { account, path })).summary }

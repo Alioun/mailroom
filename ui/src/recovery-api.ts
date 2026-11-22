@@ -35,3 +35,17 @@ export async function previewRestore(bundle: string, restoreLedger: boolean, pas
 export async function restore(offer: RestoreOffer, passphrase?: string) { return post({ action: 'selected_restore', preview: offer.preview, receipt: offer.receipt, ...(passphrase ? { passphrase } : {}) }) }
 export async function resumeRestore(passphrase?: string) { return post({ action: 'selected_resume', ...(passphrase ? { passphrase } : {}) }) }
 export async function resumeLegacyRestore(account: string, passphrase?: string) { return post({ action: 'resume', account, ...(passphrase ? { passphrase } : {}) }) }
+const importBundleResult = z.object({ imported: z.literal(true), already_present: z.boolean(), id: z.string(), filename: z.string(), bytes: z.number() })
+export async function importRecoveryBundle(filename: string, contentBase64: string) {
+  const response = await localFetch('/api/accounts/recovery/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename, content_base64: contentBase64 }),
+  })
+  const data: unknown = await response.json().catch(() => null)
+  if (!response.ok) {
+    const parsed = z.object({ error: z.string() }).safeParse(data)
+    throw Error(parsed.success ? parsed.data.error : 'Could not import the recovery bundle.')
+  }
+  return importBundleResult.parse(data)
+}

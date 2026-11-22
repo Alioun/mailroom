@@ -599,7 +599,7 @@ export function Invoices({
                   </p>
                 </div>
                 {preview.plan.source.evidence.kind === "known" && (
-                  <ul className="evidence-list" style={{ margin: 0 }}>
+                  <ul className="evidence-list list-flush">
                     {preview.plan.source.evidence.attachments.map((att, i) => (
                       <li key={i}>
                         <code>{att.name}</code> ({att.media_type})

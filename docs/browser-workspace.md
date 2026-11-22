@@ -17,7 +17,7 @@ The legacy `/advanced.html` entry and old Svelte UI have been retired.
 
 ## Session safety mode
 
-Every server launch starts in **Read-only** mode (`live_writes: false`). Real provider writes (ManageSieve upload/activate, IMAP folder creation, backlog moves/labels, invoice send-on, and unsubscribe execution) remain blocked until the user explicitly arms **Live writes** in Settings, the top bar, or an in-place modal, and every mutation still requires its own exact preview and confirmation. Live writes auto-disarm after a configurable timer (default 15 minutes, paused while a job is running, shown as a live countdown in the top bar) and immediately disarm on vault lock or server restart. Settings also offers an optional vault inactivity auto-lock timer.
+Every server launch starts in **Read-only** mode (`live_writes: false`). Real provider writes (ManageSieve upload/activate, IMAP folder creation, backlog moves/labels, invoice send-on, and unsubscribe execution) remain blocked until the user explicitly arms **Live writes** in Settings, the top bar, or an in-place modal, and every mutation still requires its own exact preview and confirmation. Live writes auto-disarm after a configurable timer (default 15 minutes, paused while a job is running, shown as a live countdown in the top bar) and immediately disarm on vault lock or server restart. The local vault also auto-locks after 30 minutes of inactivity by default (configurable in Settings).
 
 ## T3 assistant exchange
 

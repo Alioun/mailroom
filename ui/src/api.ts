@@ -84,7 +84,7 @@ const accountStatus = z.object({
   live_writes: z.boolean().default(false),
   live_writes_expires_in_secs: z.number().nullable().optional().default(null),
   live_writes_timeout_secs: z.number().optional().default(900),
-  vault_idle_timeout_secs: z.number().optional().default(0),
+  vault_idle_timeout_secs: z.number().optional().default(1800),
   vault_locks_in_secs: z.number().nullable().optional().default(null),
   vault: z.enum(['absent', 'locked', 'unlocked', 'unavailable']).nullable(),
   vault_problem: z.enum(['unsafe_file', 'damaged', 'unsupported_version']).nullable(),

@@ -16,8 +16,10 @@ const ACCOUNT_ROUTES: &[&str] = &[
     "unsubscribe",
     "subscription-review",
     "list",
+    "overview",
     "lifecycle",
     "recovery",
+    "recovery/import",
     "connect",
     "reconnect",
     "interrupted",
@@ -40,6 +42,8 @@ const ACCOUNT_ROUTES: &[&str] = &[
     "summary/review",
     "summary/export",
     "write-mode",
+    "safety-settings",
+    "pick-file",
     "takeout",
 ];
 
@@ -911,4 +915,35 @@ async fn council_track1_zero_account_config_bundle_info_takeout_errors_and_reado
     )
     .await;
     assert_eq!(code, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn unlocked_vault_defaults_to_30m_idle_lock_and_auto_locks_when_elapsed() {
+    let fixture = Fixture::new();
+    let app = fixture.start();
+    let (code, created) = post(
+        &app,
+        "/api/vault/create",
+        json!({"password": MASTER, "confirmation": MASTER}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{created}");
+    assert_eq!(created["vault"], "unlocked");
+    assert_eq!(created["live_writes_timeout_secs"], 900);
+    assert_eq!(created["vault_idle_timeout_secs"], 1800);
+
+    // Arm live writes, then simulate 31 minutes of inactivity.
+    let (code, armed) = post(
+        &app,
+        "/api/accounts/write-mode",
+        json!({"live_writes": true, "confirmed": true}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{armed}");
+    assert_eq!(armed["live_writes"], true);
+
+    app.accounts.rewind_safety_timers_for_test(31 * 60);
+    let after = status_of(&app).await;
+    assert_eq!(after["vault"], "locked");
+    assert_eq!(after["live_writes"], false);
 }

@@ -262,7 +262,7 @@ export function WorkspaceSettings({
   }
 
   const liveTimeoutValue = String(status.live_writes_timeout_secs ?? 900);
-  const vaultIdleValue = String(status.vault_idle_timeout_secs ?? 0);
+  const vaultIdleValue = String(status.vault_idle_timeout_secs ?? 1800);
 
   return (
     <div className="page-stack">
@@ -354,7 +354,7 @@ export function WorkspaceSettings({
               value={
                 ["0", "900", "1800", "3600"].includes(vaultIdleValue)
                   ? vaultIdleValue
-                  : "0"
+                  : "1800"
               }
               disabled={busy}
               onChange={(val) =>
@@ -363,7 +363,10 @@ export function WorkspaceSettings({
               options={[
                 { value: "0", label: t("Off (manual lock)", "Aus (manuell)") },
                 { value: "900", label: t("15 minutes", "15 Minuten") },
-                { value: "1800", label: t("30 minutes", "30 Minuten") },
+                {
+                  value: "1800",
+                  label: t("30 minutes (default)", "30 Minuten (Standard)"),
+                },
                 { value: "3600", label: t("60 minutes", "60 Minuten") },
               ]}
             />

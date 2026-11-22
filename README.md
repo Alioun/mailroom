@@ -56,9 +56,10 @@ See [Rules and proof](docs/rules-proof.md) for the validated YAML model, emitted
 
 ```sh
 ./scripts/verify-sieve.sh
+./scripts/verify-sieve-file.sh path/to/rules.sieve
 ```
 
-The Sieve check builds an isolated image and runs check-sieve and Pigeonhole against synthetic artifacts. It starts no global service and mounts no credentials or personal directories. Its runtime container has no network access.
+The Sieve checks build an isolated image and run `check-sieve` and Dovecot Pigeonhole (`sievec` / `sieve-test`) against synthetic artifacts or any exported `rules.sieve` file. They start no global service, mount no credentials or personal directories, and run with `--network none`.
 
 See [Native confirmation and protected Keychain credentials](docs/macos-confirmation.md) for the pinned confirmation helper, the single-use confirmation boundary and Keychain protection. The owner runs the setup wizard from a clean checkout of the approved commit, as that page describes. `scripts/setup.sh --plan` previews it.
 
@@ -66,7 +67,7 @@ See [Native confirmation and protected Keychain credentials](docs/macos-confirma
 
 [Encrypted recovery](docs/recovery-format.md) captures an explicit set of up to eight synthetic accounts and optionally the installed authoritative ledger with a separately held recovery key. It authenticates an absent-account restore and preserves later independent mailbox and transport effects. Restored accounts remain read-only pending fresh provider evidence and reconciliation. Production creation and restoration stay denied until the owner has run the native setup and authorized live validation.
 
-Inspect the [owner-run recovery wizard](scripts/recovery-wizard.sh) with `bash scripts/recovery-wizard.sh --plan`. Planning requests no secret and creates no backup. With port 4173 free, run `CARGO_PROFILE_TEST_OPT_LEVEL=1 node scripts/verify-recovery-selected-state.mjs` against its paired synthetic fixture.
+Inspect the [owner-run recovery wizard](scripts/recovery-wizard.sh) with `bash scripts/recovery-wizard.sh --plan`. Planning requests no secret and creates no backup. Passphrase-encrypted backup, bundle upload, and restore are also available in browser **Settings** and verified in `ui/scripts/verify-workbench.mjs`.
 
 ## Account boundary
 

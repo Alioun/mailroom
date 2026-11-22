@@ -21,6 +21,7 @@ use std::{
 };
 
 pub(super) const DEFAULT_LIVE_WRITES_TIMEOUT_SECS: u64 = 15 * 60;
+pub(super) const DEFAULT_VAULT_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
 pub(super) const MIN_TIMEOUT_SECS: u64 = 60;
 pub(super) const MAX_TIMEOUT_SECS: u64 = 24 * 60 * 60;
 
@@ -39,7 +40,7 @@ impl Default for SafetyState {
             live_writes: false,
             live_writes_armed_at: None,
             live_writes_timeout_secs: DEFAULT_LIVE_WRITES_TIMEOUT_SECS,
-            vault_idle_timeout_secs: 0,
+            vault_idle_timeout_secs: DEFAULT_VAULT_IDLE_TIMEOUT_SECS,
             last_activity: Instant::now(),
         }
     }

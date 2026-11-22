@@ -49,6 +49,7 @@ impl ObservedDependentCleanup {
         self.review
     }
 
+    #[cfg(test)]
     pub(in crate::acquisition) fn review(&self) -> &DependentCleanupReview {
         &self.review
     }
@@ -74,6 +75,7 @@ impl ObservedCopyCompensation {
         self.review
     }
 
+    #[cfg(test)]
     pub(in crate::acquisition) fn review(&self) -> &CopyCompensationReview {
         &self.review
     }

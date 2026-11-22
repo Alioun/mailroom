@@ -24,4 +24,9 @@ jobs:
       - run: npm --prefix ui ci
       - run: npm --prefix ui run check
       - run: npm --prefix ui run build
+      - name: Install Playwright Chromium and verify workbench UI
+        run: |
+          npm --prefix ui exec playwright install --with-deps chromium
+          cargo build --locked --bin mailroom
+          MAILROOM_DISABLE_NATIVE_PICKER=1 node ui/scripts/verify-workbench.mjs "$PWD/target/debug/mailroom" "$TMPDIR/workbench-browser"
       - run: ./scripts/verify-sieve.sh

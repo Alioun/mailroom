@@ -65,10 +65,6 @@ impl Endpoints {
 
     /// Asks the policy for `operation`. Routes call this before any repository,
     /// credential or network access.
-    pub(crate) fn permit(&self, operation: Operation) -> Result<WritePermit, &'static str> {
-        self.permit_with_mode(operation, false)
-    }
-
     pub(crate) fn permit_with_mode(
         &self,
         operation: Operation,

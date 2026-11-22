@@ -457,31 +457,6 @@ struct WorkerTransport {
     stop_at: Option<usize>,
     inventories: usize,
 }
-
-fn commit_start(
-    repo: &crate::acquisition::Accounts,
-    account: &crate::acquisition::Account,
-    store: &crate::census::EncryptedStore,
-    saved: &mut crate::census::AccountState,
-) -> String {
-    use crate::acquisition::backlog::copy_start::tests::{confirm_prepared, sign};
-    use crate::backlog::protocol::Status;
-    let mut operation = saved.protocol_backlog.runs.remove(0);
-    store.save_state(saved).unwrap();
-    operation.status = Status::Prepared;
-    sign(store, saved, &mut operation);
-    let receipt = operation.receipt.clone();
-    let id = confirm_prepared(repo, account, store, saved, operation, &receipt).unwrap();
-    assert_eq!(saved.protocol_backlog.runs[0].status, Status::Prepared);
-    assert_eq!(saved.protocol_backlog.runs[0].receipt, receipt);
-    assert!(!saved.protocol_backlog.runs[0].batches[0].attempted());
-    assert!(
-        store
-            .checkpoint_matches(saved, crate::census::ProtocolStateView::Persisted)
-            .unwrap()
-    );
-    id
-}
 impl crate::acquisition::backlog::copy_worker::CopyTransport for WorkerTransport {
     fn inventory(&mut self) -> Result<crate::census::folder_provisioning::Inventory, Error> {
         self.inventories += 1;

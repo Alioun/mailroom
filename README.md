@@ -1,8 +1,8 @@
 # mailroom
 
-Inspect a header census, preview deterministic mail rules locally, and run the personal Mac workflow for mailbox.org and Gmail. The Rust core serves a unified React + Base UI workbench at `http://127.0.0.1:4173`. Every server launch starts in **Read-only** mode (`live_writes: false`); live provider writes (ManageSieve deployment, IMAP folder provisioning, backlog sorting, invoice send-on, and unsubscribe execution) stay blocked until explicitly armed for the current session in Settings, and every mutation still requires an exact preview and confirmation. Locking the vault or restarting disarms live writes automatically.
+Inspect a header census, preview deterministic mail rules locally, and run the personal Mac workflow for mailbox.org and Gmail. The Rust core serves a code-split React + Base UI workbench (with WCAG 2.1 AA light/dark themes and instant push status updates) at `http://127.0.0.1:4173`. Every server launch starts in **Read-only** mode (`live_writes: false`); live provider writes (ManageSieve deployment, IMAP folder provisioning, backlog sorting, invoice send-on, and unsubscribe execution) stay blocked until explicitly armed for the current session (with a configurable auto-disarm countdown, default 15 minutes), and every mutation still requires an exact preview and confirmation. Locking the vault (manually or via optional inactivity auto-lock) or restarting disarms live writes automatically.
 
-The workbench unifies all nine views (`Overview`, `Senders`, `Recommendations`, `Rules & deploy`, `Backlog`, `Invoices`, `Subscriptions`, `Addresses & wind-down`, and `Settings`), includes a curated CC0 starter sender catalog (`data/*.csv`, v1.1.0), supports local Google Takeout `.mbox` header-only import alongside IMAP census, configurable T3 provider/model settings, and full local-vault lifecycle & passphrase-encrypted recovery.
+The workbench unifies all ten views (`Overview`, `Senders`, `Recommendations`, `Rules & deploy`, `Backlog`, `Invoices`, `Subscriptions`, `Addresses & wind-down`, `Activity & undo`, and `Settings`), includes a curated CC0 starter sender catalog (`data/*.csv`, v1.1.0), supports local Google Takeout `.mbox` header-only import (with native macOS Finder picker) alongside IMAP census, configurable T3 provider/model presets, and full local-vault lifecycle & passphrase-encrypted recovery with drag-and-drop bundle import.
 
 The [development agent exchange](docs/agent-exchange.md) includes separate folders, a skill, a stdio MCP command and local review of text recommendations. Summary sharing shows the exact masked summary in the browser before launching T3.
 
@@ -40,15 +40,13 @@ cargo check --locked
 cargo test --locked
 npm --prefix ui run check
 npm --prefix ui run build
-node scripts/verify-http.mjs
-node ui/scripts/verify-census.mjs
-node ui/scripts/verify-acquisition.mjs
-node ui/scripts/verify-reports.mjs
+scripts/verify-local-web-launcher.sh
+node ui/scripts/verify-workbench.mjs "$PWD/target/debug/mailroom" .audit/workbench-browser
 bash -n scripts/connect-account.sh
 shellcheck -e SC2329 scripts/connect-account.sh
 ```
 
-The HTTP and browser commands require the running server and run sequentially. The acquisition and report browser flows require `--synthetic-accounts`. The HTTP script checks the foundation preview, denied account operations, launch tokens, cancellation, encrypted resume, failure recovery and summary privacy. The browser scripts exercise the built interface and save screenshots under `.audit/census-browser/`, `.audit/acquisition-browser/` and `.audit/reports-browser/`. It requires Playwright Chromium, installed with `npm --prefix ui exec playwright install chromium`.
+`verify-workbench.mjs` runs 18 end-to-end browser checks in Playwright Chromium against the real server with local-vault and synthetic accounts (port 4173 must be free), covering vault lock/unlock, dark & light WCAG 2.1 AA contrast, safety timer countdown, recovery bundle upload, Takeout import, Activity & undo, responsive 320/768/1440px EN+DE layouts, and DOM accessibility across all 10 views. Install Chromium once with `npm --prefix ui exec playwright install chromium`.
 
 See [Census implementation and remaining work](docs/census.md) for the data model, encrypted file format and incomplete capabilities.
 
@@ -57,7 +55,6 @@ See [Census implementation and remaining work](docs/census.md) for the data mode
 See [Rules and proof](docs/rules-proof.md) for the validated YAML model, emitted-output evaluator, local census interface, cross-check scope and incomplete acceptance criteria. Saved-account rules and pins load and save explicitly. A fresh proof and local confirmation can prepare an exact Sieve download for mailbox.org, with an encrypted export baseline. Gmail backlog has no Sieve-download action. A local export grants no provider authority. The examples contain only synthetic mail and configuration. [Backlog sorting](docs/backlog.md) adds exact previews, encrypted journals, recovery and conditional Undo. Its separately installed loopback IMAP source executes verified-TLS UID MOVE against an independently durable synthetic mailbox. Production execution remains unavailable.
 
 ```sh
-node ui/scripts/verify-rules.mjs
 ./scripts/verify-sieve.sh
 ```
 
@@ -69,7 +66,7 @@ See [Native confirmation and protected Keychain credentials](docs/macos-confirma
 
 [Encrypted recovery](docs/recovery-format.md) captures an explicit set of up to eight synthetic accounts and optionally the installed authoritative ledger with a separately held recovery key. It authenticates an absent-account restore and preserves later independent mailbox and transport effects. Restored accounts remain read-only pending fresh provider evidence and reconciliation. Production creation and restoration stay denied until the owner has run the native setup and authorized live validation.
 
-Inspect the [owner-run recovery wizard](scripts/recovery-wizard.sh) with `bash scripts/recovery-wizard.sh --plan`. Planning requests no secret and creates no backup. With port 4173 free, run `CARGO_PROFILE_TEST_OPT_LEVEL=1 node scripts/verify-recovery-selected-state.mjs`, then `node ui/scripts/verify-recovery-selected-state.mjs` against its paired synthetic fixture.
+Inspect the [owner-run recovery wizard](scripts/recovery-wizard.sh) with `bash scripts/recovery-wizard.sh --plan`. Planning requests no secret and creates no backup. With port 4173 free, run `CARGO_PROFILE_TEST_OPT_LEVEL=1 node scripts/verify-recovery-selected-state.mjs` against its paired synthetic fixture.
 
 ## Account boundary
 
@@ -79,4 +76,4 @@ Read-only adapters use fixed provider TLS endpoints. There are no write-enable f
 
 The server binds only `127.0.0.1:4173`, validates Host and any Origin header, rejects cross-site fetch metadata, has no CORS allowance, and limits JSON POST bodies to 256 KiB. Every API except the session bootstrap requires the current launch token. Its production CSP permits only same-origin external scripts and styles, without `unsafe-inline` or `unsafe-eval`. Native CLI requests may omit Origin. A local process can bootstrap a session and request owner account reads. It cannot unlock account writes. The token binds browser requests to a server launch. It does not isolate mutually untrusted processes running as the same OS user.
 
-The Ark UI compatibility spike exercised the production-built language toggle under this CSP. Its state changed to German without a recorded CSP violation. Future floating or portaled components need their own compatibility check before adoption.
+All floating and portaled Base UI components (dialogs, selects, tabs, and navigation drawers) are verified under this strict CSP with zero violations in `ui/scripts/verify-workbench.mjs`.

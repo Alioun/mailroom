@@ -1,7 +1,9 @@
 use super::compensation_observer::{
     CompensationReadTransport, ObservedCopyCompensation, ObservedDependentCleanup,
 };
-use super::compensation_review::{CopyCompensationActions, CopyCompensationReview};
+#[cfg(test)]
+use super::compensation_review::CopyCompensationActions;
+use super::compensation_review::CopyCompensationReview;
 use super::compensation_worker::CompensationTransport;
 use super::dependent_cleanup::{DependentCleanupReview, DependentCleanupTarget};
 use super::*;
@@ -84,6 +86,7 @@ pub(crate) enum CopyUndoReview {
     AfterClear(DependentCleanupReview),
 }
 
+#[cfg(test)]
 impl CopyUndoReview {
     pub(in crate::acquisition) fn receipt(&self) -> &str {
         match self {

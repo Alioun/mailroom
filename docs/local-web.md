@@ -39,7 +39,7 @@ The page adds an account from its provider, login and app password, saves it in 
 
 Web accounts live in `~/.config/mailroom-web` and `~/Library/Application Support/mailroom-web`. Accounts of the native setup in `~/.config/mailroom` and the Keychain stay where they are, unread and unchanged. Nothing migrates between the two.
 
-Every server launch starts in **Read-only** mode (`live_writes: false`). Provider writes remain denied until you explicitly arm **Live writes** for the current session in Settings or the top bar, and every mutation still requires its own preview and confirmation. Locking the vault (from the top bar or Settings) or restarting the server immediately disarms live writes. Settings also provides master password change, local Google Takeout `.mbox` header-only import, configurable T3 provider/model, account key rotation/forgetting, and passphrase-encrypted recovery backup and restore.
+Every server launch starts in **Read-only** mode (`live_writes: false`). Provider writes remain denied until you explicitly arm **Live writes** for the current session in Settings, the top bar, or an in-place confirmation modal, and every mutation still requires its own preview and confirmation. Live writes auto-disarm after a configurable countdown (default 15 minutes, paused while a job runs), and locking the vault (manually or via the optional inactivity timer) or restarting the server immediately disarms live writes. Settings also provides master password change, local Google Takeout `.mbox` header-only import (with native macOS Finder picker), configurable T3 provider/model presets, account key rotation/forgetting, and passphrase-encrypted recovery backup, drag-and-drop bundle upload, and restore.
 
 ## Limits
 
@@ -55,7 +55,7 @@ Every server launch starts in **Read-only** mode (`live_writes: false`). Provide
 scripts/verify-local-web-launcher.sh          # launcher with a dummy home and fake npm and cargo
 cargo test --locked --lib -- acquisition::accounts::vault server::accounts::web
 npm --prefix ui run build && cargo build --release --locked
-node ui/scripts/verify-local-web.mjs "$PWD/target/release/mailroom"
+node ui/scripts/verify-workbench.mjs "$PWD/target/release/mailroom" .audit/workbench-browser
 ```
 
-The last command starts the real binary with a dummy home on `127.0.0.1:4173`, so nothing else may use that port. It drives the forms in Chromium when Playwright's browser is installed and falls back to HTTP otherwise. It adds no account and contacts no provider.
+The last command starts the real binary with a dummy home on `127.0.0.1:4173`, so nothing else may use that port. It drives the local-vault and synthetic workbench flows in Chromium (including WCAG 2.1 AA light/dark contrast, safety countdown, recovery bundle upload, Takeout import, Activity & undo, and accessibility checks across all 10 views). It never contacts any real mail provider.

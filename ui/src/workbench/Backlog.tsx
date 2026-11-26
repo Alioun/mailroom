@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useContext, useEffect, useState } from "react";
 import {
   Archive,
+  ArrowRight,
   CheckCircle2,
   FolderSync,
   Play,
@@ -37,13 +38,15 @@ import type {
 } from "../api";
 import { labelPreviewFor } from "../folder-provisioning-api";
 import type { LabelPreview } from "../folder-provisioning-api";
-import { describeError } from "./status-labels";
+import { describeError, localizedError } from "./status-labels";
+import { formatNumber } from "./format";
 import {
   Action,
   Busy,
   CheckField,
   Choice,
   Empty,
+  LanguageContext,
   Notice,
   Stat,
   useCopy,
@@ -56,14 +59,21 @@ export function Backlog({
   account,
   liveWrites,
   liveJob,
+  hasLocalRules = true,
+  synthetic = false,
   onOpenWriteMode,
+  onGoRules,
 }: {
   account: Account;
   liveWrites: boolean;
   liveJob: AccountStatus["job"];
+  hasLocalRules?: boolean;
+  synthetic?: boolean;
   onOpenWriteMode: () => void;
+  onGoRules?: () => void;
 }) {
   const t = useCopy();
+  const language = useContext(LanguageContext);
   const isGmail = account.provider === "gmail";
   const [scope, setScope] =
     useState<BacklogOptions["scope"]>("inbox_unfiled");
@@ -146,7 +156,9 @@ export function Backlog({
   const protocolReady = isGmail
     ? Boolean(gmailView?.installed)
     : Boolean(protocolView?.installed);
-  const syntheticOnly = !protocolReady && Boolean(legacyView?.synthetic);
+  const syntheticOnly =
+    !protocolReady && (synthetic || Boolean(legacyView?.synthetic));
+  const needsRulesFirst = !hasLocalRules && !archiveUnmatched;
   const backlogKind = isGmail ? "gmail" : "protocol";
 
   async function runPreview() {
@@ -164,8 +176,9 @@ export function Backlog({
       }
     } catch (err) {
       setError(
-        describeError(
+        localizedError(
           err,
+          t,
           t(
             "Could not preview backlog sorting. Ensure local rules are saved and valid, and the mailbox is reachable.",
             "Bestandsvorschau fehlgeschlagen. Prüfe, ob lokale Regeln gespeichert und gültig sind und das Postfach erreichbar ist.",
@@ -491,19 +504,16 @@ export function Backlog({
           <div>
             <h2>
               {isGmail
-                ? t(
-                    "Sort existing Gmail backlog (labels)",
-                    "Gmail-Bestand sortieren (Labels)",
-                  )
+                ? t("Sort existing Gmail backlog", "Gmail-Bestand sortieren")
                 : t(
-                    "Sort existing mailbox.org backlog (IMAP MOVE)",
-                    "mailbox.org-Bestand sortieren (IMAP MOVE)",
+                    "Sort existing mailbox.org backlog",
+                    "mailbox.org-Bestand sortieren",
                   )}
             </h2>
             <p className="muted">
               {t(
-                "Journaled, batch-bounded sorting with flagged-message protection and conditional Undo. Sent, Drafts, Spam, and Trash stay untouched.",
-                "Protokollierte Stapelsortierung mit Schutz markierter Nachrichten und bedingtem Rückgängigmachen. Gesendet, Entwürfe, Spam und Papierkorb bleiben unberührt.",
+                "Preview every planned move before anything changes. Flagged mail stays protected, every run is reversible, and Sent, Drafts, Spam, and Trash are never touched.",
+                "Prüfe jede geplante Änderung vorab. Markierte Nachrichten bleiben geschützt, jeder Lauf ist umkehrbar, und Gesendet, Entwürfe, Spam sowie Papierkorb bleiben unberührt.",
               )}
             </p>
           </div>
@@ -512,9 +522,26 @@ export function Backlog({
             {t("Refresh", "Aktualisieren")}
           </Action>
         </div>
+        {needsRulesFirst && (
+          <Notice tone="info">
+            <span>
+              {t(
+                "Create local rules first to sort existing mail by rules, or switch Mode to archive unmatched mail.",
+                "Erstelle zuerst lokale Regeln, um vorhandene Mails nach Regeln zu sortieren, oder wechsle den Modus auf Archivieren.",
+              )}
+            </span>
+            {onGoRules && (
+              <Action size="compact" onClick={onGoRules}>
+                {t("Create local rules", "Lokale Regeln anlegen")}
+                <ArrowRight size={13} />
+              </Action>
+            )}
+          </Notice>
+        )}
         <div className="toolbar">
           <Choice
             label={t("Mode", "Modus")}
+            fieldLabel={t("Mode", "Modus")}
             value={archiveUnmatched ? "archive_unmatched" : "sort"}
             onChange={(value) => {
               setArchiveUnmatched(value === "archive_unmatched");
@@ -539,6 +566,7 @@ export function Backlog({
           />
           <Choice
             label={t("Scope", "Bereich")}
+            fieldLabel={t("Scope", "Bereich")}
             value={scope}
             onChange={(value) => {
               if (
@@ -583,7 +611,7 @@ export function Backlog({
           <Action
             primary
             onClick={() => void runPreview()}
-            disabled={busy || hasRunningRun}
+            disabled={busy || hasRunningRun || needsRulesFirst}
           >
             {busy ? (
               <Busy>{t("Computing preview…", "Vorschau wird berechnet…")}</Busy>
@@ -614,9 +642,9 @@ export function Backlog({
               <ul className="evidence-list list-compact">
                 {gmailPreview.missing_labels.map((m) => (
                   <li key={m.name}>
-                    <code>{m.name}</code> ({m.messages.toLocaleString()}{" "}
+                    <code>{m.name}</code> ({formatNumber(m.messages, language)}{" "}
                     {t("messages", "Nachrichten")})
-                    {m.blocked ? ` — ${m.blocked}` : ""}
+                    {m.blocked ? `: ${m.blocked}` : ""}
                   </li>
                 ))}
               </ul>
@@ -685,19 +713,19 @@ export function Backlog({
             <div className="stats compact">
               <Stat
                 label={t("Planned moves/labels", "Geplante Änderungen")}
-                value={activePlan.changes.length.toLocaleString()}
+                value={formatNumber(activePlan.changes.length, language)}
               />
               <Stat
                 label={t("Unmatched (stay)", "Nicht zugeordnet")}
-                value={activePlan.unmatched.toLocaleString()}
+                value={formatNumber(activePlan.unmatched, language)}
               />
               <Stat
                 label={t("Held for review", "Zur Prüfung behalten")}
-                value={activePlan.review.toLocaleString()}
+                value={formatNumber(activePlan.review, language)}
               />
               <Stat
                 label={t("Destinations", "Zielordner")}
-                value={Object.keys(activePlan.groups).length.toLocaleString()}
+                value={formatNumber(Object.keys(activePlan.groups).length, language)}
               />
             </div>
             {(excludedEntries.length > 0 ||
@@ -735,7 +763,7 @@ export function Backlog({
                       <tr key={dest}>
                         <th>{dest}</th>
                         <td className="numeric">
-                          {group.count.toLocaleString()}
+                          {formatNumber(group.count, language)}
                         </td>
                         <td>
                           {group.top_senders

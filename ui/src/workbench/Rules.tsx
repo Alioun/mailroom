@@ -53,6 +53,7 @@ export function Rules({
   workspace,
   liveWrites,
   liveJob,
+  synthetic = false,
   onWorkspace,
   onOpenWriteMode,
   onGoBacklog,
@@ -63,6 +64,7 @@ export function Rules({
   workspace: WorkspaceView | null;
   liveWrites: boolean;
   liveJob: AccountStatus["job"];
+  synthetic?: boolean;
   onWorkspace: (value: WorkspaceView) => void;
   onOpenWriteMode: () => void;
   onGoBacklog: () => void;
@@ -621,6 +623,7 @@ export function Rules({
                 account={account}
                 liveWrites={liveWrites}
                 liveJob={liveJob}
+                synthetic={synthetic}
                 onOpenWriteMode={onOpenWriteMode}
               />
             ),

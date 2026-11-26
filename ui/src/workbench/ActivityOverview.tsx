@@ -1,25 +1,21 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useContext, useEffect, useState } from "react";
 import { ArrowUpRight, Clock, History, RefreshCw } from "lucide-react";
 import { readAccountsOverview } from "../api";
 import type { AccountsOverview, RecentAction } from "../api";
-import { Action, Empty, Notice, Stat, StatusBadge, useCopy } from "./components";
+import {
+  Action,
+  Empty,
+  LanguageContext,
+  Notice,
+  Stat,
+  StatusBadge,
+  useCopy,
+} from "./components";
+import { formatNumber, formatShortDate, pluralCount } from "./format";
 import { describeError } from "./status-labels";
 import type { Page } from "./AccountWorkspace";
 
 type ActionFilter = "all" | "undo" | "attention";
-
-function formatShortDate(unixSecs: number): string {
-  if (!unixSecs || unixSecs < 1_000_000_000) return "";
-  try {
-    return new Date(unixSecs * 1000).toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-  } catch {
-    return "";
-  }
-}
 
 function actionKindLabel(
   kind: RecentAction["kind"],
@@ -36,6 +32,8 @@ function actionKindLabel(
       return t("Subscription", "Abonnement");
     case "folders":
       return t("Folders", "Ordner");
+    case "safety":
+      return t("Safety", "Sicherheit");
   }
 }
 
@@ -53,6 +51,7 @@ export function ActivityOverview({
   onOpenFullActivity?: () => void;
 }) {
   const t = useCopy();
+  const language = useContext(LanguageContext);
   const [data, setData] = useState<AccountsOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -98,9 +97,31 @@ export function ActivityOverview({
           <div>
             <h2>{t("All connected accounts", "Alle verbundenen Konten")}</h2>
             <p className="muted">
-              {t(
-                `${data.accounts.length} accounts · ${totalUndo} open undo window(s) · ${totalUncertain} item(s) needing review`,
-                `${data.accounts.length} Konten · ${totalUndo} offene Rücknahmefenster · ${totalUncertain} Einträge zur Prüfung`,
+              {pluralCount(
+                data.accounts.length,
+                language,
+                "account",
+                "accounts",
+                "Konto",
+                "Konten",
+              )}{" "}
+              ·{" "}
+              {pluralCount(
+                totalUndo,
+                language,
+                "open undo window",
+                "open undo windows",
+                "offenes Rücknahmefenster",
+                "offene Rücknahmefenster",
+              )}{" "}
+              ·{" "}
+              {pluralCount(
+                totalUncertain,
+                language,
+                "item needing review",
+                "items needing review",
+                "Eintrag zur Prüfung",
+                "Einträge zur Prüfung",
               )}
             </p>
           </div>
@@ -128,8 +149,14 @@ export function ActivityOverview({
                   {row.provider === "gmail" ? "Gmail" : "mailbox.org"}
                 </span>
                 <span>
-                  {row.saved_messages.toLocaleString()}{" "}
-                  {t("messages", "Nachrichten")}
+                  {pluralCount(
+                    row.saved_messages,
+                    language,
+                    "message",
+                    "messages",
+                    "Nachricht",
+                    "Nachrichten",
+                  )}
                 </span>
                 {row.active_undo_windows > 0 && (
                   <span className="badge info">
@@ -187,20 +214,20 @@ export function ActivityOverview({
       <div className="stats">
         <Stat
           label={t("Connected accounts", "Verbundene Konten")}
-          value={data?.accounts.length ?? 0}
+          value={formatNumber(data?.accounts.length ?? 0, language)}
         />
         <Stat
           label={t("Saved messages", "Gespeicherte Nachrichten")}
-          value={totalMessages.toLocaleString()}
+          value={formatNumber(totalMessages, language)}
         />
         <Stat
           label={t("Open undo windows", "Offene Rücknahmefenster")}
-          value={totalUndo}
+          value={formatNumber(totalUndo, language)}
           detail={t("90-day retention", "90 Tage Aufbewahrung")}
         />
         <Stat
           label={t("Needs attention", "Prüfung erforderlich")}
-          value={totalUncertain}
+          value={formatNumber(totalUncertain, language)}
         />
       </div>
 
@@ -211,8 +238,8 @@ export function ActivityOverview({
               <h2>{t("Account health", "Kontostatus")}</h2>
               <p className="muted">
                 {t(
-                  "Click any account card to jump straight to its overview.",
-                  "Klicke auf eine Kontokarte, um direkt zu deren Übersicht zu wechseln.",
+                  "Open an account to jump straight to its overview.",
+                  "Öffne ein Konto, um direkt zu dessen Übersicht zu wechseln.",
                 )}
               </p>
             </div>
@@ -242,11 +269,24 @@ export function ActivityOverview({
                     {row.provider === "gmail" ? "Gmail" : "mailbox.org"}
                   </span>
                   <span>
-                    {row.saved_messages.toLocaleString()}{" "}
-                    {t("messages", "Nachrichten")}
+                    {pluralCount(
+                      row.saved_messages,
+                      language,
+                      "message",
+                      "messages",
+                      "Nachricht",
+                      "Nachrichten",
+                    )}
                   </span>
                   <span>
-                    {row.folders} {t("folders", "Ordner")}
+                    {pluralCount(
+                      row.folders,
+                      language,
+                      "folder",
+                      "folders",
+                      "Ordner",
+                      "Ordner",
+                    )}
                   </span>
                   {row.sieve_deployed && (
                     <span className="badge success">
@@ -331,7 +371,7 @@ export function ActivityOverview({
                     <StatusBadge status={item.status} />
                     <strong>{item.account_login}</strong>
                     {item.timestamp !== null && (
-                      <span>{formatShortDate(item.timestamp)}</span>
+                      <span>{formatShortDate(item.timestamp, language)}</span>
                     )}
                   </div>
                   <span>{item.summary}</span>
@@ -339,15 +379,20 @@ export function ActivityOverview({
                     <small className="muted">
                       <Clock size={12} />{" "}
                       {t(
-                        `Undo window open until ${formatShortDate(item.undo_until)}`,
-                        `Rücknahme möglich bis ${formatShortDate(item.undo_until)}`,
+                        `Undo window open until ${formatShortDate(item.undo_until, language)}`,
+                        `Rücknahme möglich bis ${formatShortDate(item.undo_until, language)}`,
                       )}
                     </small>
                   )}
                 </div>
                 <Action
                   size="compact"
-                  onClick={() => onSelectAccountPage(item.account, item.page)}
+                  onClick={() =>
+                    onSelectAccountPage(
+                      item.account || selectedAccount,
+                      item.page,
+                    )
+                  }
                 >
                   {t("Open", "Öffnen")}
                   <ArrowUpRight size={14} />

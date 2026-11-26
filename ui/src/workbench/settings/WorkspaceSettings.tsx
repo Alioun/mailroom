@@ -266,7 +266,7 @@ export function WorkspaceSettings({
 
   return (
     <div className="page-stack">
-      <section className="panel">
+      <section id="settings-safety" className="panel">
         <div className="section-heading">
           <div>
             <h2>{t("Provider safety mode", "Sicherheitsmodus")}</h2>
@@ -374,7 +374,7 @@ export function WorkspaceSettings({
         </div>
       </section>
 
-      <section className="panel">
+      <section id="settings-t3" className="panel">
         <div className="section-heading">
           <div>
             <h2>
@@ -452,7 +452,7 @@ export function WorkspaceSettings({
       </section>
 
       {status.source === "vault" && (
-        <section className="panel">
+        <section id="settings-vault" className="panel">
           <div className="section-heading">
             <div>
               <h2>

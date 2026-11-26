@@ -1,77 +1,93 @@
 ---
 name: mailroom
-description: A restrained local interface for inspecting mail decisions.
+description: A calm, local-first Operate workbench for inspecting mail, previewing rules, and executing confirmed mailbox actions safely.
 colors:
-  primary: "#15596a"
-  background: "#ffffff"
-  foreground: "#203239"
-  secondary-text: "#53656e"
-  divider: "#ccd6da"
-  sample-surface: "#eaf0f3"
+  primary: "#147d70"
+  primary-strong: "#106659"
+  primary-soft: "#e6f3f0"
+  background: "#f7f9f9"
+  surface: "#ffffff"
+  foreground: "#263c3a"
+  secondary-text: "#526663"
+  divider: "#d9e3e0"
+  control-border: "#8fa39d"
+  warning: "#b45309"
+  warning-surface: "#fffbeb"
+  danger: "#b91c1c"
+  danger-surface: "#fef2f2"
+  dark-background: "#0d1514"
+  dark-surface: "#131f1e"
+  dark-foreground: "#e6f0ee"
+  dark-secondary-text: "#9eb3af"
+  dark-divider: "#243735"
 typography:
   body:
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
-    fontSize: "16px"
-    lineHeight: 1.55
+    fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    fontSize: "14px"
+    lineHeight: 1.5
   heading:
-    fontSize: "clamp(30px, 4vw, 43px)"
+    fontSize: "30px"
     fontWeight: 650
-    lineHeight: 1.18
-    letterSpacing: "-0.035em"
+    lineHeight: 1.25
+    letterSpacing: "-0.03em"
 rounded:
-  control: "5px"
-  panel: "7px"
+  control: "8px"
+  panel: "12px"
+  pill: "999px"
 spacing:
   compact: "10px"
-  group: "20px"
-  section: "30px"
+  group: "16px"
+  section: "24px"
 components:
   button-primary:
     backgroundColor: "{colors.primary}"
-    textColor: "{colors.background}"
+    textColor: "#ffffff"
     rounded: "{rounded.control}"
     padding: "9px 16px"
 ---
 
 ## Overview
 
-This is an Operate interface. The current screen helps a reader compare message destinations and understand why each rule matched. Keep synthetic-source labels and account restrictions visible.
+Mailroom is a local-first **Operate** workbench built with React and Base UI (`@base-ui/react`). Users connect personal mail accounts (stored in an encrypted local vault) or explore a clearly labelled synthetic demo account, inspect deduplicated header findings, author and simulate local rules, and only modify real mail after explicitly arming session-scoped Live writes plus per-action preview and confirmation.
 
-## Colors
+## Colors & Themes
 
-Use white for the page, blue-tinted gray for the sample, and deep teal for the primary action and filing destinations. Use secondary text for explanations. Borders separate decisions without surrounding each row with a card.
+- **Light mode (default):** cool off-white canvas (`#f7f9f9`), crisp white panels (`#ffffff`), deep pine-slate ink (`#263c3a`), muted slate secondary copy (`#526663`), and deep teal primary accent (`#147d70` / `#106659`).
+- **Dark mode (`data-theme="dark"`):** deep slate-pine canvas (`#0d1514`), elevated surfaces (`#131f1e`), high-contrast off-white ink (`#e6f0ee`), and WCAG 2.1 AA contrast across controls, badges, and notices.
+- **Safety semantics:** Read-only uses calm teal (`#eef7f3` / `#175c4b`). Armed Live writes shifts the topbar badge to high-contrast amber (`#b45309` / `#ffffff`) and subtly tints the topbar so write capability is unmistakable at a glance.
+- **Browser surfaces:** Theme `::selection`, `caret-color`, `text-underline-offset`, and `font-variant-numeric: tabular-nums` from the palette.
 
 ## Typography
 
-Use the native sans-serif stack for interface text. Keep headings upright. Monospace is reserved for generated code and raw JSON. Use tabular numerals for counts.
+- Use `Inter` with system UI fallbacks (`-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`) at `14px` body size (`1.5` line-height).
+- Keep headings upright with `-0.02em` to `-0.03em` tracking; do not place eyebrow kickers above page headings.
+- Reserve monospace for generated Sieve scripts, YAML documents, receipts, and file paths.
+- Format all counts, percentages, and dates using the active UI locale (`en-US` or `de-DE`) with tabular numerals (`tabular-nums`) and proper singular/plural grammar.
 
-## Layout
+## Layout & Navigation
 
-The page has a maximum width of 1200px with 40px side padding. Below 680px, use 20px padding, stack the sample controls, and show decisions as compact message rows. Keep copy actions separate from filing destinations.
+- Persistent `234px` left sidebar on desktop (collapsing into a Base UI focus-trapped `NavigationDrawer` below `768px`) with two clear groups (`Mailbox` and `Organize`) plus `Settings`.
+- Sticky `70px` topbar carrying breadcrumb orientation, an explicit `Demo mail` pill whenever `status.synthetic` is active, the interactive Read-only / Live writes safety badge, Lock vault (when in vault mode), Theme switcher, Keyboard shortcuts trigger (`?`), and Language selector (`English` / `Deutsch`).
+- Content column uses generous padding (`35px 38px` desktop, `20px 16px` mobile below `768px`, max-width `1510px`). Below `680px`, toolbars and filter selects stack cleanly at full width so German labels never collapse or clip.
+- Long multi-section pages such as **Settings** begin with a compact in-page section jump strip, and destructive account actions (`Account key & local removal`) live at the bottom.
 
-The saved-account workspace opens the selected census automatically. Loading, errors and retry belong to the selected account; delayed results must not restore an earlier account. Task links point to the census, rules and address policy, existing mail, invoices, subscriptions, wind-down, then setup and recovery. Keep task contents mounted while using those links so navigation does not discard an exact review. Setup controls and raw saved headers follow the everyday tasks. Account activity names the account whose job it describes.
+## Elevation, Surfaces & Shapes
 
-Stand-alone census and rule examples follow saved accounts in one native disclosure, closed initially and labelled as invented mail. Keep both examples mounted so closing the disclosure preserves an in-progress review. Account write restrictions remain visible outside this disclosure.
+- Primary elevation comes from `1px` borders (`--border`) over the canvas; reserve soft shadows strictly for floating overlays (dialogs, dropdown popups, mobile drawer).
+- Standardize radii: `8px` for controls and status banners, `12px` for panels and dialogs, `999px` for small status pills and filter chips.
+- Never use one-sided `border-left` accent bars ("side tabs") on rounded boxes; communicate notice/warning tone through a full tinted border, surface tint, and leading icon.
 
-Proof decisions use local subject, sender and destination search, with separate Inbox, copy and recipient-review filters. Show 50 messages per page with a matching result range and previous/next controls. The folder diff follows that page. Keep full-census totals and approval gates above the filters, with explicit text that browsing does not change their scope. Distinguish an empty census from filters with no matches. Search and page controls wrap with the existing layout and retain native focus styling.
+## Components & Accessibility
 
-The saved account view also compares observed folders with the last recorded deployment. Keep unavailable evidence explicit, show summary counts before private details and distinguish matches, other folders and uncheckable predictions. Put transaction and census identities inside the detail disclosure. Show 50 messages per page in a horizontally scrollable table. State that old mail and later moves are included and that matches do not prove initial delivery.
-
-## Elevation & Depth
-
-Use borders and surface colors. There are no shadows.
-
-## Shapes
-
-Controls have small rounded corners. Avoid pill buttons and nested cards.
-
-## Components
-
-Ark UI toggle groups provide language and result selection. Selected controls use a tinted fill and border. The primary preview button has a dark fill with white text. Controls are at least 44px high. Keyboard focus has a visible outline. Disabled controls remain legible.
+- Base UI (`Dialog`, `Select`, `Checkbox`, `Tabs`, `Button`) supplies accessible focus management, keyboard navigation, and Escape dismissal.
+- Keep interactive touch targets usable (`>= 36–44px`), with distinct disabled surfaces rather than low-contrast opacity washout.
+- Never place a 1-second ticking countdown inside `role="status"` or an `aria-live` region; announce safety state changes and threshold warnings cleanly without spamming screen readers.
+- Keyboard shortcuts: `?` opens the shortcut reference, `/` focuses Senders search, `g` then `o`/`s`/`r`/`b`/`a` jumps between core views, and `Esc` closes open dialogs.
 
 ## Do's and Don'ts
 
-- Do show source, decisions and unavailable operations in plain language.
-- Do verify German text at narrow widths.
-- Don't add gradients, cream backgrounds, italic heading accents or decorative section numbers.
-- Don't show account actions as successful while their implementation is unavailable.
+- **Do** keep synthetic/demo-source indicators visible in the topbar, sidebar, footer, and unavailable panels whenever `status.synthetic` is true.
+- **Do** speak in plain user verbs ("deploy filter rules, create folders, move existing mail") instead of protocol acronyms where possible, and localize all server-rejected actions in EN and DE.
+- **Do** verify German text and controls at `390px` width.
+- **Don't** add gradients, cream backgrounds, eyebrow kickers above headings, italic heading accents, decorative section numbers, or one-sided accent bars on rounded boxes.
+- **Don't** claim "Encrypted local vault" during synthetic demo sessions or show unavailable account actions as active.

@@ -238,6 +238,15 @@
 .page-heading .muted {
   font-size: 13px;
 }
+.page-context {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  margin-top: 2px;
+}
 .page-stack {
   display: grid;
   gap: 23px;

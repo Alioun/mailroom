@@ -82,6 +82,9 @@ export function statusMeta(raw: string, t: CopyFn): StatusMeta {
     cancelled: { label: t("Cancelled", "Abgebrochen"), tone: "subtle" },
     idle: { label: t("Idle", "Bereit"), tone: "subtle" },
     forgotten: { label: t("Removed", "Entfernt"), tone: "subtle" },
+    armed: { label: t("Live writes armed", "Live-Schreibzugriff aktiv"), tone: "warning" },
+    disarmed: { label: t("Read-only", "Nur-Lese"), tone: "success" },
+    locked: { label: t("Vault locked", "Tresor gesperrt"), tone: "subtle" },
   };
   if (table[key]) return table[key];
   const fallback = raw
@@ -228,6 +231,45 @@ export function invoiceRoleText(role: string, t: CopyFn): StatusMeta {
     unknown_or_mixed: { label: t("Unknown / mixed", "Unbekannt / gemischt"), tone: "warning" },
   };
   return map[role] ?? statusMeta(role, t);
+}
+
+export function localizedError(err: unknown, t: CopyFn, fallback: string): string {
+  const code =
+    typeof err === "object" && err !== null && "code" in err && typeof err.code === "string"
+      ? err.code
+      : undefined;
+  const map: Record<string, string> = {
+    no_local_rules: t(
+      "Create and save local rules on Rules & deploy before previewing a backlog sort.",
+      "Erstelle und speichere zuerst lokale Regeln unter Regeln & Bereitstellung, bevor du den Bestand prüfst.",
+    ),
+    scan_incomplete: t(
+      "Finish scanning this mailbox before previewing a backlog sort.",
+      "Schließe zuerst die Postfacherfassung ab, bevor du den Bestand prüfst.",
+    ),
+    pending_unsubscribe: t(
+      "Reconcile pending unsubscribe actions before starting a backlog sort.",
+      "Kläre zuerst ausstehende Abmeldungen, bevor du den Bestand sortierst.",
+    ),
+    pending_invoice: t(
+      "Resolve pending invoice sends before starting a backlog sort.",
+      "Kläre zuerst ausstehende Rechnungsversände, bevor du den Bestand sortierst.",
+    ),
+    job_running: t(
+      "Wait for the active account operation to finish first.",
+      "Warte zuerst, bis die laufende Kontoaktion abgeschlossen ist.",
+    ),
+    recovery_pending: t(
+      "Run a fresh scan to reconcile this account after recovery.",
+      "Starte nach der Wiederherstellung zuerst eine neue Erfassung.",
+    ),
+    backlog_rejected: t(
+      "Backlog preview could not run. Save local rules first or refresh this view.",
+      "Die Bestandsvorschau konnte nicht ausgeführt werden. Speichere zuerst lokale Regeln oder aktualisiere die Ansicht.",
+    ),
+  };
+  if (code && map[code]) return map[code];
+  return describeError(err, fallback);
 }
 
 export function describeError(err: unknown, fallback: string): string {

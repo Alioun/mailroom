@@ -404,6 +404,23 @@ pub(in crate::server) async fn handle(
             rows.push(row);
         }
 
+        for ev in state.accounts.safety_audit_events() {
+            actions.push(RecentAction {
+                id: ev.id,
+                account: String::new(),
+                account_login: "Workspace".into(),
+                kind: "safety",
+                status: ev.status.into(),
+                summary: ev.summary,
+                timestamp: Some(ev.timestamp),
+                undo_open: false,
+                undo_until: None,
+                page: "settings",
+                needs_attention: false,
+                history_order: 0,
+            });
+        }
+
         let actions = sort_and_cap_actions(actions);
 
         Ok::<_, AcquisitionError>(json!({

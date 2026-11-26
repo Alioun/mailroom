@@ -178,8 +178,8 @@ export function AccountArea({
                     ? t("Scanning your mailbox…", "Dein Postfach wird erfasst…")
                     : report.complete
                       ? t(
-                          "Scan complete — 0 messages found",
-                          "Erfassung abgeschlossen — 0 Nachrichten gefunden",
+                          "Scan complete: 0 messages found",
+                          "Erfassung abgeschlossen: 0 Nachrichten gefunden",
                         )
                       : t(
                           "Ready to understand your mailbox",
@@ -240,6 +240,7 @@ export function AccountArea({
           <Senders
             report={report}
             onRecommend={() => onNavigate("recommendations")}
+            onGoRules={() => onNavigate("rules")}
           />
         ) : (
           <Empty
@@ -287,6 +288,7 @@ export function AccountArea({
               workspace={workspace}
               liveWrites={status.live_writes}
               liveJob={status.job}
+              synthetic={status.synthetic}
               onWorkspace={setWorkspace}
               onOpenWriteMode={onOpenWriteMode}
               onGoBacklog={() => onNavigate("backlog")}
@@ -305,7 +307,10 @@ export function AccountArea({
               account={account}
               liveWrites={status.live_writes}
               liveJob={status.job}
+              hasLocalRules={Boolean(workspace?.workspace)}
+              synthetic={status.synthetic}
               onOpenWriteMode={onOpenWriteMode}
+              onGoRules={() => onNavigate("rules")}
             />
           </Suspense>
         )}

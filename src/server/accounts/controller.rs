@@ -36,11 +36,38 @@ enum ArmedTimer {
 }
 
 #[derive(Clone, Debug)]
+pub(super) struct SafetyAuditEvent {
+    pub(super) id: String,
+    pub(super) status: &'static str,
+    pub(super) summary: String,
+    pub(super) timestamp: u64,
+}
+
+#[derive(Clone, Debug)]
 pub(super) struct SafetyState {
     live_writes_timer: Option<ArmedTimer>,
     pub(super) live_writes_timeout_secs: u64,
     pub(super) vault_idle_timeout_secs: u64,
     pub(super) last_activity: Instant,
+    audit_seq: u64,
+    audit_events: Vec<SafetyAuditEvent>,
+}
+
+impl SafetyState {
+    fn record_audit(&mut self, status: &'static str, summary: impl Into<String>) {
+        self.audit_seq = self.audit_seq.wrapping_add(1);
+        let timestamp = crate::backlog::retention::now();
+        self.audit_events.push(SafetyAuditEvent {
+            id: format!("safety-{}-{}", timestamp, self.audit_seq),
+            status,
+            summary: summary.into(),
+            timestamp,
+        });
+        if self.audit_events.len() > 32 {
+            let excess = self.audit_events.len() - 32;
+            self.audit_events.drain(..excess);
+        }
+    }
 }
 
 impl Default for SafetyState {
@@ -50,6 +77,8 @@ impl Default for SafetyState {
             live_writes_timeout_secs: DEFAULT_LIVE_WRITES_TIMEOUT_SECS,
             vault_idle_timeout_secs: DEFAULT_VAULT_IDLE_TIMEOUT_SECS,
             last_activity: Instant::now(),
+            audit_seq: 0,
+            audit_events: Vec::new(),
         }
     }
 }
@@ -398,6 +427,7 @@ impl AccountController {
             if let Some(ArmedTimer::Running { deadline }) = safety.live_writes_timer {
                 if now >= deadline {
                     safety.live_writes_timer = None;
+                    safety.record_audit("disarmed", "Live writes auto-disarmed after timeout");
                     changed = true;
                 }
             }
@@ -407,6 +437,7 @@ impl AccountController {
                     >= Duration::from_secs(safety.vault_idle_timeout_secs)
             {
                 safety.live_writes_timer = None;
+                safety.record_audit("locked", "Vault auto-locked after inactivity");
                 should_lock_vault = true;
                 changed = true;
             }
@@ -458,6 +489,7 @@ impl AccountController {
         let now = Instant::now();
         {
             let mut safety = self.safety.lock().expect("safety state");
+            let was_armed = safety.live_writes_timer.is_some();
             if let Some(secs) = timeout_secs {
                 safety.live_writes_timeout_secs = secs;
             }
@@ -470,9 +502,30 @@ impl AccountController {
             } else {
                 None
             };
+            if enabled {
+                let summary = if safety.live_writes_timeout_secs == 0 {
+                    "Live writes armed (until locked or quit)".to_owned()
+                } else {
+                    format!(
+                        "Live writes armed ({}m auto-disarm)",
+                        (safety.live_writes_timeout_secs / 60).max(1)
+                    )
+                };
+                safety.record_audit("armed", summary);
+            } else if was_armed {
+                safety.record_audit("disarmed", "Returned to read-only mode");
+            }
             safety.last_activity = now;
         }
         self.notify_change();
+    }
+
+    pub(super) fn safety_audit_events(&self) -> Vec<SafetyAuditEvent> {
+        self.safety
+            .lock()
+            .expect("safety state")
+            .audit_events
+            .clone()
     }
 
     pub(super) fn set_safety_timeouts(

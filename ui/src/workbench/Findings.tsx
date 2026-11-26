@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useContext, useMemo, useState } from "react";
 import {
   ArrowRight,
   Search,
@@ -13,12 +13,19 @@ import {
   Choice,
   Details,
   Empty,
+  LanguageContext,
   Modal,
   Notice,
   Stat,
   StatusBadge,
   useCopy,
 } from "./components";
+import {
+  formatDateTime,
+  formatNumber,
+  localeFor,
+  pluralCount,
+} from "./format";
 
 type Sender = CensusReport["senders"][number];
 function useClassLabel() {
@@ -42,6 +49,7 @@ export function Overview({
   onRecommend: () => void;
 }) {
   const t = useCopy();
+  const language = useContext(LanguageContext);
   const classLabel = useClassLabel();
   const top = [...report.senders]
     .sort((a, b) => b.counts.messages - a.counts.messages)
@@ -53,7 +61,7 @@ export function Overview({
   const bulk = report.senders
     .filter((sender) => sender.class === "bulk")
     .reduce((total, sender) => total + sender.counts.messages, 0);
-  const date = new Date(report.as_of * 1000).toLocaleString();
+  const date = formatDateTime(report.as_of, language);
   const historical =
     report.acquisition.last_successful !== null && !report.acquisition.current;
   const scannedAt =
@@ -77,8 +85,15 @@ export function Overview({
               : t("Partial findings", "Teilweise erfasst")}
         </strong>
         <span className="muted">
-          {report.folders.length} {t("folders", "Ordner")} ·{" "}
-          {t("Analysis updated", "Analyse aktualisiert")} {date}
+          {pluralCount(
+            report.folders.length,
+            language,
+            "folder",
+            "folders",
+            "Ordner",
+            "Ordner",
+          )}{" "}
+          · {t("Analysis updated", "Analyse aktualisiert")} {date}
         </span>
       </div>
       {historical && (
@@ -92,7 +107,7 @@ export function Overview({
       <div className="stats">
         <Stat
           label={t("Messages", "Nachrichten")}
-          value={report.canonical_messages.toLocaleString()}
+          value={formatNumber(report.canonical_messages, language)}
           detail={t(
             "Unique saved messages",
             "Eindeutige gespeicherte Nachrichten",
@@ -100,12 +115,12 @@ export function Overview({
         />
         <Stat
           label={t("Received", "Empfangen")}
-          value={report.received.messages.toLocaleString()}
-          detail={`${report.received.seen.toLocaleString()} ${t("currently marked read", "aktuell als gelesen markiert")}`}
+          value={formatNumber(report.received.messages, language)}
+          detail={`${formatNumber(report.received.seen, language)} ${t("currently marked read", "aktuell als gelesen markiert")}`}
         />
         <Stat
           label={t("Sent", "Gesendet")}
-          value={report.sent.toLocaleString()}
+          value={formatNumber(report.sent, language)}
           detail={t(
             "Saved sent correspondence",
             "Gespeicherte gesendete Korrespondenz",
@@ -113,8 +128,15 @@ export function Overview({
         />
         <Stat
           label={t("Senders", "Absender")}
-          value={report.senders.length.toLocaleString()}
-          detail={`${bulk.toLocaleString()} ${t("bulk messages", "Massenmails")}`}
+          value={formatNumber(report.senders.length, language)}
+          detail={pluralCount(
+            bulk,
+            language,
+            "bulk message",
+            "bulk messages",
+            "Massenmail",
+            "Massenmails",
+          )}
         />
       </div>
       <div className="overview-grid">
@@ -156,7 +178,7 @@ export function Overview({
                         />
                       </div>
                       <strong className="numeric">
-                        {count.toLocaleString()}
+                        {formatNumber(count, language)}
                       </strong>
                     </div>
                   ))}
@@ -173,7 +195,7 @@ export function Overview({
                   {monthly.map(([month, count]) => (
                     <div className="chart-column" key={month}>
                       <span className="chart-value">
-                        {count.toLocaleString()}
+                        {formatNumber(count, language)}
                       </span>
                       <div className="chart-track">
                         <div
@@ -185,7 +207,7 @@ export function Overview({
                       </div>
                       <span className="chart-month">
                         {new Date(`${month}-01T12:00:00`).toLocaleString(
-                          undefined,
+                          localeFor(language),
                           { month: "short" },
                         )}
                       </span>
@@ -214,7 +236,9 @@ export function Overview({
                       {monthly.map(([month, count]) => (
                         <tr key={month}>
                           <th>{month}</th>
-                          <td className="numeric">{count.toLocaleString()}</td>
+                          <td className="numeric">
+                            {formatNumber(count, language)}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -261,7 +285,7 @@ export function Overview({
                   <small className="muted">{classLabel(sender.class)}</small>
                 </div>
                 <strong className="numeric">
-                  {sender.counts.messages.toLocaleString()}
+                  {formatNumber(sender.counts.messages, language)}
                 </strong>
               </div>
             ))}
@@ -310,13 +334,13 @@ export function Overview({
         <p className="help">
           {t("Last successful scan", "Letzte erfolgreiche Erfassung")} ·{" "}
           {scannedAt
-            ? new Date(scannedAt * 1000).toLocaleString()
+            ? formatDateTime(scannedAt, language)
             : t("Time unavailable", "Zeitpunkt nicht verfügbar")}
         </p>
         <p className="help">
           {t("Current Spam count", "Aktuelle Spam-Anzahl")} ·{" "}
           {report.acquisition.spam.kind === "observed"
-            ? report.acquisition.spam.messages.toLocaleString()
+            ? formatNumber(report.acquisition.spam.messages, language)
             : t("Unknown", "Unbekannt")}
         </p>
         <div className="table-scroll">
@@ -333,9 +357,11 @@ export function Overview({
               {report.folders.map((folder) => (
                 <tr key={folder.folder}>
                   <th>{folder.folder}</th>
-                  <td className="numeric">{folder.saved.toLocaleString()}</td>
                   <td className="numeric">
-                    {folder.inventory.toLocaleString()}
+                    {formatNumber(folder.saved, language)}
+                  </td>
+                  <td className="numeric">
+                    {formatNumber(folder.inventory, language)}
                   </td>
                   <td>
                     <StatusBadge status={folder.state} />
@@ -359,17 +385,23 @@ export function Overview({
 export function Senders({
   report,
   onRecommend,
+  onGoRules,
 }: {
   report: CensusReport;
   onRecommend: () => void;
+  onGoRules?: () => void;
 }) {
   const t = useCopy();
+  const language = useContext(LanguageContext);
   const classLabel = useClassLabel();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [sort, setSort] = useState("volume");
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<Sender | null>(null);
+  const [checkedKeys, setCheckedKeys] = useState<Set<string>>(() => new Set());
+  const senderKey = (sender: Sender, index: number) =>
+    `${sender.sender ?? ""}::${sender.domain ?? ""}::${index}`;
   const results = useMemo(
     () =>
       report.senders
@@ -394,12 +426,40 @@ export function Senders({
   const pages = Math.max(1, Math.ceil(results.length / 20));
   const current = Math.min(page, pages - 1);
   const visible = results.slice(current * 20, current * 20 + 20);
+  const visibleKeys = visible.map((sender, i) =>
+    senderKey(sender, current * 20 + i),
+  );
+  const allVisibleChecked =
+    visibleKeys.length > 0 && visibleKeys.every((key) => checkedKeys.has(key));
+
+  function toggleOne(key: string) {
+    setCheckedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function toggleVisible() {
+    setCheckedKeys((prev) => {
+      const next = new Set(prev);
+      if (allVisibleChecked) {
+        for (const key of visibleKeys) next.delete(key);
+      } else {
+        for (const key of visibleKeys) next.add(key);
+      }
+      return next;
+    });
+  }
+
   return (
     <div className="page-stack">
       <div className="toolbar">
         <label className="search">
           <Search size={18} />
           <input
+            id="senders-search-input"
             aria-label={t("Search senders", "Absender suchen")}
             placeholder={t(
               "Search senders or domains…",
@@ -453,7 +513,7 @@ export function Senders({
         <div className="section-heading">
           <h2>
             {t("Senders", "Absender")}{" "}
-            <span className="count">{results.length.toLocaleString()}</span>
+            <span className="count">{formatNumber(results.length, language)}</span>
           </h2>
           <span className="help">
             {t(
@@ -462,13 +522,67 @@ export function Senders({
             )}
           </span>
         </div>
+        {checkedKeys.size > 0 && (
+          <div className="bulk-bar" role="region" aria-label={t("Selected senders", "Ausgewählte Absender")}>
+            <strong>
+              {pluralCount(
+                checkedKeys.size,
+                language,
+                "sender selected",
+                "senders selected",
+                "Absender ausgewählt",
+                "Absender ausgewählt",
+              )}
+            </strong>
+            <div className="bulk-bar-actions">
+              <Action
+                size="compact"
+                primary
+                onClick={() => {
+                  setCheckedKeys(new Set());
+                  onRecommend();
+                }}
+              >
+                {t("Ask for recommendations", "Vorschläge anfordern")}
+              </Action>
+              {onGoRules && (
+                <Action
+                  size="compact"
+                  onClick={() => {
+                    setCheckedKeys(new Set());
+                    onGoRules();
+                  }}
+                >
+                  {t("Open Rules & deploy", "Regeln & Bereitstellung")}
+                </Action>
+              )}
+              <Action size="compact" onClick={() => setCheckedKeys(new Set())}>
+                {t("Clear selection", "Auswahl aufheben")}
+              </Action>
+            </div>
+          </div>
+        )}
         {visible.length ? (
           <>
             <div className="table-scroll">
               <table className="senders-table">
                 <thead>
                   <tr>
-                    <th>{t("Sender", "Absender")}</th>
+                    <th>
+                      <div className="sender-check-cell">
+                        <input
+                          type="checkbox"
+                          className="row-check"
+                          checked={allVisibleChecked}
+                          onChange={toggleVisible}
+                          aria-label={t(
+                            "Select all senders on this page",
+                            "Alle Absender auf dieser Seite auswählen",
+                          )}
+                        />
+                        <span>{t("Sender", "Absender")}</span>
+                      </div>
+                    </th>
                     <th>{t("Type", "Typ")}</th>
                     <th className="numeric">{t("Messages", "Nachrichten")}</th>
                     <th className="numeric">
@@ -478,55 +592,72 @@ export function Senders({
                   </tr>
                 </thead>
                 <tbody>
-                  {visible.map((sender, i) => (
-                    <tr key={`${sender.sender}-${i}`}>
-                      <td>
-                        <strong>
-                          {sender.sender ??
-                            t("Unknown sender", "Unbekannter Absender")}
-                        </strong>
-                        <small className="muted">
-                          {sender.domain ??
-                            t("Unknown domain", "Unbekannte Domain")}
-                        </small>
-                      </td>
-                      <td>
-                        <span className={`badge class-${sender.class}`}>
-                          {classLabel(sender.class)}
-                        </span>
-                      </td>
-                      <td
-                        className="numeric"
-                        data-label={t("messages", "Nachrichten")}
-                      >
-                        {sender.counts.messages.toLocaleString()}
-                      </td>
-                      <td
-                        className="numeric"
-                        data-label={t("Read / total", "Gelesen / gesamt")}
-                      >
-                        {sender.counts.seen.toLocaleString()} /{" "}
-                        {sender.counts.messages.toLocaleString()}
-                      </td>
-                      <td>
-                        <Action
-                          onClick={() => setSelected(sender)}
-                          aria-label={`${t("Inspect", "Ansehen")} ${sender.sender ?? ""}`}
+                  {visible.map((sender, i) => {
+                    const key = senderKey(sender, current * 20 + i);
+                    const senderLabel =
+                      sender.sender ??
+                      t("Unknown sender", "Unbekannter Absender");
+                    return (
+                      <tr key={key}>
+                        <td>
+                          <div className="sender-check-cell">
+                            <input
+                              type="checkbox"
+                              className="row-check"
+                              checked={checkedKeys.has(key)}
+                              onChange={() => toggleOne(key)}
+                              aria-label={`${t("Select", "Auswählen")} ${senderLabel}`}
+                            />
+                            <div>
+                              <strong>{senderLabel}</strong>
+                              <small className="muted">
+                                {sender.domain ??
+                                  t("Unknown domain", "Unbekannte Domain")}
+                              </small>
+                            </div>
+                          </div>
+                        </td>
+                        <td>
+                          <span className={`badge class-${sender.class}`}>
+                            {classLabel(sender.class)}
+                          </span>
+                        </td>
+                        <td
+                          className="numeric"
+                          data-label={t("messages", "Nachrichten")}
                         >
-                          {t("Inspect", "Ansehen")}
-                          <ArrowRight size={14} />
-                        </Action>
-                      </td>
-                    </tr>
-                  ))}
+                          {formatNumber(sender.counts.messages, language)}
+                        </td>
+                        <td
+                          className="numeric"
+                          data-label={t("Read / total", "Gelesen / gesamt")}
+                        >
+                          {formatNumber(sender.counts.seen, language)} /{" "}
+                          {formatNumber(sender.counts.messages, language)}
+                        </td>
+                        <td>
+                          <Action
+                            onClick={() => setSelected(sender)}
+                            aria-label={`${t("Inspect", "Ansehen")} ${sender.sender ?? ""}`}
+                          >
+                            {t("Inspect", "Ansehen")}
+                            <ArrowRight size={14} />
+                          </Action>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
             <div className="pagination">
               <span className="muted">
-                {current * 20 + 1}–
-                {Math.min(results.length, (current + 1) * 20)} /{" "}
-                {results.length}
+                {formatNumber(current * 20 + 1, language)}–
+                {formatNumber(
+                  Math.min(results.length, (current + 1) * 20),
+                  language,
+                )}{" "}
+                / {formatNumber(results.length, language)}
               </span>
               <div>
                 <Action
@@ -537,7 +668,8 @@ export function Senders({
                   <ChevronLeft size={16} />
                 </Action>
                 <span>
-                  {current + 1} / {pages}
+                  {formatNumber(current + 1, language)} /{" "}
+                  {formatNumber(pages, language)}
                 </span>
                 <Action
                   aria-label={t("Next page", "Nächste Seite")}
@@ -574,15 +706,15 @@ export function Senders({
             <div className="stats compact">
               <Stat
                 label={t("Messages", "Nachrichten")}
-                value={selected.counts.messages.toLocaleString()}
+                value={formatNumber(selected.counts.messages, language)}
               />
               <Stat
                 label={t("Read", "Gelesen")}
-                value={selected.counts.seen.toLocaleString()}
+                value={formatNumber(selected.counts.seen, language)}
               />
               <Stat
                 label={t("Answered", "Beantwortet")}
-                value={selected.counts.answered.toLocaleString()}
+                value={formatNumber(selected.counts.answered, language)}
               />
             </div>
             <h3>{t("What we observed", "Unsere Beobachtungen")}</h3>
@@ -599,16 +731,22 @@ export function Senders({
                     )}
               </li>
               <li>
-                {selected.one_click_pair.toLocaleString()}{" "}
-                {t(
+                {pluralCount(
+                  selected.one_click_pair,
+                  language,
+                  "message includes a complete one-click unsubscribe pair.",
                   "messages include a complete one-click unsubscribe pair.",
+                  "Nachricht enthält ein vollständiges Ein-Klick-Abmeldepaar.",
                   "Nachrichten enthalten ein vollständiges Ein-Klick-Abmeldepaar.",
                 )}
               </li>
               <li>
-                {selected.list_unsubscribe.toLocaleString()}{" "}
-                {t(
+                {pluralCount(
+                  selected.list_unsubscribe,
+                  language,
+                  "message includes an unsubscribe header.",
                   "messages include an unsubscribe header.",
+                  "Nachricht enthält einen Abmelde-Header.",
                   "Nachrichten enthalten einen Abmelde-Header.",
                 )}
               </li>

@@ -481,4 +481,12 @@ async fn events_and_overview_routes_enforce_session_and_report_changes() {
             .unwrap();
     assert!(ov_json["accounts"].is_array());
     assert!(ov_json["recent_actions"].is_array());
+    assert!(
+        ov_json["recent_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["kind"] == "safety" && a["status"] == "armed"),
+        "arming live writes must be recorded in the overview activity trail: {ov_json}"
+    );
 }

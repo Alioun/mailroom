@@ -77,12 +77,27 @@ pub(in crate::server) async fn handle(
             _ => None,
         };
         match request.command {
-            Action::Open => {},
-            Action::Preview { options } => return backlog::preview(&saved, account.provider, store.keys(), options, mailbox.as_ref()).map(|p| json!(p)),
+            Action::Open => {}
+            Action::Preview { options } => {
+                if saved.workspace.is_none() {
+                    return Err("no_local_rules".into());
+                }
+                if saved.census.acquisition_state != ScanState::Complete {
+                    return Err("scan_incomplete".into());
+                }
+                return backlog::preview(
+                    &saved,
+                    account.provider,
+                    store.keys(),
+                    options,
+                    mailbox.as_ref(),
+                )
+                .map(|p| json!(p));
+            }
             Action::Start { options, receipt, confirmed } => {
-                if saved.unsubscribe.history.iter().any(|e| matches!(e.status, crate::unsubscribe::Status::Intent | crate::unsubscribe::Status::Uncertain)) { return Err("Reconcile pending unsubscribe intent first".into()); }
-                if saved.invoices.sends.iter().any(|s| !s.status.settled()) { return Err("Recover the pending invoice submission first".into()); }
-                if !confirmed { return Err("Explicit synthetic confirmation required".into()); }
+                if saved.unsubscribe.history.iter().any(|e| matches!(e.status, crate::unsubscribe::Status::Intent | crate::unsubscribe::Status::Uncertain)) { return Err("pending_unsubscribe".into()); }
+                if saved.invoices.sends.iter().any(|s| !s.status.settled()) { return Err("pending_invoice".into()); }
+                if !confirmed { return Err("confirmation_required".into()); }
                 let preview = backlog::preview(&saved, account.provider, store.keys(), options, mailbox.as_ref())?;
                 backlog::start(&mut saved, preview, &receipt)?;
                 store.save_state(&mut saved).map_err(|e| e.to_string())?;
@@ -95,18 +110,59 @@ pub(in crate::server) async fn handle(
             Action::Stop { run } => { backlog::stop(&mut saved, &run)?; store.save_state(&mut saved).map_err(|e| e.to_string())?; },
             Action::UndoPreview { run } => return backlog::undo_preview(&saved, mailbox.as_ref().ok_or("No installed synthetic mailbox")?, store.keys(), &run).map(|p| json!(p)),
             Action::Undo { run, receipt, confirmed } => {
-                if !confirmed { return Err("Explicit conditional undo confirmation required".into()); }
+                if !confirmed { return Err("confirmation_required".into()); }
                 backlog::undo(&store, &mut saved, mailbox.as_mut().ok_or("No installed synthetic mailbox")?, &run, Some(&receipt))?;
             },
             Action::ResumeUndo { run } => {
-                if !saved.backlog.iter().any(|r| r.id == run && r.undo_requested) { return Err("No previously confirmed undo".into()); }
+                if !saved.backlog.iter().any(|r| r.id == run && r.undo_requested) { return Err("no_confirmed_undo".into()); }
                 backlog::undo(&store, &mut saved, mailbox.as_mut().ok_or("No installed synthetic mailbox")?, &run, None)?;
             },
         }
-        Ok::<_, String>(json!({"protocol_installed": repo.backlog_installed(Some(&account.id)), "protocol_history": !saved.protocol_backlog.runs.is_empty(), "gmail_installed": repo.labels_installed(Some(&account.id)), "gmail_history": !saved.gmail_backlog.runs.is_empty(), "runs": saved.backlog, "synthetic": mailbox.is_some(), "mailbox": mailbox.as_ref().map(|m| &m.snapshot().census)}))
+        Ok::<_, String>(json!({"protocol_installed": repo.backlog_installed(Some(&account.id)), "protocol_history": !saved.protocol_backlog.runs.is_empty(), "gmail_installed": repo.labels_installed(Some(&account.id)), "gmail_history": !saved.gmail_backlog.runs.is_empty(), "has_local_rules": saved.workspace.is_some(), "runs": saved.backlog, "synthetic": mailbox.is_some(), "mailbox": mailbox.as_ref().map(|m| &m.snapshot().census)}))
     }).await {
         Ok(Ok(v)) => Json(v).into_response(),
-        Ok(Err(_)) | Err(_) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error":"Backlog action rejected. Refresh the preview or recover the saved run. Existing files are retained."}))).into_response(),
+        Ok(Err(reason)) => {
+            let (code, error) = match reason.as_str() {
+                "no_local_rules" => (
+                    "no_local_rules",
+                    "Create local rules first before previewing a backlog sort.",
+                ),
+                "scan_incomplete" => (
+                    "scan_incomplete",
+                    "Complete a mailbox scan before previewing a backlog sort.",
+                ),
+                "pending_unsubscribe" => (
+                    "pending_unsubscribe",
+                    "Reconcile pending unsubscribe actions before starting a backlog sort.",
+                ),
+                "pending_invoice" => (
+                    "pending_invoice",
+                    "Resolve pending invoice sends before starting a backlog sort.",
+                ),
+                "Wait for the account action" => (
+                    "job_running",
+                    "Wait for the active account operation to finish first.",
+                ),
+                "Fresh provider evidence and reconciliation required after recovery" => (
+                    "recovery_pending",
+                    "Run a fresh scan to reconcile this account after recovery.",
+                ),
+                _ => (
+                    "backlog_rejected",
+                    "Backlog preview or action could not run. Check that local rules are saved and try again.",
+                ),
+            };
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"code": code, "error": error})),
+            )
+                .into_response()
+        }
+        Err(_) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"code": "backlog_rejected", "error": "Backlog preview or action could not run. Try again."})),
+        )
+            .into_response(),
     }
 }
 

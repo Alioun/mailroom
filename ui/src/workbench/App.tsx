@@ -3,8 +3,10 @@ import {
   BookUser,
   ChevronRight,
   FileText,
+  FlaskConical,
   FolderSync,
   History,
+  Keyboard,
   LayoutDashboard,
   Lock,
   LockKeyhole,
@@ -49,6 +51,7 @@ import { ConnectForm, VaultForm } from "./Setup";
 import { AccountArea } from "./AccountWorkspace";
 import type { Page } from "./AccountWorkspace";
 import { NavigationDrawer } from "./NavigationDrawer";
+import { formatNumber, pluralCount } from "./format";
 import { describeError } from "./status-labels";
 import {
   autoScan,
@@ -120,6 +123,7 @@ function Workbench({
   } = useAccountSession(t);
   const [add, setAdd] = useState(false);
   const [menu, setMenu] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [writeModal, setWriteModal] = useState(false);
   const [writeBusy, setWriteBusy] = useState(false);
   const [writeError, setWriteError] = useState("");
@@ -128,6 +132,7 @@ function Workbench({
   const [counts, setCounts] = useState<Record<string, number>>({});
   const heading = useRef<HTMLHeadingElement>(null);
   const menuTrigger = useRef<HTMLButtonElement>(null);
+  const chordRef = useRef<{ key: string; at: number } | null>(null);
   const account = accounts.find((value) => value.id === selected);
 
   function navigate(next: Page) {
@@ -301,6 +306,69 @@ function Workbench({
 
   const runningJob = status?.job?.progress.state === "running";
 
+  useEffect(() => {
+    if (vaultGated) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.key === "?") {
+        e.preventDefault();
+        setShortcutsOpen((prev) => !prev);
+        chordRef.current = null;
+        return;
+      }
+      if (e.key === "/") {
+        e.preventDefault();
+        setShortcutsOpen(false);
+        chordRef.current = null;
+        navigate("senders");
+        requestAnimationFrame(() => {
+          document.getElementById("senders-search-input")?.focus();
+        });
+        return;
+      }
+      const now = Date.now();
+      if (
+        chordRef.current &&
+        chordRef.current.key === "g" &&
+        now - chordRef.current.at < 900
+      ) {
+        chordRef.current = null;
+        const map: Record<string, Page> = {
+          o: "overview",
+          s: "senders",
+          r: "rules",
+          b: "backlog",
+          a: "activity",
+          ",": "settings",
+        };
+        const dest = map[e.key.toLowerCase()];
+        if (dest) {
+          e.preventDefault();
+          setShortcutsOpen(false);
+          navigate(dest);
+        }
+        return;
+      }
+      if (e.key === "g") {
+        chordRef.current = { key: "g", at: now };
+      } else {
+        chordRef.current = null;
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [vaultGated, selected]);
+
   const themeLabel =
     theme === "dark"
       ? t("Dark", "Dunkel")
@@ -329,7 +397,7 @@ function Workbench({
               mailroom<span className="brand-dot">.</span>
             </a>
             <div className="account-switcher">
-              <span className="eyebrow">
+              <span className="nav-section-label m-0">
                 {t("Workspace", "Arbeitsbereich")}
               </span>
               {accounts.length > 0 ? (
@@ -396,13 +464,20 @@ function Workbench({
                 <span>{t("Settings", "Einstellungen")}</span>
               </button>
               <div className="local-status">
-                <span className="status-dot" />
-                {t("Running on this Mac", "Läuft auf diesem Mac")}
+                <span className={`status-dot ${status?.synthetic ? "amber" : ""}`} />
+                {status?.synthetic
+                  ? t("Synthetic demo sandbox", "Synthetische Demo")
+                  : t("Running on this Mac", "Läuft auf diesem Mac")}
                 <small>
-                  {t(
-                    "Your workspace stays local",
-                    "Dein Arbeitsbereich bleibt lokal",
-                  )}
+                  {status?.synthetic
+                    ? t(
+                        "Invented local mail only",
+                        "Nur erfundene lokale Mails",
+                      )
+                    : t(
+                        "Your workspace stays local",
+                        "Dein Arbeitsbereich bleibt lokal",
+                      )}
                 </small>
               </div>
             </div>
@@ -438,10 +513,27 @@ function Workbench({
               )}
             </div>
             <div className="topbar-actions">
+              {!vaultGated && status?.synthetic && (
+                <span
+                  className="demo-badge"
+                  title={t(
+                    "Synthetic sandbox using invented mail. No live mail accounts are connected.",
+                    "Synthetische Demo mit erfundenen Mails. Es sind keine echten Konten verbunden.",
+                  )}
+                >
+                  <FlaskConical size={13} />
+                  {t("Demo data", "Demodaten")}
+                </span>
+              )}
               {!vaultGated && (
                 <button
                   type="button"
                   className={`readonly-badge ${status?.live_writes ? "live" : ""}`}
+                  aria-label={
+                    status?.live_writes
+                      ? t("Live writes armed", "Live-Schreibzugriff aktiv")
+                      : t("Provider read-only", "Anbieter nur lesbar")
+                  }
                   onClick={() => {
                     setWriteError("");
                     setWriteModal(true);
@@ -449,12 +541,12 @@ function Workbench({
                   title={
                     status?.live_writes
                       ? t(
-                          "Live writes armed — click to manage or return to read-only",
-                          "Live-Schreibzugriff aktiv — klicken zum Verwalten oder Deaktivieren",
+                          "Live writes armed. Click to manage or return to read-only.",
+                          "Live-Schreibzugriff aktiv. Zum Verwalten oder Deaktivieren klicken.",
                         )
                       : t(
-                          "Read-only mode — click to enable Live writes",
-                          "Nur-Lese-Modus — klicken für Live-Schreibzugriff",
+                          "Read-only mode. Click to enable Live writes.",
+                          "Nur-Lese-Modus. Für Live-Schreibzugriff klicken.",
                         )
                   }
                 >
@@ -466,7 +558,7 @@ function Workbench({
                       </span>
                       <span className="badge-short">{t("Live", "Live")}</span>
                       {liveCountdown !== null && (
-                        <span className="badge-countdown">
+                        <span className="badge-countdown" aria-hidden="true">
                           {formatCountdown(liveCountdown)}
                         </span>
                       )}
@@ -482,6 +574,18 @@ function Workbench({
                       </span>
                     </>
                   )}
+                </button>
+              )}
+              {!vaultGated && (
+                <button
+                  type="button"
+                  className="shortcuts-button"
+                  onClick={() => setShortcutsOpen(true)}
+                  aria-label={t("Keyboard shortcuts", "Tastenkürzel")}
+                  title={t("Keyboard shortcuts (?)", "Tastenkürzel (?)")}
+                >
+                  <Keyboard size={14} />
+                  <span className="lock-label">?</span>
                 </button>
               )}
               {!vaultGated && status?.source === "vault" && (
@@ -580,15 +684,17 @@ function Workbench({
               <>
                 <div className="page-heading">
                   <div>
-                    <span className="eyebrow">
-                      {account && page !== "activity"
-                        ? `${account.login} · ${account.provider === "gmail" ? "Gmail" : "mailbox.org"}`
-                        : t("Your workspace", "Dein Arbeitsbereich")}
-                    </span>
                     <h1 ref={heading} tabIndex={-1}>
                       {currentTitle}
                     </h1>
                     <p className="muted">{subtitles[page]}</p>
+                    <div className="page-context">
+                      <span>
+                        {account && page !== "activity"
+                          ? `${account.login} · ${account.provider === "gmail" ? "Gmail" : "mailbox.org"}`
+                          : t("All connected accounts", "Alle verbundenen Konten")}
+                      </span>
+                    </div>
                   </div>
                   {account && page === "overview" && (
                     <Action
@@ -624,10 +730,16 @@ function Workbench({
                     </span>
                     <span>
                       {status.job.account?.login} ·{" "}
-                      {status.job.progress.saved.toLocaleString()}{" "}
+                      {formatNumber(status.job.progress.saved, language)}{" "}
                       {t("headers saved", "Kopfzeilen gespeichert")} ·{" "}
-                      {status.job.progress.folders.toLocaleString()}{" "}
-                      {t("folders", "Ordner")}
+                      {pluralCount(
+                        status.job.progress.folders,
+                        language,
+                        "folder",
+                        "folders",
+                        "Ordner",
+                        "Ordner",
+                      )}
                     </span>
                     <Action
                       size="compact"
@@ -787,7 +899,20 @@ function Workbench({
               <footer className="workbench-footer">
                 <span>
                   <LockKeyhole size={13} />
-                  {t("Encrypted local vault", "Verschlüsselter lokaler Tresor")}
+                  {status?.synthetic
+                    ? t(
+                        "Synthetic demo sandbox (invented mail)",
+                        "Synthetische Demo-Umgebung (erfundene Mails)",
+                      )
+                    : status?.source === "vault"
+                      ? t(
+                          "Encrypted local vault",
+                          "Verschlüsselter lokaler Tresor",
+                        )
+                      : t(
+                          "Local macOS workspace",
+                          "Lokaler macOS-Arbeitsbereich",
+                        )}
                 </span>
                 <span>
                   {status?.live_writes
@@ -796,8 +921,8 @@ function Workbench({
                         "Live-Schreibzugriff für alle Konten dieser Sitzung aktiv; jede Änderung erfordert Vorschau und Bestätigung.",
                       )
                     : t(
-                        "Read-only mode active. Click the safety badge above when ready to deploy or sort.",
-                        "Nur-Lese-Modus aktiv. Klicke oben auf das Sicherheitssymbol, wenn du bereit zur Ausführung bist.",
+                        "Read-only mode active. Use the safety badge above when ready to deploy or sort.",
+                        "Nur-Lese-Modus aktiv. Nutze das Sicherheitssymbol oben, wenn du bereit zur Ausführung bist.",
                       )}
                 </span>
               </footer>
@@ -805,6 +930,78 @@ function Workbench({
           </main>
         </div>
       </div>
+      <Modal
+        open={shortcutsOpen}
+        onOpenChange={setShortcutsOpen}
+        title={t("Keyboard shortcuts", "Tastenkürzel")}
+        description={t(
+          "Navigate Mailroom faster without leaving the keyboard.",
+          "Navigiere schneller durch Mailroom direkt per Tastatur.",
+        )}
+      >
+        <ul className="shortcut-list">
+          <li>
+            <span>{t("Open or close this shortcut sheet", "Diese Übersicht öffnen oder schließen")}</span>
+            <span className="shortcut-keys">
+              <kbd>?</kbd>
+            </span>
+          </li>
+          <li>
+            <span>{t("Search senders", "Absender suchen")}</span>
+            <span className="shortcut-keys">
+              <kbd>/</kbd>
+            </span>
+          </li>
+          <li>
+            <span>{t("Go to Overview", "Zur Übersicht")}</span>
+            <span className="shortcut-keys">
+              <kbd>g</kbd>
+              <kbd>o</kbd>
+            </span>
+          </li>
+          <li>
+            <span>{t("Go to Senders", "Zu Absender")}</span>
+            <span className="shortcut-keys">
+              <kbd>g</kbd>
+              <kbd>s</kbd>
+            </span>
+          </li>
+          <li>
+            <span>{t("Go to Rules & deploy", "Zu Regeln & Bereitstellung")}</span>
+            <span className="shortcut-keys">
+              <kbd>g</kbd>
+              <kbd>r</kbd>
+            </span>
+          </li>
+          <li>
+            <span>{t("Go to Backlog", "Zu Bestand sortieren")}</span>
+            <span className="shortcut-keys">
+              <kbd>g</kbd>
+              <kbd>b</kbd>
+            </span>
+          </li>
+          <li>
+            <span>{t("Go to Activity & undo", "Zu Aktivität & Rücknahme")}</span>
+            <span className="shortcut-keys">
+              <kbd>g</kbd>
+              <kbd>a</kbd>
+            </span>
+          </li>
+          <li>
+            <span>{t("Go to Settings", "Zu Einstellungen")}</span>
+            <span className="shortcut-keys">
+              <kbd>g</kbd>
+              <kbd>,</kbd>
+            </span>
+          </li>
+          <li>
+            <span>{t("Close open dialog", "Geöffneten Dialog schließen")}</span>
+            <span className="shortcut-keys">
+              <kbd>Esc</kbd>
+            </span>
+          </li>
+        </ul>
+      </Modal>
       <Modal
         open={add}
         onOpenChange={setAdd}

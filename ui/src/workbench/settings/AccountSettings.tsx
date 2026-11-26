@@ -26,6 +26,7 @@ import type {
   TakeoutSummary,
 } from "../../api";
 import { describeError } from "../status-labels";
+import { formatNumber, pluralCount } from "../format";
 import {
   Action,
   Busy,
@@ -176,8 +177,8 @@ export function AccountSettings({
       setTakeoutResult(summary);
       setTakeoutNotice(
         t(
-          `Imported ${summary.imported.toLocaleString()} headers from Google Takeout into ${summary.folder} (bodies skipped).${summary.truncated ? " Import reached the 500,000-message cap." : ""}`,
-          `${summary.imported.toLocaleString()} Kopfzeilen aus Google Takeout in ${summary.folder} importiert (Nachrichtentexte übersprungen).${summary.truncated ? " Importlimit von 500.000 Nachrichten erreicht." : ""}`,
+          `Imported ${formatNumber(summary.imported, language)} headers from Google Takeout into ${summary.folder} (bodies skipped).${summary.truncated ? " Import reached the 500,000-message cap." : ""}`,
+          `${formatNumber(summary.imported, language)} Kopfzeilen aus Google Takeout in ${summary.folder} importiert (Nachrichtentexte übersprungen).${summary.truncated ? " Importlimit von 500.000 Nachrichten erreicht." : ""}`,
         ),
       );
       onRefresh();
@@ -202,7 +203,23 @@ export function AccountSettings({
 
   return (
     <div className="page-stack">
-      <section className="panel">
+      <nav
+        className="settings-jump-nav"
+        aria-label={t("Settings sections", "Einstellungsbereiche")}
+      >
+        <a href="#settings-connection">{t("Connection", "Verbindung")}</a>
+        <a href="#settings-addresses">{t("Addresses", "Adressen")}</a>
+        <a href="#settings-takeout">{t("Takeout", "Takeout")}</a>
+        <a href="#settings-safety">{t("Safety", "Sicherheit")}</a>
+        <a href="#settings-t3">{t("T3 assistant", "T3-Assistent")}</a>
+        {(status.source === "vault" || status.synthetic) && (
+          <a href="#settings-recovery">{t("Backup & restore", "Sicherung")}</a>
+        )}
+        {(status.source === "vault" || status.synthetic) && (
+          <a href="#settings-danger">{t("Danger zone", "Entfernen & Schlüssel")}</a>
+        )}
+      </nav>
+      <section id="settings-connection" className="panel">
         <div className="section-heading">
           <div>
             <h2>
@@ -315,59 +332,9 @@ export function AccountSettings({
             {t("Reconnect", "Erneut verbinden")}
           </Action>
         </form>
-        {(status.source === "vault" || status.synthetic) && (
-          <div className="danger-zone">
-            <h3>
-              {t(
-                "Account key & local removal",
-                "Kontoschlüssel & lokales Entfernen",
-              )}
-            </h3>
-            <p className="help">
-              {t(
-                "Rotating re-encrypts this account's local store with a fresh key. Removing deletes only local Mailroom data and credentials — your mail on the provider stays untouched.",
-                "Rotieren verschlüsselt den lokalen Speicher dieses Kontos mit einem neuen Schlüssel. Entfernen löscht nur lokale Mailroom-Daten und Zugangsdaten — deine Nachrichten beim Anbieter bleiben unberührt.",
-              )}
-            </p>
-            <div className="actions">
-              <Action disabled={busy} onClick={() => setRotateModal(true)}>
-                <RotateCcw size={15} />
-                {t("Rotate local key", "Lokalen Schlüssel rotieren")}
-              </Action>
-              <Action
-                tone="danger-outline"
-                disabled={busy}
-                onClick={async () => {
-                  setBusy(true);
-                  setConnError("");
-                  setForgetError("");
-                  setForgetChecked(false);
-                  try {
-                    setForgetPreview(await previewForget(account.id));
-                  } catch (err) {
-                    setConnError(
-                      describeError(
-                        err,
-                        t(
-                          "Could not preview account removal.",
-                          "Entfernen des Kontos konnte nicht geprüft werden.",
-                        ),
-                      ),
-                    );
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-              >
-                <Trash2 size={15} />
-                {t("Remove account", "Konto entfernen")}
-              </Action>
-            </div>
-          </div>
-        )}
       </section>
 
-      <section className="panel">
+      <section id="settings-addresses" className="panel">
         <h2>{t("Your addresses", "Deine Adressen")}</h2>
         <p className="muted">
           {t(
@@ -421,7 +388,7 @@ export function AccountSettings({
         </Details>
       </section>
 
-      <section className="panel">
+      <section id="settings-takeout" className="panel">
         <h2>
           <Upload size={17} />{" "}
           {t(
@@ -487,11 +454,12 @@ export function AccountSettings({
         {takeoutResult && (
           <p className="help mt-sm">
             {t("Last import", "Letzter Import")}:{" "}
-            {takeoutResult.imported.toLocaleString()}{" "}
+            {formatNumber(takeoutResult.imported, language)}{" "}
             {t("imported", "importiert")},{" "}
-            {takeoutResult.skipped.toLocaleString()}{" "}
+            {formatNumber(takeoutResult.skipped, language)}{" "}
             {t("skipped", "übersprungen")},{" "}
-            {takeoutResult.labels.toLocaleString()} {t("labels", "Labels")}.
+            {formatNumber(takeoutResult.labels, language)}{" "}
+            {t("labels", "Labels")}.
           </p>
         )}
       </section>
@@ -503,6 +471,61 @@ export function AccountSettings({
         onRefresh={onRefresh}
         onOpenWriteMode={onOpenWriteMode}
       />
+
+      {(status.source === "vault" || status.synthetic) && (
+        <section id="settings-danger" className="panel">
+          <div className="section-heading">
+            <div>
+              <h2>
+                {t(
+                  "Account key & local removal",
+                  "Kontoschlüssel & lokales Entfernen",
+                )}
+              </h2>
+              <p className="muted">
+                {t(
+                  "Rotating re-encrypts this account's local store with a fresh key. Removing deletes only local Mailroom data and credentials; your mail on the provider stays untouched.",
+                  "Rotieren verschlüsselt den lokalen Speicher dieses Kontos mit einem neuen Schlüssel. Entfernen löscht nur lokale Mailroom-Daten und Zugangsdaten; deine Nachrichten beim Anbieter bleiben unberührt.",
+                )}
+              </p>
+            </div>
+          </div>
+          <div className="actions">
+            <Action disabled={busy} onClick={() => setRotateModal(true)}>
+              <RotateCcw size={15} />
+              {t("Rotate local key", "Lokalen Schlüssel rotieren")}
+            </Action>
+            <Action
+              tone="danger-outline"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                setConnError("");
+                setForgetError("");
+                setForgetChecked(false);
+                try {
+                  setForgetPreview(await previewForget(account.id));
+                } catch (err) {
+                  setConnError(
+                    describeError(
+                      err,
+                      t(
+                        "Could not preview account removal.",
+                        "Entfernen des Kontos konnte nicht geprüft werden.",
+                      ),
+                    ),
+                  );
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              <Trash2 size={15} />
+              {t("Remove account", "Konto entfernen")}
+            </Action>
+          </div>
+        </section>
+      )}
 
       <Modal
         open={rotateModal}
@@ -570,8 +593,14 @@ export function AccountSettings({
           <div className="page-stack">
             <p>
               <strong>{account.login}</strong> ·{" "}
-              {forgetPreview.resources.length}{" "}
-              {t("local files", "lokale Dateien")}
+              {pluralCount(
+                forgetPreview.resources.length,
+                language,
+                "local file",
+                "local files",
+                "lokale Datei",
+                "lokale Dateien",
+              )}
             </p>
             <p className="muted">{forgetPreview.consequences[language]}</p>
             <CheckField checked={forgetChecked} onChange={setForgetChecked}>

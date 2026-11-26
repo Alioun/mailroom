@@ -45,11 +45,13 @@ import {
 
 export function SieveDeployPanel({
   account,
+  synthetic = false,
   liveWrites,
   liveJob,
   onOpenWriteMode,
 }: {
   account: Account;
+  synthetic?: boolean;
   liveWrites: boolean;
   liveJob: AccountStatus["job"];
   onOpenWriteMode: () => void;
@@ -142,14 +144,19 @@ export function SieveDeployPanel({
     return (
       <Empty
         title={t(
-          "ManageSieve deployment unavailable",
-          "ManageSieve-Bereitstellung nicht verfügbar",
+          "Live Sieve deployment unavailable",
+          "Live-Sieve-Bereitstellung nicht verfügbar",
         )}
       >
-        {t(
-          "Connect a mailbox.org vault account to inspect Open-Xchange rules and deploy Sieve scripts.",
-          "Verbinde ein mailbox.org-Tresorkonto, um Open-Xchange-Regeln zu prüfen und Sieve-Skripte bereitzustellen.",
-        )}
+        {synthetic
+          ? t(
+              "Demo accounts use invented mail and cannot connect to a live provider to deploy Sieve scripts. You can still build, simulate, and download rules.sieve locally.",
+              "Demo-Konten nutzen fiktive Daten und können keine Live-Sieve-Skripte an einen Anbieter senden. Du kannst rules.sieve weiterhin lokal erstellen, prüfen und herunterladen.",
+            )
+          : t(
+              "Connect a mailbox.org vault account to inspect Open-Xchange rules and deploy Sieve scripts.",
+              "Verbinde ein mailbox.org-Tresorkonto, um Open-Xchange-Regeln zu prüfen und Sieve-Skripte bereitzustellen.",
+            )}
       </Empty>
     );
   }

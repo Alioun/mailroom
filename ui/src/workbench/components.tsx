@@ -417,8 +417,8 @@ export function ArmLiveWritesModal({
               "Das Deaktivieren sperrt sofort neue Schreibzugriffe für alle Konten. Du kannst den Auto-Deaktivierungs-Timer auch verlängern.",
             )
           : t(
-              "This unlocks live execution for ManageSieve deployment, IMAP folder creation, backlog moves/labels, SMTP invoice send-on, and external unsubscribe actions across all connected accounts until the timer expires, you lock the vault, or quit Mailroom.",
-              "Dies entsperrt Live-Ausführung für ManageSieve, IMAP-Ordneranlage, Bestandssortierung, SMTP-Rechnungsversand und externe Abmeldungen für alle verbundenen Konten, bis der Timer abläuft, der Tresor gesperrt oder Mailroom beendet wird.",
+              "This lets Mailroom create folders, publish sorting rules, move or label existing mail, forward verified invoices, and send unsubscribe requests across your connected accounts. It automatically returns to read-only when the timer expires, when you lock the vault, or when you quit Mailroom.",
+              "Damit darf Mailroom Ordner anlegen, Sortierregeln aktivieren, vorhandene Mails sortieren oder labeln, geprüfte Rechnungen weiterleiten und Abmeldungen senden. Der Modus kehrt automatisch zu Nur-Lese zurück, wenn der Timer abläuft, der Tresor gesperrt oder Mailroom beendet wird.",
             )
       }
     >
@@ -426,14 +426,29 @@ export function ArmLiveWritesModal({
         {liveWrites ? (
           <>
             {expiresInSecs !== null && (
-              <Notice tone="info">
-                <span>
-                  {t(
-                    `Auto-disarms in ${formatCountdown(expiresInSecs)} (paused while a job is running).`,
-                    `Automatische Deaktivierung in ${formatCountdown(expiresInSecs)} (pausiert während laufender Aktionen).`,
-                  )}
+              <>
+                <div className="notice info">
+                  <span>
+                    {runningJob
+                      ? t(
+                          `Auto-disarms in ${formatCountdown(expiresInSecs)} (paused while a job is running).`,
+                          `Automatische Deaktivierung in ${formatCountdown(expiresInSecs)} (pausiert während laufender Aktionen).`,
+                        )
+                      : t(
+                          `Auto-disarms in ${formatCountdown(expiresInSecs)}.`,
+                          `Automatische Deaktivierung in ${formatCountdown(expiresInSecs)}.`,
+                        )}
+                  </span>
+                </div>
+                <span className="sr-only" role="status" aria-live="polite">
+                  {expiresInSecs === 60
+                    ? t(
+                        "One minute remaining before live writes automatically disarm.",
+                        "Noch eine Minute bis zur automatischen Deaktivierung des Live-Schreibzugriffs.",
+                      )
+                    : ""}
                 </span>
-              </Notice>
+              </>
             )}
             {runningJob && (
               <Notice tone="warning">

@@ -34,11 +34,19 @@ export type Availability = z.infer<typeof availability>
 export type Operation = z.infer<typeof operation>
 export type Sample = z.infer<typeof sample>
 
+export class ApiError extends Error {
+  constructor(message: string, readonly code?: string) {
+    super(message)
+  }
+}
 async function responseJson(response: Response): Promise<unknown> {
   const value: unknown = await response.json()
   if (!response.ok) {
-    const error = z.object({ error: z.string() }).safeParse(value)
-    throw new Error(error.success ? error.data.error : `HTTP ${response.status}`)
+    const error = z.object({ error: z.string(), code: z.string().optional() }).safeParse(value)
+    throw new ApiError(
+      error.success ? error.data.error : `HTTP ${response.status}`,
+      error.success ? error.data.code : undefined,
+    )
   }
   return value
 }
@@ -166,13 +174,13 @@ const recentAction = z.object({
   id: z.string(),
   account: z.string(),
   account_login: z.string(),
-  kind: z.enum(['backlog', 'sieve', 'invoice', 'unsubscribe', 'folders']),
+  kind: z.enum(['backlog', 'sieve', 'invoice', 'unsubscribe', 'folders', 'safety']),
   status: z.string(),
   summary: z.string(),
   timestamp: z.number().nullable(),
   undo_open: z.boolean(),
   undo_until: z.number().nullable(),
-  page: z.enum(['backlog', 'rules', 'invoices', 'subscriptions']),
+  page: z.enum(['backlog', 'rules', 'invoices', 'subscriptions', 'settings']),
 })
 const accountsOverview = z.object({
   accounts: z.array(accountOverviewRow),

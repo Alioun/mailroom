@@ -13,6 +13,9 @@
   --control-border: #486460;
   --surface: #141f1e;
   --canvas: #0d1413;
+  --disabled-bg: #1a2826;
+  --disabled-border: #2c423f;
+  --disabled-ink: #8fa9a3;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -30,6 +33,9 @@
     --control-border: #486460;
     --surface: #141f1e;
     --canvas: #0d1413;
+    --disabled-bg: #1a2826;
+    --disabled-border: #2c423f;
+    --disabled-ink: #8fa9a3;
   }
 }
 
@@ -378,5 +384,58 @@
 :root[data-theme="dark"] .provider-card {
   background: #111c1b;
   border-color: var(--border);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] button:disabled {
+  background: #192625;
+  border-color: #293c3a;
+  color: #8aa39f;
+}
+
+:root[data-theme="dark"] .topbar-actions .select-trigger {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  min-height: 36px;
+  padding: 5px 10px;
+}
+
+:root[data-theme="dark"] .demo-badge {
+  background: #172742;
+  border-color: #2c4a7c;
+  color: #dbeafe;
+}
+
+:root[data-theme="dark"] .settings-jump-nav {
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+:root[data-theme="dark"] .settings-jump-nav a {
+  background: #101b1a;
+  border-color: var(--border);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .settings-jump-nav a:hover {
+  background: #17332f;
+  border-color: var(--accent);
+  color: #8ee6d8;
+}
+
+:root[data-theme="dark"] .bulk-bar {
+  background: #132c28;
+  border-color: var(--border);
+}
+
+:root[data-theme="dark"] .shortcut-list li {
+  background: #101b1a;
+  border-color: var(--border);
+}
+
+:root[data-theme="dark"] .shortcut-keys kbd {
+  background: #192928;
+  border-color: var(--control-border);
   color: var(--ink);
 }

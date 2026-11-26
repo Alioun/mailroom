@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { Archive, CheckCircle2, FileUp } from "lucide-react";
 import type { Account, AccountStatus } from "../../api";
 import {
@@ -16,10 +16,12 @@ import type {
   RestoreOffer,
 } from "../../recovery-api";
 import { describeError } from "../status-labels";
+import { formatDateTime } from "../format";
 import {
   Action,
   CheckField,
   Choice,
+  LanguageContext,
   Notice,
   useCopy,
 } from "../components";
@@ -50,6 +52,7 @@ export function RecoverySection({
   onRefresh: () => void;
 }) {
   const t = useCopy();
+  const language = useContext(LanguageContext);
   const [busy, setBusy] = useState(false);
   const [recStatus, setRecStatus] = useState<RecoveryStatus | null>(null);
   const [backupPass, setBackupPass] = useState("");
@@ -154,7 +157,7 @@ export function RecoverySection({
   const bundleOptions = recStatus?.bundle_info.length
     ? recStatus.bundle_info.map((b) => ({
         value: b.id,
-        label: `${b.id.slice(0, 12)} · ${b.modified_at ? new Date(b.modified_at * 1000).toLocaleString() : "—"} · ${formatBytes(b.bytes)}`,
+        label: `${b.id.slice(0, 12)} · ${b.modified_at ? formatDateTime(b.modified_at, language) : "—"} · ${formatBytes(b.bytes)}`,
       }))
     : (recStatus?.bundles ?? []).map((id) => ({
         value: id,
@@ -162,7 +165,7 @@ export function RecoverySection({
       }));
 
   return (
-    <section className="panel">
+    <section id="settings-recovery" className="panel">
       <h2>
         <Archive size={17} />{" "}
         {t(

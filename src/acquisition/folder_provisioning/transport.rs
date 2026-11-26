@@ -493,7 +493,8 @@ impl Session {
         let mut offset = 0;
         while offset < bytes.len() {
             self.check()?;
-            match self.stream.write(&bytes[offset..]) {
+            let end = bytes.len().min(offset + 16 * 1024);
+            match self.stream.write(&bytes[offset..end]) {
                 Ok(0) => return Err(Error::Eof),
                 Ok(n) => offset += n,
                 Err(e) if pending(&e) => {
@@ -854,23 +855,38 @@ mod write_tests {
                 },
                 0
             );
+            // Saturate the underlying non-blocking TCP socket down to 0 free bytes
+            // rather than leaving an abandoned partial `SSL_write` buffer inside
+            // OpenSSL, which would reject the subsequent `CAPABILITY` command write
+            // with BAD_WRITE_RETRY. Stepping down to 1-byte writes drains past BSD
+            // `SO_SNDLOWAT` so even a small TLS record must hit `WouldBlock`.
             let fill_end = Instant::now() + Duration::from_secs(1);
             let padding = vec![b'X'; 64 * 1024];
             let mut saturated = false;
             let mut filled = 0;
-            while filled < TOTAL / 2 && Instant::now() < fill_end {
-                match session.stream.write(&padding) {
-                    Ok(n) => filled += n,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        saturated = true;
-                        break;
+            for pass in 0..2 {
+                if pass > 0 {
+                    std::thread::sleep(POLL);
+                }
+                for chunk_len in [padding.len(), 1024, 64, 1] {
+                    while filled < TOTAL / 2 && Instant::now() < fill_end {
+                        match session.stream.get_mut().write(&padding[..chunk_len]) {
+                            Ok(n) => {
+                                filled += n;
+                                saturated = false;
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                saturated = true;
+                                break;
+                            }
+                            Err(_) => panic!("Synthetic socket saturation failed"),
+                        }
                     }
-                    Err(_) => panic!("Synthetic TLS saturation failed"),
                 }
             }
             assert!(
                 saturated,
-                "Actual TLS write must report WouldBlock after bounded synthetic padding"
+                "Underlying TCP socket must report WouldBlock after bounded synthetic padding"
             );
             session.timeout = Duration::from_secs(2);
             session.command_end = Instant::now() + Duration::from_secs(2);
@@ -897,7 +913,12 @@ mod write_tests {
                 None
             };
             let started = Instant::now();
-            let result = session.execute(b"CAPABILITY");
+            // Pipeline >1 TLS record (>16 KiB) so SecureTransport on macOS cannot
+            // absorb the entire write into its internal pending buffer before
+            // reporting WouldBlock, while OpenSSL on Linux retries the exact
+            // same command buffer across SSL_ERROR_WANT_WRITE.
+            let commands = vec![b"CAPABILITY".as_slice(); 4096];
+            let result = session.execute_all(&commands);
             assert_eq!(
                 result.unwrap_err(),
                 if cancelled {

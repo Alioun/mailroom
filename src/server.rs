@@ -51,8 +51,13 @@ impl AppState {
 /// While the vault is locked, every account route but status and events answers 423 before its handler.
 async fn vault_gate(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
     let path = request.uri().path();
-    let passive = path == "/api/accounts/status" || path == "/api/accounts/events";
-    if path.starts_with("/api/accounts/") && !passive && state.accounts.vault_locked() {
+    let passive_path = path == "/api/accounts/status" || path == "/api/accounts/events";
+    let passive_poll = passive_path
+        || request
+            .headers()
+            .get("x-mailroom-passive")
+            .is_some_and(|v| v == "1");
+    if path.starts_with("/api/accounts/") && !passive_path && state.accounts.vault_locked() {
         return (
             StatusCode::LOCKED,
             Json(json!({
@@ -62,7 +67,7 @@ async fn vault_gate(State(state): State<Arc<AppState>>, request: Request, next: 
         )
             .into_response();
     }
-    if path.starts_with("/api/") && !passive && path != "/api/session" {
+    if path.starts_with("/api/") && !passive_poll && path != "/api/session" {
         state.accounts.touch_activity();
     }
     next.run(request).await

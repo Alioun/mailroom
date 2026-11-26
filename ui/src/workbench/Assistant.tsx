@@ -43,6 +43,7 @@ type SelectedProposal = {
 
 export function Assistant({
   account,
+  active,
   report,
   workspace,
   onWorkspace,
@@ -51,6 +52,7 @@ export function Assistant({
   onGoRules,
 }: {
   account: string;
+  active: boolean;
   report: CensusReport | null;
   workspace: WorkspaceView | null;
   onWorkspace: (value: WorkspaceView) => void;
@@ -86,15 +88,19 @@ export function Assistant({
     );
   };
 
+  const hasInFlightLaunch = inbox.requests.some(
+    (r) => r.phase === "launching" || r.phase === "launched",
+  );
+
   useEffect(() => {
-    let active = true;
+    let mounted = true;
     const refresh = () =>
-      assistantAction(account, { action: "status" })
+      assistantAction(account, { action: "status" }, { passive: true })
         .then((value) => {
-          if (active) receive(value);
+          if (mounted) receive(value);
         })
         .catch(() => {
-          if (active)
+          if (mounted)
             setPollError(
               t(
                 "Recommendations could not refresh. Retry below.",
@@ -103,12 +109,17 @@ export function Assistant({
             );
         });
     void refresh();
+    if (!active && !hasInFlightLaunch) {
+      return () => {
+        mounted = false;
+      };
+    }
     const timer = setInterval(() => void refresh(), 3000);
     return () => {
-      active = false;
+      mounted = false;
       clearInterval(timer);
     };
-  }, [account]);
+  }, [account, active, hasInFlightLaunch]);
 
   useEffect(() => {
     if (!sharing || !report) return;

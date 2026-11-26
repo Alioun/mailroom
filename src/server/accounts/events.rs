@@ -31,7 +31,7 @@ pub(super) fn status_json(state: &AppState) -> serde_json::Value {
         "vault": accounts.vault().map(|vault| vault.status()),
         "vault_problem": accounts.vault().and_then(|vault| vault.problem()),
         "interrupted": web::interrupted(accounts),
-        "job": accounts.job.lock().expect("account job").clone(),
+        "job": accounts.job_snapshot(),
     })
 }
 

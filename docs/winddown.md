@@ -59,10 +59,9 @@ Private files include exact local observations and associations. Agent summaries
 
 ## Local verification commands
 
-Run all commands in the application checkout. Shared mutable fixtures run sequentially. Before replacement, verify the retained fake server's exact argv, cwd and binary SHA-256 against its metadata. Never use the production-default launcher for these checks.
+Run all commands in the application checkout:
 
-After the fake port is free, `CARGO_PROFILE_TEST_OPT_LEVEL=1 node scripts/verify-winddown.mjs` builds the test-only launcher and verifies protected HTTP, receipts, exact output and actual SIGKILL/replacement. It retains a fake process and metadata in `.audit/winddown-retained.json`. Prior fixture directories remain intact.
+- `cargo test --locked` runs the synthetic wind-down, receipt, HMAC, export, and restart test suite.
+- `node ui/scripts/verify-workbench.mjs "$PWD/target/debug/mailroom" "$TMPDIR/workbench-browser"` drives the built React workbench (including Addresses & wind-down) in headless Playwright Chromium.
 
-With that matching process retained, `node ui/scripts/verify-winddown.mjs` drives the actual built Svelte interface with repository Playwright Chromium. It saves exact review, summary and narrow German screenshots under `.audit/winddown-browser/`. T3 preview is attempted first. This fallback is used only after the allowed preview failures.
-
-`node scripts/winddown-report.mjs --account ACCOUNT --as-of UTC_SECONDS` prints the server's local terminal rendering. It contacts only the fixed local server and never prints its session token. Terminal output is private and can contain addresses and service associations. The synthetic verifier captures it and compares it byte for byte with the local-file preview. Browser download remains the explicit file-export path.
+Browser download remains the explicit file-export path for private wind-down reports and agent summaries.

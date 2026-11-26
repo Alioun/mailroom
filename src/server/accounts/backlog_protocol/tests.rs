@@ -49,7 +49,7 @@ async fn denied_sources_and_malformed_requests_never_open_repository_credentials
             0
         );
         assert_eq!(state.accounts.confirmations.lock().unwrap().accesses, 0);
-        assert!(state.accounts.job.lock().unwrap().is_none());
+        assert!(state.accounts.is_job_none());
         if let Some(accesses) = accesses {
             assert_eq!(accesses.load(std::sync::atomic::Ordering::SeqCst), 0);
         }
@@ -417,7 +417,7 @@ mod authority_matrix {
         })
         .await
         .unwrap();
-        let job = state.accounts.job.lock().unwrap().clone().unwrap();
+        let job = state.accounts.job_snapshot().unwrap();
         (status, job.progress.state == ScanState::Complete, value)
     }
 

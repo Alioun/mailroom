@@ -207,18 +207,9 @@ async fn serve(
     if matches!(request.command, Action::Cancel {}) {
         return match tokio::task::spawn_blocking(move || {
             let _admission = state.accounts.admission.lock().expect("admission");
-            let matching = {
-                let job = state.accounts.job.lock().expect("job");
-                if let Some(job) = job
-                    .as_ref()
-                    .filter(|j| j.backlog_account.as_ref() == Some(&request.account))
-                {
-                    job.cancel.cancel();
-                    true
-                } else {
-                    false
-                }
-            };
+            let matching = state
+                .accounts
+                .cancel_job_if(|j| j.backlog_account.as_ref() == Some(&request.account));
             if matching && kind == Kind::Gmail {
                 crate::acquisition::gmail_backlog::boundary("gmail_cancel_signalled");
             }
@@ -261,18 +252,12 @@ async fn serve(
             Ok(g) => g,
             Err(_) => return failure(AcquisitionError::LifecyclePending),
         };
-        let cancel = match state.accounts.reserve("backlog") {
+        let cancel = match state.accounts.reserve_for("backlog", |job| {
+            job.backlog_account = Some(request.account.clone());
+        }) {
             Ok(c) => c,
             Err(e) => return failure(e),
         };
-        state
-            .accounts
-            .job
-            .lock()
-            .unwrap()
-            .as_mut()
-            .unwrap()
-            .backlog_account = Some(request.account.clone());
         drop(operation);
         let worker = state.clone();
         let handle = std::thread::spawn(move || {
@@ -287,14 +272,7 @@ async fn serve(
     match tokio::task::spawn_blocking(move || {
         let _admission = state.accounts.admission.lock().expect("admission");
         let _operation = if status_only {
-            if state
-                .accounts
-                .job
-                .lock()
-                .expect("job")
-                .as_ref()
-                .is_some_and(|j| j.progress.state == ScanState::Running)
-            {
+            if state.accounts.job_running() {
                 return Err(AcquisitionError::LifecyclePending);
             }
             state.accounts.operation.lock().expect("operation")

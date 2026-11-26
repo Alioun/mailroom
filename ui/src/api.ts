@@ -43,14 +43,16 @@ async function responseJson(response: Response): Promise<unknown> {
   return value
 }
 let sessionToken: Promise<string> | undefined
-export async function localFetch(path: string, options: RequestInit = {}): Promise<Response> {
+export async function localFetch(path: string, options: RequestInit & { passive?: boolean } = {}): Promise<Response> {
   sessionToken ??= fetch('/api/session').then(responseJson).then(value => z.object({ token: z.string().length(64) }).parse(value).token).catch(() => {
     sessionToken = undefined
     throw new Error('Local session unavailable. Reload the page.')
   })
-  const headers = new Headers(options.headers)
+  const { passive, ...init } = options
+  const headers = new Headers(init.headers)
   headers.set('X-Mailroom-Token', await sessionToken)
-  return fetch(path, { ...options, headers })
+  if (passive) headers.set('X-Mailroom-Passive', '1')
+  return fetch(path, { ...init, headers })
 }
 export async function load() {
   const [a, b] = await Promise.all([localFetch('/api/sample'), localFetch('/api/availability')])
@@ -167,7 +169,7 @@ const recentAction = z.object({
   kind: z.enum(['backlog', 'sieve', 'invoice', 'unsubscribe', 'folders']),
   status: z.string(),
   summary: z.string(),
-  timestamp: z.number(),
+  timestamp: z.number().nullable(),
   undo_open: z.boolean(),
   undo_until: z.number().nullable(),
   page: z.enum(['backlog', 'rules', 'invoices', 'subscriptions']),

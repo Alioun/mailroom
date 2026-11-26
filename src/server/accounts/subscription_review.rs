@@ -327,7 +327,9 @@ pub(in crate::server) async fn handle(
     };
     match tokio::task::spawn_blocking(move || {
         let _operation=state.accounts.operation.lock().expect("account operation");
-        if state.accounts.job.lock().expect("account job").as_ref().is_some_and(|j|j.progress.state==ScanState::Running) {return Err("Wait for census completion".to_owned());}
+        if state.accounts.job_running() {
+            return Err("Wait for census completion".to_owned());
+        }
         let ledger_guard = state.accounts.ledger().map_err(|e| e.to_string())?.map(|l| l.lock()).transpose()?;
         let as_of=match request.command {
             Action::Open {as_of}=>as_of,

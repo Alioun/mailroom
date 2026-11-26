@@ -305,6 +305,9 @@ pub(in crate::server) struct PickFileRequest {
     kind: String,
 }
 
+#[cfg(target_os = "macos")]
+static PICKER_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Opens the native macOS file picker for Takeout `.mbox` selection on explicit user click.
 pub(in crate::server) async fn pick_file(
     State(state): State<Arc<AppState>>,
@@ -325,14 +328,46 @@ pub(in crate::server) async fn pick_file(
     }
     #[cfg(target_os = "macos")]
     {
-        match tokio::task::spawn_blocking(|| {
-            std::process::Command::new("/usr/bin/osascript")
+        use std::sync::atomic::Ordering;
+        if PICKER_OPEN.swap(true, Ordering::AcqRel) {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "A file picker dialog is already open."})),
+            )
+                .into_response();
+        }
+        struct PickerGuard;
+        impl Drop for PickerGuard {
+            fn drop(&mut self) {
+                PICKER_OPEN.store(false, Ordering::Release);
+            }
+        }
+        let outcome = tokio::task::spawn_blocking(|| {
+            let _guard = PickerGuard;
+            let mut child = std::process::Command::new("/usr/bin/osascript")
                 .arg("-e")
                 .arg("POSIX path of (choose file with prompt \"Select an extracted Google Takeout .mbox file\")")
-                .output()
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            loop {
+                match child.try_wait()? {
+                    Some(_) => return child.wait_with_output(),
+                    None if std::time::Instant::now() >= deadline => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "file picker timed out",
+                        ));
+                    }
+                    None => std::thread::sleep(std::time::Duration::from_millis(50)),
+                }
+            }
         })
-        .await
-        {
+        .await;
+        match outcome {
             Ok(Ok(output)) if output.status.success() => {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
                 if path.is_empty() {
@@ -341,9 +376,20 @@ pub(in crate::server) async fn pick_file(
                     Json(json!({"supported": true, "cancelled": false, "path": path})).into_response()
                 }
             }
-            Ok(Ok(_)) => {
-                Json(json!({"supported": true, "cancelled": true, "path": null})).into_response()
+            Ok(Ok(output)) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if stderr.contains("(-128)") || stderr.contains("User canceled") {
+                    Json(json!({"supported": true, "cancelled": true, "path": null})).into_response()
+                } else {
+                    Json(json!({"supported": false, "cancelled": false, "path": null}))
+                        .into_response()
+                }
             }
+            Ok(Err(err)) if err.kind() == std::io::ErrorKind::TimedOut => (
+                StatusCode::REQUEST_TIMEOUT,
+                Json(json!({"error": "File picker timed out. Try again or paste the .mbox path manually."})),
+            )
+                .into_response(),
             _ => Json(json!({"supported": false, "path": null})).into_response(),
         }
     }
@@ -450,14 +496,7 @@ pub(in crate::server) async fn takeout(
     let worker = state.clone();
     match tokio::task::spawn_blocking(move || {
         let _admission = worker.accounts.admission.lock().expect("account admission");
-        if worker
-            .accounts
-            .job
-            .lock()
-            .expect("account job")
-            .as_ref()
-            .is_some_and(|j| j.progress.state == ScanState::Running)
-        {
+        if worker.accounts.job_running() {
             return Err((
                 "Wait for the active scan or account operation to finish before importing Takeout.",
                 "scan_running",

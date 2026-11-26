@@ -942,8 +942,44 @@ async fn unlocked_vault_defaults_to_30m_idle_lock_and_auto_locks_when_elapsed() 
     assert_eq!(code, StatusCode::OK, "{armed}");
     assert_eq!(armed["live_writes"], true);
 
-    app.accounts.rewind_safety_timers_for_test(31 * 60);
+    app.accounts.rewind_safety_timers_for_test(25 * 60);
+    // Passive background polls (like Assistant status) must NOT reset the idle timer.
+    let token = app.token.to_string();
+    let (code, _) = call(
+        &app,
+        "POST",
+        "/api/accounts/list",
+        Some(json!({})),
+        &[
+            ("Host", ADDRESS),
+            ("Origin", ORIGIN),
+            ("Content-Type", "application/json"),
+            ("X-Mailroom-Token", &token),
+            ("X-Mailroom-Passive", "1"),
+        ],
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+
+    app.accounts.rewind_safety_timers_for_test(6 * 60);
     let after = status_of(&app).await;
     assert_eq!(after["vault"], "locked");
     assert_eq!(after["live_writes"], false);
+
+    // Even passive requests remain blocked with 423 once locked.
+    let (code, body) = call(
+        &app,
+        "POST",
+        "/api/accounts/list",
+        Some(json!({})),
+        &[
+            ("Host", ADDRESS),
+            ("Origin", ORIGIN),
+            ("Content-Type", "application/json"),
+            ("X-Mailroom-Token", &token),
+            ("X-Mailroom-Passive", "1"),
+        ],
+    )
+    .await;
+    assert_eq!(code, StatusCode::LOCKED, "{body}");
 }

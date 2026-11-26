@@ -45,7 +45,17 @@ let server;
 async function start(mode) {
   let output = "";
   const child = spawn(binary, [mode], {
-    env: { HOME: home, TMPDIR: temp, PATH: "/usr/bin:/bin" },
+    env: {
+      HOME: home,
+      TMPDIR: temp,
+      PATH: "/usr/bin:/bin",
+      ...(process.env.MAILROOM_DISABLE_NATIVE_PICKER
+        ? {
+            MAILROOM_DISABLE_NATIVE_PICKER:
+              process.env.MAILROOM_DISABLE_NATIVE_PICKER,
+          }
+        : {}),
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stdout.on("data", (bytes) => {

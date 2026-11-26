@@ -360,13 +360,37 @@ async fn safety_timers_auto_disarm_and_respect_running_jobs() {
             .is_some_and(|s| s <= 120)
     );
 
-    // While a job is actively running, timers must not expire mid-job.
+    // While a job is actively running, timers genuinely pause and preserve remaining time.
+    let before_job = state
+        .accounts
+        .safety_snapshot()
+        .live_writes_expires_in_secs
+        .unwrap();
     let _cancel = state.accounts.reserve("scan").unwrap();
     state.accounts.rewind_safety_timers_for_test(300);
     assert!(state.accounts.live_writes());
+    let during_job = state
+        .accounts
+        .safety_snapshot()
+        .live_writes_expires_in_secs
+        .unwrap();
+    assert!(
+        during_job + 2 >= before_job,
+        "paused timer must preserve remaining seconds during a job: before={before_job} during={during_job}"
+    );
 
-    // Once the job finishes, an elapsed live_writes window disarms automatically.
+    // Once the job finishes, remaining time resumes intact rather than immediately disarming.
     state.accounts.finish(Ok(()));
+    assert!(state.accounts.live_writes());
+    assert!(
+        state
+            .accounts
+            .safety_snapshot()
+            .live_writes_expires_in_secs
+            .is_some_and(|s| s >= before_job.saturating_sub(2))
+    );
+
+    // After resuming, an elapsed live_writes window disarms automatically.
     state.accounts.rewind_safety_timers_for_test(300);
     assert!(!state.accounts.live_writes());
     assert!(

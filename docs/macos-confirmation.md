@@ -137,7 +137,6 @@ An installation from an earlier commit under `/usr/local/libexec/mailroom`, and 
 (cd native/macos && swift test)
 cargo test --locked
 bash scripts/verify-setup-macos-protection.sh
-python3 -I scripts/verify-account-setup.py
 bash scripts/verify-setup-real-build.sh
 ```
 

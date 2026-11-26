@@ -190,7 +190,9 @@ pub(in crate::server) async fn handle(
     };
     match tokio::task::spawn_blocking(move || {
         let _operation = state.accounts.operation.lock().expect("account operation");
-        if state.accounts.job.lock().expect("account job").as_ref().is_some_and(|j| j.progress.state == ScanState::Running) { return Err("Wait for census completion".to_owned()); }
+        if state.accounts.job_running() {
+            return Err("Wait for census completion".to_owned());
+        }
         let repo = state.accounts.repository().map_err(|_| "Account unavailable")?;
         let account = repo.load(&request.account).map_err(|_| "Account unavailable")?;
         let store = repo.store(&account).map_err(|_| "Account storage unavailable")?;

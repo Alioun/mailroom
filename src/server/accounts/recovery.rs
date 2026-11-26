@@ -159,7 +159,9 @@ pub(in crate::server) async fn handle(
     match tokio::task::spawn_blocking(move || -> Result<serde_json::Value, AcquisitionError> {
         let status_only = matches!(request, Request::Status);
         let _admission = if status_only { None } else { Some(state.accounts.admission.lock().expect("account admission")) };
-        if !status_only && state.accounts.job.lock().expect("account job").as_ref().is_some_and(|j| j.progress.state == ScanState::Running) {return Err(AcquisitionError::LifecyclePending);}
+        if !status_only && state.accounts.job_running() {
+            return Err(AcquisitionError::LifecyclePending);
+        }
         let _operation = state.accounts.operation.lock().expect("account operation");
         let repo = state.accounts.repository()?;
         let (root, synthetic) = match &state.accounts.source {
@@ -251,13 +253,13 @@ pub(in crate::server) async fn handle(
             Request::SelectedRestore { preview, receipt, .. } => {
                 let restored = repo.selected_restore(&bundle_path(&root, &preview.bundle)?, &secret, &preview, state.accounts.ledger()?, |plan| consent(plan, &receipt))?;
                 *state.accounts.confirmations.lock().expect("confirmations") = reset_boundary();
-                *state.accounts.job.lock().expect("account job") = None;
+                state.accounts.clear_job();
                 Ok(json!({"restored":restored,"local_restore_complete":true,"provider_authority":false}))
             },
             Request::SelectedResume { .. } => {
                 let restored = repo.selected_resume_reviewed(&secret, state.accounts.ledger()?, |_, _| Ok(()))?;
                 *state.accounts.confirmations.lock().expect("confirmations") = reset_boundary();
-                *state.accounts.job.lock().expect("account job") = None;
+                state.accounts.clear_job();
                 Ok(json!({"restored":restored,"local_restore_complete":true,"provider_authority":false}))
             },
             Request::CapturePreview { account, .. } => {
@@ -278,7 +280,7 @@ pub(in crate::server) async fn handle(
             Request::Restore { preview, receipt, .. } => {
                 let restored = repo.restore(&bundle_path(&root, &preview.bundle)?, &secret, &preview, |plan| consent(plan, &receipt))?;
                 *state.accounts.confirmations.lock().expect("confirmations") = reset_boundary();
-                *state.accounts.job.lock().expect("account job") = None;
+                state.accounts.clear_job();
                 Ok(json!({"restored":restored,"local_restore_complete":true,"provider_authority":false}))
             },
             Request::Resume { account, .. } => {
@@ -388,44 +390,25 @@ pub(in crate::server) async fn import_bundle(
             _ => return Err(("Recovery unavailable.", StatusCode::FORBIDDEN)),
         };
         let bundles_dir = root.join("bundles");
-        crate::private_fs::prepare(&bundles_dir)
-            .map_err(|_| ("Could not prepare recovery bundles folder.", StatusCode::UNPROCESSABLE_ENTITY))?;
-        let target = bundles_dir.join(&filename);
-        if target.exists() {
-            if let Ok(existing) = std::fs::read(&target) {
-                if existing == bytes {
-                    return Ok(json!({
-                        "imported": true,
-                        "already_present": true,
-                        "id": id,
-                        "filename": filename,
-                        "bytes": bytes.len(),
-                    }));
-                }
+        let already_present = match recovery::import_bundle_file(&bundles_dir, &filename, &bytes) {
+            Ok(recovery::ImportBundleResult::Imported) => false,
+            Ok(recovery::ImportBundleResult::AlreadyPresent) => true,
+            Ok(recovery::ImportBundleResult::Conflict) => {
+                return Err((
+                    "A different bundle with that same ID already exists locally. Mailroom did not overwrite it.",
+                    StatusCode::CONFLICT,
+                ));
             }
-            return Err((
-                "A different bundle with that same ID already exists locally. Mailroom did not overwrite it.",
-                StatusCode::CONFLICT,
-            ));
-        }
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        use std::io::Write;
-        options
-            .open(&target)
-            .and_then(|mut file| {
-                file.write_all(&bytes)?;
-                file.sync_all()
-            })
-            .map_err(|_| ("Could not save the recovery bundle.", StatusCode::UNPROCESSABLE_ENTITY))?;
+            Err(_) => {
+                return Err((
+                    "Could not save the recovery bundle.",
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                ));
+            }
+        };
         Ok(json!({
             "imported": true,
-            "already_present": false,
+            "already_present": already_present,
             "id": id,
             "filename": filename,
             "bytes": bytes.len(),

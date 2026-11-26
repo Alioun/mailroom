@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import {
   BookUser,
   ChevronRight,
@@ -26,14 +26,12 @@ import {
 import {
   cancelAccount,
   finishInterrupted,
-  listAccounts,
   lockVault,
-  pollAccountEvents,
   readAccountStatus,
   scanAccount,
   setWriteMode,
 } from "../api";
-import type { Account, AccountStatus } from "../api";
+import type { AccountStatus } from "../api";
 import {
   LanguageContext,
   Action,
@@ -52,6 +50,15 @@ import { AccountArea } from "./AccountWorkspace";
 import type { Page } from "./AccountWorkspace";
 import { NavigationDrawer } from "./NavigationDrawer";
 import { describeError } from "./status-labels";
+import {
+  autoScan,
+  cycleThemePreference,
+  remember,
+  stored,
+  useThemePreference,
+} from "./preferences";
+import type { ThemePreference } from "./preferences";
+import { useAccountSession } from "./useAccountSession";
 
 const WorkspaceSettings = lazy(() =>
   import("./Settings").then((m) => ({ default: m.WorkspaceSettings })),
@@ -60,86 +67,16 @@ const ActivityOverview = lazy(() =>
   import("./ActivityOverview").then((m) => ({ default: m.ActivityOverview })),
 );
 
-type ThemePreference = "system" | "light" | "dark";
-
-const pages: Page[] = [
-  "overview",
-  "senders",
-  "recommendations",
-  "rules",
-  "backlog",
-  "invoices",
-  "subscriptions",
-  "addresses",
-  "activity",
-  "settings",
-];
-
-function safeStorageGet(storage: Storage, key: string): string | null {
-  try {
-    return storage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-function safeStorageSet(storage: Storage, key: string, value: string | null) {
-  try {
-    if (value === null) storage.removeItem(key);
-    else storage.setItem(key, value);
-  } catch {
-    // Private browsing or disabled web storage: keep working in-memory.
-  }
-}
-function stored(key: string) {
-  return safeStorageGet(localStorage, key);
-}
-function remember(key: string, value: string) {
-  safeStorageSet(localStorage, key, value);
-}
-function initialPage(): Page {
-  const value = new URLSearchParams(location.search).get("view");
-  return pages.find((page) => page === value) ?? "overview";
-}
-function initialAccount(): string {
-  const fromUrl = new URLSearchParams(location.search).get("account");
-  return fromUrl ?? stored("mailroom.account") ?? "";
-}
-function initialTheme(): ThemePreference {
-  const value = stored("mailroom.theme");
-  return value === "light" || value === "dark" || value === "system"
-    ? value
-    : "system";
-}
-function pendingAutoScan() {
-  return safeStorageGet(sessionStorage, "mailroom.autoscan") === "waiting";
-}
-function autoScan(value: boolean) {
-  safeStorageSet(sessionStorage, "mailroom.autoscan", value ? "waiting" : null);
-}
-
 export function App() {
   const [language, setLanguage] = useState<Language>(
     stored("mailroom.language") === "de" ? "de" : "en",
   );
-  const [theme, setTheme] = useState<ThemePreference>(initialTheme);
+  const [theme, setTheme] = useThemePreference();
 
   useEffect(() => {
     document.documentElement.lang = language;
     remember("mailroom.language", language);
   }, [language]);
-
-  useEffect(() => {
-    remember("mailroom.theme", theme);
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const apply = () => {
-      const resolved =
-        theme === "system" ? (mq.matches ? "dark" : "light") : theme;
-      document.documentElement.dataset.theme = resolved;
-    };
-    apply();
-    mq.addEventListener("change", apply);
-    return () => mq.removeEventListener("change", apply);
-  }, [theme]);
 
   return (
     <LanguageContext value={language}>
@@ -165,160 +102,33 @@ function Workbench({
   onTheme: (value: ThemePreference) => void;
 }) {
   const t = useCopy();
-  const [status, setStatus] = useState<AccountStatus | null>(null);
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [selected, setSelected] = useState(initialAccount);
-  const [page, setPage] = useState<Page>(initialPage);
+  const {
+    status,
+    accounts,
+    selected,
+    setSelected,
+    page,
+    setPage,
+    error,
+    setError,
+    refresh,
+    bumpRefresh,
+    liveCountdown,
+    loadAccounts,
+    applyStatus,
+    pushUrl,
+  } = useAccountSession(t);
   const [add, setAdd] = useState(false);
   const [menu, setMenu] = useState(false);
   const [writeModal, setWriteModal] = useState(false);
   const [writeBusy, setWriteBusy] = useState(false);
   const [writeError, setWriteError] = useState("");
-  const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [refresh, setRefresh] = useState(0);
   const [pending, setPending] = useState(false);
   const [counts, setCounts] = useState<Record<string, number>>({});
-  const [liveCountdown, setLiveCountdown] = useState<number | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
-  const lastJob = useRef<string | null>(null);
-  const eventSeq = useRef<number | undefined>(undefined);
-  const wasUsable = useRef(false);
   const menuTrigger = useRef<HTMLButtonElement>(null);
   const account = accounts.find((value) => value.id === selected);
-
-  const loadAccounts = useCallback(async () => {
-    const values = await listAccounts();
-    setAccounts(values);
-    setSelected((current) =>
-      values.some((value) => value.id === current)
-        ? current
-        : (values[0]?.id ?? ""),
-    );
-    return values;
-  }, []);
-
-  const applyStatus = useCallback(
-    async (next: AccountStatus) => {
-      setStatus(next);
-      setLiveCountdown(
-        next.live_writes ? (next.live_writes_expires_in_secs ?? null) : null,
-      );
-      const job = next.job;
-      const signature = job
-        ? `${job.account?.id}-${job.progress.state}-${job.operation ?? ""}`
-        : "none";
-      const usable =
-        next.vault !== "locked" &&
-        next.vault !== "absent" &&
-        next.vault !== "unavailable";
-      const becameUsable = usable && !wasUsable.current;
-      wasUsable.current = usable;
-      if (signature !== lastJob.current || becameUsable) {
-        const previous = lastJob.current;
-        lastJob.current = signature;
-        if (usable) {
-          await loadAccounts();
-          if (previous !== null && job?.progress.state !== "running")
-            setRefresh((value) => value + 1);
-        }
-      }
-      if (
-        pendingAutoScan() &&
-        job?.progress.state === "complete" &&
-        (job.operation === "connect" || job.operation === "reconnect") &&
-        job.account
-      ) {
-        autoScan(false);
-        setSelected(job.account.id);
-        setPage("overview");
-        setStatus(await scanAccount(job.account.id));
-        setRefresh((value) => value + 1);
-      }
-    },
-    [loadAccounts],
-  );
-
-  // Instant push updates via /api/accounts/events long-poll loop with backoff on disconnect.
-  useEffect(() => {
-    let active = true;
-    let controller = new AbortController();
-
-    const loop = async () => {
-      while (active) {
-        controller = new AbortController();
-        try {
-          const event = await pollAccountEvents(
-            eventSeq.current,
-            controller.signal,
-          );
-          if (!active) break;
-          eventSeq.current = event.seq;
-          await applyStatus(event.status);
-          setError("");
-        } catch (err) {
-          if (!active) break;
-          if (err instanceof DOMException && err.name === "AbortError") break;
-          setError(
-            t(
-              "Mailroom is not responding. Check that the app is running, then retry.",
-              "Mailroom antwortet nicht. Prüfe, ob die App läuft, und versuche es erneut.",
-            ),
-          );
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-        }
-      }
-    };
-    void loop();
-    return () => {
-      active = false;
-      controller.abort();
-    };
-  }, [applyStatus, t]);
-
-  // Smooth local 1-second tick for live_writes auto-disarm countdown (paused while job runs).
-  useEffect(() => {
-    if (
-      !status?.live_writes ||
-      liveCountdown === null ||
-      status.job?.progress.state === "running"
-    ) {
-      return;
-    }
-    const timer = setInterval(() => {
-      setLiveCountdown((prev) => (prev !== null && prev > 0 ? prev - 1 : prev));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [status?.live_writes, status?.job?.progress.state, liveCountdown !== null]);
-
-  useEffect(() => {
-    if (selected) remember("mailroom.account", selected);
-  }, [selected]);
-
-  useEffect(() => {
-    const syncFromUrl = () => {
-      const params = new URLSearchParams(location.search);
-      const v = params.get("view");
-      const nextPage = pages.find((p) => p === v) ?? "overview";
-      setPage(nextPage);
-      const acc = params.get("account");
-      if (acc) setSelected(acc);
-    };
-    window.addEventListener("popstate", syncFromUrl);
-    return () => window.removeEventListener("popstate", syncFromUrl);
-  }, []);
-
-  const pushUrl = useCallback((nextPage: Page, nextAccount: string) => {
-    const query = new URLSearchParams(location.search);
-    const same =
-      query.get("view") === nextPage &&
-      (nextAccount ? query.get("account") === nextAccount : true);
-    query.set("view", nextPage);
-    if (nextAccount) query.set("account", nextAccount);
-    else query.delete("account");
-    const target = `${location.pathname}?${query}`;
-    if (!same) history.pushState(null, "", target);
-  }, []);
 
   function navigate(next: Page) {
     setPage(next);
@@ -344,9 +154,7 @@ function Workbench({
   }
 
   function cycleTheme() {
-    const order: ThemePreference[] = ["system", "light", "dark"];
-    const next = order[(order.indexOf(theme) + 1) % order.length];
-    onTheme(next);
+    onTheme(cycleThemePreference(theme));
   }
 
   async function action(work: () => Promise<AccountStatus>) {
@@ -765,7 +573,7 @@ function Workbench({
                 status={status}
                 onOpened={(next) => {
                   void applyStatus(next);
-                  setRefresh((value) => value + 1);
+                  bumpRefresh();
                 }}
               />
             ) : (
@@ -910,7 +718,7 @@ function Workbench({
                         onStatus={(next) => void applyStatus(next)}
                         onRefresh={() => {
                           void loadAccounts();
-                          setRefresh((v) => v + 1);
+                          bumpRefresh();
                         }}
                         onOpenWriteMode={() => {
                           setWriteError("");
@@ -963,7 +771,7 @@ function Workbench({
                       onStatus={(next) => void applyStatus(next)}
                       onRefresh={() => {
                         void loadAccounts();
-                        setRefresh((v) => v + 1);
+                        bumpRefresh();
                       }}
                       onOpenWriteMode={() => {
                         setWriteError("");

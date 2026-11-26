@@ -45,7 +45,7 @@ pub(in crate::server) async fn handle(
         use subtle::ConstantTimeEq;
         let _admission = state.accounts.admission.lock().expect("account admission");
         let _operation = state.accounts.operation.lock().expect("account operation");
-        if state.accounts.job.lock().expect("account job").as_ref().is_some_and(|j| j.progress.state == ScanState::Running) {
+        if state.accounts.job_running() {
             return Err("Wait for census completion".into());
         }
         let repo = state.accounts.repository().map_err(|e| e.to_string())?;

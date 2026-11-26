@@ -330,7 +330,7 @@ export function ActivityOverview({
                     </span>
                     <StatusBadge status={item.status} />
                     <strong>{item.account_login}</strong>
-                    {item.timestamp > 1_000_000_000 && (
+                    {item.timestamp !== null && (
                       <span>{formatShortDate(item.timestamp)}</span>
                     )}
                   </div>

@@ -51,16 +51,9 @@ pub(in crate::server) async fn handle(
         return (StatusCode::FORBIDDEN, Json(json!({"error":"Live provider writes are locked in Read-only mode. Enable Live writes in Settings to create IMAP folders."}))).into_response();
     }
     if matches!(request.command, Action::Cancel {}) {
-        if let Some(job) = state
+        state
             .accounts
-            .job
-            .lock()
-            .expect("account job")
-            .as_ref()
-            .filter(|j| j.folder_account.as_ref() == Some(&request.account))
-        {
-            job.cancel.cancel();
-        }
+            .cancel_job_if(|j| j.folder_account.as_ref() == Some(&request.account));
         return Json(json!({"cancel_requested":true})).into_response();
     }
     if matches!(request.command, Action::Confirm { .. }) {
@@ -72,18 +65,12 @@ pub(in crate::server) async fn handle(
             Ok(g) => g,
             Err(_) => return failure(AcquisitionError::LifecyclePending),
         };
-        let cancel = match state.accounts.reserve("folders") {
+        let cancel = match state.accounts.reserve_for("folders", |job| {
+            job.folder_account = Some(request.account.clone());
+        }) {
             Ok(c) => c,
             Err(e) => return failure(e),
         };
-        state
-            .accounts
-            .job
-            .lock()
-            .expect("job")
-            .as_mut()
-            .unwrap()
-            .folder_account = Some(request.account.clone());
         drop(operation);
         let worker = state.clone();
         let handle = std::thread::spawn(move || {

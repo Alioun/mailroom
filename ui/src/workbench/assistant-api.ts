@@ -47,11 +47,13 @@ type Command =
 export async function assistantAction(
   account: string,
   command: Command,
+  options: { passive?: boolean } = {},
 ): Promise<AssistantInbox> {
   const response = await localFetch("/api/accounts/assistant", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ account, command }),
+    passive: options.passive,
   });
   const value: unknown = await response.json();
   if (!response.ok) {

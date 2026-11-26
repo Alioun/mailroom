@@ -80,7 +80,7 @@ async fn installed_move_source_cannot_admit_held_copy_actions() {
     );
     assert_eq!(credentials.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(state.accounts.confirmations.lock().unwrap().accesses, 0);
-    assert!(state.accounts.job.lock().unwrap().is_none());
+    assert!(state.accounts.is_job_none());
     assert!(state.accounts.worker.lock().unwrap().is_none());
 }
 

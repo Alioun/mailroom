@@ -265,6 +265,7 @@ export function AccountArea({
         <Suspense fallback={fallback}>
           <Assistant
             account={account.id}
+            active={!hidden && page === "recommendations"}
             report={report}
             workspace={workspace}
             onWorkspace={setWorkspace}

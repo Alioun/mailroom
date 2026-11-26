@@ -138,10 +138,10 @@ export function Backlog({
     runs.some((r) => r.status === "running" || r.status === "undo_running");
 
   useEffect(() => {
-    if (!hasRunningRun) return;
+    if (!jobRunning) return;
     const timer = setInterval(() => void load(), 1800);
     return () => clearInterval(timer);
-  }, [hasRunningRun, load]);
+  }, [jobRunning, load]);
 
   const protocolReady = isGmail
     ? Boolean(gmailView?.installed)

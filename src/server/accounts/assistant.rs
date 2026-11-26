@@ -45,14 +45,7 @@ fn reviewed(
     summary: &Summary,
 ) -> Result<String, String> {
     use subtle::ConstantTimeEq;
-    if state
-        .accounts
-        .job
-        .lock()
-        .expect("account job")
-        .as_ref()
-        .is_some_and(|j| j.progress.state == ScanState::Running)
-    {
+    if state.accounts.job_running() {
         return Err("Wait for the account operation to finish".into());
     }
     let store = repo.store(account).map_err(|e| e.to_string())?;

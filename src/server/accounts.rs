@@ -148,15 +148,9 @@ async fn launch_connection(
         let result = (|| {
             let repo = worker.accounts.repository()?;
             let account = establish(&repo)?;
-            worker
-                .accounts
-                .job
-                .lock()
-                .expect("account job")
-                .as_mut()
-                .expect("reserved account job")
-                .account = Some(account.clone());
-            worker.accounts.notify_change();
+            worker.accounts.update_job(|job| {
+                job.account = Some(account.clone());
+            });
             let probe = if worker.accounts.synthetic() {
                 Ok(1)
             } else {
@@ -164,15 +158,9 @@ async fn launch_connection(
             };
             repo.connection_observed(&account.id, probe.is_ok())?;
             let folders = probe?;
-            worker
-                .accounts
-                .job
-                .lock()
-                .expect("account job")
-                .as_mut()
-                .expect("reserved account job")
-                .progress
-                .folders = folders;
+            worker.accounts.update_job(|job| {
+                job.progress.folders = folders;
+            });
             Ok(())
         })();
         worker.accounts.finish(result);
@@ -213,26 +201,14 @@ pub(super) async fn scan(
         let result = (|| {
             let repo = worker.accounts.repository()?;
             let account = repo.load(&request.account)?;
-            worker
-                .accounts
-                .job
-                .lock()
-                .expect("account job")
-                .as_mut()
-                .expect("reserved account job")
-                .account = Some(account.clone());
-            worker.accounts.notify_change();
+            worker.accounts.update_job(|job| {
+                job.account = Some(account.clone());
+            });
             let progress = |mut progress: ScanProgress| {
                 progress.state = ScanState::Running;
-                worker
-                    .accounts
-                    .job
-                    .lock()
-                    .expect("account job")
-                    .as_mut()
-                    .expect("reserved account job")
-                    .progress = progress;
-                worker.accounts.notify_change();
+                worker.accounts.update_job(|job| {
+                    job.progress = progress;
+                });
             };
             if worker.accounts.synthetic() && !repo.installed_test_transport() {
                 acquisition::synthetic::scan(&repo, &account.id, cancel, progress)?;
@@ -255,10 +231,7 @@ pub(super) async fn cancel(
     if let Err(error) = input(body) {
         return error;
     }
-    if let Some(job) = state.accounts.job.lock().expect("account job").as_ref() {
-        job.cancel.cancel();
-    }
-    state.accounts.notify_change();
+    state.accounts.cancel_job();
     status(State(state)).await
 }
 

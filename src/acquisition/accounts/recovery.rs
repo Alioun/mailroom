@@ -245,6 +245,50 @@ fn publish_new(path: &Path, bytes: &[u8]) -> Result<(), AcquisitionError> {
         .map_err(|_| AcquisitionError::Storage)?;
     sync_dir(dir)
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImportBundleResult {
+    Imported,
+    AlreadyPresent,
+    Conflict,
+}
+
+/// Atomically imports an already-validated recovery bundle file into `bundles_dir`
+/// without overwriting an existing bundle of the same ID.
+pub(crate) fn import_bundle_file(
+    bundles_dir: &Path,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<ImportBundleResult, AcquisitionError> {
+    private_directory(bundles_dir)?;
+    let target = bundles_dir.join(filename);
+    if target.exists() {
+        let mut file = open_bundle_file(&target)?;
+        let mut existing = Vec::new();
+        file.read_to_end(&mut existing)
+            .map_err(|_| AcquisitionError::Storage)?;
+        return Ok(if existing == bytes {
+            ImportBundleResult::AlreadyPresent
+        } else {
+            ImportBundleResult::Conflict
+        });
+    }
+    match publish_new(&target, bytes) {
+        Ok(()) => Ok(ImportBundleResult::Imported),
+        Err(_) if target.exists() => {
+            let mut file = open_bundle_file(&target)?;
+            let mut existing = Vec::new();
+            file.read_to_end(&mut existing)
+                .map_err(|_| AcquisitionError::Storage)?;
+            Ok(if existing == bytes {
+                ImportBundleResult::AlreadyPresent
+            } else {
+                ImportBundleResult::Conflict
+            })
+        }
+        Err(err) => Err(err),
+    }
+}
 /// Writes a version-3 bundle into `directory`, verifies it by opening it
 /// again, and publishes it under its identity without replacing a file.
 fn write_bundle(

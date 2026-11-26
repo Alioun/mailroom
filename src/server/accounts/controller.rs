@@ -25,10 +25,19 @@ pub(super) const DEFAULT_VAULT_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
 pub(super) const MIN_TIMEOUT_SECS: u64 = 60;
 pub(super) const MAX_TIMEOUT_SECS: u64 = 24 * 60 * 60;
 
+#[derive(Clone, Copy, Debug)]
+enum ArmedTimer {
+    /// Counting down toward `deadline`.
+    Running { deadline: Instant },
+    /// Frozen while a background job runs, preserving remaining duration.
+    Paused { remaining: Duration },
+    /// Live writes armed without an auto-disarm timeout (`timeout_secs == 0`).
+    Untimed,
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct SafetyState {
-    pub(super) live_writes: bool,
-    pub(super) live_writes_armed_at: Option<Instant>,
+    live_writes_timer: Option<ArmedTimer>,
     pub(super) live_writes_timeout_secs: u64,
     pub(super) vault_idle_timeout_secs: u64,
     pub(super) last_activity: Instant,
@@ -37,8 +46,7 @@ pub(super) struct SafetyState {
 impl Default for SafetyState {
     fn default() -> Self {
         Self {
-            live_writes: false,
-            live_writes_armed_at: None,
+            live_writes_timer: None,
             live_writes_timeout_secs: DEFAULT_LIVE_WRITES_TIMEOUT_SECS,
             vault_idle_timeout_secs: DEFAULT_VAULT_IDLE_TIMEOUT_SECS,
             last_activity: Instant::now(),
@@ -59,7 +67,7 @@ pub(in crate::server) struct AccountController {
     #[cfg(test)]
     pub(super) assistant_cli: Option<crate::agent::t3::Client>,
     pub(super) source: AccountSource,
-    pub(super) job: Mutex<Option<Job>>,
+    job: Mutex<Option<Job>>,
     pub(super) operation: Mutex<()>,
     pub(super) admission: Mutex<()>,
     pub(super) worker: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -232,6 +240,15 @@ impl AccountController {
         }
     }
 
+    pub(super) fn job_snapshot(&self) -> Option<Job> {
+        self.job.lock().expect("account job").clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_job_none(&self) -> bool {
+        self.job.lock().expect("account job").is_none()
+    }
+
     pub(super) fn job_running(&self) -> bool {
         self.job
             .lock()
@@ -240,9 +257,133 @@ impl AccountController {
             .is_some_and(|j| j.progress.state == ScanState::Running)
     }
 
+    pub(super) fn sieve_job_status(&self, account: &AccountId) -> (bool, Option<AcquisitionError>) {
+        let job = self.job.lock().expect("account job");
+        let matching = job
+            .as_ref()
+            .filter(|j| j.sieve_account.as_ref() == Some(account));
+        (
+            matching.is_some_and(|j| j.progress.state == ScanState::Running),
+            matching.and_then(|j| j.error),
+        )
+    }
+
+    pub(super) fn update_job(&self, mutate: impl FnOnce(&mut Job)) {
+        let mut updated = false;
+        {
+            let mut job = self.job.lock().expect("account job");
+            if let Some(current) = job.as_mut() {
+                mutate(current);
+                updated = true;
+            }
+        }
+        if updated {
+            self.notify_change();
+        }
+    }
+
+    pub(super) fn update_job_if(
+        &self,
+        predicate: impl FnOnce(&Job) -> bool,
+        mutate: impl FnOnce(&mut Job),
+    ) -> bool {
+        let updated = {
+            let mut job = self.job.lock().expect("account job");
+            if let Some(current) = job.as_mut().filter(|j| predicate(j)) {
+                mutate(current);
+                true
+            } else {
+                false
+            }
+        };
+        if updated {
+            self.notify_change();
+        }
+        updated
+    }
+
+    pub(super) fn cancel_job(&self) {
+        let cancelled = {
+            let job = self.job.lock().expect("account job");
+            if let Some(current) = job.as_ref() {
+                current.cancel.cancel();
+                true
+            } else {
+                false
+            }
+        };
+        if cancelled {
+            self.notify_change();
+        }
+    }
+
+    pub(super) fn cancel_job_if(&self, predicate: impl FnOnce(&Job) -> bool) -> bool {
+        let cancelled = {
+            let job = self.job.lock().expect("account job");
+            if let Some(current) = job.as_ref().filter(|j| predicate(j)) {
+                current.cancel.cancel();
+                true
+            } else {
+                false
+            }
+        };
+        if cancelled {
+            self.notify_change();
+        }
+        cancelled
+    }
+
+    pub(super) fn clear_job(&self) {
+        let cleared = {
+            let mut job = self.job.lock().expect("account job");
+            job.take().is_some()
+        };
+        if cleared {
+            self.notify_change();
+        }
+    }
+
+    pub(super) fn clear_job_if(&self, predicate: impl FnOnce(&Job) -> bool) -> bool {
+        let cleared = {
+            let mut job = self.job.lock().expect("account job");
+            if job.as_ref().is_some_and(predicate) {
+                *job = None;
+                true
+            } else {
+                false
+            }
+        };
+        if cleared {
+            self.notify_change();
+        }
+        cleared
+    }
+
     pub(in crate::server) fn touch_activity(&self) {
         let mut safety = self.safety.lock().expect("safety state");
         safety.last_activity = Instant::now();
+    }
+
+    fn pause_timers_for_job(&self) {
+        let now = Instant::now();
+        let mut safety = self.safety.lock().expect("safety state");
+        if let Some(ArmedTimer::Running { deadline }) = safety.live_writes_timer {
+            safety.live_writes_timer = Some(ArmedTimer::Paused {
+                remaining: deadline.saturating_duration_since(now),
+            });
+        }
+        safety.last_activity = now;
+    }
+
+    fn resume_timers_after_job(&self) {
+        let now = Instant::now();
+        let mut safety = self.safety.lock().expect("safety state");
+        if let Some(ArmedTimer::Paused { remaining }) = safety.live_writes_timer {
+            safety.live_writes_timer = Some(ArmedTimer::Running {
+                deadline: now + remaining,
+            });
+        }
+        safety.last_activity = now;
     }
 
     pub(in crate::server) fn enforce_timeouts(&self) {
@@ -254,15 +395,10 @@ impl AccountController {
         let mut should_lock_vault = false;
         {
             let mut safety = self.safety.lock().expect("safety state");
-            if safety.live_writes && safety.live_writes_timeout_secs > 0 {
-                if let Some(armed_at) = safety.live_writes_armed_at {
-                    if now.saturating_duration_since(armed_at)
-                        >= Duration::from_secs(safety.live_writes_timeout_secs)
-                    {
-                        safety.live_writes = false;
-                        safety.live_writes_armed_at = None;
-                        changed = true;
-                    }
+            if let Some(ArmedTimer::Running { deadline }) = safety.live_writes_timer {
+                if now >= deadline {
+                    safety.live_writes_timer = None;
+                    changed = true;
                 }
             }
             if safety.vault_idle_timeout_secs > 0
@@ -270,8 +406,7 @@ impl AccountController {
                 && now.saturating_duration_since(safety.last_activity)
                     >= Duration::from_secs(safety.vault_idle_timeout_secs)
             {
-                safety.live_writes = false;
-                safety.live_writes_armed_at = None;
+                safety.live_writes_timer = None;
                 should_lock_vault = true;
                 changed = true;
             }
@@ -293,22 +428,49 @@ impl AccountController {
 
     pub(in crate::server) fn live_writes(&self) -> bool {
         self.enforce_timeouts();
-        self.safety.lock().expect("safety state").live_writes
+        self.safety
+            .lock()
+            .expect("safety state")
+            .live_writes_timer
+            .is_some()
     }
 
     pub(super) fn set_live_writes(&self, enabled: bool) {
         self.arm_live_writes(enabled, None);
     }
 
+    fn new_armed_timer(timeout_secs: u64, job_running: bool, now: Instant) -> ArmedTimer {
+        if timeout_secs == 0 {
+            ArmedTimer::Untimed
+        } else if job_running {
+            ArmedTimer::Paused {
+                remaining: Duration::from_secs(timeout_secs),
+            }
+        } else {
+            ArmedTimer::Running {
+                deadline: now + Duration::from_secs(timeout_secs),
+            }
+        }
+    }
+
     pub(super) fn arm_live_writes(&self, enabled: bool, timeout_secs: Option<u64>) {
+        let running = self.job_running();
+        let now = Instant::now();
         {
             let mut safety = self.safety.lock().expect("safety state");
             if let Some(secs) = timeout_secs {
                 safety.live_writes_timeout_secs = secs;
             }
-            safety.live_writes = enabled;
-            safety.live_writes_armed_at = if enabled { Some(Instant::now()) } else { None };
-            safety.last_activity = Instant::now();
+            safety.live_writes_timer = if enabled {
+                Some(Self::new_armed_timer(
+                    safety.live_writes_timeout_secs,
+                    running,
+                    now,
+                ))
+            } else {
+                None
+            };
+            safety.last_activity = now;
         }
         self.notify_change();
     }
@@ -318,18 +480,20 @@ impl AccountController {
         live_writes_timeout_secs: Option<u64>,
         vault_idle_timeout_secs: Option<u64>,
     ) {
+        let running = self.job_running();
+        let now = Instant::now();
         {
             let mut safety = self.safety.lock().expect("safety state");
             if let Some(secs) = live_writes_timeout_secs {
                 safety.live_writes_timeout_secs = secs;
-                if safety.live_writes {
-                    safety.live_writes_armed_at = Some(Instant::now());
+                if safety.live_writes_timer.is_some() {
+                    safety.live_writes_timer = Some(Self::new_armed_timer(secs, running, now));
                 }
             }
             if let Some(secs) = vault_idle_timeout_secs {
                 safety.vault_idle_timeout_secs = secs;
             }
-            safety.last_activity = Instant::now();
+            safety.last_activity = now;
         }
         self.notify_change();
     }
@@ -339,15 +503,13 @@ impl AccountController {
         let now = Instant::now();
         let vault_unlocked = self.vault().is_some_and(|v| v.unlocked());
         let safety = self.safety.lock().expect("safety state");
-        let live_writes_expires_in_secs =
-            if safety.live_writes && safety.live_writes_timeout_secs > 0 {
-                safety.live_writes_armed_at.map(|armed_at| {
-                    let elapsed = now.saturating_duration_since(armed_at).as_secs();
-                    safety.live_writes_timeout_secs.saturating_sub(elapsed)
-                })
-            } else {
-                None
-            };
+        let live_writes_expires_in_secs = match safety.live_writes_timer {
+            Some(ArmedTimer::Running { deadline }) => {
+                Some(deadline.saturating_duration_since(now).as_secs())
+            }
+            Some(ArmedTimer::Paused { remaining }) => Some(remaining.as_secs()),
+            Some(ArmedTimer::Untimed) | None => None,
+        };
         let vault_locks_in_secs = if vault_unlocked && safety.vault_idle_timeout_secs > 0 {
             let elapsed = now
                 .saturating_duration_since(safety.last_activity)
@@ -357,7 +519,7 @@ impl AccountController {
             None
         };
         SafetySnapshot {
-            live_writes: safety.live_writes,
+            live_writes: safety.live_writes_timer.is_some(),
             live_writes_expires_in_secs,
             live_writes_timeout_secs: safety.live_writes_timeout_secs,
             vault_idle_timeout_secs: safety.vault_idle_timeout_secs,
@@ -381,8 +543,10 @@ impl AccountController {
     pub(super) fn rewind_safety_timers_for_test(&self, secs: u64) {
         let mut safety = self.safety.lock().expect("safety state");
         let delta = Duration::from_secs(secs);
-        if let Some(armed_at) = safety.live_writes_armed_at {
-            safety.live_writes_armed_at = Some(armed_at.checked_sub(delta).unwrap_or(armed_at));
+        if let Some(ArmedTimer::Running { deadline }) = safety.live_writes_timer {
+            safety.live_writes_timer = Some(ArmedTimer::Running {
+                deadline: deadline.checked_sub(delta).unwrap_or(deadline),
+            });
         }
         safety.last_activity = safety
             .last_activity
@@ -412,60 +576,74 @@ impl AccountController {
         &self,
         operation: &'static str,
     ) -> Result<Cancellation, AcquisitionError> {
-        let mut job = self.job.lock().expect("account job");
-        if job
-            .as_ref()
-            .is_some_and(|j| j.progress.state == ScanState::Running)
-        {
-            return Err(AcquisitionError::InvalidInput);
-        }
-        let cancel = Cancellation::default();
-        *job = Some(Job {
-            operation,
-            backlog_account: None,
-            folder_account: None,
-            sieve_account: None,
-            account: None,
-            progress: ScanProgress {
-                state: ScanState::Running,
-                saved: 0,
-                folders: 0,
-            },
-            error: None,
-            cancel: cancel.clone(),
-        });
-        drop(job);
+        self.reserve_for(operation, |_| {})
+    }
+
+    pub(super) fn reserve_for(
+        &self,
+        operation: &'static str,
+        init: impl FnOnce(&mut Job),
+    ) -> Result<Cancellation, AcquisitionError> {
+        let cancel = {
+            let mut job = self.job.lock().expect("account job");
+            if job
+                .as_ref()
+                .is_some_and(|j| j.progress.state == ScanState::Running)
+            {
+                return Err(AcquisitionError::InvalidInput);
+            }
+            let cancel = Cancellation::default();
+            let mut next = Job {
+                operation,
+                backlog_account: None,
+                folder_account: None,
+                sieve_account: None,
+                account: None,
+                progress: ScanProgress {
+                    state: ScanState::Running,
+                    saved: 0,
+                    folders: 0,
+                },
+                error: None,
+                cancel: cancel.clone(),
+            };
+            init(&mut next);
+            *job = Some(next);
+            cancel
+        };
+        self.pause_timers_for_job();
         self.notify_change();
         Ok(cancel)
     }
 
     pub(super) fn finish(&self, result: Result<(), AcquisitionError>) {
-        let mut current = self.job.lock().expect("account job");
-        let job = current.as_mut().expect("reserved account job");
-        match result {
-            Ok(()) => job.progress.state = ScanState::Complete,
-            Err(error) => {
-                let error = if job.cancel.is_cancelled()
-                    && matches!(
-                        error,
-                        AcquisitionError::Protocol
-                            | AcquisitionError::Tls
-                            | AcquisitionError::Authentication
-                    ) {
-                    AcquisitionError::Cancelled
-                } else {
-                    error
-                };
-                job.progress.state = if error == AcquisitionError::Cancelled {
-                    ScanState::Cancelled
-                } else {
-                    ScanState::Failed
-                };
-                job.error = Some(error);
+        {
+            let mut current = self.job.lock().expect("account job");
+            let job = current.as_mut().expect("reserved account job");
+            match result {
+                Ok(()) => job.progress.state = ScanState::Complete,
+                Err(error) => {
+                    let error = if job.cancel.is_cancelled()
+                        && matches!(
+                            error,
+                            AcquisitionError::Protocol
+                                | AcquisitionError::Tls
+                                | AcquisitionError::Authentication
+                        ) {
+                        AcquisitionError::Cancelled
+                    } else {
+                        error
+                    };
+                    job.progress.state = if error == AcquisitionError::Cancelled {
+                        ScanState::Cancelled
+                    } else {
+                        ScanState::Failed
+                    };
+                    job.error = Some(error);
+                }
             }
         }
-        drop(current);
-        self.touch_activity();
+        self.resume_timers_after_job();
         self.notify_change();
     }
 }

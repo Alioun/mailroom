@@ -110,43 +110,39 @@ pub(super) fn execute(
     ledger_fresh(&saved, guard.as_ref()).map_err(|_| AcquisitionError::InvalidInput)?;
     let fresh = |s: &crate::census::AccountState| {
         ledger_fresh(s, guard.as_ref())?;
-        if let Some(job) = state
-            .accounts
-            .job
-            .lock()
-            .expect("job")
-            .as_mut()
-            .filter(|j| j.backlog_account.as_ref() == Some(&request.account))
-        {
-            if kind == Kind::Gmail {
-                if let Some(run) = s.gmail_backlog.runs.last() {
-                    let entries = run.entries(run.undo_receipt.is_some());
+        state.accounts.update_job_if(
+            |j| j.backlog_account.as_ref() == Some(&request.account),
+            |job| {
+                if kind == Kind::Gmail {
+                    if let Some(run) = s.gmail_backlog.runs.last() {
+                        let entries = run.entries(run.undo_receipt.is_some());
+                        job.progress.saved = entries
+                            .iter()
+                            .filter(|b| b.verified())
+                            .map(|b| b.intent().messages().len())
+                            .sum();
+                        job.progress.folders = entries.len();
+                    }
+                } else if let Some(run) = s.protocol_backlog.runs.last() {
+                    let entries: Vec<_> = if run.undo_receipt.is_some() {
+                        run.reverse.iter().map(|r| &r.evidence).collect()
+                    } else {
+                        run.batches.iter().collect()
+                    };
                     job.progress.saved = entries
                         .iter()
-                        .filter(|b| b.verified())
-                        .map(|b| b.intent().messages().len())
+                        .filter(|e| protocol::verified(e))
+                        .map(|e| e.command().messages().len())
                         .sum();
                     job.progress.folders = entries.len();
+                    if !run.compensation.is_empty() {
+                        let counts = run.compensation_counts();
+                        job.progress.saved = counts.restored + counts.copies_removed;
+                        job.progress.folders = run.compensation.len();
+                    }
                 }
-            } else if let Some(run) = s.protocol_backlog.runs.last() {
-                let entries: Vec<_> = if run.undo_receipt.is_some() {
-                    run.reverse.iter().map(|r| &r.evidence).collect()
-                } else {
-                    run.batches.iter().collect()
-                };
-                job.progress.saved = entries
-                    .iter()
-                    .filter(|e| protocol::verified(e))
-                    .map(|e| e.command().messages().len())
-                    .sum();
-                job.progress.folders = entries.len();
-                if !run.compensation.is_empty() {
-                    let counts = run.compensation_counts();
-                    job.progress.saved = counts.restored + counts.copies_removed;
-                    job.progress.folders = run.compensation.len();
-                }
-            }
-        }
+            },
+        );
         Ok(())
     };
     match &request.command {

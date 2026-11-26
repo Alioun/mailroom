@@ -69,9 +69,8 @@ pub(in crate::server) async fn handle(
             Some(state.accounts.admission.lock().expect("account admission"))
         };
         if !matches!(request, Request::Status { .. }) {
-            if let Some(job) = state.accounts.job.lock().expect("account job").as_ref() {
-                if job
-                    .folder_account
+            state.accounts.cancel_job_if(|job| {
+                job.folder_account
                     .as_ref()
                     .is_some_and(|id| Some(id) == request.account())
                     || job
@@ -86,10 +85,7 @@ pub(in crate::server) async fn handle(
                         .account
                         .as_ref()
                         .is_some_and(|a| Some(&a.id) == request.account())
-                {
-                    job.cancel.cancel();
-                }
-            }
+            });
             if let Some(worker) = state.accounts.worker.lock().expect("account worker").take() {
                 worker.join().map_err(|_| AcquisitionError::Storage)?;
             }
@@ -127,8 +123,7 @@ pub(in crate::server) async fn handle(
             }
             Request::Recover { account } => repo.recover(account, mailboxes)?,
         }
-        let mut job = state.accounts.job.lock().expect("account job");
-        if job.as_ref().is_some_and(|j| {
+        state.accounts.clear_job_if(|j| {
             j.folder_account
                 .as_ref()
                 .is_some_and(|id| Some(id) == request.account())
@@ -138,9 +133,7 @@ pub(in crate::server) async fn handle(
                 || j.account
                     .as_ref()
                     .is_some_and(|a| Some(&a.id) == request.account())
-        }) {
-            *job = None;
-        }
+        });
         Ok(json!({"saved":true,"recovery":repo.recovery_status()?}))
     })
     .await
@@ -164,15 +157,12 @@ async fn lifecycle_cancels_and_joins_folder_work_before_rotation_and_clears_its_
         mailboxes: root.path().join("mailboxes"),
     };
     let state = Arc::new(app);
-    let cancel = state.accounts.reserve("folders").unwrap();
-    state
+    let cancel = state
         .accounts
-        .job
-        .lock()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .folder_account = Some(account.id.clone());
+        .reserve_for("folders", |job| {
+            job.folder_account = Some(account.id.clone());
+        })
+        .unwrap();
     let cancelled_before_join = Arc::new(AtomicBool::new(false));
     let observed = cancelled_before_join.clone();
     let worker = state.clone();
@@ -200,7 +190,7 @@ async fn lifecycle_cancels_and_joins_folder_work_before_rotation_and_clears_its_
     assert_eq!(response.status(), StatusCode::OK);
     assert!(cancelled_before_join.load(Ordering::SeqCst));
     assert!(state.accounts.worker.lock().unwrap().is_none());
-    assert!(state.accounts.job.lock().unwrap().is_none());
+    assert!(state.accounts.is_job_none());
 }
 
 #[cfg(test)]

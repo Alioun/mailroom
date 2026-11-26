@@ -30,21 +30,16 @@ pub(in crate::server) async fn handle(
         Err(e) => return e,
     };
     if matches!(request.command, Action::Status {}) {
-        let job = state.accounts.job.lock().expect("account job");
-        let job = job
-            .as_ref()
-            .filter(|j| j.sieve_account.as_ref() == Some(&request.account));
-        return Json(json!({"installed":true,"running":job.is_some_and(|j| j.progress.state == ScanState::Running),"error":job.and_then(|j| j.error)})).into_response();
+        let (running, error) = state.accounts.sieve_job_status(&request.account);
+        return Json(json!({"installed":true,"running":running,"error":error})).into_response();
     }
     if matches!(request.command, Action::Cancel {}) {
-        let job = state.accounts.job.lock().expect("account job");
-        let Some(job) = job
-            .as_ref()
-            .filter(|j| j.sieve_account.as_ref() == Some(&request.account))
-        else {
+        if !state
+            .accounts
+            .cancel_job_if(|j| j.sieve_account.as_ref() == Some(&request.account))
+        {
             return failure(AcquisitionError::InvalidInput);
-        };
-        job.cancel.cancel();
+        }
         return Json(json!({"cancel_requested":true})).into_response();
     }
     if matches!(request.command, Action::Start {}) {
@@ -56,18 +51,12 @@ pub(in crate::server) async fn handle(
             Ok(g) => g,
             Err(_) => return failure(AcquisitionError::LifecyclePending),
         };
-        let cancel = match state.accounts.reserve("sieve_probe") {
+        let cancel = match state.accounts.reserve_for("sieve_probe", |job| {
+            job.sieve_account = Some(request.account.clone());
+        }) {
             Ok(c) => c,
             Err(e) => return failure(e),
         };
-        state
-            .accounts
-            .job
-            .lock()
-            .expect("account job")
-            .as_mut()
-            .unwrap()
-            .sieve_account = Some(request.account.clone());
         drop(operation);
         let worker = state.clone();
         let handle = std::thread::spawn(move || {

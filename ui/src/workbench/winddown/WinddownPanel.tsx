@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useState } from "react";
 import {
   CheckCircle2,
   ChevronLeft,
@@ -21,6 +21,7 @@ import type {
   WinddownReview,
   WinddownView,
 } from "../../winddown-api";
+import { formatNumber } from "../format";
 import {
   describeError,
   winddownBlockerText,
@@ -33,6 +34,7 @@ import {
   Choice,
   Details,
   Empty,
+  LanguageContext,
   Modal,
   Notice,
   Stat,
@@ -42,6 +44,7 @@ import {
 
 export function WinddownPanel({ account }: { account: Account }) {
   const t = useCopy();
+  const language = useContext(LanguageContext);
   const [view, setView] = useState<WinddownView | null>(null);
   const [comparisons, setComparisons] = useState<Record<string, boolean>>({});
   const [query, setQuery] = useState("");
@@ -321,23 +324,24 @@ export function WinddownPanel({ account }: { account: Account }) {
             <div className="stats compact">
               <Stat
                 label={t("Still writing here", "Schreiben noch hier")}
-                value={waitingCount.toLocaleString()}
+                value={formatNumber(waitingCount, language)}
               />
               <Stat
                 label={t("Moved", "Umgezogen")}
-                value={movedCount.toLocaleString()}
+                value={formatNumber(movedCount, language)}
               />
               <Stat
                 label={t("Quiet / dismissed", "Ruhig / ausgeblendet")}
-                value={(
+                value={formatNumber(
                   (view.report.counts.quiet ?? 0) +
-                  (view.report.counts.dismissed ?? 0)
-                ).toLocaleString()}
+                    (view.report.counts.dismissed ?? 0),
+                  language,
+                )}
               />
               {catalog && (
                 <Stat
                   label={t("Curated sender catalog", "Kuratierter Katalog")}
-                  value={`${catalog.rows} (${catalog.seed_complete ? t("Complete", "Vollständig") : t("Seed", "Entwurf")})`}
+                  value={`${formatNumber(catalog.rows, language)} (${catalog.seed_complete ? t("Complete", "Vollständig") : t("Seed", "Entwurf")})`}
                 />
               )}
             </div>
@@ -473,7 +477,7 @@ export function WinddownPanel({ account }: { account: Account }) {
                             <StatusBadge status={row.status} />
                           </td>
                           <td className="numeric">
-                            {row.recent.toLocaleString()}
+                            {formatNumber(row.recent, language)}
                           </td>
                           <td>
                             <div className="cell-actions">

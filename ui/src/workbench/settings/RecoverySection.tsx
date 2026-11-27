@@ -26,20 +26,30 @@ import {
   useCopy,
 } from "../components";
 
+const MAX_IMPORT_BUNDLE_BYTES = 12 * 1024 * 1024;
+
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-  }
-  return btoa(binary);
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const comma = result.indexOf(",");
+      if (comma < 0) {
+        reject(new Error("Could not read file contents."));
+        return;
+      }
+      resolve(result.slice(comma + 1));
+    };
+    reader.onerror = () =>
+      reject(reader.error ?? new Error("Could not read file contents."));
+    reader.readAsDataURL(file);
+  });
 }
 
 export function RecoverySection({
@@ -111,12 +121,21 @@ export function RecoverySection({
 
   async function handleBundleFile(file: File | null | undefined) {
     if (!file) return;
-    setBusy(true);
     setRecError("");
     setRecNotice("");
+    if (file.size === 0 || file.size > MAX_IMPORT_BUNDLE_BYTES) {
+      setRecError(
+        t(
+          "Recovery bundle is empty or exceeds the 12 MB upload limit.",
+          "Sicherungspaket ist leer oder überschreitet das Upload-Limit von 12 MB.",
+        ),
+      );
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+    setBusy(true);
     try {
-      const buf = await file.arrayBuffer();
-      const base64 = arrayBufferToBase64(buf);
+      const base64 = await readFileAsBase64(file);
       const res = await importRecoveryBundle(file.name, base64);
       setRecNotice(
         res.already_present
@@ -257,21 +276,34 @@ export function RecoverySection({
             {t("Create encrypted backup", "Verschlüsselte Sicherung erstellen")}
           </h3>
           <div className="domain-options">
-            {accounts.map((acc) => (
-              <CheckField
-                key={acc.id}
-                checked={Boolean(backupSelected[acc.id])}
-                onChange={(checked) => {
-                  setBackupSelected((prev) => ({
-                    ...prev,
-                    [acc.id]: checked,
-                  }));
-                  setCaptureOffer(null);
-                }}
-              >
-                {acc.login}
-              </CheckField>
-            ))}
+            {(() => {
+              const seen = new Map<string, number>();
+              for (const acc of accounts) {
+                seen.set(acc.login, (seen.get(acc.login) ?? 0) + 1);
+              }
+              return accounts.map((acc) => {
+                const dup = (seen.get(acc.login) ?? 0) > 1;
+                const providerLabel =
+                  acc.provider === "gmail" ? "Gmail" : "mailbox.org";
+                return (
+                  <CheckField
+                    key={acc.id}
+                    checked={Boolean(backupSelected[acc.id])}
+                    onChange={(checked) => {
+                      setBackupSelected((prev) => ({
+                        ...prev,
+                        [acc.id]: checked,
+                      }));
+                      setCaptureOffer(null);
+                    }}
+                  >
+                    {dup
+                      ? `${acc.login} · ${providerLabel} (${acc.id.slice(0, 6)})`
+                      : acc.login}
+                  </CheckField>
+                );
+              });
+            })()}
           </div>
           <CheckField
             checked={backupIncludeLedger}

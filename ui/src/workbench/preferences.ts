@@ -89,3 +89,15 @@ export function useThemePreference() {
 
   return [theme, setTheme] as const;
 }
+
+export function useShortcutsEnabled() {
+  const [enabled, setEnabled] = useState<boolean>(
+    () => stored("mailroom.shortcuts") !== "off",
+  );
+
+  useEffect(() => {
+    remember("mailroom.shortcuts", enabled ? "on" : "off");
+  }, [enabled]);
+
+  return [enabled, setEnabled] as const;
+}

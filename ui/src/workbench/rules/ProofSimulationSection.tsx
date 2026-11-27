@@ -1,12 +1,15 @@
+import { useContext } from "react";
 import { Download, Pin as PinIcon, X } from "lucide-react";
 import type { Pin, ProofPreview, WorkspaceView } from "../../api";
 import {
   Action,
   Details,
+  LanguageContext,
   Stat,
   StatusBadge,
   useCopy,
 } from "../components";
+import { formatNumber } from "../format";
 
 type Input = NonNullable<WorkspaceView["workspace"]>["input"];
 
@@ -44,6 +47,7 @@ export function ProofSimulationSection({
   onRemovePin: (messageIdHash: string) => void;
 }) {
   const t = useCopy();
+  const language = useContext(LanguageContext);
 
   return (
     <section className="panel">
@@ -70,19 +74,19 @@ export function ProofSimulationSection({
       <div className="stats compact">
         <Stat
           label={t("Messages checked", "Geprüfte Nachrichten")}
-          value={proof.proof.counts.messages.toLocaleString()}
+          value={formatNumber(proof.proof.counts.messages, language)}
         />
         <Stat
           label={t("Would be filed", "Würden abgelegt")}
-          value={proof.proof.counts.filed.toLocaleString()}
+          value={formatNumber(proof.proof.counts.filed, language)}
         />
         <Stat
           label={t("Kept in Inbox", "Bleiben im Posteingang")}
-          value={proof.proof.counts.inbox.toLocaleString()}
+          value={formatNumber(proof.proof.counts.inbox, language)}
         />
         <Stat
           label={t("Need review", "Benötigen Prüfung")}
-          value={proof.proof.counts.review.toLocaleString()}
+          value={formatNumber(proof.proof.counts.review, language)}
         />
       </div>
       <div className="table-scroll">
@@ -98,7 +102,7 @@ export function ProofSimulationSection({
             {proof.proof.rules.map((rule) => (
               <tr key={rule.id}>
                 <th>{rule.id}</th>
-                <td className="numeric">{rule.matched.toLocaleString()}</td>
+                <td className="numeric">{formatNumber(rule.matched, language)}</td>
                 <td>
                   {rule.fully_shadowed ? (
                     <StatusBadge
@@ -184,7 +188,7 @@ export function ProofSimulationSection({
         </Details>
       )}
       <Details
-        title={`${t("Inspect message decisions", "Nachrichtenentscheidungen prüfen")} · ${proof.proof.decisions.length.toLocaleString()}`}
+        title={`${t("Inspect message decisions", "Nachrichtenentscheidungen prüfen")} · ${formatNumber(proof.proof.decisions.length, language)}`}
       >
         <div className="toolbar">
           <input

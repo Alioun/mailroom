@@ -39,6 +39,7 @@ import {
   Action,
   ArmLiveWritesModal,
   Busy,
+  CheckField,
   Choice,
   Empty,
   Modal,
@@ -58,6 +59,7 @@ import {
   cycleThemePreference,
   remember,
   stored,
+  useShortcutsEnabled,
   useThemePreference,
 } from "./preferences";
 import type { ThemePreference } from "./preferences";
@@ -124,6 +126,7 @@ function Workbench({
   const [add, setAdd] = useState(false);
   const [menu, setMenu] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [shortcutsEnabled, setShortcutsEnabled] = useShortcutsEnabled();
   const [writeModal, setWriteModal] = useState(false);
   const [writeBusy, setWriteBusy] = useState(false);
   const [writeError, setWriteError] = useState("");
@@ -132,10 +135,12 @@ function Workbench({
   const [counts, setCounts] = useState<Record<string, number>>({});
   const heading = useRef<HTMLHeadingElement>(null);
   const menuTrigger = useRef<HTMLButtonElement>(null);
+  const drawerNavigated = useRef(false);
   const chordRef = useRef<{ key: string; at: number } | null>(null);
   const account = accounts.find((value) => value.id === selected);
 
   function navigate(next: Page) {
+    if (menu) drawerNavigated.current = true;
     setPage(next);
     setMenu(false);
     pushUrl(next, selected);
@@ -150,6 +155,7 @@ function Workbench({
   }
 
   function selectAccountAndPage(nextId: string, nextPage: Page) {
+    if (menu) drawerNavigated.current = true;
     setSelected(nextId);
     setPage(nextPage);
     setMenu(false);
@@ -307,7 +313,7 @@ function Workbench({
   const runningJob = status?.job?.progress.state === "running";
 
   useEffect(() => {
-    if (vaultGated) return;
+    if (vaultGated || !shortcutsEnabled) return;
     function onKeyDown(e: KeyboardEvent) {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const target = e.target as HTMLElement | null;
@@ -346,8 +352,12 @@ function Workbench({
         const map: Record<string, Page> = {
           o: "overview",
           s: "senders",
+          m: "recommendations",
           r: "rules",
           b: "backlog",
+          i: "invoices",
+          u: "subscriptions",
+          d: "addresses",
           a: "activity",
           ",": "settings",
         };
@@ -367,7 +377,29 @@ function Workbench({
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [vaultGated, selected]);
+  }, [vaultGated, shortcutsEnabled, selected, menu]);
+
+  const baseLabels = accounts.map(
+    (value) =>
+      `${value.login} · ${value.provider === "gmail" ? "Gmail" : "mailbox.org"}`,
+  );
+  const labelCounts = new Map<string, number>();
+  for (const label of baseLabels) {
+    labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+  }
+  const accountOptions = accounts.map((value, idx) => {
+    const base = baseLabels[idx];
+    return {
+      value: value.id,
+      label:
+        (labelCounts.get(base) ?? 0) > 1
+          ? `${base} (${value.id.slice(0, 6)})`
+          : base,
+    };
+  });
+  const currentAccountLabel =
+    accountOptions.find((option) => option.value === selected)?.label ??
+    t("All connected accounts", "Alle verbundenen Konten");
 
   const themeLabel =
     theme === "dark"
@@ -389,6 +421,8 @@ function Workbench({
             open={menu}
             onOpenChange={setMenu}
             triggerRef={menuTrigger}
+            headingRef={heading}
+            shouldFocusHeadingRef={drawerNavigated}
           >
             <a href="/" className="brand">
               <span className="brand-icon">
@@ -405,10 +439,7 @@ function Workbench({
                   label={t("Select account", "Konto auswählen")}
                   value={selected}
                   onChange={selectAccount}
-                  options={accounts.map((value) => ({
-                    value: value.id,
-                    label: `${value.login} · ${value.provider === "gmail" ? "Gmail" : "mailbox.org"}`,
-                  }))}
+                  options={accountOptions}
                 />
               ) : (
                 <span className="muted">
@@ -521,8 +552,11 @@ function Workbench({
                     "Synthetische Demo mit erfundenen Mails. Es sind keine echten Konten verbunden.",
                   )}
                 >
-                  <FlaskConical size={13} />
-                  {t("Demo data", "Demodaten")}
+                  <FlaskConical size={13} aria-hidden="true" />
+                  <span className="badge-full">
+                    {t("Demo data", "Demodaten")}
+                  </span>
+                  <span className="badge-short">{t("Demo", "Demo")}</span>
                 </span>
               )}
               {!vaultGated && (
@@ -691,7 +725,7 @@ function Workbench({
                     <div className="page-context">
                       <span>
                         {account && page !== "activity"
-                          ? `${account.login} · ${account.provider === "gmail" ? "Gmail" : "mailbox.org"}`
+                          ? currentAccountLabel
                           : t("All connected accounts", "Alle verbundenen Konten")}
                       </span>
                     </div>
@@ -724,7 +758,10 @@ function Workbench({
                               : status.job.operation === "folders"
                                 ? t("Creating folders…", "Ordner werden angelegt…")
                                 : status.job.operation === "sieve"
-                                  ? t("Running ManageSieve…", "ManageSieve läuft…")
+                                  ? t(
+                                      "Publishing filter rules…",
+                                      "Filterregeln werden bereitgestellt…",
+                                    )
                                   : t("Working…", "In Arbeit…")}
                       </Busy>
                     </span>
@@ -786,16 +823,25 @@ function Workbench({
                       )}
                     </span>
                     <div className="actions">
-                      {status.interrupted.map((id) => (
+                      {status.interrupted.map((id, idx) => (
                         <Action
                           key={id}
                           size="compact"
+                          title={id}
                           onClick={() =>
                             void action(() => finishInterrupted(id))
                           }
                           disabled={pending}
                         >
-                          {t(`Clean up ${id.slice(0, 8)}`, `${id.slice(0, 8)} bereinigen`)}
+                          {status.interrupted.length > 1
+                            ? t(
+                                `Clean up setup #${idx + 1}`,
+                                `Einrichtung #${idx + 1} bereinigen`,
+                              )
+                            : t(
+                                "Clean up interrupted setup",
+                                "Unterbrochene Einrichtung bereinigen",
+                              )}
                         </Action>
                       ))}
                     </div>
@@ -836,6 +882,8 @@ function Workbench({
                           setWriteError("");
                           setWriteModal(true);
                         }}
+                        shortcutsEnabled={shortcutsEnabled}
+                        onShortcutsEnabled={setShortcutsEnabled}
                       />
                     </Suspense>
                   ) : (
@@ -890,6 +938,8 @@ function Workbench({
                         setWriteModal(true);
                       }}
                       onScan={() => void action(() => scanAccount(value.id))}
+                      shortcutsEnabled={shortcutsEnabled}
+                      onShortcutsEnabled={setShortcutsEnabled}
                     />
                   ))
                 )}
@@ -939,7 +989,16 @@ function Workbench({
           "Navigiere schneller durch Mailroom direkt per Tastatur.",
         )}
       >
-        <ul className="shortcut-list">
+        <CheckField
+          checked={shortcutsEnabled}
+          onChange={setShortcutsEnabled}
+        >
+          {t(
+            "Enable single-key shortcuts (?, /, g)",
+            "Einzel-Tastenkürzel aktivieren (?, /, g)",
+          )}
+        </CheckField>
+        <ul className="shortcut-list mt-md">
           <li>
             <span>{t("Open or close this shortcut sheet", "Diese Übersicht öffnen oder schließen")}</span>
             <span className="shortcut-keys">
@@ -967,6 +1026,13 @@ function Workbench({
             </span>
           </li>
           <li>
+            <span>{t("Go to Recommendations", "Zu Vorschläge")}</span>
+            <span className="shortcut-keys">
+              <kbd>g</kbd>
+              <kbd>m</kbd>
+            </span>
+          </li>
+          <li>
             <span>{t("Go to Rules & deploy", "Zu Regeln & Bereitstellung")}</span>
             <span className="shortcut-keys">
               <kbd>g</kbd>
@@ -978,6 +1044,27 @@ function Workbench({
             <span className="shortcut-keys">
               <kbd>g</kbd>
               <kbd>b</kbd>
+            </span>
+          </li>
+          <li>
+            <span>{t("Go to Invoices", "Zu Rechnungen")}</span>
+            <span className="shortcut-keys">
+              <kbd>g</kbd>
+              <kbd>i</kbd>
+            </span>
+          </li>
+          <li>
+            <span>{t("Go to Subscriptions", "Zu Abonnements")}</span>
+            <span className="shortcut-keys">
+              <kbd>g</kbd>
+              <kbd>u</kbd>
+            </span>
+          </li>
+          <li>
+            <span>{t("Go to Addresses & wind-down", "Zu Adressen & Abbau")}</span>
+            <span className="shortcut-keys">
+              <kbd>g</kbd>
+              <kbd>d</kbd>
             </span>
           </li>
           <li>
@@ -1020,6 +1107,7 @@ function Workbench({
         open={writeModal}
         onOpenChange={setWriteModal}
         liveWrites={Boolean(status?.live_writes)}
+        synthetic={Boolean(status?.synthetic)}
         expiresInSecs={liveCountdown}
         timeoutSecs={status?.live_writes_timeout_secs ?? 900}
         busy={writeBusy}

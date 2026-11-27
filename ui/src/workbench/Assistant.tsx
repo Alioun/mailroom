@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
   ArrowUpRight,
@@ -21,6 +21,8 @@ import type { AgentProposal } from "../agent-exchange";
 import { createLocalRules } from "./rules-workspace";
 import { assistantAction } from "./assistant-api";
 import type { AssistantInbox, AssistantRequest } from "./assistant-api";
+import type { SenderFocusScope } from "./Findings";
+import { formatDateTime, formatNumber, pluralCount } from "./format";
 import { describeError } from "./status-labels";
 import {
   Action,
@@ -28,12 +30,29 @@ import {
   CheckField,
   Details,
   Empty,
+  LanguageContext,
   Modal,
   Notice,
   Stat,
   StatusBadge,
   useCopy,
 } from "./components";
+
+function friendlyProvider(provider: string): string {
+  switch (provider) {
+    case "codex_home_v2":
+    case "codex":
+      return "Codex";
+    case "claude_code":
+    case "claudeAgent":
+    case "claudeAgent_home":
+      return "Claude Code";
+    case "antigravity":
+      return "Antigravity";
+    default:
+      return provider;
+  }
+}
 
 type SelectedProposal = {
   request: AssistantRequest;
@@ -46,6 +65,8 @@ export function Assistant({
   active,
   report,
   workspace,
+  focusedSenders = null,
+  onClearFocusedSenders,
   onWorkspace,
   onInbox,
   onGoSettings,
@@ -55,12 +76,15 @@ export function Assistant({
   active: boolean;
   report: CensusReport | null;
   workspace: WorkspaceView | null;
+  focusedSenders?: SenderFocusScope | null;
+  onClearFocusedSenders?: () => void;
   onWorkspace: (value: WorkspaceView) => void;
   onInbox: (count: number) => void;
   onGoSettings: () => void;
   onGoRules: () => void;
 }) {
   const t = useCopy();
+  const language = useContext(LanguageContext);
   const [inbox, setInbox] = useState<AssistantInbox>({ requests: [] });
   const [sharing, setSharing] = useState(false);
   const [approved, setApproved] = useState<string[]>([]);
@@ -375,9 +399,73 @@ export function Assistant({
   const activeConfig = inbox.config;
   const canShare = Boolean(report && report.canonical_messages > 0);
   const candidateTotal = report?.clear_candidates.length ?? 0;
+  const hasFocus = Boolean(
+    focusedSenders &&
+      (focusedSenders.senders.length > 0 || focusedSenders.domains.length > 0),
+  );
+  const matchingCandidateIds = (() => {
+    if (!focusedSenders || !report) return [] as string[];
+    const domains = new Set([
+      ...focusedSenders.domains.map((d) => d.toLowerCase()),
+      ...focusedSenders.senders
+        .map((s) => s.split("@")[1]?.toLowerCase() ?? "")
+        .filter(Boolean),
+    ]);
+    return report.clear_candidates
+      .filter((c) => domains.has(c.domain.toLowerCase()))
+      .map((c) => c.id);
+  })();
+
+  function openShareModal(preselectedDomains: string[]) {
+    setApproved(preselectedDomains);
+    setSummary(null);
+    setSharing(true);
+    setMessage("");
+  }
 
   return (
     <div className="page-stack">
+      {hasFocus && focusedSenders && (
+        <Notice tone="info">
+          <span>
+            {pluralCount(
+              focusedSenders.senders.length || focusedSenders.domains.length,
+              language,
+              "sender",
+              "senders",
+              "Absender",
+              "Absender",
+            )}{" "}
+            {t("selected from Senders", "aus Absender übernommen")} (
+            {(focusedSenders.senders.length
+              ? focusedSenders.senders
+              : focusedSenders.domains
+            )
+              .slice(0, 3)
+              .join(", ")}
+            {(focusedSenders.senders.length || focusedSenders.domains.length) >
+            3
+              ? "…"
+              : ""}
+            )
+          </span>
+          <div className="actions">
+            <Action
+              size="compact"
+              primary
+              disabled={!canShare || busy}
+              onClick={() => openShareModal(matchingCandidateIds)}
+            >
+              {t("Review focused summary", "Auswahl-Zusammenfassung prüfen")}
+            </Action>
+            {onClearFocusedSenders && (
+              <Action size="compact" onClick={onClearFocusedSenders}>
+                {t("Clear focus", "Auswahl verwerfen")}
+              </Action>
+            )}
+          </div>
+        </Notice>
+      )}
       {message && (
         <Notice>
           <CheckCircle2 size={18} />
@@ -427,8 +515,8 @@ export function Assistant({
           </h2>
           <p className="muted">
             {t(
-              "T3 reviews a masked summary and sends recommendations back here. You review every local rule change before saving.",
-              "T3 prüft eine maskierte Zusammenfassung und sendet Vorschläge hierher zurück. Du prüfst jede lokale Regeländerung vor dem Speichern.",
+              "Your local T3 assistant reviews a masked mailbox summary and sends rule ideas back here. You review every change before saving.",
+              "Dein lokaler T3-Assistent prüft eine maskierte Zusammenfassung und sendet Regelvorschläge hierher zurück. Du prüfst jede Änderung vor dem Speichern.",
             )}
           </p>
           <div className="inline-note">
@@ -443,10 +531,10 @@ export function Assistant({
           {activeConfig && (
             <div className="inline-note mt-xs">
               <span>
-                {t("Active T3 model", "Aktives T3-Modell")}:{" "}
-                <code>
-                  {activeConfig.provider} / {activeConfig.model}
-                </code>
+                {t("Assistant model", "Assistentenmodell")}:{" "}
+                <strong>
+                  {friendlyProvider(activeConfig.provider)} · {activeConfig.model}
+                </strong>
               </span>
               <Action size="compact" onClick={onGoSettings}>
                 <Settings size={13} />
@@ -458,12 +546,7 @@ export function Assistant({
         <Action
           primary
           disabled={!canShare || busy}
-          onClick={() => {
-            setApproved([]);
-            setSummary(null);
-            setSharing(true);
-            setMessage("");
-          }}
+          onClick={() => openShareModal([])}
         >
           <Sparkles size={16} />
           {t("Get recommendations", "Vorschläge erhalten")}
@@ -497,11 +580,15 @@ export function Assistant({
                 <StatusBadge status={request.phase} />
                 <h2>{t("Mailbox recommendations", "Postfachvorschläge")}</h2>
                 <p className="help">
-                  {new Date(request.summary.as_of * 1000).toLocaleString()} ·{" "}
+                  {formatDateTime(request.summary.as_of, language)} ·{" "}
                   {request.summary.approved.length
-                    ? t(
-                        `${request.summary.approved.length} selected domains shared`,
-                        `${request.summary.approved.length} ausgewählte Domains geteilt`,
+                    ? pluralCount(
+                        request.summary.approved.length,
+                        language,
+                        "selected domain shared",
+                        "selected domains shared",
+                        "ausgewählte Domain geteilt",
+                        "ausgewählte Domains geteilt",
                       )
                     : t("Masked identifiers only", "Nur maskierte Kennungen")}
                 </p>
@@ -570,8 +657,14 @@ export function Assistant({
                     {proposal.dismissed && <StatusBadge status="dismissed" />}
                   </div>
                   <p className="muted">
-                    {proposal.proposal.recommendations.length}{" "}
-                    {t("recommendations", "Vorschläge")}
+                    {pluralCount(
+                      proposal.proposal.recommendations.length,
+                      language,
+                      "recommendation",
+                      "recommendations",
+                      "Vorschlag",
+                      "Vorschläge",
+                    )}
                     {proposal.proposal.rule_edits
                       ? ` · ${t("Includes local rule edits", "Enthält lokale Regeländerungen")}`
                       : ""}
@@ -613,9 +706,9 @@ export function Assistant({
         {activeConfig && (
           <p className="help mb-sm">
             {t("Will launch with", "Startet mit")}:{" "}
-            <code>
-              {activeConfig.provider} / {activeConfig.model}
-            </code>
+            <strong>
+              {friendlyProvider(activeConfig.provider)} · {activeConfig.model}
+            </strong>
           </p>
         )}
         {candidateTotal > 0 && (
@@ -704,9 +797,10 @@ export function Assistant({
             <div className="recommendation-list">
               {selection.proposal.recommendations.map((recommendation, i) => (
                 <article key={i}>
-                  <span className="eyebrow">
-                    {t("Recommendation", "Vorschlag")} {i + 1}
-                  </span>
+                  <small className="muted">
+                    {t("Recommendation", "Vorschlag")}{" "}
+                    {formatNumber(i + 1, language)}
+                  </small>
                   <h3>{recommendation.title}</h3>
                   <p>{recommendation.reason}</p>
                   <div className="proposed-change">
@@ -760,22 +854,22 @@ export function Assistant({
                       "Filed before → after",
                       "Abgelegt vorher → nachher",
                     )}
-                    value={`${review.current.proof.counts.filed} → ${review.resulting.proof.counts.filed}`}
+                    value={`${formatNumber(review.current.proof.counts.filed, language)} → ${formatNumber(review.resulting.proof.counts.filed, language)}`}
                   />
                   <Stat
                     label={t(
                       "Inbox before → after",
                       "Posteingang vorher → nachher",
                     )}
-                    value={`${review.current.proof.counts.inbox} → ${review.resulting.proof.counts.inbox}`}
+                    value={`${formatNumber(review.current.proof.counts.inbox, language)} → ${formatNumber(review.resulting.proof.counts.inbox, language)}`}
                   />
                   <Stat
                     label={t("Needs review", "Prüfung erforderlich")}
-                    value={review.resulting.proof.counts.review}
+                    value={formatNumber(review.resulting.proof.counts.review, language)}
                   />
                   <Stat
                     label={t("Destination changes", "Zieländerungen")}
-                    value={review.resulting.proof.diff.length}
+                    value={formatNumber(review.resulting.proof.diff.length, language)}
                   />
                 </div>
                 <ul className="evidence-list">

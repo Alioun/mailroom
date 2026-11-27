@@ -16,6 +16,7 @@ import {
   Check,
   ChevronDown,
   X,
+  ArrowRight,
   Inbox,
   LoaderCircle,
   ShieldAlert,
@@ -171,6 +172,7 @@ export function Modal({
         <Dialog.Backdrop className="dialog-backdrop" />
         <Dialog.Popup
           className={`dialog ${wide ? "wide" : ""}`}
+          aria-modal="true"
           initialFocus={() => {
             opener.current =
               document.activeElement instanceof HTMLElement
@@ -249,13 +251,40 @@ export function Empty({
 }) {
   return (
     <div className="empty">
-      <div className="empty-icon">
-        <Inbox size={26} />
+      <div className="empty-head">
+        <Inbox size={20} aria-hidden="true" />
+        {headingLevel === 3 ? <h3>{title}</h3> : <h2>{title}</h2>}
       </div>
-      {headingLevel === 3 ? <h3>{title}</h3> : <h2>{title}</h2>}
       {children ? <p className="muted">{children}</p> : null}
       {action}
     </div>
+  );
+}
+
+export function RequiresLocalRules({
+  message,
+  onGoRules,
+}: {
+  message?: string;
+  onGoRules?: () => void;
+}) {
+  const t = useCopy();
+  return (
+    <Notice tone="info">
+      <span>
+        {message ??
+          t(
+            "Create local rules once in Rules & deploy before using this workspace.",
+            "Erstelle zuerst einmalig lokale Regeln unter Regeln & Bereitstellung, um diesen Bereich zu nutzen.",
+          )}
+      </span>
+      {onGoRules && (
+        <Action size="compact" onClick={onGoRules}>
+          {t("Create local rules", "Lokale Regeln anlegen")}
+          <ArrowRight size={13} />
+        </Action>
+      )}
+    </Notice>
   );
 }
 export function Busy({ children }: { children: ReactNode }) {
@@ -364,6 +393,7 @@ export function ArmLiveWritesModal({
   open,
   onOpenChange,
   liveWrites,
+  synthetic = false,
   expiresInSecs = null,
   timeoutSecs = 900,
   busy,
@@ -374,6 +404,7 @@ export function ArmLiveWritesModal({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   liveWrites: boolean;
+  synthetic?: boolean;
   expiresInSecs?: number | null;
   timeoutSecs?: number;
   busy: boolean;
@@ -492,6 +523,16 @@ export function ArmLiveWritesModal({
           </>
         ) : (
           <>
+            {synthetic && (
+              <Notice tone="info">
+                <span>
+                  {t(
+                    "Demo session active: actions affect invented local demo mail only, never a live mail provider.",
+                    "Demo-Sitzung aktiv: Aktionen betreffen nur erfundene lokale Demo-Mails, niemals ein echtes Postfach.",
+                  )}
+                </span>
+              </Notice>
+            )}
             <Choice
               label={t("Auto-disarm timer", "Auto-Deaktivierung")}
               fieldLabel={t(
@@ -512,6 +553,14 @@ export function ArmLiveWritesModal({
                 "Mir ist bewusst, dass bestätigte Aktionen meine verbundenen Mailkonten verändern können. Jede Änderung erfordert weiterhin eine eigene Vorschau und Bestätigung.",
               )}
             </CheckField>
+            {!checked && (
+              <p id="arm-confirm-hint" className="help">
+                {t(
+                  "Tick the confirmation checkbox above to enable live writes.",
+                  "Hake oben das Bestätigungsfeld an, um Live-Schreibzugriff zu aktivieren.",
+                )}
+              </p>
+            )}
             {error && <Notice error>{error}</Notice>}
             <div className="dialog-actions">
               <Action onClick={() => handleOpenChange(false)} disabled={busy}>
@@ -520,6 +569,7 @@ export function ArmLiveWritesModal({
               <Action
                 tone="warning"
                 disabled={!checked || busy}
+                aria-describedby={!checked ? "arm-confirm-hint" : undefined}
                 onClick={async () => {
                   await onConfirm(true, Number(duration));
                   setChecked(false);

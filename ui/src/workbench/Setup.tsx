@@ -15,7 +15,7 @@ import {
   syntheticAccount,
 } from "../api";
 import type { AccountStatus } from "../api";
-import { vaultProblemText } from "./status-labels";
+import { localizedError, vaultProblemText } from "./status-labels";
 import {
   Action,
   Busy,
@@ -176,6 +176,8 @@ export function VaultForm({
                   maxLength={1024}
                   value={repeat}
                   onChange={(e) => setRepeat(e.target.value)}
+                  aria-invalid={!!error}
+                  aria-describedby={error ? "vault-error" : undefined}
                   disabled={busy}
                 />
               </label>
@@ -271,12 +273,14 @@ export function ConnectForm({
       );
     } catch (err) {
       setError(
-        err instanceof Error && err.message
-          ? err.message
-          : t(
-              "Connection could not start. Check your account details and try again.",
-              "Die Verbindung konnte nicht starten. Prüfe deine Zugangsdaten und versuche es erneut.",
-            ),
+        localizedError(
+          err,
+          t,
+          t(
+            "Connection could not start. Check your account details and try again.",
+            "Die Verbindung konnte nicht starten. Prüfe deine Zugangsdaten und versuche es erneut.",
+          ),
+        ),
       );
       requestAnimationFrame(() => passwordField.current?.focus());
     } finally {
@@ -324,6 +328,8 @@ export function ConnectForm({
           placeholder={
             provider === "gmail" ? "name@gmail.com" : "name@mailbox.org"
           }
+          aria-invalid={!!error}
+          aria-describedby={error ? "connect-error" : "connect-help"}
           disabled={busy}
         />
       </label>
@@ -338,7 +344,8 @@ export function ConnectForm({
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           disabled={busy}
-          aria-describedby="connect-help"
+          aria-invalid={!!error}
+          aria-describedby={error ? "connect-error" : "connect-help"}
         />
       </label>
       <p id="connect-help" className="help">
@@ -374,7 +381,11 @@ export function ConnectForm({
           </>
         )}
       </p>
-      {error && <Notice error>{error}</Notice>}
+      {error && (
+        <div id="connect-error">
+          <Notice error>{error}</Notice>
+        </div>
+      )}
       <div className="actions">
         <Action primary type="submit" disabled={busy}>
           {busy ? (

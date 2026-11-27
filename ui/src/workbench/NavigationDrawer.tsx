@@ -8,11 +8,15 @@ export function NavigationDrawer({
   open,
   onOpenChange,
   triggerRef,
+  headingRef,
+  shouldFocusHeadingRef,
   children,
 }: {
   open: boolean;
   onOpenChange: (value: boolean) => void;
   triggerRef: RefObject<HTMLButtonElement | null>;
+  headingRef?: RefObject<HTMLHeadingElement | null>;
+  shouldFocusHeadingRef?: RefObject<boolean>;
   children: ReactNode;
 }) {
   const t = useCopy();
@@ -33,7 +37,16 @@ export function NavigationDrawer({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Backdrop className="navigation-backdrop" />
-        <Dialog.Popup className="sidebar mobile-drawer" finalFocus={triggerRef}>
+        <Dialog.Popup
+          className="sidebar mobile-drawer"
+          finalFocus={() => {
+            if (shouldFocusHeadingRef?.current && headingRef?.current) {
+              shouldFocusHeadingRef.current = false;
+              return headingRef.current;
+            }
+            return triggerRef.current ?? true;
+          }}
+        >
           <Dialog.Title className="sr-only">
             {t("Navigation", "Navigation")}
           </Dialog.Title>

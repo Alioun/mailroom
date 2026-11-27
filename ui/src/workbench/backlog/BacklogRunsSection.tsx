@@ -1,3 +1,4 @@
+import { useContext } from "react";
 import { Square, Undo2 } from "lucide-react";
 import {
   previewBacklogUndo,
@@ -15,8 +16,9 @@ import type {
   RunSummary,
   UndoDeadline,
 } from "../../api";
+import { formatNumber, formatShortDate } from "../format";
 import { describeError } from "../status-labels";
-import { Action, Details, StatusBadge, useCopy } from "../components";
+import { Action, Details, LanguageContext, StatusBadge, useCopy } from "../components";
 import type { PendingRunModal } from "./BacklogRunModal";
 
 type SortingRun =
@@ -61,6 +63,7 @@ export function BacklogRunsSection({
   onLegacyView: (view: BacklogView) => void;
 }) {
   const t = useCopy();
+  const language = useContext(LanguageContext);
 
   return (
     <>
@@ -95,13 +98,13 @@ export function BacklogRunsSection({
                         <StatusBadge status={run.status} />
                       </td>
                       <td className="numeric">
-                        {run.plan.filing.changes.length.toLocaleString()}
+                        {formatNumber(run.plan.filing.changes.length, language)}
                       </td>
                       <td>
                         {run.closed
                           ? t("Closed", "Abgeschlossen")
                           : dl?.undo_until
-                            ? new Date(dl.undo_until * 1000).toLocaleDateString()
+                            ? formatShortDate(dl.undo_until, language)
                             : "—"}
                       </td>
                       <td>
@@ -242,12 +245,12 @@ export function BacklogRunsSection({
                         <td>
                           <StatusBadge status={s.status} />
                         </td>
-                        <td className="numeric">{s.applied.toLocaleString()}</td>
+                        <td className="numeric">{formatNumber(s.applied, language)}</td>
                         <td className="numeric">
-                          {s.restored.toLocaleString()}
+                          {formatNumber(s.restored, language)}
                         </td>
                         <td>
-                          {new Date(s.completed_at * 1000).toLocaleDateString()}
+                          {formatShortDate(s.completed_at, language)}
                         </td>
                       </tr>
                     ))}

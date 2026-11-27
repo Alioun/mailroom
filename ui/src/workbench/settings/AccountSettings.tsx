@@ -49,6 +49,8 @@ export function AccountSettings({
   onStatus,
   onRefresh,
   onOpenWriteMode,
+  shortcutsEnabled,
+  onShortcutsEnabled,
 }: {
   account: Account;
   accounts: Account[];
@@ -58,6 +60,8 @@ export function AccountSettings({
   onStatus: (value: AccountStatus) => void;
   onRefresh: () => void;
   onOpenWriteMode: () => void;
+  shortcutsEnabled?: boolean;
+  onShortcutsEnabled?: (next: boolean) => void;
 }) {
   const t = useCopy();
   const language = useContext(LanguageContext);
@@ -250,7 +254,11 @@ export function AccountSettings({
             }
           />
         </div>
-        {connError && <Notice error>{connError}</Notice>}
+        {connError && (
+          <div id="conn-error">
+            <Notice error>{connError}</Notice>
+          </div>
+        )}
         {connNotice && (
           <Notice>
             <CheckCircle2 size={16} />
@@ -322,6 +330,8 @@ export function AccountSettings({
               autoComplete="off"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              aria-invalid={Boolean(connError)}
+              aria-describedby={connError ? "conn-error" : undefined}
               placeholder={t(
                 "Leave empty to retry saved password",
                 "Leer lassen, um gespeichertes Passwort zu verwenden",
@@ -420,8 +430,8 @@ export function AccountSettings({
           </label>
           <p className="help">
             {t(
-              "Choose the extracted .mbox file with Browse, or copy its path in Finder (⌥⌘C; leading ~/ and quotes are supported). Re-importing replaces this account's Takeout snapshot.",
-              "Wähle die entpackte .mbox-Datei über Durchsuchen aus oder kopiere den Pfad im Finder (⌥⌘C; ~/ und Anführungszeichen werden verarbeitet). Ein erneuter Import ersetzt den Takeout-Stand dieses Kontos.",
+              "Choose the extracted .mbox file with Browse, or paste its local path. Re-importing replaces this account's Takeout snapshot.",
+              "Wähle die entpackte .mbox-Datei über Durchsuchen aus oder füge den lokalen Pfad ein. Ein erneuter Import ersetzt den Takeout-Stand dieses Kontos.",
             )}
           </p>
           <div className="actions">
@@ -470,6 +480,8 @@ export function AccountSettings({
         onStatus={onStatus}
         onRefresh={onRefresh}
         onOpenWriteMode={onOpenWriteMode}
+        shortcutsEnabled={shortcutsEnabled}
+        onShortcutsEnabled={onShortcutsEnabled}
       />
 
       {(status.source === "vault" || status.synthetic) && (

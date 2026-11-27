@@ -118,11 +118,31 @@ async function navigate(name) {
     .click();
 }
 async function noOverflow(label) {
+  const info = await page.evaluate(() => {
+    const scrollW = document.documentElement.scrollWidth;
+    const innerW = innerWidth;
+    if (scrollW <= innerW + 1) return { ok: true };
+    let worst = null;
+    for (const el of document.querySelectorAll("body *")) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;
+      if (r.right > innerW + 1 || r.left < -1) {
+        if (!worst || r.right > worst.right) {
+          worst = {
+            tag: el.tagName,
+            cls: el.className,
+            left: Math.round(r.left),
+            right: Math.round(r.right),
+            width: Math.round(r.width),
+          };
+        }
+      }
+    }
+    return { ok: false, scrollW, innerW, worst };
+  });
   assert.ok(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= innerWidth + 1,
-    ),
-    `${label} has no page-wide overflow`,
+    info.ok,
+    `${label} has no page-wide overflow (scrollWidth=${info.scrollW}, innerWidth=${info.innerW}, worst=${JSON.stringify(info.worst)})`,
   );
 }
 async function api(path, body) {
@@ -554,6 +574,48 @@ try {
   check(
     "failed additional-account recovery selects the failed account before opening connection settings",
   );
+  await navigate("Senders");
+  const visibleSenders = page.locator(".senders-table").filter({ visible: true });
+  const senderCheckboxes = visibleSenders.locator(
+    'tbody tr input[type="checkbox"]',
+  );
+  const pickedSenders = [
+    (await visibleSenders.locator("tbody tr strong").nth(0).textContent())?.trim(),
+    (await visibleSenders.locator("tbody tr strong").nth(1).textContent())?.trim(),
+  ];
+  await senderCheckboxes.nth(0).check();
+  await senderCheckboxes.nth(1).check();
+  assert.equal(await visibleSenders.locator("tbody tr.row-selected").count(), 2);
+  await page.getByText("2 senders selected").first().waitFor();
+  await page
+    .getByRole("combobox", { name: "Sort senders", exact: true })
+    .click();
+  await page.getByRole("option", { name: "Name A–Z", exact: true }).click();
+  await page
+    .getByRole("combobox", { name: "Sort senders", exact: true })
+    .click();
+  await page.getByRole("option", { name: "Most messages", exact: true }).click();
+  assert.equal(await visibleSenders.locator("tbody tr.row-selected").count(), 2);
+  const remainingSelected = await visibleSenders
+    .locator("tbody tr.row-selected strong")
+    .allTextContents();
+  assert.deepEqual(
+    remainingSelected.map((s) => s.trim()),
+    pickedSenders,
+  );
+  await page
+    .getByRole("button", { name: "Ask for recommendations", exact: true })
+    .click();
+  await page
+    .getByRole("heading", { name: "Recommendations", exact: true })
+    .waitFor();
+  await page.getByText(/2 senders selected from Senders/).first().waitFor();
+  await page
+    .getByRole("button", { name: "Clear focus", exact: true })
+    .click();
+  check(
+    "senders bulk selection survives sorting, highlights rows, and scopes Recommendations",
+  );
   await navigate("Recommendations");
   let launchRequests = 0;
   await page.route("**/api/accounts/assistant", async (route) => {
@@ -734,21 +796,71 @@ try {
         return parseRgb(getComputedStyle(document.documentElement).backgroundColor) || [255, 255, 255, 1];
       }
       const actualTheme = document.documentElement.dataset.theme;
+      const isVisible = (node) => {
+        if (!node || node.closest("[hidden]")) return false;
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
       const samples = [];
-      for (const sel of ["h1", ".muted", ".nav-item.active", ".readonly-badge", ".workbench-footer"]) {
-        const el = document.querySelector(sel);
+      for (const sel of [
+        "h1",
+        ".muted",
+        ".nav-item.active",
+        ".readonly-badge",
+        ".workbench-footer",
+        ".recommend-banner h2",
+        ".recommend-banner p",
+      ]) {
+        const el = Array.from(document.querySelectorAll(sel)).find(isVisible);
         if (!el) continue;
         const fg = parseRgb(getComputedStyle(el).color);
         const bg = effectiveBg(el);
         if (fg && bg) samples.push({ sel, ratio: Number(contrast(fg, bg).toFixed(2)) });
       }
-      return { actualTheme, expectedTheme: theme, samples };
+      const skip = document.querySelector(".skip-link");
+      if (skip instanceof HTMLElement) {
+        const prev = document.activeElement;
+        skip.focus({ preventScroll: true });
+        const fg = parseRgb(getComputedStyle(skip).color);
+        const bg = effectiveBg(skip);
+        if (fg && bg) {
+          samples.push({
+            sel: ".skip-link:focus",
+            ratio: Number(contrast(fg, bg).toFixed(2)),
+          });
+        }
+        skip.blur();
+        if (prev instanceof HTMLElement) prev.focus({ preventScroll: true });
+      }
+      const borderSamples = [];
+      for (const sel of [".select-trigger", "input"]) {
+        const el = Array.from(document.querySelectorAll(sel)).find((node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        });
+        if (!el) continue;
+        const border = parseRgb(getComputedStyle(el).borderTopColor);
+        const bg = effectiveBg(el.parentElement || el);
+        if (border && bg) {
+          borderSamples.push({
+            sel,
+            ratio: Number(contrast(border, bg).toFixed(2)),
+          });
+        }
+      }
+      return { actualTheme, expectedTheme: theme, samples, borderSamples };
     }, expectedTheme);
     assert.equal(result.actualTheme, expectedTheme);
     for (const sample of result.samples) {
       assert.ok(
         sample.ratio >= 4.5,
         `WCAG AA contrast failed in ${expectedTheme} mode for ${sample.sel}: ${sample.ratio}:1`,
+      );
+    }
+    for (const sample of result.borderSamples) {
+      assert.ok(
+        sample.ratio >= 3.0,
+        `WCAG 1.4.11 non-text border contrast failed in ${expectedTheme} mode for ${sample.sel}: ${sample.ratio}:1`,
       );
     }
   }
@@ -932,10 +1044,22 @@ try {
   );
   await page.locator(".sidebar").waitFor({ state: "detached" });
   assert.equal(await page.locator(".sidebar").count(), 0);
-  check(
-    "mobile navigation has no hidden tab stops, traps focus while open, and restores the menu trigger",
+  await page
+    .getByRole("button", { name: "Open navigation", exact: true })
+    .click();
+  await page
+    .locator(".mobile-drawer")
+    .getByRole("button", { name: "Senders", exact: true })
+    .click();
+  await page.waitForFunction(
+    () =>
+      document.activeElement?.tagName === "H1" &&
+      document.activeElement?.textContent?.trim() === "Senders",
   );
-  for (const width of [320, 768, 1440]) {
+  check(
+    "mobile navigation has no hidden tab stops, traps focus while open, focuses H1 on navigate, and restores trigger on Esc",
+  );
+  for (const width of [320, 390, 768, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     for (const name of [
       "Overview",
@@ -951,12 +1075,30 @@ try {
     ]) {
       await navigate(name);
       await noOverflow(`${name} at ${width}`);
+      if (width === 390 && name === "Overview") {
+        const badgeBox = await page.locator(".demo-badge").boundingBox();
+        assert.ok(
+          badgeBox && badgeBox.width > 0 && badgeBox.height > 0,
+          "Synthetic demo badge stays visible at 390px",
+        );
+      }
     }
   }
+  await page.setViewportSize({ width: 390, height: 900 });
+  await page.locator(".theme-toggle").click();
+  for (const name of ["Overview", "Senders", "Rules & deploy", "Subscriptions", "Settings"]) {
+    await navigate(name);
+    await noOverflow(`Dark ${name} at 390`);
+  }
+  await page.locator(".theme-toggle").click();
+  await page.locator(".theme-toggle").click();
   await page.setViewportSize({ width: 320, height: 900 });
   await navigate("Overview");
   await language("Deutsch");
   await noOverflow("German overview at 320");
+  await page.setViewportSize({ width: 390, height: 900 });
+  await noOverflow("German overview at 390");
+  await page.setViewportSize({ width: 320, height: 900 });
   await page.screenshot({
     path: join(artifacts, "overview-mobile-de.png"),
     fullPage: true,

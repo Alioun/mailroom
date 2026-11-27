@@ -24,7 +24,25 @@
     padding: 28px 24px;
   }
   .topbar {
-    padding: 0 24px;
+    padding: 0 16px;
+    gap: 8px;
+  }
+  .topbar-actions {
+    gap: 6px;
+    min-width: 0;
+  }
+  .readonly-badge .badge-full,
+  .demo-badge .badge-full {
+    display: none;
+  }
+  .readonly-badge .badge-short,
+  .demo-badge .badge-short {
+    display: inline;
+  }
+  .theme-toggle .lock-label,
+  .lock-button .lock-label,
+  .shortcuts-button .lock-label {
+    display: none;
   }
   .stats {
     gap: 10px;
@@ -33,7 +51,7 @@
     padding: 16px;
   }
   .stat > small {
-    font-size: 9px;
+    font-size: 12px;
   }
   .overview-grid {
     grid-template-columns: 1fr;
@@ -76,6 +94,10 @@
     top: 14px;
     right: 16px;
   }
+  .icon-button {
+    width: 44px;
+    height: 44px;
+  }
   .shortcuts-button {
     display: none;
   }
@@ -89,10 +111,11 @@
   .topbar {
     height: 62px;
     padding: 0 12px;
-    gap: 8px;
+    gap: 6px;
   }
   .topbar-actions {
-    gap: 6px;
+    gap: 5px;
+    min-width: 0;
   }
   .breadcrumb {
     font-size: 12px;
@@ -108,23 +131,23 @@
     font-size: 11px;
     gap: 5px;
   }
-  .readonly-badge .badge-full {
-    display: none;
+  .demo-badge {
+    padding: 5px 8px;
+    min-height: 36px;
+    font-size: 11px;
+    gap: 4px;
   }
-  .readonly-badge .badge-short {
-    display: inline;
-  }
-  .lock-button {
+  .lock-button,
+  .theme-toggle {
     min-height: 36px;
     padding: 6px 9px;
   }
-  .lock-button .lock-label {
-    display: none;
-  }
-  .topbar-actions .select-trigger {
+  .topbar-actions .select-trigger,
+  :root[data-theme="dark"] .topbar-actions .select-trigger {
     font-size: 12px;
     gap: 4px;
-    padding: 6px 2px;
+    min-height: 36px;
+    padding: 5px 7px;
   }
   .main-content {
     padding: 20px 16px 20px;
@@ -151,7 +174,7 @@
     font-size: 28px;
   }
   .stat > small {
-    font-size: 10px;
+    font-size: 12px;
   }
   .panel {
     padding: 20px;
@@ -172,9 +195,6 @@
   .toolbar > .button {
     flex: 1 1 100%;
     width: 100%;
-  }
-  .demo-badge {
-    display: none;
   }
   .section-heading {
     flex-wrap: wrap;
@@ -230,11 +250,43 @@
   .proposal-card .button {
     width: 100%;
   }
-  .senders-table thead {
-    display: none;
+  .mobile-select-all {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    background: var(--canvas);
+    min-height: 44px;
+    font-size: 13px;
+    font-weight: 550;
+  }
+  .row-check-wrap {
+    min-width: 44px;
+    min-height: 44px;
+    margin: -10px 0 -10px -10px;
+  }
+  .settings-jump-nav a {
+    min-height: 44px;
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+  .senders-table thead,
+  .subscriptions-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .senders-table,
-  .senders-table tbody {
+  .senders-table tbody,
+  .subscriptions-table,
+  .subscriptions-table tbody {
     display: block;
     min-width: 0;
   }
@@ -267,7 +319,7 @@
   }
   .senders-table td:nth-child(3)::after {
     content: " " attr(data-label);
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 400;
     color: var(--muted);
   }
@@ -286,6 +338,52 @@
     grid-column: 2 / 3;
     grid-row: 2 / 4;
     justify-self: end;
+  }
+  .senders-table .button {
+    min-height: 44px;
+    font-size: 13px;
+    padding: 8px 4px;
+  }
+  .subscriptions-table tr {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 8px 10px;
+    align-items: start;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .subscriptions-table td {
+    display: block;
+    min-width: 0;
+    padding: 0;
+    border: 0 !important;
+    text-align: left;
+    overflow-wrap: anywhere;
+  }
+  .subscriptions-table td.sub-check {
+    grid-column: 1 / 2;
+    grid-row: 1;
+  }
+  .subscriptions-table td.sub-sender {
+    grid-column: 2 / 3;
+    grid-row: 1;
+  }
+  .subscriptions-table td.sub-account,
+  .subscriptions-table td.sub-count {
+    grid-column: 2 / 3;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .subscriptions-table td.sub-count::before {
+    content: attr(data-label) ": ";
+  }
+  .subscriptions-table td.sub-method {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+  .subscriptions-table td.sub-method .select-trigger {
+    width: 100%;
+    min-height: 44px;
   }
   .pagination {
     padding: 12px 16px;
@@ -322,13 +420,97 @@
     display: none;
   }
 }
+@media (max-width: 420px) {
+  .topbar {
+    padding: 0 8px;
+    gap: 4px;
+  }
+  .topbar-actions {
+    gap: 4px;
+  }
+  .breadcrumb {
+    display: none;
+  }
+  .demo-badge svg {
+    display: none;
+  }
+  .demo-badge {
+    padding: 4px 7px;
+    font-size: 11px;
+  }
+  .readonly-badge {
+    padding: 4px 7px;
+    font-size: 11px;
+    gap: 4px;
+  }
+  .lock-button,
+  .theme-toggle {
+    padding: 6px 8px;
+  }
+  .topbar-actions .select-trigger,
+  :root[data-theme="dark"] .topbar-actions .select-trigger {
+    padding: 5px;
+    font-size: 11px;
+    gap: 2px;
+  }
+}
+@media (max-width: 360px) {
+  .topbar {
+    padding: 0 6px;
+    gap: 3px;
+  }
+  .topbar-actions {
+    gap: 3px;
+  }
+  .mobile-menu {
+    width: 36px;
+    height: 36px;
+  }
+  .readonly-badge svg {
+    display: none;
+  }
+  .readonly-badge,
+  .demo-badge {
+    padding: 4px 6px;
+    min-height: 32px;
+  }
+  .lock-button,
+  .theme-toggle {
+    padding: 5px 6px;
+    min-height: 32px;
+  }
+  .topbar-actions .select-trigger,
+  :root[data-theme="dark"] .topbar-actions .select-trigger {
+    padding: 4px;
+    min-height: 32px;
+  }
+}
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation: none !important;
-    transition: none !important;
-    scroll-behavior: auto !important;
+  html {
+    scroll-behavior: auto;
+  }
+  .button,
+  .nav-item,
+  .subtab,
+  .filter-chip,
+  .topbar,
+  .readonly-badge,
+  .dialog-backdrop,
+  .dialog,
+  .select-popup {
+    transition-duration: 0.08s;
+  }
+  .dialog[data-starting-style],
+  .dialog[data-ending-style] {
+    transform: translate(-50%, -50%);
+  }
+  .select-popup[data-starting-style],
+  .select-popup[data-ending-style] {
+    transform: none;
+  }
+  .spin {
+    animation: none;
+    opacity: 0.75;
   }
 }
 

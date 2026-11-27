@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useContext, useEffect, useState } from "react";
 import {
   CheckCircle2,
   RefreshCw,
@@ -29,6 +29,7 @@ import type {
   TransactionPreview,
   TransactionView,
 } from "../../sieve-transactions-api";
+import { formatNumber } from "../format";
 import { describeError, sieveRefusalText } from "../status-labels";
 import {
   Action,
@@ -37,6 +38,7 @@ import {
   Choice,
   Details,
   Empty,
+  LanguageContext,
   Notice,
   Stat,
   StatusBadge,
@@ -57,6 +59,7 @@ export function SieveDeployPanel({
   onOpenWriteMode: () => void;
 }) {
   const t = useCopy();
+  const language = useContext(LanguageContext);
   const [discovery, setDiscovery] = useState<SieveView | null>(null);
   const [txView, setTxView] = useState<TransactionView | null>(null);
   const [running, setRunning] = useState(false);
@@ -170,8 +173,8 @@ export function SieveDeployPanel({
       setRunning(true);
       setMessage(
         t(
-          "ManageSieve discovery started (read-only). Results will appear automatically.",
-          "ManageSieve-Prüfung gestartet (nur lesend). Ergebnisse erscheinen automatisch.",
+          "Filter inspection started (read-only). Results will appear automatically.",
+          "Filterprüfung gestartet (nur lesend). Ergebnisse erscheinen automatisch.",
         ),
       );
     } catch (err) {
@@ -179,8 +182,8 @@ export function SieveDeployPanel({
         describeError(
           err,
           t(
-            "Could not start ManageSieve discovery. Check connectivity and credentials.",
-            "ManageSieve-Prüfung konnte nicht starten. Prüfe Verbindung und Zugangsdaten.",
+            "Could not start filter inspection. Check connectivity and credentials.",
+            "Filterprüfung konnte nicht starten. Prüfe Verbindung und Zugangsdaten.",
           ),
         ),
       );
@@ -237,8 +240,8 @@ export function SieveDeployPanel({
         describeError(
           err,
           t(
-            "Could not preview Sieve transaction. Save valid local rules, choose a placement strategy, and check connectivity.",
-            "Sieve-Vorschau fehlgeschlagen. Speichere gültige lokale Regeln, wähle eine Platzierung und prüfe die Verbindung.",
+            "Could not preview filter publishing. Save valid local rules, choose how to keep existing filters, and check connectivity.",
+            "Filter-Vorschau fehlgeschlagen. Speichere gültige lokale Regeln, wähle eine Platzierung und prüfe die Verbindung.",
           ),
         ),
       );
@@ -277,8 +280,8 @@ export function SieveDeployPanel({
       setConfirmed(false);
       setMessage(
         t(
-          "ManageSieve transaction started. Status refreshes automatically to confirm observed server state.",
-          "ManageSieve-Transaktion gestartet. Der Status aktualisiert sich automatisch zur Bestätigung.",
+          "Filter publishing started. Status refreshes automatically to confirm what mailbox.org accepted.",
+          "Filter-Veröffentlichung gestartet. Der Status aktualisiert sich automatisch zur Bestätigung.",
         ),
       );
       setTimeout(() => void load(), 1200);
@@ -312,8 +315,8 @@ export function SieveDeployPanel({
           <ShieldAlert size={16} />
           <span>
             {t(
-              "Read-only mode is active. Live ManageSieve discovery and deploy previews work right now; uploading or activating scripts requires enabling Live writes.",
-              "Der Nur-Lese-Modus ist aktiv. ManageSieve-Prüfung und Vorschau funktionieren sofort; zum Hochladen oder Aktivieren aktiviere Live-Schreibzugriff.",
+              "Read-only mode is active. Inspecting your current mailbox.org filters and previewing rule changes work right now; publishing filters requires Live writes.",
+              "Der Nur-Lese-Modus ist aktiv. Filterprüfung und Änderungsvorschau funktionieren sofort; zum Veröffentlichen aktiviere Live-Schreibzugriff.",
             )}
           </span>
           <Action size="compact" tone="warning" onClick={onOpenWriteMode}>
@@ -325,8 +328,8 @@ export function SieveDeployPanel({
         <Notice tone="info">
           <Busy>
             {t(
-              "ManageSieve discovery is running…",
-              "ManageSieve-Prüfung läuft…",
+              "Inspecting mailbox.org filters…",
+              "mailbox.org-Filter werden geprüft…",
             )}
           </Busy>
           <Action
@@ -337,8 +340,8 @@ export function SieveDeployPanel({
                 .catch(() =>
                   setError(
                     t(
-                      "Could not stop ManageSieve discovery.",
-                      "ManageSieve-Prüfung konnte nicht gestoppt werden.",
+                      "Could not stop filter inspection.",
+                      "Filterprüfung konnte nicht gestoppt werden.",
                     ),
                   ),
                 )
@@ -360,14 +363,14 @@ export function SieveDeployPanel({
           <div>
             <h2>
               {t(
-                "1. Live ManageSieve discovery (read-only)",
-                "1. Live-ManageSieve-Prüfung (nur lesend)",
+                "1. Inspect current mailbox.org filters (read-only)",
+                "1. Aktuelle mailbox.org-Filter prüfen (nur lesend)",
               )}
             </h2>
             <p className="muted">
               {t(
-                "Inspect sieve.mailbox.org capabilities, active scripts, and existing Open-Xchange rules without changing anything.",
-                "Prüfe Fähigkeiten von sieve.mailbox.org, aktive Skripte und bestehende Open-Xchange-Regeln ohne Änderungen.",
+                "Inspect active server scripts and your existing mailbox.org webmail rules without changing anything.",
+                "Prüfe aktive Filterskripte und bestehende mailbox.org-Webmail-Regeln ohne Änderungen.",
               )}
             </p>
           </div>
@@ -383,7 +386,7 @@ export function SieveDeployPanel({
                 disabled={busy || jobRunning}
               >
                 <Server size={15} />
-                {t("Inspect ManageSieve", "ManageSieve prüfen")}
+                {t("Inspect mailbox.org filters", "Filter bei mailbox.org prüfen")}
               </Action>
             )}
           </div>
@@ -400,22 +403,23 @@ export function SieveDeployPanel({
               />
               <Stat
                 label={t("Stored scripts", "Gespeicherte Skripte")}
-                value={baseline.names.length}
+                value={formatNumber(baseline.names.length, language)}
               />
               <Stat
-                label={t("Sieve extensions", "Sieve-Erweiterungen")}
-                value={
+                label={t("Filter extensions", "Filter-Erweiterungen")}
+                value={formatNumber(
                   baseline.capabilities.SIEVE
                     ? baseline.capabilities.SIEVE.split(/\s+/).filter(Boolean)
                         .length
-                    : 0
-                }
+                    : 0,
+                  language,
+                )}
               />
             </div>
             <Details
               title={t(
-                "Capabilities and observed scripts",
-                "Fähigkeiten und gelesene Skripte",
+                "Server capabilities and observed scripts",
+                "Server-Fähigkeiten und gelesene Skripte",
               )}
             >
               <p className="help">
@@ -424,7 +428,7 @@ export function SieveDeployPanel({
               {baseline.bodies.map((body) => (
                 <div key={body.name}>
                   <h4>
-                    {body.name} ({body.bytes.length.toLocaleString()} B)
+                    {body.name} ({formatNumber(body.bytes.length, language)} B)
                   </h4>
                   <pre tabIndex={0}>{exactReview(body)}</pre>
                 </div>
@@ -434,8 +438,8 @@ export function SieveDeployPanel({
         ) : (
           <p className="muted">
             {t(
-              "No ManageSieve baseline observed yet. Run Inspect ManageSieve above.",
-              "Noch keine ManageSieve-Basis erfasst. Starte oben ManageSieve prüfen.",
+              "No mailbox.org filter baseline observed yet. Run Inspect mailbox.org filters above.",
+              "Noch keine Filter-Basis erfasst. Starte oben Filter bei mailbox.org prüfen.",
             )}
           </p>
         )}
@@ -446,8 +450,8 @@ export function SieveDeployPanel({
           <div>
             <h2>
               {t(
-                "2. Coexistence strategy with existing Open-Xchange rules",
-                "2. Koexistenz mit bestehenden Open-Xchange-Regeln",
+                "2. Keep existing mailbox.org filters working",
+                "2. Bestehende mailbox.org-Filter beibehalten",
               )}
             </h2>
             <p className="muted">
@@ -461,8 +465,8 @@ export function SieveDeployPanel({
             <span className="badge info">
               {t("Recommended", "Empfohlen")}:{" "}
               {rec.recommended === "include"
-                ? t("Include script", "Include-Skript")
-                : t("Marked block", "Markierter Block")}
+                ? t("Separate script", "Eigenes Skript")
+                : t("Append block", "Block anfügen")}
             </span>
           )}
         </div>
@@ -482,15 +486,15 @@ export function SieveDeployPanel({
               {
                 value: "block",
                 label: t(
-                  "Block — marked OX block appended inside Open-Xchange",
-                  "Block — markierter OX-Block am Ende von Open-Xchange",
+                  "Append — add Mailroom rules after existing filters",
+                  "Anfügen — Mailroom-Regeln nach bestehenden Filtern",
                 ),
               },
               {
                 value: "include",
                 label: t(
-                  "Include — separate Mailroom script referenced via include :personal",
-                  "Include — eigenes Mailroom-Skript über include :personal",
+                  "Separate script — link Mailroom rules cleanly after existing filters",
+                  "Eigenes Skript — Mailroom-Regeln sauber nach bestehenden Filtern einbinden",
                 ),
               },
             ]}
@@ -519,14 +523,14 @@ export function SieveDeployPanel({
           <div>
             <h2>
               {t(
-                "3. Preview and deploy to mailbox.org",
-                "3. Vorschau und Bereitstellung bei mailbox.org",
+                "3. Preview and publish to mailbox.org",
+                "3. Vorschau und Veröffentlichung bei mailbox.org",
               )}
             </h2>
             <p className="muted">
               {t(
-                "Preview inspects live Open-Xchange state and computes exact rule precedence before any upload. During execution, Mailroom validates syntax via CHECKSCRIPT when supported and verifies live readback.",
-                "Die Vorschau prüft den aktuellen Open-Xchange-Stand und berechnet die genaue Regelrangfolge vor jedem Upload. Bei der Ausführung prüft Mailroom die Syntax per CHECKSCRIPT (falls unterstützt) und liest den Stand zurück.",
+                "Preview checks live mailbox.org filters and exact rule precedence before anything is uploaded. Syntax and live readback are verified automatically on publish.",
+                "Die Vorschau prüft die aktuellen mailbox.org-Filter und die genaue Regelrangfolge vor jedem Upload. Syntax und Rücklesen werden beim Veröffentlichen automatisch geprüft.",
               )}
             </p>
           </div>
@@ -582,22 +586,22 @@ export function SieveDeployPanel({
                 <div className="stats compact">
                   <Stat
                     label={t("Mailroom files", "Mailroom legt ab")}
-                    value={preview.precedence.counts.mailroom.toLocaleString()}
+                    value={formatNumber(preview.precedence.counts.mailroom, language)}
                   />
                   <Stat
                     label={t(
                       "Existing rules win",
                       "Bestehende Regeln gewinnen",
                     )}
-                    value={preview.precedence.counts.existing_wins.toLocaleString()}
+                    value={formatNumber(preview.precedence.counts.existing_wins, language)}
                   />
                   <Stat
                     label={t("Conflicts", "Konflikte")}
-                    value={preview.precedence.counts.conflicting.toLocaleString()}
+                    value={formatNumber(preview.precedence.counts.conflicting, language)}
                   />
                   <Stat
                     label={t("Accounting copies", "Rechnungskopien")}
-                    value={preview.precedence.counts.copies.copied.toLocaleString()}
+                    value={formatNumber(preview.precedence.counts.copies.copied, language)}
                   />
                 </div>
                 {preview.precedence.warnings.length > 0 && (
@@ -613,8 +617,8 @@ export function SieveDeployPanel({
                   <Details
                     defaultOpen={preview.precedence.counts.conflicting > 0}
                     title={t(
-                      `Open-Xchange precedence details (${preview.precedence.decisions.length})`,
-                      `Open-Xchange-Rangfolgedetails (${preview.precedence.decisions.length})`,
+                      `Existing-filter precedence details (${formatNumber(preview.precedence.decisions.length, language)})`,
+                      `Rangfolgedetails zu bestehenden Filtern (${formatNumber(preview.precedence.decisions.length, language)})`,
                     )}
                   >
                     <div className="table-scroll">
@@ -664,14 +668,14 @@ export function SieveDeployPanel({
             )}
             <Details
               title={t(
-                `Target script contents (${preview.transaction.after.bodies.length})`,
-                `Ziel-Skriptinhalte (${preview.transaction.after.bodies.length})`,
+                `Target script contents (${formatNumber(preview.transaction.after.bodies.length, language)})`,
+                `Ziel-Skriptinhalte (${formatNumber(preview.transaction.after.bodies.length, language)})`,
               )}
             >
               {preview.transaction.after.bodies.map((body) => (
                 <div key={body.name}>
                   <h4>
-                    {body.name} ({body.bytes.length.toLocaleString()} B)
+                    {body.name} ({formatNumber(body.bytes.length, language)} B)
                   </h4>
                   <pre tabIndex={0}>{exactReview(body)}</pre>
                 </div>
@@ -679,8 +683,8 @@ export function SieveDeployPanel({
             </Details>
             <CheckField checked={confirmed} onChange={setConfirmed}>
               {t(
-                "I reviewed the exact precedence, script contents, and effects above and confirm applying this ManageSieve transaction.",
-                "Ich habe Rangfolge, Skriptinhalte und Auswirkungen oben geprüft und bestätige diese ManageSieve-Transaktion.",
+                "I reviewed the filter order, script contents, and effects above and confirm publishing this update.",
+                "Ich habe Filterrangfolge, Skriptinhalte und Auswirkungen oben geprüft und bestätige das Veröffentlichen.",
               )}
             </CheckField>
             <div className="actions">

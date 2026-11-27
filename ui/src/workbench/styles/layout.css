@@ -118,7 +118,7 @@
 .local-status small {
   display: block;
   margin: 3px 0 0 15px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
 }
 .status-dot {
@@ -154,7 +154,10 @@
 }
 .workbench.live-armed .topbar {
   background: #fffbf2;
-  border-bottom-color: #ebc984;
+  border-bottom: 2px solid #b45309;
+}
+.workbench.live-armed .sidebar {
+  border-right-color: #d97706;
 }
 .breadcrumb {
   display: flex;

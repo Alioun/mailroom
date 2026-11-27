@@ -9,7 +9,15 @@ import { WinddownPanel } from "./winddown/WinddownPanel";
 
 type Tab = "ledger" | "forwarding" | "winddown";
 
-export function AddressesWinddown({ account }: { account: Account }) {
+export function AddressesWinddown({
+  account,
+  hasLocalRules,
+  onGoRules,
+}: {
+  account: Account;
+  hasLocalRules?: boolean;
+  onGoRules?: () => void;
+}) {
   const t = useCopy();
   const [tab, setTab] = useState<Tab>("ledger");
 
@@ -18,7 +26,13 @@ export function AddressesWinddown({ account }: { account: Account }) {
       value: "ledger",
       label: t("Address ledger", "Adressverzeichnis"),
       icon: <BookUser size={15} />,
-      content: <LedgerPanel account={account} />,
+      content: (
+        <LedgerPanel
+          account={account}
+          hasLocalRules={hasLocalRules}
+          onGoRules={onGoRules}
+        />
+      ),
     },
     {
       value: "forwarding",

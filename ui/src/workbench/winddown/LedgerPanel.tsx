@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import {
   CheckCircle2,
   Plus,
@@ -9,6 +9,7 @@ import {
 import type { Account } from "../../api";
 import { confirmLedger, openLedger, reviewLedger } from "../../ledger-api";
 import type { LedgerEntry, LedgerReview, LedgerView } from "../../ledger-api";
+import { formatNumber } from "../format";
 import { describeError } from "../status-labels";
 import {
   Action,
@@ -16,16 +17,26 @@ import {
   CheckField,
   Choice,
   Details,
-  Empty,
+  LanguageContext,
   Modal,
   Notice,
+  RequiresLocalRules,
   Stat,
   StatusBadge,
   useCopy,
 } from "../components";
 
-export function LedgerPanel({ account }: { account: Account }) {
+export function LedgerPanel({
+  account,
+  hasLocalRules,
+  onGoRules,
+}: {
+  account: Account;
+  hasLocalRules?: boolean;
+  onGoRules?: () => void;
+}) {
   const t = useCopy();
+  const language = useContext(LanguageContext);
   const [view, setView] = useState<LedgerView | null>(null);
   const [enabled, setEnabled] = useState(false);
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
@@ -36,6 +47,12 @@ export function LedgerPanel({ account }: { account: Account }) {
     useState<LedgerEntry["category"]>("contracts");
   const [newInvoice, setNewInvoice] = useState(false);
   const [formError, setFormError] = useState("");
+  const [errorField, setErrorField] = useState<
+    "address" | "service" | "folder" | null
+  >(null);
+  const addressRef = useRef<HTMLInputElement>(null);
+  const serviceRef = useRef<HTMLInputElement>(null);
+  const folderRef = useRef<HTMLInputElement>(null);
   const [review, setReview] = useState<LedgerReview | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -44,6 +61,10 @@ export function LedgerPanel({ account }: { account: Account }) {
 
   const load = useCallback(async () => {
     setError("");
+    if (hasLocalRules === false) {
+      setView(null);
+      return;
+    }
     try {
       const next = await openLedger(account.id);
       setView(next);
@@ -52,12 +73,12 @@ export function LedgerPanel({ account }: { account: Account }) {
     } catch {
       setError(
         t(
-          "Save local rules first before managing the private address ledger.",
-          "Speichere zuerst lokale Regeln, um das private Adressverzeichnis zu öffnen.",
+          "Could not load the private address ledger. Refresh and try again.",
+          "Das private Adressverzeichnis konnte nicht geladen werden. Aktualisiere und versuche es erneut.",
         ),
       );
     }
-  }, [account.id]);
+  }, [account.id, hasLocalRules]);
 
   useEffect(() => {
     void load();
@@ -65,37 +86,46 @@ export function LedgerPanel({ account }: { account: Account }) {
 
   function addEntry() {
     setFormError("");
+    setErrorField(null);
     const addr = newAddress.trim().toLowerCase();
     const svc = newService.trim();
     const folder = newFolder.trim();
     if (!addr || !addr.includes("@") || addr.startsWith("@") || addr.endsWith("@")) {
+      setErrorField("address");
       setFormError(
         t(
           "Enter a valid service email address (e.g. shop@example.de).",
           "Gib eine gültige Dienst-E-Mail-Adresse ein (z. B. shop@example.de).",
         ),
       );
+      addressRef.current?.focus();
       return;
     }
     if (!svc) {
+      setErrorField("service");
       setFormError(
         t("Enter a service name.", "Gib einen Dienstnamen ein."),
       );
+      serviceRef.current?.focus();
       return;
     }
     if (!folder) {
+      setErrorField("folder");
       setFormError(
         t("Enter a target folder path.", "Gib einen Zielordner ein."),
       );
+      folderRef.current?.focus();
       return;
     }
     if (entries.some((e) => e.address.toLowerCase() === addr)) {
+      setErrorField("address");
       setFormError(
         t(
           "That address is already in the ledger.",
           "Diese Adresse ist bereits im Verzeichnis eingetragen.",
         ),
       );
+      addressRef.current?.focus();
       return;
     }
     const today = new Date().toISOString().slice(0, 10);
@@ -181,7 +211,14 @@ export function LedgerPanel({ account }: { account: Account }) {
 
   return (
     <div className="page-stack">
-      {error && <Notice error>{error}</Notice>}
+      {error && (
+        <Notice error>
+          <span>{error}</span>
+          <Action size="compact" onClick={() => void load()} disabled={busy}>
+            {t("Retry", "Erneut versuchen")}
+          </Action>
+        </Notice>
+      )}
       {message && (
         <Notice>
           <CheckCircle2 size={16} />
@@ -215,15 +252,15 @@ export function LedgerPanel({ account }: { account: Account }) {
             <div className="stats compact">
               <Stat
                 label={t("Recorded addresses", "Erfasste Adressen")}
-                value={entries.length.toLocaleString()}
+                value={formatNumber(entries.length, language)}
               />
               <Stat
                 label={t("Discovery hints", "Entdeckungshinweise")}
-                value={view.proposals.length.toLocaleString()}
+                value={formatNumber(view.proposals.length, language)}
               />
               <Stat
                 label={t("Leak alerts", "Leak-Hinweise")}
-                value={view.leaks.length.toLocaleString()}
+                value={formatNumber(view.leaks.length, language)}
               />
             </div>
 
@@ -242,7 +279,7 @@ export function LedgerPanel({ account }: { account: Account }) {
 
             {view.proposals.length > 0 && (
               <Details
-                title={`${t("Observed address discovery hints", "Entdeckte Dienstadressen")} · ${view.proposals.length}`}
+                title={`${t("Observed address discovery hints", "Entdeckte Dienstadressen")} · ${formatNumber(view.proposals.length, language)}`}
               >
                 <div className="table-scroll">
                   <table>
@@ -292,33 +329,57 @@ export function LedgerPanel({ account }: { account: Account }) {
               <label className="field">
                 {t("Service email address", "Dienst-E-Mail-Adresse")}
                 <input
+                  ref={addressRef}
                   value={newAddress}
                   onChange={(e) => {
                     setNewAddress(e.target.value);
                     setFormError("");
+                    setErrorField(null);
                   }}
+                  aria-invalid={errorField === "address"}
+                  aria-describedby={
+                    formError && errorField === "address"
+                      ? "ledger-form-error"
+                      : undefined
+                  }
                   placeholder="shop@example.de"
                 />
               </label>
               <label className="field">
                 {t("Service name", "Dienstname")}
                 <input
+                  ref={serviceRef}
                   value={newService}
                   onChange={(e) => {
                     setNewService(e.target.value);
                     setFormError("");
+                    setErrorField(null);
                   }}
+                  aria-invalid={errorField === "service"}
+                  aria-describedby={
+                    formError && errorField === "service"
+                      ? "ledger-form-error"
+                      : undefined
+                  }
                   placeholder="Example Shop"
                 />
               </label>
               <label className="field">
                 {t("Target folder", "Zielordner")}
                 <input
+                  ref={folderRef}
                   value={newFolder}
                   onChange={(e) => {
                     setNewFolder(e.target.value);
                     setFormError("");
+                    setErrorField(null);
                   }}
+                  aria-invalid={errorField === "folder"}
+                  aria-describedby={
+                    formError && errorField === "folder"
+                      ? "ledger-form-error"
+                      : undefined
+                  }
                 />
               </label>
               <Choice
@@ -338,7 +399,11 @@ export function LedgerPanel({ account }: { account: Account }) {
               <CheckField checked={newInvoice} onChange={setNewInvoice}>
                 {t("Invoice address", "Rechnungsadresse")}
               </CheckField>
-              {formError && <Notice error>{formError}</Notice>}
+              {formError && (
+                <div id="ledger-form-error">
+                  <Notice error>{formError}</Notice>
+                </div>
+              )}
               <Action onClick={addEntry}>
                 <Plus size={15} />
                 {t("Add entry", "Eintrag hinzufügen")}
@@ -448,12 +513,7 @@ export function LedgerPanel({ account }: { account: Account }) {
             )}
           </>
         ) : (
-          <Empty
-            title={t(
-              "Address ledger waiting for local rules",
-              "Adressverzeichnis wartet auf lokale Regeln",
-            )}
-          />
+          <RequiresLocalRules onGoRules={onGoRules} />
         )}
       </section>
 
@@ -474,11 +534,11 @@ export function LedgerPanel({ account }: { account: Account }) {
             <div className="stats compact">
               <Stat
                 label={t("Would file", "Würden abgelegt")}
-                value={review.proof.proof.counts.filed.toLocaleString()}
+                value={formatNumber(review.proof.proof.counts.filed, language)}
               />
               <Stat
                 label={t("Kept in Inbox", "Im Posteingang")}
-                value={review.proof.proof.counts.inbox.toLocaleString()}
+                value={formatNumber(review.proof.proof.counts.inbox, language)}
               />
               <Stat
                 label={t("Validation", "Prüfung")}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useContext, useEffect, useState } from "react";
 import {
   CheckCircle2,
   ChevronLeft,
@@ -19,6 +19,7 @@ import {
 } from "../api";
 import type { Account, InvoicePreview, InvoiceView } from "../api";
 import { describeError, invoiceRoleText } from "./status-labels";
+import { formatNumber, pluralCount } from "./format";
 import {
   Action,
   Busy,
@@ -26,8 +27,10 @@ import {
   Choice,
   Details,
   Empty,
+  LanguageContext,
   Modal,
   Notice,
+  RequiresLocalRules,
   Stat,
   StatusBadge,
   useCopy,
@@ -37,12 +40,17 @@ export function Invoices({
   account,
   liveWrites,
   onOpenWriteMode,
+  hasLocalRules,
+  onGoRules,
 }: {
   account: Account;
   liveWrites: boolean;
   onOpenWriteMode: () => void;
+  hasLocalRules?: boolean;
+  onGoRules?: () => void;
 }) {
   const t = useCopy();
+  const language = useContext(LanguageContext);
   const [view, setView] = useState<InvoiceView | null>(null);
   const [target, setTarget] = useState("");
   const [preview, setPreview] = useState<InvoicePreview | null>(null);
@@ -57,6 +65,10 @@ export function Invoices({
 
   const load = useCallback(async () => {
     setError("");
+    if (hasLocalRules === false) {
+      setView(null);
+      return;
+    }
     try {
       const next = await openInvoices(account.id);
       setView(next);
@@ -74,7 +86,7 @@ export function Invoices({
         ),
       );
     }
-  }, [account.id]);
+  }, [account.id, hasLocalRules]);
 
   useEffect(() => {
     void load();
@@ -217,8 +229,8 @@ export function Invoices({
           <ShieldAlert size={16} />
           <span>
             {t(
-              "Read-only mode is active. Inspecting candidates, fetching originals, previewing sends, and resolving uncertain entries work now; transmitting via SMTP requires Live writes.",
-              "Der Nur-Lese-Modus ist aktiv. Prüfen, Originale laden, Versandvorschau und Klärung unklarer Einträge funktionieren sofort; der SMTP-Versand erfordert Live-Schreibzugriff.",
+              "Read-only mode is active. Inspecting candidates, fetching originals, previewing sends, and resolving uncertain entries work now; sending invoices requires Live writes.",
+              "Der Nur-Lese-Modus ist aktiv. Prüfen, Originale laden, Versandvorschau und Klärung unklarer Einträge funktionieren sofort; der Versand erfordert Live-Schreibzugriff.",
             )}
           </span>
           <Action size="compact" tone="warning" onClick={onOpenWriteMode}>
@@ -233,6 +245,9 @@ export function Invoices({
           <span>{message}</span>
         </Notice>
       )}
+      {hasLocalRules === false ? (
+        <RequiresLocalRules onGoRules={onGoRules} />
+      ) : (
       <section className="panel">
         <div className="section-heading">
           <div>
@@ -244,8 +259,8 @@ export function Invoices({
             </h2>
             <p className="muted">
               {t(
-                "Inspect business invoice candidates, verify attachments read-only, and send approved originals via SMTP to your accounting target (such as Qonto) without duplicate copies.",
-                "Prüfe geschäftliche Rechnungskandidaten, verifiziere Anhänge nur lesend und leite freigegebene Originale per SMTP ohne Duplikate an dein Buchhaltungsziel (z. B. Qonto) weiter.",
+                "Inspect business invoice candidates, verify attachments read-only, and send approved originals to your accounting target (such as Qonto) without duplicate copies.",
+                "Prüfe geschäftliche Rechnungskandidaten, verifiziere Anhänge nur lesend und leite freigegebene Originale ohne Duplikate an dein Buchhaltungsziel (z. B. Qonto) weiter.",
               )}
             </p>
           </div>
@@ -259,19 +274,19 @@ export function Invoices({
             <div className="stats compact">
               <Stat
                 label={t("Candidates", "Kandidaten")}
-                value={view.report.count.toLocaleString()}
+                value={formatNumber(view.report.count, language)}
               />
               <Stat
                 label={t("Eligible business", "Geschäftlich geeignet")}
-                value={view.report.eligible_business.toLocaleString()}
+                value={formatNumber(view.report.eligible_business, language)}
               />
               <Stat
                 label={t("Unresolved", "Ungeklärt")}
-                value={view.report.unresolved.toLocaleString()}
+                value={formatNumber(view.report.unresolved, language)}
               />
               <Stat
                 label={t("Recorded sends", "Erfasste Sendungen")}
-                value={view.sends.length.toLocaleString()}
+                value={formatNumber(view.sends.length, language)}
               />
             </div>
             {view.targets.length > 0 ? (
@@ -289,9 +304,16 @@ export function Invoices({
               </div>
             ) : (
               <Notice tone="warning">
-                {t(
-                  "No accounting targets are configured in your local rules yet. Add a target (e.g. Qonto) in Rules & deploy to enable send-on.",
-                  "In deinen lokalen Regeln ist noch kein Buchhaltungsziel konfiguriert. Füge ein Ziel (z. B. Qonto) unter Regeln & Bereitstellung hinzu.",
+                <span>
+                  {t(
+                    "No accounting targets are configured in your local rules yet. Add a target (e.g. Qonto) in Rules & deploy to enable send-on.",
+                    "In deinen lokalen Regeln ist noch kein Buchhaltungsziel konfiguriert. Füge ein Ziel (z. B. Qonto) unter Regeln & Bereitstellung hinzu.",
+                  )}
+                </span>
+                {onGoRules && (
+                  <Action size="compact" onClick={onGoRules}>
+                    {t("Open Rules & deploy", "Regeln & Bereitstellung öffnen")}
+                  </Action>
                 )}
               </Notice>
             )}
@@ -324,7 +346,7 @@ export function Invoices({
                         const roleMeta = invoiceRoleText(row.role, t);
                         const evidenceSummary =
                           row.evidence.kind === "known"
-                            ? `${row.evidence.attachments.length} ${t("attachments", "Anhänge")} (${row.evidence.attachments.map((a) => `${a.name} · ${a.media_type}`).join(", ") || row.evidence.body})`
+                            ? `${pluralCount(row.evidence.attachments.length, language, "attachment", "attachments", "Anhang", "Anhänge")} (${row.evidence.attachments.map((a) => `${a.name} · ${a.media_type}`).join(", ") || row.evidence.body})`
                             : row.evidence.kind === "filename_hint"
                               ? `${t("Filename hints", "Dateinamen-Hinweise")}: ${row.evidence.names.join(", ")}`
                               : t(
@@ -420,6 +442,7 @@ export function Invoices({
           />
         )}
       </section>
+      )}
 
       {view && view.sends.length > 0 && (
         <section className="panel">

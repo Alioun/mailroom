@@ -10,9 +10,15 @@
   --muted: #a1b8b3;
   --border: #263a37;
   --line: #263a37;
-  --control-border: #486460;
+  --control-border: #5f807b;
   --surface: #141f1e;
   --canvas: #0d1413;
+  --banner-bg: var(--accent-soft);
+  --banner-border: var(--border);
+  --banner-icon-bg: #1a403a;
+  --banner-icon-ink: var(--accent);
+  --avatar-bg: #17332f;
+  --avatar-ink: #8ee6d8;
   --disabled-bg: #1a2826;
   --disabled-border: #2c423f;
   --disabled-ink: #8fa9a3;
@@ -30,9 +36,15 @@
     --muted: #a1b8b3;
     --border: #263a37;
     --line: #263a37;
-    --control-border: #486460;
+    --control-border: #5f807b;
     --surface: #141f1e;
     --canvas: #0d1413;
+    --banner-bg: var(--accent-soft);
+    --banner-border: var(--border);
+    --banner-icon-bg: #1a403a;
+    --banner-icon-ink: var(--accent);
+    --avatar-bg: #17332f;
+    --avatar-ink: #8ee6d8;
     --disabled-bg: #1a2826;
     --disabled-border: #2c423f;
     --disabled-ink: #8fa9a3;
@@ -68,17 +80,27 @@
 
 :root[data-theme="dark"] .workbench.live-armed .topbar {
   background: #2c1e0c;
-  border-bottom-color: #7c4d14;
+  border-bottom: 2px solid #d97706;
+}
+
+:root[data-theme="dark"] .workbench.live-armed .sidebar {
+  border-right-color: #b45309;
 }
 
 :root[data-theme="dark"] input,
 :root[data-theme="dark"] textarea,
 :root[data-theme="dark"] select,
 :root[data-theme="dark"] .select-trigger,
-:root[data-theme="dark"] .search-input,
+:root[data-theme="dark"] .search,
 :root[data-theme="dark"] .code-editor {
   background: #0f1918;
   border-color: var(--control-border);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .search input {
+  background: transparent;
+  border: 0;
   color: var(--ink);
 }
 
@@ -438,4 +460,19 @@
   background: #192928;
   border-color: var(--control-border);
   color: var(--ink);
+}
+
+:root[data-theme="dark"] .proposed-change {
+  background: var(--accent-soft);
+  border-color: var(--border);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] tr.row-selected td {
+  background: #132c28;
+}
+
+:root[data-theme="dark"] .mobile-select-all {
+  background: #101b1a;
+  border-color: var(--border);
 }

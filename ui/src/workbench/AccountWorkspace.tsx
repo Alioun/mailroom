@@ -10,6 +10,7 @@ import type {
 } from "../api";
 import { Action, Busy, Empty, Notice, useCopy } from "./components";
 import { Overview, Senders } from "./Findings";
+import type { SenderFocusScope } from "./Findings";
 
 const ActivityOverview = lazy(() =>
   import("./ActivityOverview").then((m) => ({ default: m.ActivityOverview })),
@@ -63,6 +64,8 @@ export function AccountArea({
   onRefresh,
   onOpenWriteMode,
   onScan,
+  shortcutsEnabled,
+  onShortcutsEnabled,
 }: {
   account: Account;
   accounts: Account[];
@@ -78,11 +81,14 @@ export function AccountArea({
   onRefresh: () => void;
   onOpenWriteMode: () => void;
   onScan: () => void;
+  shortcutsEnabled?: boolean;
+  onShortcutsEnabled?: (next: boolean) => void;
 }) {
   const t = useCopy();
   const [report, setReport] = useState<CensusReport | null>(null);
   const [view, setView] = useState<AccountView | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceView | null>(null);
+  const [senderScope, setSenderScope] = useState<SenderFocusScope | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [loaded, setLoaded] = useState(false);
@@ -169,7 +175,10 @@ export function AccountArea({
               <Overview
                 report={report}
                 onSenders={() => onNavigate("senders")}
-                onRecommend={() => onNavigate("recommendations")}
+                onRecommend={() => {
+                  setSenderScope(null);
+                  onNavigate("recommendations");
+                }}
               />
             ) : (
               <Empty
@@ -239,7 +248,18 @@ export function AccountArea({
         {report && report.canonical_messages > 0 ? (
           <Senders
             report={report}
-            onRecommend={() => onNavigate("recommendations")}
+            onRecommend={() => {
+              setSenderScope(null);
+              onNavigate("recommendations");
+            }}
+            onRecommendSenders={(scope) => {
+              setSenderScope(scope);
+              onNavigate("recommendations");
+            }}
+            onUnsubscribeSenders={(scope) => {
+              setSenderScope(scope);
+              onNavigate("subscriptions");
+            }}
             onGoRules={() => onNavigate("rules")}
           />
         ) : (
@@ -269,6 +289,8 @@ export function AccountArea({
             active={!hidden && page === "recommendations"}
             report={report}
             workspace={workspace}
+            focusedSenders={senderScope}
+            onClearFocusedSenders={() => setSenderScope(null)}
             onWorkspace={setWorkspace}
             onInbox={onCount}
             onGoSettings={() => onNavigate("settings")}
@@ -324,7 +346,9 @@ export function AccountArea({
             <Invoices
               account={account}
               liveWrites={status.live_writes}
+              hasLocalRules={workspace ? Boolean(workspace.workspace) : undefined}
               onOpenWriteMode={onOpenWriteMode}
+              onGoRules={() => onNavigate("rules")}
             />
           </Suspense>
         )}
@@ -339,6 +363,8 @@ export function AccountArea({
               account={account}
               accounts={accounts}
               liveWrites={status.live_writes}
+              focusedSenders={senderScope}
+              onClearFocusedSenders={() => setSenderScope(null)}
               onOpenWriteMode={onOpenWriteMode}
             />
           </Suspense>
@@ -350,7 +376,11 @@ export function AccountArea({
       >
         {page === "addresses" && (
           <Suspense fallback={fallback}>
-            <AddressesWinddown account={account} />
+            <AddressesWinddown
+              account={account}
+              hasLocalRules={workspace ? Boolean(workspace.workspace) : undefined}
+              onGoRules={() => onNavigate("rules")}
+            />
           </Suspense>
         )}
       </section>
@@ -365,6 +395,8 @@ export function AccountArea({
               accounts={accounts}
               status={status}
               view={view}
+              shortcutsEnabled={shortcutsEnabled}
+              onShortcutsEnabled={onShortcutsEnabled}
               onView={(value) => {
                 setView(value);
                 void fetchSaved();

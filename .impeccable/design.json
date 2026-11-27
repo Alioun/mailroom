@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-27T05:39:40.000Z",
+  "generatedAt": "2026-11-27T07:39:00.000Z",
   "title": "Design System: mailroom",
   "extensions": {
     "colorMeta": {
@@ -341,21 +341,21 @@
       "refersTo": "button-primary",
       "description": "Primary action trigger for scanning, saving local rules, and confirming previewed work.",
       "html": "<button class=\"ds-btn-primary\">Check saved rules</button>",
-      "css": ".ds-btn-primary{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:42px;padding:10px 14px;border-radius:6px;border:1px solid #147466;background:#147466;color:#fff;font-family:inherit;font-size:12px;font-weight:550;line-height:1.4;cursor:pointer;box-shadow:0 2px 3px #113b2820;transition:background 0.15s,border-color 0.15s,box-shadow 0.15s}.ds-btn-primary:hover:not(:disabled){background:#0f6155;border-color:#0f6155}.ds-btn-primary:focus-visible{outline:3px solid #17897b;outline-offset:3px}.ds-btn-primary:disabled{background:var(--disabled-bg,#e9efed);border-color:var(--disabled-border,#cbd7d4);color:var(--disabled-ink,#526663);box-shadow:none;cursor:not-allowed}"
+      "css": ".ds-btn-primary{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:42px;padding:10px 14px;border-radius:8px;border:1px solid #147d70;background:#147d70;color:#fff;font-family:inherit;font-size:12px;font-weight:550;line-height:1.4;cursor:pointer;box-shadow:0 2px 3px #113b2820;transition:background 0.15s,border-color 0.15s,box-shadow 0.15s}.ds-btn-primary:hover:not(:disabled){background:#106659;border-color:#106659}.ds-btn-primary:focus-visible{outline:3px solid #17897b;outline-offset:3px}.ds-btn-primary:disabled{background:var(--disabled-bg,#e9efed);border-color:var(--disabled-border,#cbd7d4);color:var(--disabled-ink,#526663);box-shadow:none;cursor:not-allowed}"
     },
     {
       "name": "Secondary Button",
       "kind": "button",
       "description": "Default neutral control for safe inspections, reloads, and dialog cancellation.",
       "html": "<button class=\"ds-btn-secondary\">Refresh</button>",
-      "css": ".ds-btn-secondary{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:42px;padding:10px 14px;border-radius:6px;border:1px solid #d4dfdc;background:var(--surface,#fff);color:#3e5c55;font-family:inherit;font-size:12px;font-weight:550;line-height:1.4;cursor:pointer;box-shadow:0 1px 2px #162e2310;transition:background 0.15s,border-color 0.15s,box-shadow 0.15s}.ds-btn-secondary:hover:not(:disabled){background:#f5f9f7;border-color:#adc7bd}.ds-btn-secondary:focus-visible{outline:3px solid #17897b;outline-offset:3px}.ds-btn-secondary:disabled{background:var(--disabled-bg,#e9efed);border-color:var(--disabled-border,#cbd7d4);color:var(--disabled-ink,#526663);box-shadow:none;cursor:not-allowed}"
+      "css": ".ds-btn-secondary{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:42px;padding:10px 14px;border-radius:8px;border:1px solid var(--control-border,#748a84);background:var(--surface,#fff);color:#3e5c55;font-family:inherit;font-size:12px;font-weight:550;line-height:1.4;cursor:pointer;box-shadow:0 1px 2px #162e2310;transition:background 0.15s,border-color 0.15s,box-shadow 0.15s}.ds-btn-secondary:hover:not(:disabled){background:#f5f9f7;border-color:#5f7a74}.ds-btn-secondary:focus-visible{outline:3px solid #17897b;outline-offset:3px}.ds-btn-secondary:disabled{background:var(--disabled-bg,#e9efed);border-color:var(--disabled-border,#cbd7d4);color:var(--disabled-ink,#526663);box-shadow:none;cursor:not-allowed}"
     },
     {
       "name": "Live-Write Warning Button",
       "kind": "button",
       "description": "High-contrast amber trigger used when arming session-scoped Live writes.",
       "html": "<button class=\"ds-btn-warning\">Enable live writes</button>",
-      "css": ".ds-btn-warning{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:42px;padding:10px 14px;border-radius:6px;border:1px solid #92400e;background:#b45309;color:#fff;font-family:inherit;font-size:12px;font-weight:550;line-height:1.4;cursor:pointer;box-shadow:0 2px 3px #78350f20;transition:background 0.15s,border-color 0.15s}.ds-btn-warning:hover:not(:disabled){background:#92400e;border-color:#78350f}.ds-btn-warning:focus-visible{outline:3px solid #17897b;outline-offset:3px}.ds-btn-warning:disabled{background:var(--disabled-bg,#e9efed);border-color:var(--disabled-border,#cbd7d4);color:var(--disabled-ink,#526663);box-shadow:none;cursor:not-allowed}"
+      "css": ".ds-btn-warning{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:42px;padding:10px 14px;border-radius:8px;border:1px solid #92400e;background:#b45309;color:#fff;font-family:inherit;font-size:12px;font-weight:550;line-height:1.4;cursor:pointer;box-shadow:0 2px 3px #78350f20;transition:background 0.15s,border-color 0.15s}.ds-btn-warning:hover:not(:disabled){background:#92400e;border-color:#78350f}.ds-btn-warning:focus-visible{outline:3px solid #17897b;outline-offset:3px}.ds-btn-warning:disabled{background:var(--disabled-bg,#e9efed);border-color:var(--disabled-border,#cbd7d4);color:var(--disabled-ink,#526663);box-shadow:none;cursor:not-allowed}"
     },
     {
       "name": "Safety Mode Badge",
@@ -369,28 +369,28 @@
       "kind": "input",
       "description": "Single-line search or configuration input with pine-teal focus halo.",
       "html": "<input class=\"ds-input\" type=\"search\" placeholder=\"Search senders or domains...\">",
-      "css": ".ds-input{width:100%;max-width:340px;padding:11px 12px;border:1px solid #cbd7d4;border-radius:7px;background:var(--surface,#fff);color:var(--ink,#263c3a);font-family:inherit;font-size:14px;outline:none;caret-color:var(--accent,#147d70);transition:border-color 0.15s,box-shadow 0.15s}.ds-input:focus{border-color:var(--accent,#147d70);box-shadow:0 0 0 3px #147d7018}.ds-input:focus-visible{outline:3px solid #17897b;outline-offset:3px}"
+      "css": ".ds-input{width:100%;max-width:340px;padding:11px 12px;border:1px solid var(--control-border,#748a84);border-radius:8px;background:var(--surface,#fff);color:var(--ink,#263c3a);font-family:inherit;font-size:14px;outline:none;caret-color:var(--accent,#147d70);transition:border-color 0.15s,box-shadow 0.15s}.ds-input:focus{border-color:var(--accent,#147d70);box-shadow:0 0 0 3px #147d7018}.ds-input:focus-visible{outline:3px solid #17897b;outline-offset:3px}"
     },
     {
       "name": "Filter Chip",
       "kind": "chip",
       "description": "Pill filter toggle for activity and sender views.",
       "html": "<div class=\"ds-chips\"><button type=\"button\" class=\"ds-chip ds-chip-active\" aria-pressed=\"true\">All</button><button type=\"button\" class=\"ds-chip\" aria-pressed=\"false\">Open undo</button></div>",
-      "css": ".ds-chips{display:inline-flex;gap:6px;flex-wrap:wrap}.ds-chip{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:6px 14px;border:1px solid var(--control-border,#8fa39d);border-radius:999px;background:var(--surface,#fff);color:var(--ink,#263c3a);font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:background 0.15s,border-color 0.15s,color 0.15s}.ds-chip:hover{border-color:var(--accent,#147d70);background:var(--accent-soft,#e6f3f0)}.ds-chip.ds-chip-active{background:var(--accent,#147d70);border-color:var(--accent,#147d70);color:#fff;font-weight:600}.ds-chip:focus-visible{outline:3px solid #17897b;outline-offset:3px}"
+      "css": ".ds-chips{display:inline-flex;gap:6px;flex-wrap:wrap}.ds-chip{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:6px 14px;border:1px solid var(--control-border,#748a84);border-radius:999px;background:var(--surface,#fff);color:var(--ink,#263c3a);font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:background 0.15s,border-color 0.15s,color 0.15s}.ds-chip:hover{border-color:var(--accent,#147d70);background:var(--accent-soft,#e6f3f0)}.ds-chip.ds-chip-active{background:var(--accent,#147d70);border-color:var(--accent,#147d70);color:#fff;font-weight:600}.ds-chip:focus-visible{outline:3px solid #17897b;outline-offset:3px}"
     },
     {
       "name": "Sidebar Navigation Item",
       "kind": "nav",
       "description": "Primary navigation item in the persistent left rail and mobile drawer.",
       "html": "<nav class=\"ds-nav\"><button type=\"button\" class=\"ds-nav-item ds-nav-active\" aria-current=\"page\"><svg width=\"17\" height=\"17\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect width=\"7\" height=\"9\" x=\"3\" y=\"3\" rx=\"1\"/><rect width=\"7\" height=\"5\" x=\"14\" y=\"3\" rx=\"1\"/><rect width=\"7\" height=\"9\" x=\"14\" y=\"12\" rx=\"1\"/><rect width=\"7\" height=\"5\" x=\"3\" y=\"16\" rx=\"1\"/></svg><span>Overview</span></button><button type=\"button\" class=\"ds-nav-item\"><svg width=\"17\" height=\"17\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2\"/><circle cx=\"9\" cy=\"7\" r=\"4\"/><path d=\"M22 21v-2a4 4 0 0 0-3-3.87\"/><path d=\"M16 3.13a4 4 0 0 1 0 7.75\"/></svg><span>Senders</span></button></nav>",
-      "css": ".ds-nav{display:grid;gap:3px;width:210px}.ds-nav-item{display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;min-height:40px;color:#465d59;padding:8px 12px;text-align:left;border-radius:7px;font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:background 0.15s,color 0.15s}.ds-nav-item:hover{background:#f3f7f6;color:#1c473f}.ds-nav-item.ds-nav-active{background:#eaf5f1;color:#106053;font-weight:600}.ds-nav-item:focus-visible{outline:3px solid #17897b;outline-offset:3px}"
+      "css": ".ds-nav{display:grid;gap:3px;width:210px}.ds-nav-item{display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;min-height:40px;color:#465d59;padding:8px 12px;text-align:left;border-radius:8px;font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:background 0.15s,color 0.15s}.ds-nav-item:hover{background:#f3f7f6;color:#1c473f}.ds-nav-item.ds-nav-active{background:#eaf5f1;color:#106053;font-weight:600}.ds-nav-item:focus-visible{outline:3px solid #17897b;outline-offset:3px}"
     },
     {
       "name": "Stat Card",
       "kind": "card",
       "description": "Metric tile displaying tabular mailbox totals with concise supporting detail.",
       "html": "<div class=\"ds-stat\"><span class=\"ds-stat-label\">Messages</span><strong class=\"ds-stat-value\">1,428</strong><small class=\"ds-stat-detail\">Unique saved messages</small></div>",
-      "css": ".ds-stat{border:1px solid var(--border,#d9e3e0);border-radius:9px;background:var(--surface,#fff);padding:20px;display:flex;flex-direction:column;gap:4px;max-width:240px}.ds-stat-label{font-size:12px;color:var(--muted,#526663)}.ds-stat-value{font-size:31px;letter-spacing:-1px;line-height:1.45;font-weight:600;font-variant-numeric:tabular-nums;color:var(--ink,#263c3a)}.ds-stat-detail{font-size:12px;color:var(--muted,#526663)}"
+      "css": ".ds-stat{border:1px solid var(--border,#d9e3e0);border-radius:12px;background:var(--surface,#fff);padding:20px;display:flex;flex-direction:column;gap:4px;max-width:240px}.ds-stat-label{font-size:12px;color:var(--muted,#526663)}.ds-stat-value{font-size:31px;letter-spacing:-1px;line-height:1.45;font-weight:600;font-variant-numeric:tabular-nums;color:var(--ink,#263c3a)}.ds-stat-detail{font-size:12px;color:var(--muted,#526663)}"
     },
     {
       "name": "Notice Banner",

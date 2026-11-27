@@ -18,6 +18,7 @@ import { getAssistantConfig, saveAssistantConfig } from "../assistant-api";
 import { describeError } from "../status-labels";
 import {
   Action,
+  CheckField,
   Choice,
   Details,
   Notice,
@@ -70,12 +71,16 @@ export function WorkspaceSettings({
   onStatus,
   onRefresh,
   onOpenWriteMode,
+  shortcutsEnabled,
+  onShortcutsEnabled,
 }: {
   accounts: Account[];
   status: AccountStatus;
   onStatus: (value: AccountStatus) => void;
   onRefresh: () => void;
   onOpenWriteMode: () => void;
+  shortcutsEnabled?: boolean;
+  onShortcutsEnabled?: (next: boolean) => void;
 }) {
   const t = useCopy();
   const [busy, setBusy] = useState(false);
@@ -370,6 +375,17 @@ export function WorkspaceSettings({
                 { value: "3600", label: t("60 minutes", "60 Minuten") },
               ]}
             />
+          )}
+          {onShortcutsEnabled && (
+            <CheckField
+              checked={shortcutsEnabled ?? true}
+              onChange={onShortcutsEnabled}
+            >
+              {t(
+                "Enable single-key keyboard shortcuts (? g o r)",
+                "Einzeltasten-Kurzbefehle aktivieren (? g o r)",
+              )}
+            </CheckField>
           )}
         </div>
       </section>

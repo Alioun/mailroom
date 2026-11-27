@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useContext, useState } from "react";
 import type { AccountView } from "../../api";
-import { Action, Details, Empty, Stat, StatusBadge, useCopy } from "../components";
+import { Action, Details, Empty, LanguageContext, Stat, StatusBadge, useCopy } from "../components";
+import { formatNumber } from "../format";
 
 export function PlacementPanel({ view }: { view: AccountView | null }) {
   const t = useCopy();
+  const language = useContext(LanguageContext);
   const [page, setPage] = useState(0);
   if (!view) {
     return (
@@ -25,8 +27,8 @@ export function PlacementPanel({ view }: { view: AccountView | null }) {
         )}
       >
         {t(
-          "Once you deploy rules via ManageSieve and run a fresh mailbox scan, Mailroom compares observed folders against your deployed rules here.",
-          "Sobald du Regeln per ManageSieve bereitstellst und das Postfach erneut erfasst, vergleicht Mailroom hier die tatsächlichen Ordner mit deinen bereitgestellten Regeln.",
+          "Once you publish rules to mailbox.org and run a fresh mailbox scan, Mailroom compares observed folders against your published rules here.",
+          "Sobald du Regeln bei mailbox.org veröffentlichst und das Postfach erneut erfasst, vergleicht Mailroom hier die tatsächlichen Ordner mit deinen veröffentlichten Regeln.",
         )}
       </Empty>
     );
@@ -47,23 +49,23 @@ export function PlacementPanel({ view }: { view: AccountView | null }) {
         <div className="stats compact">
           <Stat
             label={t("Matched", "Übereinstimmend")}
-            value={landing.counts.matches.toLocaleString()}
+            value={formatNumber(landing.counts.matches, language)}
           />
           <Stat
             label={t("Elsewhere", "Woanders")}
-            value={landing.counts.elsewhere.toLocaleString()}
+            value={formatNumber(landing.counts.elsewhere, language)}
           />
           <Stat
             label={t("Additional folders", "Zusätzliche Ordner")}
-            value={landing.counts.additional_folders.toLocaleString()}
+            value={formatNumber(landing.counts.additional_folders, language)}
           />
           <Stat
             label={t("Uncheckable", "Nicht prüfbar")}
-            value={landing.counts.uncheckable.toLocaleString()}
+            value={formatNumber(landing.counts.uncheckable, language)}
           />
           <Stat
             label={t("Total messages", "Nachrichten gesamt")}
-            value={rows.length.toLocaleString()}
+            value={formatNumber(rows.length, language)}
           />
         </div>
         <div className="table-scroll">

@@ -28,6 +28,10 @@ import {
 } from "./format";
 
 type Sender = CensusReport["senders"][number];
+export interface SenderFocusScope {
+  senders: string[];
+  domains: string[];
+}
 function useClassLabel() {
   const t = useCopy();
   return (kind: Sender["class"]) =>
@@ -168,7 +172,12 @@ export function Overview({
                 >
                   {monthly.map(([month, count]) => (
                     <div className="compact-month-row" key={month}>
-                      <span>{month}</span>
+                      <span>
+                        {new Date(`${month}-01T12:00:00`).toLocaleDateString(
+                          localeFor(language),
+                          { year: "numeric", month: "short" },
+                        )}
+                      </span>
                       <div className="compact-month-track">
                         <div
                           className="compact-month-bar"
@@ -271,7 +280,7 @@ export function Overview({
           <div className="sender-ranking">
             {top.map((sender, i) => (
               <div className="rank-row" key={sender.sender ?? i}>
-                <div className="sender-avatar">
+                <div className="sender-avatar" aria-hidden="true">
                   {(sender.domain ?? sender.sender ?? "?")
                     .replace(/^.*@/, "")
                     .slice(0, 1)
@@ -314,7 +323,7 @@ export function Overview({
             )}
           </p>
         </div>
-        <Action primary onClick={onRecommend}>
+        <Action onClick={onRecommend}>
           {t("Get recommendations", "Vorschläge erhalten")}
           <ArrowRight size={16} />
         </Action>
@@ -385,10 +394,14 @@ export function Overview({
 export function Senders({
   report,
   onRecommend,
+  onRecommendSenders,
+  onUnsubscribeSenders,
   onGoRules,
 }: {
   report: CensusReport;
   onRecommend: () => void;
+  onRecommendSenders?: (scope: SenderFocusScope) => void;
+  onUnsubscribeSenders?: (scope: SenderFocusScope) => void;
   onGoRules?: () => void;
 }) {
   const t = useCopy();
@@ -400,13 +413,19 @@ export function Senders({
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<Sender | null>(null);
   const [checkedKeys, setCheckedKeys] = useState<Set<string>>(() => new Set());
-  const senderKey = (sender: Sender, index: number) =>
-    `${sender.sender ?? ""}::${sender.domain ?? ""}::${index}`;
+  const keyedSenders = useMemo(
+    () =>
+      report.senders.map((sender, origIdx) => ({
+        sender,
+        key: `${sender.sender ?? ""}::${sender.domain ?? ""}::${origIdx}`,
+      })),
+    [report],
+  );
   const results = useMemo(
     () =>
-      report.senders
+      keyedSenders
         .filter(
-          (sender) =>
+          ({ sender }) =>
             (filter === "all" || sender.class === filter) &&
             `${sender.sender ?? ""} ${sender.domain ?? ""}`
               .toLowerCase()
@@ -414,23 +433,37 @@ export function Senders({
         )
         .sort((a, b) =>
           sort === "name"
-            ? (a.sender ?? "").localeCompare(b.sender ?? "")
+            ? (a.sender.sender ?? "").localeCompare(b.sender.sender ?? "")
             : sort === "unread"
-              ? b.counts.messages -
-                b.counts.seen -
-                (a.counts.messages - a.counts.seen)
-              : b.counts.messages - a.counts.messages,
+              ? b.sender.counts.messages -
+                b.sender.counts.seen -
+                (a.sender.counts.messages - a.sender.counts.seen)
+              : b.sender.counts.messages - a.sender.counts.messages,
         ),
-    [report, query, filter, sort],
+    [keyedSenders, query, filter, sort],
   );
   const pages = Math.max(1, Math.ceil(results.length / 20));
   const current = Math.min(page, pages - 1);
   const visible = results.slice(current * 20, current * 20 + 20);
-  const visibleKeys = visible.map((sender, i) =>
-    senderKey(sender, current * 20 + i),
-  );
+  const visibleKeys = visible.map((item) => item.key);
   const allVisibleChecked =
     visibleKeys.length > 0 && visibleKeys.every((key) => checkedKeys.has(key));
+
+  function buildScope(rows?: Sender[]): SenderFocusScope {
+    const picked =
+      rows ??
+      keyedSenders
+        .filter((item) => checkedKeys.has(item.key))
+        .map((item) => item.sender);
+    return {
+      senders: Array.from(
+        new Set(picked.map((s) => s.sender).filter((v): v is string => Boolean(v))),
+      ),
+      domains: Array.from(
+        new Set(picked.map((s) => s.domain).filter((v): v is string => Boolean(v))),
+      ),
+    };
+  }
 
   function toggleOne(key: string) {
     setCheckedKeys((prev) => {
@@ -524,7 +557,7 @@ export function Senders({
         </div>
         {checkedKeys.size > 0 && (
           <div className="bulk-bar" role="region" aria-label={t("Selected senders", "Ausgewählte Absender")}>
-            <strong>
+            <strong role="status" aria-live="polite">
               {pluralCount(
                 checkedKeys.size,
                 language,
@@ -539,12 +572,26 @@ export function Senders({
                 size="compact"
                 primary
                 onClick={() => {
+                  const scope = buildScope();
                   setCheckedKeys(new Set());
-                  onRecommend();
+                  if (onRecommendSenders) onRecommendSenders(scope);
+                  else onRecommend();
                 }}
               >
                 {t("Ask for recommendations", "Vorschläge anfordern")}
               </Action>
+              {onUnsubscribeSenders && (
+                <Action
+                  size="compact"
+                  onClick={() => {
+                    const scope = buildScope();
+                    setCheckedKeys(new Set());
+                    onUnsubscribeSenders(scope);
+                  }}
+                >
+                  {t("Manage subscriptions", "Abonnements verwalten")}
+                </Action>
+              )}
               {onGoRules && (
                 <Action
                   size="compact"
@@ -564,22 +611,38 @@ export function Senders({
         )}
         {visible.length ? (
           <>
+            <label className="mobile-select-all">
+              <input
+                type="checkbox"
+                className="row-check"
+                checked={allVisibleChecked}
+                onChange={toggleVisible}
+              />
+              <span>
+                {t(
+                  "Select all senders on this page",
+                  "Alle Absender auf dieser Seite auswählen",
+                )}
+              </span>
+            </label>
             <div className="table-scroll">
               <table className="senders-table">
                 <thead>
                   <tr>
                     <th>
                       <div className="sender-check-cell">
-                        <input
-                          type="checkbox"
-                          className="row-check"
-                          checked={allVisibleChecked}
-                          onChange={toggleVisible}
-                          aria-label={t(
-                            "Select all senders on this page",
-                            "Alle Absender auf dieser Seite auswählen",
-                          )}
-                        />
+                        <label className="row-check-wrap">
+                          <input
+                            type="checkbox"
+                            className="row-check"
+                            checked={allVisibleChecked}
+                            onChange={toggleVisible}
+                            aria-label={t(
+                              "Select all senders on this page",
+                              "Alle Absender auf dieser Seite auswählen",
+                            )}
+                          />
+                        </label>
                         <span>{t("Sender", "Absender")}</span>
                       </div>
                     </th>
@@ -592,22 +655,27 @@ export function Senders({
                   </tr>
                 </thead>
                 <tbody>
-                  {visible.map((sender, i) => {
-                    const key = senderKey(sender, current * 20 + i);
+                  {visible.map(({ sender, key }) => {
                     const senderLabel =
                       sender.sender ??
                       t("Unknown sender", "Unbekannter Absender");
+                    const isChecked = checkedKeys.has(key);
                     return (
-                      <tr key={key}>
+                      <tr
+                        key={key}
+                        className={isChecked ? "row-selected" : undefined}
+                      >
                         <td>
                           <div className="sender-check-cell">
-                            <input
-                              type="checkbox"
-                              className="row-check"
-                              checked={checkedKeys.has(key)}
-                              onChange={() => toggleOne(key)}
-                              aria-label={`${t("Select", "Auswählen")} ${senderLabel}`}
-                            />
+                            <label className="row-check-wrap">
+                              <input
+                                type="checkbox"
+                                className="row-check"
+                                checked={isChecked}
+                                onChange={() => toggleOne(key)}
+                                aria-label={`${t("Select", "Auswählen")} ${senderLabel}`}
+                              />
+                            </label>
                             <div>
                               <strong>{senderLabel}</strong>
                               <small className="muted">
@@ -767,7 +835,7 @@ export function Senders({
                 {Object.entries(selected.subject_keywords).map(
                   ([word, count]) => (
                     <span className="badge subtle" key={word}>
-                      {word} · {count}
+                      {word} · {formatNumber(count, language)}
                     </span>
                   ),
                 )}
@@ -782,11 +850,25 @@ export function Senders({
               <Action onClick={() => setSelected(null)}>
                 {t("Close", "Schließen")}
               </Action>
+              {(selected.one_click_pair > 0 || selected.list_unsubscribe > 0) &&
+                onUnsubscribeSenders && (
+                  <Action
+                    onClick={() => {
+                      const scope = buildScope([selected]);
+                      setSelected(null);
+                      onUnsubscribeSenders(scope);
+                    }}
+                  >
+                    {t("Manage in Subscriptions", "In Abonnements verwalten")}
+                  </Action>
+                )}
               <Action
                 primary
                 onClick={() => {
+                  const scope = buildScope([selected]);
                   setSelected(null);
-                  onRecommend();
+                  if (onRecommendSenders) onRecommendSenders(scope);
+                  else onRecommend();
                 }}
               >
                 {t("Ask for recommendations", "Vorschläge anfordern")}

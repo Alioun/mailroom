@@ -1,39 +1,439 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-24T10:42:07.162358+00:00",
+  "generatedAt": "2026-11-27T05:39:40.000Z",
   "title": "Design System: mailroom",
   "extensions": {
-    "shadows": [],
-    "motion": [],
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "Deep Pine Teal",
+        "canonical": "#147d70",
+        "tonalRamp": [
+          "oklch(22% 0.045 176)",
+          "oklch(32% 0.068 176)",
+          "oklch(42% 0.088 176)",
+          "oklch(52% 0.095 176)",
+          "oklch(62% 0.085 176)",
+          "oklch(75% 0.062 176)",
+          "oklch(87% 0.032 176)",
+          "oklch(95% 0.015 176)"
+        ]
+      },
+      "primary-strong": {
+        "role": "primary",
+        "displayName": "Forest Pine Hover",
+        "canonical": "#106659",
+        "tonalRamp": [
+          "oklch(20% 0.040 172)",
+          "oklch(30% 0.062 172)",
+          "oklch(40% 0.080 172)",
+          "oklch(45% 0.085 172)",
+          "oklch(58% 0.075 172)",
+          "oklch(72% 0.052 172)",
+          "oklch(85% 0.028 172)",
+          "oklch(95% 0.012 172)"
+        ]
+      },
+      "primary-soft": {
+        "role": "primary",
+        "displayName": "Pale Mint Wash",
+        "canonical": "#e6f3f0",
+        "tonalRamp": [
+          "oklch(22% 0.018 176)",
+          "oklch(34% 0.022 176)",
+          "oklch(46% 0.024 176)",
+          "oklch(58% 0.024 176)",
+          "oklch(70% 0.022 176)",
+          "oklch(82% 0.020 176)",
+          "oklch(91% 0.018 176)",
+          "oklch(95% 0.015 176)"
+        ]
+      },
+      "background": {
+        "role": "neutral",
+        "displayName": "Cool Glacier Canvas",
+        "canonical": "#f7f9f9",
+        "tonalRamp": [
+          "oklch(18% 0.004 195)",
+          "oklch(30% 0.005 195)",
+          "oklch(42% 0.006 195)",
+          "oklch(56% 0.006 195)",
+          "oklch(70% 0.006 195)",
+          "oklch(84% 0.005 195)",
+          "oklch(93% 0.004 195)",
+          "oklch(98% 0.003 195)"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Pure Paper Panel",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "oklch(15% 0 0)",
+          "oklch(28% 0 0)",
+          "oklch(42% 0 0)",
+          "oklch(56% 0 0)",
+          "oklch(70% 0 0)",
+          "oklch(84% 0 0)",
+          "oklch(94% 0 0)",
+          "oklch(99% 0 0)"
+        ]
+      },
+      "foreground": {
+        "role": "neutral",
+        "displayName": "Deep Pine Ink",
+        "canonical": "#263c3a",
+        "tonalRamp": [
+          "oklch(20% 0.018 175)",
+          "oklch(33% 0.024 175)",
+          "oklch(44% 0.022 175)",
+          "oklch(56% 0.020 175)",
+          "oklch(68% 0.016 175)",
+          "oklch(80% 0.012 175)",
+          "oklch(90% 0.008 175)",
+          "oklch(96% 0.004 175)"
+        ]
+      },
+      "secondary-text": {
+        "role": "neutral",
+        "displayName": "Muted Pine Slate",
+        "canonical": "#526663",
+        "tonalRamp": [
+          "oklch(20% 0.014 172)",
+          "oklch(32% 0.018 172)",
+          "oklch(48% 0.020 172)",
+          "oklch(58% 0.018 172)",
+          "oklch(70% 0.015 172)",
+          "oklch(82% 0.011 172)",
+          "oklch(90% 0.007 172)",
+          "oklch(96% 0.004 172)"
+        ]
+      },
+      "divider": {
+        "role": "neutral",
+        "displayName": "Hairline Sage Divider",
+        "canonical": "#d9e3e0",
+        "tonalRamp": [
+          "oklch(20% 0.010 170)",
+          "oklch(32% 0.012 170)",
+          "oklch(46% 0.013 170)",
+          "oklch(60% 0.013 170)",
+          "oklch(72% 0.012 170)",
+          "oklch(84% 0.011 170)",
+          "oklch(90% 0.010 170)",
+          "oklch(96% 0.006 170)"
+        ]
+      },
+      "control-border": {
+        "role": "neutral",
+        "displayName": "Control Slate Stroke",
+        "canonical": "#8fa39d",
+        "tonalRamp": [
+          "oklch(20% 0.012 168)",
+          "oklch(34% 0.015 168)",
+          "oklch(48% 0.018 168)",
+          "oklch(62% 0.019 168)",
+          "oklch(70% 0.018 168)",
+          "oklch(81% 0.014 168)",
+          "oklch(90% 0.009 168)",
+          "oklch(96% 0.005 168)"
+        ]
+      },
+      "warning": {
+        "role": "warning",
+        "displayName": "Live Write Amber",
+        "canonical": "#b45309",
+        "tonalRamp": [
+          "oklch(24% 0.065 56)",
+          "oklch(36% 0.095 56)",
+          "oklch(48% 0.125 56)",
+          "oklch(55% 0.145 56)",
+          "oklch(68% 0.130 56)",
+          "oklch(80% 0.095 56)",
+          "oklch(90% 0.048 56)",
+          "oklch(96% 0.020 56)"
+        ]
+      },
+      "warning-surface": {
+        "role": "warning",
+        "displayName": "Soft Warning Cream",
+        "canonical": "#fffbeb",
+        "tonalRamp": [
+          "oklch(24% 0.025 90)",
+          "oklch(36% 0.032 90)",
+          "oklch(50% 0.038 90)",
+          "oklch(64% 0.040 90)",
+          "oklch(76% 0.038 90)",
+          "oklch(86% 0.032 90)",
+          "oklch(93% 0.026 90)",
+          "oklch(98% 0.022 90)"
+        ]
+      },
+      "danger": {
+        "role": "danger",
+        "displayName": "Destructive Crimson",
+        "canonical": "#b91c1c",
+        "tonalRamp": [
+          "oklch(22% 0.085 27)",
+          "oklch(34% 0.135 27)",
+          "oklch(45% 0.175 27)",
+          "oklch(52% 0.195 27)",
+          "oklch(64% 0.165 27)",
+          "oklch(76% 0.115 27)",
+          "oklch(88% 0.055 27)",
+          "oklch(95% 0.022 27)"
+        ]
+      },
+      "danger-surface": {
+        "role": "danger",
+        "displayName": "Soft Danger Rose",
+        "canonical": "#fef2f2",
+        "tonalRamp": [
+          "oklch(22% 0.025 22)",
+          "oklch(34% 0.032 22)",
+          "oklch(48% 0.035 22)",
+          "oklch(62% 0.032 22)",
+          "oklch(74% 0.028 22)",
+          "oklch(85% 0.022 22)",
+          "oklch(92% 0.016 22)",
+          "oklch(96% 0.012 22)"
+        ]
+      },
+      "dark-background": {
+        "role": "neutral",
+        "displayName": "Deep Spruce Canvas",
+        "canonical": "#0d1413",
+        "tonalRamp": [
+          "oklch(16% 0.012 174)",
+          "oklch(24% 0.016 174)",
+          "oklch(36% 0.018 174)",
+          "oklch(48% 0.018 174)",
+          "oklch(62% 0.016 174)",
+          "oklch(75% 0.012 174)",
+          "oklch(86% 0.008 174)",
+          "oklch(94% 0.004 174)"
+        ]
+      },
+      "dark-surface": {
+        "role": "neutral",
+        "displayName": "Dark Pine Panel",
+        "canonical": "#141f1e",
+        "tonalRamp": [
+          "oklch(18% 0.014 175)",
+          "oklch(26% 0.018 175)",
+          "oklch(38% 0.020 175)",
+          "oklch(50% 0.018 175)",
+          "oklch(64% 0.015 175)",
+          "oklch(76% 0.011 175)",
+          "oklch(87% 0.007 175)",
+          "oklch(94% 0.004 175)"
+        ]
+      },
+      "dark-foreground": {
+        "role": "neutral",
+        "displayName": "Crisp Mineral Ink",
+        "canonical": "#e6f0ee",
+        "tonalRamp": [
+          "oklch(20% 0.012 176)",
+          "oklch(32% 0.015 176)",
+          "oklch(46% 0.016 176)",
+          "oklch(60% 0.016 176)",
+          "oklch(72% 0.015 176)",
+          "oklch(84% 0.014 176)",
+          "oklch(91% 0.012 176)",
+          "oklch(95% 0.010 176)"
+        ]
+      },
+      "dark-secondary-text": {
+        "role": "neutral",
+        "displayName": "Muted Sage Ink",
+        "canonical": "#a1b8b3",
+        "tonalRamp": [
+          "oklch(20% 0.014 172)",
+          "oklch(34% 0.018 172)",
+          "oklch(48% 0.020 172)",
+          "oklch(62% 0.022 172)",
+          "oklch(75% 0.022 172)",
+          "oklch(84% 0.016 172)",
+          "oklch(90% 0.010 172)",
+          "oklch(95% 0.006 172)"
+        ]
+      },
+      "dark-divider": {
+        "role": "neutral",
+        "displayName": "Dark Pine Hairline",
+        "canonical": "#263a37",
+        "tonalRamp": [
+          "oklch(18% 0.016 174)",
+          "oklch(28% 0.022 174)",
+          "oklch(40% 0.022 174)",
+          "oklch(52% 0.020 174)",
+          "oklch(66% 0.016 174)",
+          "oklch(78% 0.012 174)",
+          "oklch(88% 0.008 174)",
+          "oklch(95% 0.004 174)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "body": {
+        "displayName": "Body",
+        "purpose": "Primary workbench copy, tables, form controls, and status messages."
+      },
+      "heading": {
+        "displayName": "Page Heading",
+        "purpose": "Single upright h1 view title anchored below the topbar."
+      }
+    },
+    "shadows": [
+      {
+        "name": "panel-subtle",
+        "value": "0 2px 3px #263b3202",
+        "purpose": "Whisper-soft depth cue paired with 1px structural borders on panels."
+      },
+      {
+        "name": "button-subtle",
+        "value": "0 1px 2px #162e2310",
+        "purpose": "Micro-elevation on default bordered action buttons."
+      },
+      {
+        "name": "button-primary",
+        "value": "0 2px 3px #113b2820",
+        "purpose": "Grounding shadow on filled primary actions."
+      },
+      {
+        "name": "dialog-overlay",
+        "value": "0 20px 90px #10291e44",
+        "purpose": "Floating elevation reserved for modal dialogs and confirmation overlays."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-transition",
+        "value": "0.15s ease",
+        "purpose": "Crisp background, border, and color shifts on buttons, nav items, chips, and dialogs."
+      },
+      {
+        "name": "spinner",
+        "value": "1s linear infinite",
+        "purpose": "Continuous rotation for active scan and background job indicators."
+      }
+    ],
     "breakpoints": [
       {
-        "name": "compact",
-        "value": "680px"
+        "name": "mobile",
+        "value": "767px"
+      },
+      {
+        "name": "tablet",
+        "value": "1150px"
+      },
+      {
+        "name": "wide",
+        "value": "1600px"
       }
     ]
   },
   "components": [
     {
-      "name": "Preview button",
+      "name": "Primary Button",
       "kind": "button",
       "refersTo": "button-primary",
-      "description": "Runs the synthetic preview.",
-      "html": "<button class=\"ds-preview\">Run sample preview</button>",
-      "css": ".ds-preview{background:var(--accent,#15596a);color:#fff;border:1px solid #15596a;border-radius:5px;padding:9px 16px;min-height:44px;font:600 16px sans-serif}.ds-preview:hover{background:#104655}.ds-preview:focus-visible{outline:3px solid #1c7086;outline-offset:4px}.ds-preview:disabled{background:#e2e8eb;color:#65767d;border-color:#d3dde1}"
+      "description": "Primary action trigger for scanning, saving local rules, and confirming previewed work.",
+      "html": "<button class=\"ds-btn-primary\">Check saved rules</button>",
+      "css": ".ds-btn-primary{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:42px;padding:10px 14px;border-radius:6px;border:1px solid #147466;background:#147466;color:#fff;font-family:inherit;font-size:12px;font-weight:550;line-height:1.4;cursor:pointer;box-shadow:0 2px 3px #113b2820;transition:background 0.15s,border-color 0.15s,box-shadow 0.15s}.ds-btn-primary:hover:not(:disabled){background:#0f6155;border-color:#0f6155}.ds-btn-primary:focus-visible{outline:3px solid #17897b;outline-offset:3px}.ds-btn-primary:disabled{background:var(--disabled-bg,#e9efed);border-color:var(--disabled-border,#cbd7d4);color:var(--disabled-ink,#526663);box-shadow:none;cursor:not-allowed}"
     },
     {
-      "name": "Selected language",
+      "name": "Secondary Button",
       "kind": "button",
-      "description": "Shows the current language.",
-      "html": "<button class=\"ds-selected\" aria-pressed=\"true\">English</button>",
-      "css": ".ds-selected{background:#dfeaf0;color:#123f50;border:1px solid #91acb8;border-radius:5px;padding:9px 12px;min-height:44px;font:16px sans-serif}.ds-selected:hover{background:#e5edf0}.ds-selected:focus-visible{outline:3px solid #1c7086;outline-offset:4px}"
+      "description": "Default neutral control for safe inspections, reloads, and dialog cancellation.",
+      "html": "<button class=\"ds-btn-secondary\">Refresh</button>",
+      "css": ".ds-btn-secondary{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:42px;padding:10px 14px;border-radius:6px;border:1px solid #d4dfdc;background:var(--surface,#fff);color:#3e5c55;font-family:inherit;font-size:12px;font-weight:550;line-height:1.4;cursor:pointer;box-shadow:0 1px 2px #162e2310;transition:background 0.15s,border-color 0.15s,box-shadow 0.15s}.ds-btn-secondary:hover:not(:disabled){background:#f5f9f7;border-color:#adc7bd}.ds-btn-secondary:focus-visible{outline:3px solid #17897b;outline-offset:3px}.ds-btn-secondary:disabled{background:var(--disabled-bg,#e9efed);border-color:var(--disabled-border,#cbd7d4);color:var(--disabled-ink,#526663);box-shadow:none;cursor:not-allowed}"
     },
     {
-      "name": "Sample override input",
+      "name": "Live-Write Warning Button",
+      "kind": "button",
+      "description": "High-contrast amber trigger used when arming session-scoped Live writes.",
+      "html": "<button class=\"ds-btn-warning\">Enable live writes</button>",
+      "css": ".ds-btn-warning{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:42px;padding:10px 14px;border-radius:6px;border:1px solid #92400e;background:#b45309;color:#fff;font-family:inherit;font-size:12px;font-weight:550;line-height:1.4;cursor:pointer;box-shadow:0 2px 3px #78350f20;transition:background 0.15s,border-color 0.15s}.ds-btn-warning:hover:not(:disabled){background:#92400e;border-color:#78350f}.ds-btn-warning:focus-visible{outline:3px solid #17897b;outline-offset:3px}.ds-btn-warning:disabled{background:var(--disabled-bg,#e9efed);border-color:var(--disabled-border,#cbd7d4);color:var(--disabled-ink,#526663);box-shadow:none;cursor:not-allowed}"
+    },
+    {
+      "name": "Safety Mode Badge",
+      "kind": "custom",
+      "description": "Topbar pill switching appearance between calm Read-only mode and high-visibility Live writes armed.",
+      "html": "<div class=\"ds-safety-row\"><button type=\"button\" class=\"ds-safety-badge\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z\"/><path d=\"m9 12 2 2 4-4\"/></svg><span>Provider read-only</span></button><button type=\"button\" class=\"ds-safety-badge ds-safety-live\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z\"/><path d=\"M12 8v4\"/><path d=\"M12 16h.01\"/></svg><span>Live writes armed</span></button></div>",
+      "css": ".ds-safety-row{display:flex;gap:10px;flex-wrap:wrap}.ds-safety-badge{display:inline-flex;align-items:center;gap:6px;min-height:36px;padding:6px 12px;border-radius:999px;border:1px solid #c5dbd3;background:#eef7f3;color:#175c4b;font-family:inherit;font-size:12px;font-weight:550;cursor:pointer;transition:background 0.15s,border-color 0.15s,color 0.15s}.ds-safety-badge:hover{background:#e1f1ea;border-color:#9ec5b7}.ds-safety-badge.ds-safety-live{background:#b45309;border-color:#92400e;color:#fff}.ds-safety-badge.ds-safety-live:hover{background:#92400e;border-color:#78350f}.ds-safety-badge:focus-visible{outline:3px solid #17897b;outline-offset:3px}"
+    },
+    {
+      "name": "Text Input",
       "kind": "input",
-      "description": "Applies the bundled sample overrides.",
-      "html": "<label class=\"ds-override\"><input type=\"checkbox\" checked> Apply sample overrides</label>",
-      "css": ".ds-override{display:flex;align-items:center;gap:10px;font:600 15px sans-serif;color:#203239}.ds-override input{width:18px;height:18px;accent-color:#15596a}.ds-override input:focus-visible{outline:3px solid #1c7086;outline-offset:4px}"
+      "description": "Single-line search or configuration input with pine-teal focus halo.",
+      "html": "<input class=\"ds-input\" type=\"search\" placeholder=\"Search senders or domains...\">",
+      "css": ".ds-input{width:100%;max-width:340px;padding:11px 12px;border:1px solid #cbd7d4;border-radius:7px;background:var(--surface,#fff);color:var(--ink,#263c3a);font-family:inherit;font-size:14px;outline:none;caret-color:var(--accent,#147d70);transition:border-color 0.15s,box-shadow 0.15s}.ds-input:focus{border-color:var(--accent,#147d70);box-shadow:0 0 0 3px #147d7018}.ds-input:focus-visible{outline:3px solid #17897b;outline-offset:3px}"
+    },
+    {
+      "name": "Filter Chip",
+      "kind": "chip",
+      "description": "Pill filter toggle for activity and sender views.",
+      "html": "<div class=\"ds-chips\"><button type=\"button\" class=\"ds-chip ds-chip-active\" aria-pressed=\"true\">All</button><button type=\"button\" class=\"ds-chip\" aria-pressed=\"false\">Open undo</button></div>",
+      "css": ".ds-chips{display:inline-flex;gap:6px;flex-wrap:wrap}.ds-chip{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:6px 14px;border:1px solid var(--control-border,#8fa39d);border-radius:999px;background:var(--surface,#fff);color:var(--ink,#263c3a);font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:background 0.15s,border-color 0.15s,color 0.15s}.ds-chip:hover{border-color:var(--accent,#147d70);background:var(--accent-soft,#e6f3f0)}.ds-chip.ds-chip-active{background:var(--accent,#147d70);border-color:var(--accent,#147d70);color:#fff;font-weight:600}.ds-chip:focus-visible{outline:3px solid #17897b;outline-offset:3px}"
+    },
+    {
+      "name": "Sidebar Navigation Item",
+      "kind": "nav",
+      "description": "Primary navigation item in the persistent left rail and mobile drawer.",
+      "html": "<nav class=\"ds-nav\"><button type=\"button\" class=\"ds-nav-item ds-nav-active\" aria-current=\"page\"><svg width=\"17\" height=\"17\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect width=\"7\" height=\"9\" x=\"3\" y=\"3\" rx=\"1\"/><rect width=\"7\" height=\"5\" x=\"14\" y=\"3\" rx=\"1\"/><rect width=\"7\" height=\"9\" x=\"14\" y=\"12\" rx=\"1\"/><rect width=\"7\" height=\"5\" x=\"3\" y=\"16\" rx=\"1\"/></svg><span>Overview</span></button><button type=\"button\" class=\"ds-nav-item\"><svg width=\"17\" height=\"17\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2\"/><circle cx=\"9\" cy=\"7\" r=\"4\"/><path d=\"M22 21v-2a4 4 0 0 0-3-3.87\"/><path d=\"M16 3.13a4 4 0 0 1 0 7.75\"/></svg><span>Senders</span></button></nav>",
+      "css": ".ds-nav{display:grid;gap:3px;width:210px}.ds-nav-item{display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;min-height:40px;color:#465d59;padding:8px 12px;text-align:left;border-radius:7px;font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:background 0.15s,color 0.15s}.ds-nav-item:hover{background:#f3f7f6;color:#1c473f}.ds-nav-item.ds-nav-active{background:#eaf5f1;color:#106053;font-weight:600}.ds-nav-item:focus-visible{outline:3px solid #17897b;outline-offset:3px}"
+    },
+    {
+      "name": "Stat Card",
+      "kind": "card",
+      "description": "Metric tile displaying tabular mailbox totals with concise supporting detail.",
+      "html": "<div class=\"ds-stat\"><span class=\"ds-stat-label\">Messages</span><strong class=\"ds-stat-value\">1,428</strong><small class=\"ds-stat-detail\">Unique saved messages</small></div>",
+      "css": ".ds-stat{border:1px solid var(--border,#d9e3e0);border-radius:9px;background:var(--surface,#fff);padding:20px;display:flex;flex-direction:column;gap:4px;max-width:240px}.ds-stat-label{font-size:12px;color:var(--muted,#526663)}.ds-stat-value{font-size:31px;letter-spacing:-1px;line-height:1.45;font-weight:600;font-variant-numeric:tabular-nums;color:var(--ink,#263c3a)}.ds-stat-detail{font-size:12px;color:var(--muted,#526663)}"
+    },
+    {
+      "name": "Notice Banner",
+      "kind": "card",
+      "description": "Full-border inline banner using surface tinting and leading icons without side-tab left bars.",
+      "html": "<div class=\"ds-notice\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><path d=\"m9 12 2 2 4-4\"/></svg><span>Local rules saved.</span></div>",
+      "css": ".ds-notice{border:1px solid #a8d5c5;background:#eef7f2;padding:13px 16px;border-radius:8px;font-size:13px;color:#1c4738;display:flex;align-items:center;gap:10px}.ds-notice-warning{border-color:#e5be6d;background:#fffbeb;color:#713f12}"
     }
-  ]
+  ],
+  "narrative": {
+    "northStar": "Calm Local-First Operate Workbench",
+    "overview": "Mailroom is a local-first **Operate** workbench built with React and Base UI. Users connect personal mail accounts (stored in an encrypted local vault) or explore a clearly labelled synthetic demo account, inspect deduplicated header findings, author and simulate local rules, and only modify real mail after explicitly arming session-scoped Live writes plus per-action preview and confirmation.",
+    "keyCharacteristics": [
+      "Cool off-white canvas with crisp hairline-bordered panels and calm pine-teal accents",
+      "High-visibility amber safety chrome whenever session-scoped Live writes are armed",
+      "Unmistakable synthetic demo labeling when exploring invented local mail",
+      "Locale-aware EN/DE formatting with tabular numerals and full-width mobile toolbars"
+    ],
+    "rules": [
+      {
+        "name": "No Side-Tab Borders",
+        "body": "Never use one-sided border-left accent bars on rounded boxes; communicate notice/warning tone through a full tinted border, surface tint, and leading icon.",
+        "section": "elevation"
+      },
+      {
+        "name": "Safety Mode Visibility",
+        "body": "Read-only uses calm teal; armed Live writes shifts the topbar badge to high-contrast amber and never places a 1-second countdown inside an aria-live region.",
+        "section": "colors"
+      },
+      {
+        "name": "Locale & Tabular Numerals",
+        "body": "Format all counts, percentages, and dates using en-US or de-DE with tabular-nums and proper singular/plural grammar.",
+        "section": "typography"
+      }
+    ],
+    "dos": [
+      "Do label synthetic demo sessions in the topbar, sidebar, footer, and unavailable panels.",
+      "Do use plain user verbs over protocol acronyms and localize server errors in EN and DE.",
+      "Do verify German UI at `390px` width."
+    ],
+    "donts": [
+      "Don't use gradients, cream backgrounds, eyebrow kickers, italic heading accents, section numbers, or border-left side-tabs.",
+      "Don't claim \"Encrypted local vault\" in synthetic sessions or enable unavailable actions."
+    ]
+  }
 }

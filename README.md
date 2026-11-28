@@ -1,80 +1,90 @@
 # mailroom
 
-Inspect a header census, preview deterministic mail rules locally, and run the personal Mac workflow for mailbox.org and Gmail. The Rust core serves a code-split React + Base UI workbench (with WCAG 2.1 AA light/dark themes and instant push status updates) at `http://127.0.0.1:4173`. Every server launch starts in **Read-only** mode (`live_writes: false`); live provider writes (ManageSieve deployment, IMAP folder provisioning, backlog sorting, invoice send-on, and unsubscribe execution) stay blocked until explicitly armed for the current session (with a configurable auto-disarm countdown, default 15 minutes), and every mutation still requires an exact preview and confirmation. Locking the vault (manually or via optional inactivity auto-lock) or restarting disarms live writes automatically.
+Local-first Rust core + React (`@base-ui/react`) workbench at `http://127.0.0.1:4173` for inspecting header-only mailbox censuses, simulating deterministic filing rules, and safely managing personal `mailbox.org` and `Gmail` accounts on macOS.
 
-The workbench unifies all ten views (`Overview`, `Senders`, `Recommendations`, `Rules & deploy`, `Backlog`, `Invoices`, `Subscriptions`, `Addresses & wind-down`, `Activity & undo`, and `Settings`), includes a curated CC0 starter sender catalog (`data/*.csv`, v1.1.0), supports local Google Takeout `.mbox` header-only import (with native macOS Finder picker) alongside IMAP census, configurable T3 provider/model presets, and full local-vault lifecycle & passphrase-encrypted recovery with drag-and-drop bundle import.
+> **Status:** Development prototype. Every server launch defaults to read-only, and daily real-account use requires owner acceptance ([Personal-use readiness](docs/personal-readiness.md)).
 
-The [development agent exchange](docs/agent-exchange.md) includes separate folders, a skill, a stdio MCP command and local review of text recommendations. Summary sharing shows the exact masked summary in the browser before launching T3.
+## Safety Model
 
-## Run locally
+- **Read-only by default (`live_writes: false`):** Provider mutations stay disabled at startup until explicitly armed for the current session (configurable auto-disarm timer, default 15 minutes; locking the vault or restarting disarms immediately).
+- **Preview & confirm every write:** ManageSieve publishing, IMAP folder creation, backlog moves/undo, invoice send-on, and unsubscribe execution require exact per-action previews and confirmations.
+- **Localhost & CSP boundary:** Binds `127.0.0.1:4173` only, validates exact `Host`, `Origin`, and same-origin `Sec-Fetch-Site` headers, enforces a per-launch token on `/api/*` (256 KiB JSON body limit, no CORS), and serves a strict CSP without `unsafe-inline` or `unsafe-eval`.
+- **Encrypted local storage:** Local-vault mode stores credentials and census keys in `~/.config/mailroom-web/vault.mrv` (Argon2id + AES-256-GCM); native macOS mode uses Keychain + a pinned confirmation helper. Passphrase-encrypted recovery bundles support up to 8 accounts plus the private address ledger.
 
-Read [Personal-use readiness](docs/personal-readiness.md) for implemented workflows, remaining acceptance gates and the scope of the Mac prototype.
+## Workbench
 
-The [Gmail forwarding preparation guide](docs/gmail-forwarding.md) provides the settled route and a terminal plan beside the account workspace's Setup and recovery tools. Live setup remains owner-run after separate approval.
+| View | Purpose |
+| --- | --- |
+| `Overview` | Mailbox activity, monthly volume charts, cross-account health, and scan/import entry points |
+| `Senders` | Searchable, sortable sender breakdown with sort-stable bulk selection into Recommendations or Subscriptions |
+| `Recommendations` | Review masked census summaries before sharing with T3; inspect and accept or reject rule proposals |
+| `Rules & deploy` | Edit YAML presets/overrides, simulate rules with pins, export `rules.sieve`, provision IMAP folders, publish to `mailbox.org`, and compare placement |
+| `Backlog` | Preview and run checkpointed backlog moves/labels with stop support and separate confirmed Undo |
+| `Invoices` | Inspect business invoice candidates, verify attachments read-only, and send approved originals without duplicates |
+| `Subscriptions` | Rank unread bulk senders, apply per-row or batch actions (unsubscribe, link card, local mute), and resolve uncertain outcomes |
+| `Addresses & wind-down` | Manage the private service-address ledger (with leak alerts), Gmail forwarding prep, and account wind-down |
+| `Activity & undo` | Cross-account action log and open undo windows |
+| `Settings` | Safety timers, single-key shortcuts toggle, Takeout `.mbox` import, T3 presets, vault lock/password change, key rotation, removal, and encrypted backup/restore |
 
-Install Rust with Cargo and Node.js 22.12 or newer with npm. From this checkout, run:
+Bilingual EN/DE UI with Light/Dark WCAG 2.1 AA themes, bundled CC0 starter sender catalog (`data/*.csv`, v1.1.0), and local Google Takeout `.mbox` header-only import.
+
+## Quick Start
+
+Requires Rust with Cargo and Node.js `>= 22.12` with npm:
 
 ```sh
-./scripts/run-local.sh
+git clone https://github.com/Alioun/mailroom.git && cd mailroom
+./scripts/run-local.sh          # builds once & starts local vault at http://127.0.0.1:4173
+./scripts/run-local.sh --demo   # synthetic sandbox (100 invented headers, no accounts needed)
 ```
 
-Open <http://127.0.0.1:4173>. The launcher installs locked UI dependencies, builds the UI and Rust binary, and starts the server. Stop it with Ctrl+C. Use this exact URL because the server rejects other Host headers.
+| Mode | Command | Storage & Scope |
+| --- | --- | --- |
+| **Local checkout (fastest)** | `./scripts/run-local.sh [--demo\|--open\|--debug]` | Defaults to `--local-vault` (`~/.config/mailroom-web/vault.mrv`); `--demo` uses a temporary sandbox |
+| **Pinned web runtime** | `COMMIT=$(git rev-parse HEAD) && /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin /usr/bin/git --no-replace-objects -C "$PWD" show "$COMMIT:scripts/local-web.sh" \| /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin /bin/bash -s -- approve "$PWD" "$COMMIT"` | Standalone SHA-256-pinned binary in `~/Library/Application Support/Mailroom Web Runtime/start` ([guide](docs/local-web.md)) |
+| **Native macOS runtime** | `scripts/setup.sh` (`--plan` to preview), then `scripts/setup.sh run` | Signed runtime in `build/local/<commit>` with Keychain + pinned confirmation helper ([guide](docs/macos-confirmation.md)) |
 
-The [local web setup](docs/local-web.md) is the browser-only way to use real accounts. `scripts/local-web.sh` builds an exact commit once into a runtime in your home folder and starts it with one command. The browser then creates or unlocks an encrypted vault with a master password and adds accounts. It needs no Keychain, native dialog or terminal wizard, and it leaves the native setup's accounts untouched.
+Open `http://127.0.0.1:4173` directly (other `Host` headers are rejected). Inspect the terminal recovery wizard anytime with `bash scripts/recovery-wizard.sh --plan`.
 
-Real accounts can also use the signed local runtime that `scripts/setup.sh` builds from the HEAD commit into `build/local/<commit>`, without `sudo` or any installation, described in [Native confirmation and protected Keychain credentials](docs/macos-confirmation.md). Its owner wizard offers hidden terminal entry and exact native consent for adding a local account or replacing its password. After setup, `scripts/setup.sh run` starts the server from that runtime without a rebuild. `./scripts/run-local.sh` builds without a helper pin or hardened runtime, so it cannot use real accounts. Local creation leaves connectivity unverified. Actual terminal, Keychain, helper and provider acceptance remain owner-run work. The connection walkthrough captures no credentials and uses the saved-account interface. Provider writes remain held.
+## T3 Agent Exchange
 
-For fake-only account verification, run `./scripts/run-local.sh --synthetic-accounts`. This mode uses temporary encrypted files, fake credentials and 100 invented headers. It cannot connect to a provider or the OS backend. The UI labels the mode explicitly.
+- **Browser flow:** `Recommendations` publishes a reviewed masked summary into a server-owned exchange and launches T3; returned proposals appear automatically for local approval.
+- **Standalone CLI:** `mailroom agent init --folder <abs-path>` initializes a `0700` exchange directory and `mailroom agent serve --folder <abs-path>` runs stdio MCP exposing `read_reviewed_summary` and `submit_proposal` ([docs/agent-exchange.md](docs/agent-exchange.md)).
 
-Development and review runners in this workspace share one Cargo target and a stable isolated Cargo home, as recorded in the workspace `AGENTS.md`. Pass that same absolute `CARGO_TARGET_DIR` to child runners that construct their own environment. The launcher uses `cargo run` so it respects the selected target directory. Keep profiles and compiler flags stable when the check permits it. Frozen owner-acceptance stages retain their approved build environments.
-
-Expand **Examples with invented mail** below the saved accounts, then click **Run sample preview**. Fourteen invented messages produce ten filings, four Inbox retentions and three independent copies. Edit the YAML, compare current folders with the previous sample configuration, switch to Gmail backlog matching or change a census pin's expected folder. A failing pin blocks the proof. Example addresses and folder roots are generic synthetic settings.
-
-Click **Start synthetic census** to parse eight invented headers. Cancel and resume the scan, confirm an own-address candidate, inspect local header details, and open **Summary preview**. **Simulate scan error** stops after two saved headers. The normal action resumes them. Demo snapshots are encrypted in a temporary sandbox with a key held only in memory. They are not a real account census and cannot resume across server restarts.
-
-## Verify the unit
+## Verification
 
 ```sh
+# Rust core
 cargo fmt --check
 cargo check --locked
 cargo test --locked
+
+# UI build & Playwright E2E (port 4173 must be free; run `npm --prefix ui exec playwright install chromium` once)
 npm --prefix ui run check
 npm --prefix ui run build
-scripts/verify-local-web-launcher.sh
-node ui/scripts/verify-workbench.mjs "$PWD/target/debug/mailroom" .audit/workbench-browser
-bash -n scripts/connect-account.sh
-shellcheck -e SC2329 scripts/connect-account.sh
-```
+cargo build --locked --bin mailroom
+mkdir -m 0700 -p target/wb-verify && MAILROOM_DISABLE_NATIVE_PICKER=1 node ui/scripts/verify-workbench.mjs "$PWD/target/debug/mailroom" "$PWD/target/wb-verify"
 
-`verify-workbench.mjs` runs 18 end-to-end browser checks in Playwright Chromium against the real server with local-vault and synthetic accounts (port 4173 must be free), covering vault lock/unlock, dark & light WCAG 2.1 AA contrast, safety timer countdown, recovery bundle upload, Takeout import, Activity & undo, responsive 320/768/1440px EN+DE layouts, and DOM accessibility across all 10 views. Install Chromium once with `npm --prefix ui exec playwright install chromium`.
-
-See [Census implementation and remaining work](docs/census.md) for the data model, encrypted file format and incomplete capabilities.
-
-## Rules and proof
-
-See [Rules and proof](docs/rules-proof.md) for the validated YAML model, emitted-output evaluator, local census interface, cross-check scope and incomplete acceptance criteria. Saved-account rules and pins load and save explicitly. A fresh proof and local confirmation can prepare an exact Sieve download for mailbox.org, with an encrypted export baseline. Gmail backlog has no Sieve-download action. A local export grants no provider authority. The examples contain only synthetic mail and configuration. [Backlog sorting](docs/backlog.md) adds exact previews, encrypted journals, recovery and conditional Undo. Its separately installed loopback IMAP source executes verified-TLS UID MOVE against an independently durable synthetic mailbox. Production execution remains unavailable.
-
-```sh
+# Sieve proof & launcher scripts
 ./scripts/verify-sieve.sh
 ./scripts/verify-sieve-file.sh path/to/rules.sieve
+scripts/verify-local-web-launcher.sh
+bash -n scripts/connect-account.sh && shellcheck -e SC2329 scripts/connect-account.sh
 ```
 
-The Sieve checks build an isolated image and run `check-sieve` and Dovecot Pigeonhole (`sievec` / `sieve-test`) against synthetic artifacts or any exported `rules.sieve` file. They start no global service, mount no credentials or personal directories, and run with `--network none`.
+`verify-workbench.mjs` runs 19 headless Chromium checks across vault lock/unlock, Senders bulk/sort/scope, Light/Dark WCAG 2.1 AA + border contrast, EN/DE `320`/`390`/`768`/`1440`px reflow, accessibility across all 10 views, and strict CSP compliance. `./scripts/verify-sieve.sh` runs `check-sieve` and Dovecot Pigeonhole (`sievec` / `sieve-test`) inside an isolated `--network none` container without mounting credentials.
 
-See [Native confirmation and protected Keychain credentials](docs/macos-confirmation.md) for the pinned confirmation helper, the single-use confirmation boundary and Keychain protection. The owner runs the setup wizard from a clean checkout of the approved commit, as that page describes. `scripts/setup.sh --plan` previews it.
+## Documentation & Layout
 
-## Encrypted recovery development
+| Area | Docs |
+| --- | --- |
+| **Readiness & Setup** | [Personal-use readiness](docs/personal-readiness.md) · [Local web setup](docs/local-web.md) · [macOS confirmation](docs/macos-confirmation.md) · [Browser workspace](docs/browser-workspace.md) |
+| **Census, Rules & Sieve** | [Census](docs/census.md) · [Census reports](docs/census-reports.md) · [Rules & proof](docs/rules-proof.md) · [ManageSieve transactions](docs/managesieve-transactions.md) · [Placement comparison](docs/landing-comparison.md) · [IMAP folders](docs/imap-folder-provisioning.md) |
+| **Mail Workflows** | [Backlog sorting](docs/backlog.md) · [Invoices](docs/invoices.md) · [Subscriptions](docs/unsubscribe.md) · [Address ledger](docs/address-ledger.md) · [Gmail forwarding](docs/gmail-forwarding.md) · [Wind-down](docs/winddown.md) |
+| **Lifecycle, Recovery & UI** | [Account lifecycle](docs/account-lifecycle.md) · [Encrypted recovery](docs/recovery-format.md) · [Agent exchange](docs/agent-exchange.md) · [Design system](DESIGN.md) |
 
-[Encrypted recovery](docs/recovery-format.md) captures an explicit set of up to eight synthetic accounts and optionally the installed authoritative ledger with a separately held recovery key. It authenticates an absent-account restore and preserves later independent mailbox and transport effects. Restored accounts remain read-only pending fresh provider evidence and reconciliation. Production creation and restoration stay denied until the owner has run the native setup and authorized live validation.
+Repo layout: `src/` (Rust core & server), `ui/` (React + Base UI workbench), `data/` (CC0 sender catalog), `scripts/` (launchers, setup & Sieve verifiers), `docs/` (protocol & architecture specs).
 
-Inspect the [owner-run recovery wizard](scripts/recovery-wizard.sh) with `bash scripts/recovery-wizard.sh --plan`. Planning requests no secret and creates no backup. Passphrase-encrypted backup, bundle upload, and restore are also available in browser **Settings** and verified in `ui/scripts/verify-workbench.mjs`.
+## License
 
-## Account boundary
-
-[Local account lifecycle](docs/account-lifecycle.md) adds synthetic-only password replacement, interrupted-creation cleanup, exact local forgetting and safe key generations. The protected owner CLI adds local account creation and password replacement. Other real lifecycle controls remain held. Actual runtime use and credential access still require exact approval and owner-run verification.
-
-Read-only adapters use fixed provider TLS endpoints. There are no write-enable flags or caller-supplied source URLs. The central policy denies rule upload and activation, folder creation, moves, flags, forwarding changes, sends and unsubscribe requests. The new proof route reads the saved census under the existing account-operation lock. It assigns no recipient trust or forwarding authority.
-
-The server binds only `127.0.0.1:4173`, validates Host and any Origin header, rejects cross-site fetch metadata, has no CORS allowance, and limits JSON POST bodies to 256 KiB. Every API except the session bootstrap requires the current launch token. Its production CSP permits only same-origin external scripts and styles, without `unsafe-inline` or `unsafe-eval`. Native CLI requests may omit Origin. A local process can bootstrap a session and request owner account reads. It cannot unlock account writes. The token binds browser requests to a server launch. It does not isolate mutually untrusted processes running as the same OS user.
-
-All floating and portaled Base UI components (dialogs, selects, tabs, and navigation drawers) are verified under this strict CSP with zero violations in `ui/scripts/verify-workbench.mjs`.
+[MIT](LICENSE)

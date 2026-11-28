@@ -17,10 +17,24 @@ export PATH=/usr/bin:/bin LC_ALL=C
 umask 077
 
 # Trusted locations and tools. Tests override these only by sourcing this file.
-CARGO=/opt/homebrew/opt/rust/bin/cargo
-RUSTC=/opt/homebrew/opt/rust/bin/rustc
-NODE=/usr/local/bin/node
-NPM_CLI=/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js
+first_exec() {
+  local p
+  for p in "$@"; do
+    if [[ -x "$p" ]]; then printf '%s' "$p"; return 0; fi
+  done
+  printf '%s' "$1"
+}
+first_file() {
+  local p
+  for p in "$@"; do
+    if [[ -f "$p" ]]; then printf '%s' "$p"; return 0; fi
+  done
+  printf '%s' "$1"
+}
+CARGO="$(first_exec /opt/homebrew/opt/rust/bin/cargo /opt/homebrew/bin/cargo /usr/local/bin/cargo "$HOME/.cargo/bin/cargo" /usr/bin/cargo)"
+RUSTC="$(first_exec /opt/homebrew/opt/rust/bin/rustc /opt/homebrew/bin/rustc /usr/local/bin/rustc "$HOME/.cargo/bin/rustc" /usr/bin/rustc)"
+NODE="$(first_exec /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node)"
+NPM_CLI="$(first_file /opt/homebrew/lib/node_modules/npm/bin/npm-cli.js /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/lib/node_modules/npm/bin/npm-cli.js /usr/share/nodejs/npm/bin/npm-cli.js)"
 GIT=/usr/bin/git
 if [[ "$(uname -s)" == Darwin ]]; then
   RUNTIME_HOME="$HOME/Library/Application Support/Mailroom Web Runtime"

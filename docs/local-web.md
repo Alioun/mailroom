@@ -23,7 +23,7 @@ Every later start is one command, with no build, install or checkout access:
 
 It checks that the runtime belongs to you, that nobody else can write to it and that its entries match their pins, then starts the binary with only `HOME` and `PATH`. A mismatch prints `status=changed` and starts nothing. Approving a commit that is already built verifies it and skips the build. In a terminal, the start opens the browser once the server answers.
 
-The build uses the toolchain the native setup uses, at fixed paths: Homebrew `cargo` and `rustc`, `/usr/local/bin/node` and Homebrew `npm`. A missing tool prints `status=toolchain_missing`. The first build downloads crates and npm packages into its private caches.
+The build locates `cargo`, `rustc`, `node`, and `npm` strictly from fixed standard locations (Homebrew, `/usr/local`, `~/.cargo/bin`, and `/usr/bin`) rather than searching `$PATH`. A missing tool prints `status=toolchain_missing`. The first build downloads crates and npm packages into its private caches.
 
 ## The vault
 
